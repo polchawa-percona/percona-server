@@ -5002,7 +5002,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  // TODO: compressed pages not supported in this patch
+  ut_a(block != nullptr);
 
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
@@ -5016,8 +5017,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
-
-    mutex_exit(&buf_pool->LRU_list_mutex);
 
     rw_lock_x_unlock(hash_lock);
 
@@ -5055,37 +5054,27 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     block->mark_for_read_io();
     buf_page_set_io_fix(bpage, BUF_IO_READ);
 
-    /* The block must be put to the LRU list, to the old blocks */
-    buf_LRU_add_block(bpage, true /* to old blocks */);
-
-    if (page_size.is_compressed()) {
-      block->page.zip.data = (page_zip_t *)data;
-
-      /* To maintain the invariant
-      block->in_unzip_LRU_list
-      == buf_page_belongs_to_unzip_LRU(&block->page)
-      we have to add this block to unzip_LRU
-      after block->page.zip.data is set. */
-      ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
-      buf_unzip_LRU_add_block(block, true);
-    }
-
-    mutex_exit(&buf_pool->LRU_list_mutex);
-
-    /* We set a pass-type x-lock on the frame because then
-    the same thread which called for the read operation
-    (and is running now at this point of code) can wait
-    for the read to complete by waiting for the x-lock on
-    the frame; if the x-lock were recursive, the same
-    thread would illegally get the x-lock before the page
-    read is completed.  The x-lock is cleared by the
-    io-handler thread. */
+    ut_a(!page_size.is_compressed()); // compressed pages not supported in this patch
+    // buf_unzip_LRU_add_block(block, true);
 
     rw_lock_x_lock_gen(&block->lock, BUF_IO_READ, UT_LOCATION_HERE);
 
     rw_lock_x_unlock(hash_lock);
 
     buf_page_mutex_exit(block);
+
+    /* The page is hash-visible already, but eviction cannot see it
+    (not on LRU yet) and readers are blocked on the frame X-lock,
+    so no other thread can race with the add.
+
+    IMPORTANT: we strongly depend here on the fact that there is no
+    other thread that can try to acquire that frame's S-lock while
+    holding already the LRU list mutex (it would be deadlock cycle).
+    For existing use cases, for that thread to exist, the page would
+    need to be in the LRU list already. */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_LRU_add_block(bpage, true /* to old blocks */);
+    mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
     /* Initialize the buf_pool pointer. */
     bpage->buf_pool_index = buf_pool_index(buf_pool);
