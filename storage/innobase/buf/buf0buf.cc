@@ -3248,7 +3248,21 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_a(buf_page_in_file(bpage));
 
   if (buf_page_peek_if_too_old(bpage)) {
-    buf_page_make_young(bpage);
+    /* Count every promotion regardless of path so the deferred-queue A/B
+    (innodb_lru_make_young_drain_threshold 0 vs tuned) shares one
+    denominator. */
+    MONITOR_INC(MONITOR_LRU_MAKE_YOUNG_CALLS);
+
+    /* When innodb_lru_make_young_drain_threshold is non-zero we push
+    onto a per-buf-pool lock-free queue instead of taking the LRU
+    mutex here. The thread that crosses the threshold drains the queue.
+    Thanks to that we decrease the number of threads that compete for
+    the LRU list mutex here. */
+    if (buf_LRU_make_young_drain_threshold != 0) {
+      buf_LRU_enqueue_promote(bpage);
+    } else {
+      buf_page_make_young(bpage);
+    }
   }
 }
 
@@ -6207,6 +6221,10 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   ulint i;
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+
+  /* Release any pages still parked on the deferred make-young queue so
+  their buf_fix counts don't block the LRU invalidation below. */
+  buf_LRU_drain_promote_queue(buf_pool);
 
   for (i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
     /* As this function is called during startup and during redo application

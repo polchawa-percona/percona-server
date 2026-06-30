@@ -135,6 +135,56 @@ std::chrono::milliseconds get_buf_LRU_old_threshold() {
   return std::chrono::milliseconds{buf_LRU_old_threshold};
 }
 
+uint buf_LRU_make_young_drain_threshold;
+
+void buf_LRU_enqueue_promote(buf_page_t *bpage) {
+  /* Only one enqueue in-flight (TODO: could we use block mutex instead?). */
+  bool expected = false;
+  if (!bpage->LRU_in_promote_queue.compare_exchange_strong(
+          expected, true, std::memory_order_acquire,
+          std::memory_order_relaxed)) {
+    /* Page already on the queue: the lock-free fast path elided this
+    promotion entirely (no LRU_list_mutex, no enqueue). */
+    MONITOR_INC(MONITOR_LRU_PROMOTE_SKIP_IN_QUEUE);
+    return;
+  }
+
+  /* Eviction skips pages with buf_fix_count > 0.
+  The drain unfixes after re-linking the page on the LRU. */
+  buf_block_fix(bpage);
+
+  const auto buf_pool = buf_pool_from_bpage(bpage);
+  auto old_head = buf_pool->LRU_promote_head.load(std::memory_order_relaxed);
+  do {
+    bpage->LRU_promote_next = old_head;
+  } while (!buf_pool->LRU_promote_head.compare_exchange_weak(
+      old_head, bpage, std::memory_order_release, std::memory_order_relaxed));
+
+  const size_t new_len =
+      buf_pool->LRU_promote_queue_len.fetch_add(1, std::memory_order_relaxed) +
+      1;
+
+  MONITOR_INC(MONITOR_LRU_PROMOTE_ENQUEUED);
+  MONITOR_SET(MONITOR_LRU_PROMOTE_QUEUE_LEN, new_len);
+
+  /* If we crossed the threshold and no other thread is
+  currently draining this buf_pool => drain. */
+  const uint threshold = buf_LRU_make_young_drain_threshold;
+  if (threshold != 0 && new_len >= threshold) {
+    bool not_draining = false;
+    /* Avoid clash of concurrent promotions. */
+    if (buf_pool->LRU_promote_draining.compare_exchange_strong(
+            not_draining, true, std::memory_order_acquire,
+            std::memory_order_relaxed)) {
+      buf_LRU_drain_promote_queue(buf_pool);
+      buf_pool->LRU_promote_draining.store(false, std::memory_order_release);
+    } else {
+      /* Another thread owns the drain; we just pushed and moved on. */
+      MONITOR_INC(MONITOR_LRU_PROMOTE_SKIP_DRAINING);
+    }
+  }
+}
+
 /** @} */
 
 /** Takes a block out of the LRU list and page hash table.
@@ -1908,6 +1958,118 @@ void buf_LRU_make_block_old(buf_page_t *bpage) {
 
   buf_LRU_remove_block(bpage);
   buf_LRU_add_block_low(bpage, true);
+}
+
+static bool buf_LRU_promote_block_batched(buf_pool_t *buf_pool,
+                                          buf_page_t *bpage) noexcept {
+  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(buf_page_in_file(bpage));
+  ut_ad(bpage->in_LRU_list);
+
+  if (UT_LIST_GET_LEN(buf_pool->LRU) <= BUF_LRU_OLD_MIN_LEN) {
+    if (bpage->old) {
+      buf_pool->stat.n_pages_made_young++;
+    }
+    buf_LRU_remove_block(bpage);
+    buf_LRU_add_block_low(bpage, false);
+    return false;
+  }
+
+  const bool was_old = bpage->old;
+
+  buf_LRU_adjust_hp(buf_pool, bpage);
+
+  if (bpage == buf_pool->LRU_old) {
+    /* Shift LRU_old back one so it still points at the first
+    old-flag entry after our removal. The previous block is
+    guaranteed to exist because LRU_old is constrained by
+    BUF_LRU_OLD_TOLERANCE. */
+    buf_page_t *prev_bpage = UT_LIST_GET_PREV(LRU, bpage);
+    ut_a(prev_bpage);
+    buf_pool->LRU_old = prev_bpage;
+    buf_page_set_old(prev_bpage, true);
+    buf_pool->LRU_old_len++;
+  }
+
+  UT_LIST_REMOVE(buf_pool->LRU, bpage);
+
+  buf_unzip_LRU_remove_block_if_needed(bpage);
+
+  if (was_old) {
+    buf_pool->LRU_old_len--;
+  }
+
+  UT_LIST_ADD_FIRST(buf_pool->LRU, bpage);
+
+  bpage->freed_page_clock = buf_pool->freed_page_clock;
+
+  /* Remove + add brought LRU back to its original length, which we
+  established above is > BUF_LRU_OLD_MIN_LEN, so LRU_old is defined.
+  The boundary fix-up is deferred to the end-of-batch. */
+  ut_ad(buf_pool->LRU_old != nullptr);
+  buf_page_set_old(bpage, false);
+
+  if (buf_page_belongs_to_unzip_LRU(bpage)) {
+    buf_unzip_LRU_add_block((buf_block_t *)bpage, false);
+  }
+
+  return was_old;
+}
+
+void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
+  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+
+  buf_page_t *head =
+      buf_pool->LRU_promote_head.exchange(nullptr, std::memory_order_acquire);
+  if (head == nullptr) {
+    return;
+  }
+
+  const auto mtx_start = std::chrono::steady_clock::now();
+  mutex_enter(&buf_pool->LRU_list_mutex);
+
+  size_t drained = 0, made_young = 0;
+
+  while (head != nullptr) {
+    buf_page_t *const next = head->LRU_promote_next;
+
+    if (buf_page_in_file(head)) {
+      if (buf_LRU_promote_block_batched(buf_pool, head)) {
+        ++made_young;
+      }
+    }
+
+    head->LRU_in_promote_queue.store(false, std::memory_order_release);
+    head->LRU_promote_next = nullptr;
+
+    buf_block_unfix(head);
+
+    head = next;
+    drained++;
+  }
+
+  /* End-of-batch fix-up: a single buf_LRU_old_adjust_len call. */
+  if (UT_LIST_GET_LEN(buf_pool->LRU) > BUF_LRU_OLD_MIN_LEN) {
+    buf_LRU_old_adjust_len(buf_pool);
+  }
+  buf_pool->stat.n_pages_made_young += made_young;
+
+  mutex_exit(&buf_pool->LRU_list_mutex);
+
+  /* Pages promoted per drain == LRU_list_mutex acquisitions amortised; with
+  deferral OFF the same work costs one acquisition per page. */
+  if (drained != 0) {
+    const auto mtx_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - mtx_start)
+                            .count();
+    MONITOR_INC_VALUE(MONITOR_LRU_PROMOTE_DRAIN_LRU_MTX_US, mtx_us);
+    MONITOR_INC_VALUE_CUMULATIVE(MONITOR_LRU_PROMOTE_DRAIN_PAGES,
+                                 MONITOR_LRU_PROMOTE_DRAIN_PAGES_NUM_CALL,
+                                 MONITOR_LRU_PROMOTE_DRAIN_PAGES_PER_CALL,
+                                 drained);
+    buf_pool->LRU_promote_queue_len.fetch_sub(drained,
+                                              std::memory_order_relaxed);
+  }
 }
 
 bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
