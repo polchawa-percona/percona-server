@@ -24005,6 +24005,19 @@ static MYSQL_SYSVAR_UINT(
     " The timeout is disabled if 0.",
     nullptr, nullptr, 1000, 0, UINT32_MAX, 0);
 
+static MYSQL_SYSVAR_UINT(
+    single_page_flush_max_concurrent, buf_LRU_single_page_flush_max_concurrent,
+    PLUGIN_VAR_OPCMDARG,
+    "Maximum number of single-page flushes that may be in flight per bp "
+    "instance before further requesters wait instead of issuing their own "
+    "flush. Captures the load-dependent crossover between two regimes: "
+    "at low concurrency single-page flushing wins because each user thread "
+    "avoids page-cleaner wake-up latency; above CPU-core saturation the "
+    "page cleaner wins because batching amortises per-flush I/O. "
+    "Set to 0 to always wait (equivalent to disabling single-page flush)."
+    "Set to a large value to never wait based on this signal.",
+    nullptr, nullptr, UINT32_MAX, 0, UINT32_MAX, 0);
+
 static MYSQL_SYSVAR_LONG(
     open_files, innobase_open_files, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
     "How many files at the maximum InnoDB keeps open at the same time.",
@@ -24583,6 +24596,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(max_purge_lag_delay),
     MYSQL_SYSVAR(old_blocks_pct),
     MYSQL_SYSVAR(old_blocks_time),
+    MYSQL_SYSVAR(single_page_flush_max_concurrent),
     MYSQL_SYSVAR(open_files),
     MYSQL_SYSVAR(optimize_fulltext_only),
     MYSQL_SYSVAR(rollback_on_timeout),

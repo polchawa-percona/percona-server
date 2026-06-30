@@ -263,6 +263,10 @@ enum monitor_id_t {
   MONITOR_LRU_SCAN_SKIP_FLUSHING,
   MONITOR_LRU_SCAN_SKIP_OTHER,
 
+  /* O2: single-page-flush concurrency cap counters. */
+  MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED,
+  MONITOR_LRU_SINGLE_PAGE_FLUSH_CAPPED,
+
   /* Buffer Page I/O specific counters. */
   MONITOR_MODULE_BUF_PAGE,
   MONITOR_INDEX_LEAF_PAGE_READ,

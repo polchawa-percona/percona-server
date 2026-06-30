@@ -626,6 +626,18 @@ static monitor_info_t innodb_counter_info[] = {
      " (e.g. stale-page and unzip-LRU scan paths); reconciliation bucket",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_OTHER},
 
+    /* ========== O2: single-page-flush concurrency cap ========== */
+    {"buffer_LRU_single_page_flush_issued", "buffer",
+     "Times a user thread issued its own single-page LRU flush while"
+     " searching for a free block",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED},
+
+    {"buffer_LRU_single_page_flush_capped", "buffer",
+     "Times a user thread waited for an in-progress LRU flush instead of"
+     " issuing its own, because innodb_single_page_flush_max_concurrent was"
+     " reached",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SINGLE_PAGE_FLUSH_CAPPED},
+
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",
      static_cast<monitor_type_t>(MONITOR_MODULE | MONITOR_GROUP_MODULE),
