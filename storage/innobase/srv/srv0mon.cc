@@ -601,6 +601,31 @@ static monitor_info_t innodb_counter_info[] = {
      MONITOR_LRU_UNZIP_SEARCH_SCANNED,
      MONITOR_LRU_UNZIP_SEARCH_SCANNED_PER_CALL},
 
+    /* ===== Why a scanned LRU page could not be freed (free search) ===== */
+    {"buffer_LRU_scan_skip_pinned", "buffer",
+     "Scanned LRU pages not freed because they were buffer-fixed (pinned by"
+     " another thread)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_PINNED},
+
+    {"buffer_LRU_scan_skip_io_read", "buffer",
+     "Scanned LRU pages not freed because a read I/O was in progress",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_IO_READ},
+
+    {"buffer_LRU_scan_skip_dirty", "buffer",
+     "Scanned LRU pages not freed because they were dirty and not yet being"
+     " flushed (the page cleaner has not picked them up)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_DIRTY},
+
+    {"buffer_LRU_scan_skip_flushing", "buffer",
+     "Scanned LRU pages not freed because a write (flush) was already in"
+     " progress (dirty, flush in flight)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_FLUSHING},
+
+    {"buffer_LRU_scan_skip_other", "buffer",
+     "Scanned LRU pages not freed for any other/uncategorized reason"
+     " (e.g. stale-page and unzip-LRU scan paths); reconciliation bucket",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_OTHER},
+
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",
      static_cast<monitor_type_t>(MONITOR_MODULE | MONITOR_GROUP_MODULE),
