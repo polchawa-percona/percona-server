@@ -24019,6 +24019,11 @@ static MYSQL_SYSVAR_UINT(
     "push and move on; their pages are picked up by the active "
     "drainer. Set to 0 to disable the deferred queue.",
     nullptr, nullptr, 0, 0, UINT32_MAX, 0);
+static MYSQL_SYSVAR_UINT(lru_flush_batch_size, buf_LRU_flush_batch_size,
+                         PLUGIN_VAR_OPCMDARG,
+                         "Batch size for LRU flush (1 to disable batching)",
+                         nullptr, nullptr, 1, 1, UINT32_MAX, 0);
+
 static MYSQL_SYSVAR_LONG(
     open_files, innobase_open_files, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
     "How many files at the maximum InnoDB keeps open at the same time.",
@@ -24598,6 +24603,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(old_blocks_pct),
     MYSQL_SYSVAR(old_blocks_time),
     MYSQL_SYSVAR(lru_make_young_drain_threshold),
+    MYSQL_SYSVAR(lru_flush_batch_size),
     MYSQL_SYSVAR(open_files),
     MYSQL_SYSVAR(optimize_fulltext_only),
     MYSQL_SYSVAR(rollback_on_timeout),

@@ -241,6 +241,17 @@ struct buf_pool_t;
 
 void buf_LRU_enqueue_promote(buf_page_t *bpage);
 void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool);
+extern uint buf_LRU_flush_batch_size;
+
+struct buf_pool_t;
+
+bool buf_LRU_free_batch_begin(buf_pool_t *buf_pool);
+void buf_LRU_free_batch_end();
+
+bool buf_LRU_evict_claim_clean(buf_pool_t *buf_pool, buf_page_t *bpage,
+                               ulint chunk_pages);
+
+void buf_LRU_evict_chunk_flush(buf_pool_t *buf_pool);
 /** @} */
 
 /** @brief Statistics for selecting the LRU list for eviction.
