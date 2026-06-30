@@ -135,6 +135,8 @@ std::chrono::milliseconds get_buf_LRU_old_threshold() {
   return std::chrono::milliseconds{buf_LRU_old_threshold};
 }
 
+uint buf_LRU_single_page_flush_max_concurrent;
+
 /** @} */
 
 /** Takes a block out of the LRU list and page hash table.
@@ -1395,7 +1397,7 @@ we put it to free list to be used.
 @return the free control block, in state BUF_BLOCK_READY_FOR_USE */
 buf_block_t *buf_LRU_get_free_block(buf_pool_t *buf_pool) {
   buf_block_t *block = nullptr;
-  bool freed = false;
+  bool freed = false, no_flush_waited = false;
   ulint n_iterations = 0;
   ulint flush_failures = 0;
   bool started_monitor = false;
@@ -1497,15 +1499,6 @@ loop:
           (srv_shutdown_state.load() != SRV_SHUTDOWN_NONE &&
            srv_shutdown_state.load() != SRV_SHUTDOWN_CLEANUP));
   }
-  if (buf_pool->init_flush[BUF_FLUSH_LRU] && dblwr::is_enabled()) {
-    /* If there is an LRU flush happening in the background then we
-    wait for it to end instead of trying a single page flush. If,
-    however, we are not using doublewrite buffer then it is better to
-    do our own single page flush instead of waiting for LRU flush to
-    end. */
-    buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
-    goto loop;
-  }
 
   os_rmb;
 
@@ -1584,9 +1577,26 @@ loop:
   involved (particularly in case of compressed pages). We
   can do that in a separate patch sometime in future. */
 
-  if (!buf_flush_single_page_from_LRU(buf_pool)) {
-    MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
-    ++flush_failures;
+  if (buf_pool->init_flush[BUF_FLUSH_LRU] && dblwr::is_enabled() &&
+      buf_pool->n_flush[BUF_FLUSH_SINGLE_PAGE] >=
+          buf_LRU_single_page_flush_max_concurrent &&
+      !no_flush_waited) {
+    if (!srv_read_only_mode && n_iterations > 1) {
+      os_event_set(buf_flush_event);
+    }
+
+    /* Cap reached: wait for an in-progress LRU flush instead of issuing
+    our own single-page flush. */
+    MONITOR_INC(MONITOR_LRU_SINGLE_PAGE_FLUSH_CAPPED);
+    buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
+    no_flush_waited = true;
+  } else {
+    /* Below the cap: issue our own single-page flush. */
+    MONITOR_INC(MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED);
+    if (!buf_flush_single_page_from_LRU(buf_pool)) {
+      MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
+      ++flush_failures;
+    }
   }
 
   srv_stats.buf_pool_wait_free.add(n_iterations, 1);
