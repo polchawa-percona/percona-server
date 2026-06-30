@@ -147,6 +147,9 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
   if (!bpage->LRU_in_promote_queue.compare_exchange_strong(
           expected, true, std::memory_order_acquire,
           std::memory_order_relaxed)) {
+    /* Page already on the queue: the lock-free fast path elided this
+    promotion entirely (no LRU_list_mutex, no enqueue). */
+    MONITOR_INC(MONITOR_LRU_PROMOTE_SKIP_IN_QUEUE);
     return;
   }
 
@@ -165,6 +168,9 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
   const size_t new_len = buf_pool->LRU_promote_queue_len.fetch_add(
                              1, std::memory_order_relaxed) + 1;
 
+  MONITOR_INC(MONITOR_LRU_PROMOTE_ENQUEUED);
+  MONITOR_SET(MONITOR_LRU_PROMOTE_QUEUE_LEN, new_len);
+
   /* If we crossed the threshold and no other thread is
   currently draining this buf_pool => drain. */
   const uint threshold = buf_LRU_make_young_drain_threshold;
@@ -176,6 +182,9 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
             std::memory_order_relaxed)) {
       buf_LRU_drain_promote_queue(buf_pool);
       buf_pool->LRU_promote_draining.store(false, std::memory_order_release);
+    } else {
+      /* Another thread owns the drain; we just pushed and moved on. */
+      MONITOR_INC(MONITOR_LRU_PROMOTE_SKIP_DRAINING);
     }
   }
 }
@@ -1279,6 +1288,11 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
 
     if (bpage->was_stale()) {
       freed = buf_page_free_stale(buf_pool, bpage);
+      if (!freed) {
+        /* Stale path does not hold the block mutex; cannot inspect the
+        page state, so it lands in the reconciliation bucket. */
+        MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
+      }
     } else {
       mutex_enter(block_mutex);
 
@@ -1287,6 +1301,22 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
       }
 
       if (!freed) {
+        /* Categorize why this scanned page could not be freed. The block
+        mutex is held, so io_fix / buf_fix_count / dirtiness are stable.
+        Priority mirrors buf_flush_ready_for_replace(): unrelocatable
+        (I/O- or buffer-fixed) first, then relocatable-but-dirty. */
+        const enum buf_io_fix io_fix = buf_page_get_io_fix(bpage);
+        if (io_fix == BUF_IO_WRITE) {
+          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_FLUSHING);
+        } else if (io_fix != BUF_IO_NONE) {
+          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_IO_READ);
+        } else if (bpage->buf_fix_count != 0) {
+          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_PINNED);
+        } else if (bpage->is_dirty()) {
+          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_DIRTY);
+        } else {
+          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
+        }
         mutex_exit(block_mutex);
       }
     }
@@ -1723,11 +1753,18 @@ loop:
       os_event_set(buf_flush_event);
     }
 
+    /* Cap reached: wait for an in-progress LRU flush instead of issuing
+    our own single-page flush. */
+    MONITOR_INC(MONITOR_LRU_SINGLE_PAGE_FLUSH_CAPPED);
     buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
     no_flush_waited = true;
-  } else if (!buf_flush_single_page_from_LRU(buf_pool)) {
-    MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
-    ++flush_failures;
+  } else {
+    /* Below the cap: issue our own single-page flush. */
+    MONITOR_INC(MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED);
+    if (!buf_flush_single_page_from_LRU(buf_pool)) {
+      MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
+      ++flush_failures;
+    }
   }
 
   srv_stats.buf_pool_wait_free.add(n_iterations, 1);
@@ -2116,6 +2153,7 @@ void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
     return;
   }
 
+  const auto mtx_start = std::chrono::steady_clock::now();
   mutex_enter(&buf_pool->LRU_list_mutex);
 
   size_t drained = 0, made_young = 0;
@@ -2146,8 +2184,19 @@ void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
 
   mutex_exit(&buf_pool->LRU_list_mutex);
 
+  /* Pages promoted per drain == LRU_list_mutex acquisitions amortised; with
+  deferral OFF the same work costs one acquisition per page. */
   if (drained != 0) {
-    buf_pool->LRU_promote_queue_len.fetch_sub(drained, std::memory_order_relaxed);
+    const auto mtx_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - mtx_start)
+                            .count();
+    MONITOR_INC_VALUE(MONITOR_LRU_PROMOTE_DRAIN_LRU_MTX_US, mtx_us);
+    MONITOR_INC_VALUE_CUMULATIVE(MONITOR_LRU_PROMOTE_DRAIN_PAGES,
+                                 MONITOR_LRU_PROMOTE_DRAIN_PAGES_NUM_CALL,
+                                 MONITOR_LRU_PROMOTE_DRAIN_PAGES_PER_CALL,
+                                 drained);
+    buf_pool->LRU_promote_queue_len.fetch_sub(drained,
+                                              std::memory_order_relaxed);
   }
 }
 

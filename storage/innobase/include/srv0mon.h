@@ -254,6 +254,30 @@ enum monitor_id_t {
   MONITOR_LRU_UNZIP_SEARCH_SCANNED_NUM_CALL,
   MONITOR_LRU_UNZIP_SEARCH_SCANNED_PER_CALL,
 
+  /* O1: deferred make-young (LRU promote) queue counters. */
+  MONITOR_LRU_MAKE_YOUNG_CALLS,
+  MONITOR_LRU_PROMOTE_ENQUEUED,
+  MONITOR_LRU_PROMOTE_SKIP_IN_QUEUE,
+  MONITOR_LRU_PROMOTE_SKIP_DRAINING,
+  MONITOR_LRU_PROMOTE_QUEUE_LEN,
+  MONITOR_LRU_PROMOTE_DRAIN_PAGES,
+  MONITOR_LRU_PROMOTE_DRAIN_PAGES_NUM_CALL,
+  MONITOR_LRU_PROMOTE_DRAIN_PAGES_PER_CALL,
+  MONITOR_LRU_PROMOTE_DRAIN_LRU_MTX_US,
+
+  /* O2: single-page-flush concurrency cap counters. */
+  MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED,
+  MONITOR_LRU_SINGLE_PAGE_FLUSH_CAPPED,
+
+  /* Why a scanned LRU page could not be freed (per scanned-but-not-freed
+  page in the common-LRU free search). dirty total = skip_dirty +
+  skip_flushing; of those already flushing = skip_flushing. */
+  MONITOR_LRU_SCAN_SKIP_PINNED,
+  MONITOR_LRU_SCAN_SKIP_IO_READ,
+  MONITOR_LRU_SCAN_SKIP_DIRTY,
+  MONITOR_LRU_SCAN_SKIP_FLUSHING,
+  MONITOR_LRU_SCAN_SKIP_OTHER,
+
   /* Buffer Page I/O specific counters. */
   MONITOR_MODULE_BUF_PAGE,
   MONITOR_INDEX_LEAF_PAGE_READ,

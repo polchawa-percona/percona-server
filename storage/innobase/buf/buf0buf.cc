@@ -3255,6 +3255,11 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_a(buf_page_in_file(bpage));
 
   if (buf_page_peek_if_too_old(bpage)) {
+    /* Count every promotion regardless of path so the deferred-queue A/B
+    (innodb_lru_make_young_drain_threshold 0 vs tuned) shares one
+    denominator. */
+    MONITOR_INC(MONITOR_LRU_MAKE_YOUNG_CALLS);
+
     /* When innodb_lru_make_young_drain_threshold is non-zero we push
     onto a per-buf-pool lock-free queue instead of taking the LRU
     mutex here. The thread that crosses the threshold drains the queue.
