@@ -1166,7 +1166,12 @@ static bool buf_LRU_clock_evict_one(buf_pool_t *buf_pool, ulint budget) {
     auto block_mutex = buf_page_get_mutex(bpage);
     mutex_enter(block_mutex);
 
-    if (buf_page_in_file(bpage) && bpage->in_LRU_list &&
+    /* A block in BUF_BLOCK_FILE_PAGE state is, by invariant, on the LRU list,
+    so buf_page_in_file() + buf_flush_ready_for_replace() (which itself asserts
+    in_LRU_list under UNIV_DEBUG) is the authoritative re-validation. Do not
+    reference bpage->in_LRU_list here: it is a UNIV_DEBUG-only field and would
+    break WITH_DEBUG=OFF (release) builds. */
+    if (buf_page_in_file(bpage) &&
         buf_flush_ready_for_replace(bpage) &&
         bpage->access_count.load(std::memory_order_relaxed) == 0) {
       /* buf_LRU_free_page() releases both mutexes on success. */
