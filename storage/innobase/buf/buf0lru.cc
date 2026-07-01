@@ -1089,123 +1089,109 @@ static bool buf_LRU_free_from_unzip_LRU_list(buf_pool_t *buf_pool,
   return (freed);
 }
 
-/** Clock-sweep PoC: pick a victim from the common LRU list using a
-PostgreSQL-style clock hand instead of recency ordering.
+/** Clock-sweep PoC v2: lock-free physical-array clock harvest (evict-only).
 
-The LRU list is walked as a circular buffer via buf_pool->lru_scan_itr, which
-acts as the persistent clock hand and survives across calls (it is only reset
-to the list tail when it runs off the head or is uninitialised). For each page
-the hand passes:
-  - not replaceable (buffer-fixed / I/O-fixed / dirty): leave it (dirty pages
-    are cleaned by the page cleaner, then become evictable on a later pass);
-  - access_count > 0: decrement it and move on (the "second chance");
-  - access_count == 0 and clean: evict it (this is the victim).
+Advances the shared clock hand (buf_pool->clock_hand) over the buffer pool's
+physical block array WITHOUT holding LRU_list_mutex. In v2 the per-instance LRU
+manager thread is the sole "ager" — it decrements usage counters as it sweeps
+the LRU tail. This user-path harvester only READS the counters: it evicts the
+first clean, unfixed, in-LRU file page whose usage has already reached 0, and
+takes LRU_list_mutex only briefly to free that single victim (O(1), not
+O(pool)). If it finds none within the budget it fails fast and the caller waits
+for the manager to age pages and refill the free list.
 
-The scan is bounded so it always terminates: on the cheap first attempt
-(scan_all == false) it looks at most BUF_LRU_SEARCH_SCAN_THRESHOLD pages; on
-the escalated attempt (scan_all == true) it is allowed a couple of full passes
-so a victim is actually found when one exists. If the bound is hit without a
-victim, we give up and the caller escalates to flushing / sleeping.
+Reading block descriptors lock-free is safe because the descriptors and their
+mutexes are stable storage — created once at pool init and never destroyed
+(buffer-pool resize is out of scope for this PoC). The racy state/usage reads
+are only a filter; everything is re-validated under the block mutex before
+freeing, so a page reused since the racy read is either rejected or is itself a
+genuinely replaceable clean page (evicting which is correct).
 
-@param[in,out]  buf_pool        buffer pool instance
-@param[in]      scan_all        allow a full circular sweep if true, otherwise
-                                only a short bounded look
+@param[in,out]  buf_pool  buffer pool instance
+@param[in]      budget    max block descriptors to inspect before giving up
 @return true if a page was freed */
-static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
-                                              bool scan_all) {
-  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+static bool buf_LRU_clock_evict_one(buf_pool_t *buf_pool, ulint budget) {
+  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
-  const auto sweep_start = std::chrono::steady_clock::now();
+  /* True number of block descriptors (curr_size carries accounting slop, so
+  sum the actual chunk sizes). */
+  ulint total = 0;
+  for (ulint i = 0; i < buf_pool->n_chunks; ++i) {
+    total += buf_pool->chunks[i].size;
+  }
+  if (total == 0) {
+    return false;
+  }
 
-  bool freed = false;
+  int64_t mtx_us = 0;
   ulint examined = 0;
-  ulint decremented = 0;
+  bool freed = false;
 
-  /* Termination bound. On the escalated path allow ~2 full passes plus a small
-  margin so a victim is found even when many pages still carry usage; on the
-  cheap path keep the mutex hold short. */
-  const ulint lru_len = UT_LIST_GET_LEN(buf_pool->LRU);
-  const ulint max_examined = scan_all
-                                 ? (2 * lru_len + BUF_LRU_SEARCH_SCAN_THRESHOLD)
-                                 : BUF_LRU_SEARCH_SCAN_THRESHOLD;
+  for (; examined < budget; ++examined) {
+    const uint64_t h =
+        buf_pool->clock_hand.fetch_add(1, std::memory_order_relaxed);
+    ulint idx = static_cast<ulint>(h % total);
 
-  while (examined < max_examined) {
-    ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
-
-    /* Read the clock hand; reset to the tail when it is uninitialised or has
-    run off the head of the list (circular wrap). */
-    buf_page_t *bpage = buf_pool->lru_scan_itr.get();
-    if (bpage == nullptr) {
-      bpage = buf_pool->lru_scan_itr.start();
-      if (bpage == nullptr) {
-        break; /* LRU list is empty */
-      }
-    }
-
-    /* Advance the hand to the previous page (toward the head); the
-    hazard-pointer machinery keeps this valid across removals. */
-    buf_pool->lru_scan_itr.set(UT_LIST_GET_PREV(LRU, bpage));
-
-    ut_ad(bpage->in_LRU_list);
-    ut_ad(buf_page_in_file(bpage));
-    ++examined;
-
-    const auto accessed = buf_page_is_accessed(bpage);
-
-    if (bpage->was_stale()) {
-      freed = buf_page_free_stale(buf_pool, bpage);
-      if (freed) {
-        if (accessed == std::chrono::steady_clock::time_point{}) {
-          ++buf_pool->stat.n_ra_pages_evicted;
-        }
+    /* Map the flat index to a block descriptor (chunk walk; the chunk array is
+    stable because resize is out of scope for this PoC). */
+    buf_block_t *block = nullptr;
+    for (ulint i = 0; i < buf_pool->n_chunks; ++i) {
+      buf_chunk_t *chunk = &buf_pool->chunks[i];
+      if (idx < chunk->size) {
+        block = &chunk->blocks[idx];
         break;
       }
+      idx -= chunk->size;
+    }
+    if (block == nullptr) {
       continue;
     }
 
+    buf_page_t *bpage = &block->page;
+
+    /* Lock-free filter. Read the raw state field directly (buf_page_get_state()
+    would ut_error on a torn read in debug builds) and the usage counter. Only
+    clean, already-aged (usage == 0) file pages are candidates; aging is the
+    manager thread's job, not this harvester's. */
+    if (bpage->state != BUF_BLOCK_FILE_PAGE) {
+      continue;
+    }
+    if (bpage->access_count.load(std::memory_order_relaxed) != 0) {
+      continue;
+    }
+
+    /* Candidate: take the mutexes and re-validate authoritatively. */
+    const auto lock_start = std::chrono::steady_clock::now();
+    mutex_enter(&buf_pool->LRU_list_mutex);
     auto block_mutex = buf_page_get_mutex(bpage);
     mutex_enter(block_mutex);
 
-    if (!buf_flush_ready_for_replace(bpage)) {
-      /* Buffer-fixed, I/O-fixed or dirty: not a candidate this pass. */
-      mutex_exit(block_mutex);
-      continue;
+    if (buf_page_in_file(bpage) && bpage->in_LRU_list &&
+        buf_flush_ready_for_replace(bpage) &&
+        bpage->access_count.load(std::memory_order_relaxed) == 0) {
+      /* buf_LRU_free_page() releases both mutexes on success. */
+      freed = buf_LRU_free_page(bpage, true);
     }
 
-    uint8_t usage = bpage->access_count.load(std::memory_order_relaxed);
-    if (usage > 0) {
-      /* Second chance: age the page and move on. */
-      bpage->access_count.store(usage - 1, std::memory_order_relaxed);
-      ++decremented;
-      mutex_exit(block_mutex);
-      continue;
+    mtx_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - lock_start)
+                  .count();
+
+    if (freed) {
+      break;
     }
 
-    /* usage == 0 and clean => victim. */
-    freed = buf_LRU_free_page(bpage, true);
-    if (!freed) {
-      mutex_exit(block_mutex);
-      continue;
-    }
-
-    ut_ad(!mutex_own(block_mutex));
-    if (accessed == std::chrono::steady_clock::time_point{}) {
-      ++buf_pool->stat.n_ra_pages_evicted;
-    }
-    break;
+    mutex_exit(block_mutex);
+    mutex_exit(&buf_pool->LRU_list_mutex);
   }
 
-  const auto sweep_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - sweep_start)
-                            .count();
-  MONITOR_INC_VALUE(MONITOR_CLOCK_SWEEP_LRU_MTX_US, sweep_us);
+  /* In v2 this is only the brief per-victim critical section, not an O(pool)
+  sweep — it should be tiny compared with the v1 mutex-held sweep. */
+  MONITOR_INC_VALUE(MONITOR_CLOCK_SWEEP_LRU_MTX_US, mtx_us);
   if (examined) {
     MONITOR_INC_VALUE_CUMULATIVE(
         MONITOR_CLOCK_SWEEP_EXAMINED, MONITOR_CLOCK_SWEEP_EXAMINED_NUM_CALL,
         MONITOR_CLOCK_SWEEP_EXAMINED_PER_CALL, examined);
-  }
-  if (decremented) {
-    MONITOR_INC_VALUE(MONITOR_CLOCK_SWEEP_DECREMENTED, decremented);
   }
   if (freed) {
     MONITOR_INC(MONITOR_CLOCK_SWEEP_EVICTED);
@@ -1213,33 +1199,67 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
     MONITOR_INC(MONITOR_CLOCK_SWEEP_GIVEUP);
   }
 
-  ut_ad(freed ? !mutex_own(&buf_pool->LRU_list_mutex)
-              : mutex_own(&buf_pool->LRU_list_mutex));
-
-  return (freed);
+  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+  return freed;
 }
 
-bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all) {
-  bool freed = false;
-  bool use_unzip_list = UT_LIST_GET_LEN(buf_pool->unzip_LRU) > 0;
-
-  mutex_enter(&buf_pool->LRU_list_mutex);
-
-  if (use_unzip_list) {
-    freed = buf_LRU_free_from_unzip_LRU_list(buf_pool, scan_all);
-  }
-
-  if (!freed) {
-    freed = buf_LRU_free_from_common_LRU_list(buf_pool, scan_all);
-  }
-
-  if (!freed) {
-    mutex_exit(&buf_pool->LRU_list_mutex);
-  }
-
+bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all,
+                                 bool force) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
-  return (freed);
+  /* Compressed pages are out of scope for this PoC, but keep the unzip-LRU
+  path so compressed instances still function; it is a no-op when unzip_LRU is
+  empty (the non-compressed case this PoC targets). */
+  if (UT_LIST_GET_LEN(buf_pool->unzip_LRU) > 0) {
+    mutex_enter(&buf_pool->LRU_list_mutex);
+    const bool freed = buf_LRU_free_from_unzip_LRU_list(buf_pool, scan_all);
+    if (!freed) {
+      mutex_exit(&buf_pool->LRU_list_mutex);
+    }
+    ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+    if (freed) {
+      return true;
+    }
+  }
+
+  if (force) {
+    /* Drain mode (buffer pool invalidation). The LRU manager thread — the
+    clock's sole ager — is paused here, so the usage-gated harvester could
+    never empty the list. Evict the first replaceable page from the LRU tail
+    directly, ignoring the usage counter. This holds LRU_list_mutex, but it
+    runs only during invalidation/teardown, where all pages are already
+    replaceable (buf_assert_all_are_replaceable), so each call frees the tail
+    page and the caller's drain loop converges in O(n). */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+    bool freed = false;
+    for (buf_page_t *bpage = UT_LIST_GET_LAST(buf_pool->LRU);
+         bpage != nullptr && !freed;) {
+      buf_page_t *prev = UT_LIST_GET_PREV(LRU, bpage);
+      auto block_mutex = buf_page_get_mutex(bpage);
+      mutex_enter(block_mutex);
+      if (buf_flush_ready_for_replace(bpage)) {
+        /* buf_LRU_free_page() releases both mutexes on success. */
+        freed = buf_LRU_free_page(bpage, true);
+      }
+      if (!freed) {
+        /* Nothing was removed, so LRU_list_mutex is still held and prev is
+        still a valid list node; step toward the head. */
+        mutex_exit(block_mutex);
+        bpage = prev;
+      }
+    }
+    if (!freed) {
+      mutex_exit(&buf_pool->LRU_list_mutex);
+    }
+    ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+    return freed;
+  }
+
+  /* Lock-free clock harvest over the physical block array. Bounded so it fails
+  fast and lets the LRU manager thread do the aging when nothing is ready. */
+  const ulint budget =
+      scan_all ? srv_LRU_scan_depth : BUF_LRU_SEARCH_SCAN_THRESHOLD;
+  return buf_LRU_clock_evict_one(buf_pool, budget);
 }
 
 /** Returns true if less than 25 % of the buffer pool in any instance is

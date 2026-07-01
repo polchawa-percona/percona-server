@@ -2510,6 +2510,11 @@ struct buf_pool_t {
   /** Base node of the LRU list */
   UT_LIST_BASE_NODE_T(buf_page_t, LRU) LRU;
 
+  /** Clock-sweep PoC v2: monotonic hand for the lock-free physical-array
+  clock sweep. Threads take (hand.fetch_add(1) % total_blocks) to pick the
+  next block descriptor to inspect without holding LRU_list_mutex. */
+  alignas(64) std::atomic<uint64_t> clock_hand{0};
+
   /** Pointer to the about LRU_old_ratio/BUF_LRU_OLD_RATIO_DIV oldest blocks in
   the LRU list; NULL if LRU length less than BUF_LRU_OLD_MIN_LEN; NOTE: when
   LRU_old != NULL, its length should always equal LRU_old_len */

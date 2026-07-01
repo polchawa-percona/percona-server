@@ -6234,7 +6234,9 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
 
   ut_d(buf_assert_all_are_replaceable(buf_pool));
 
-  while (buf_LRU_scan_and_free_block(buf_pool, true)) {
+  /* force=true: the LRU manager (clock ager) is paused above, so drain the
+  list ignoring usage counters. */
+  while (buf_LRU_scan_and_free_block(buf_pool, true, /*force=*/true)) {
   }
 
   mutex_enter(&buf_pool->LRU_list_mutex);

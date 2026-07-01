@@ -102,9 +102,17 @@ The caller must hold the LRU list and buf_page_get_mutex() mutexes.
 @param[in,out]  buf_pool        buffer pool instance
 @param[in]      scan_all        scan whole LRU list if true, otherwise scan
                                 only BUF_LRU_SEARCH_SCAN_THRESHOLD blocks
+@param[in]      force           drain mode (buffer pool invalidation): evict the
+                                first replaceable page directly from the LRU
+                                tail, ignoring the clock usage counter. Needed
+                                because invalidation pauses the LRU manager
+                                thread (the clock's sole "ager"), so the
+                                usage-gated harvester alone could never empty
+                                the list.
 @return true if found and freed */
 [[nodiscard]] bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool,
-                                               bool scan_all);
+                                               bool scan_all,
+                                               bool force = false);
 
 /** Returns a free block from the buf_pool.  The block is taken off the
 free list.  If it is empty, returns NULL.

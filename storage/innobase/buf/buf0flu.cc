@@ -1793,15 +1793,23 @@ static std::pair<ulint, ulint> buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
     } else {
       auto acquired = mutex_enter_nowait(block_mutex) == 0;
 
-      if (acquired && buf_flush_ready_for_replace(bpage) &&
-          bpage->access_count.load(std::memory_order_relaxed) == 0) {
-        /* block is ready for eviction i.e., it is clean and is not IO-fixed or
-        buffer fixed. Clock-sweep PoC: only evict a clean page here if its usage
-        counter has already aged to 0, so the page cleaner does not evict hot
-        pages behind the clock hand's back (keeps the replacement policy purely
-        clock-driven). Hot clean pages fall through and are left for the clock
-        to age. */
-        if (buf_LRU_free_page(bpage, true)) {
+      if (acquired && buf_flush_ready_for_replace(bpage)) {
+        /* Clean and unfixed. Clock-sweep PoC v2: the LRU manager thread is the
+        sole "ager" of the clock. Apply the second-chance rule as the hand
+        passes this tail page: if it still carries usage, decrement it and move
+        on (do NOT evict, and do NOT fall through to the flush branch below —
+        it is clean anyway); only evict once usage has aged to 0. This keeps
+        the free list fed while driving the usage counters down continuously,
+        so the lock-free user-path harvester finds usage==0 victims. */
+        uint8_t usage = bpage->access_count.load(std::memory_order_relaxed);
+        if (usage > 0) {
+          while (usage > 0 && !bpage->access_count.compare_exchange_weak(
+                                  usage, usage - 1, std::memory_order_relaxed,
+                                  std::memory_order_relaxed)) {
+          }
+          MONITOR_INC(MONITOR_CLOCK_SWEEP_DECREMENTED);
+          mutex_exit(block_mutex);
+        } else if (buf_LRU_free_page(bpage, true)) {
           ++evict_count;
           mutex_enter(&buf_pool->LRU_list_mutex);
         } else {
