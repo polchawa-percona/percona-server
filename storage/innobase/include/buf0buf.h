@@ -1709,6 +1709,13 @@ class buf_page_t {
   /** true if the block is in the old blocks in buf_pool->LRU_old */
   bool old;
 
+  /** Clock-sweep PoC: per-page usage counter (PostgreSQL-style). Bumped
+  (saturating at CLOCK_SWEEP_MAX_USAGE) on each real access; decremented by the
+  eviction clock hand. A page is evictable when this reaches 0. Atomic because
+  access-side bumps race with the sweep. Replaces the recency LRU ordering as
+  the replacement policy; the LRU list itself is kept only as a container. */
+  std::atomic<uint8_t> access_count{0};
+
   bool is_corrupt;
 #ifdef UNIV_DEBUG
   /** This is set to true when fsp frees a page in buffer pool;

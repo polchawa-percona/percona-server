@@ -1089,87 +1089,128 @@ static bool buf_LRU_free_from_unzip_LRU_list(buf_pool_t *buf_pool,
   return (freed);
 }
 
-/** Try to free a clean page from the common LRU list.
+/** Clock-sweep PoC: pick a victim from the common LRU list using a
+PostgreSQL-style clock hand instead of recency ordering.
+
+The LRU list is walked as a circular buffer via buf_pool->lru_scan_itr, which
+acts as the persistent clock hand and survives across calls (it is only reset
+to the list tail when it runs off the head or is uninitialised). For each page
+the hand passes:
+  - not replaceable (buffer-fixed / I/O-fixed / dirty): leave it (dirty pages
+    are cleaned by the page cleaner, then become evictable on a later pass);
+  - access_count > 0: decrement it and move on (the "second chance");
+  - access_count == 0 and clean: evict it (this is the victim).
+
+The scan is bounded so it always terminates: on the cheap first attempt
+(scan_all == false) it looks at most BUF_LRU_SEARCH_SCAN_THRESHOLD pages; on
+the escalated attempt (scan_all == true) it is allowed a couple of full passes
+so a victim is actually found when one exists. If the bound is hit without a
+victim, we give up and the caller escalates to flushing / sleeping.
+
 @param[in,out]  buf_pool        buffer pool instance
-@param[in]      scan_all        scan whole LRU list if true, otherwise scan
-                                only up to BUF_LRU_SEARCH_SCAN_THRESHOLD
-@return true if freed */
+@param[in]      scan_all        allow a full circular sweep if true, otherwise
+                                only a short bounded look
+@return true if a page was freed */
 static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
                                               bool scan_all) {
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
-  bool freed{};
-  ulint scanned{};
+  const auto sweep_start = std::chrono::steady_clock::now();
 
-  for (buf_page_t *bpage = buf_pool->lru_scan_itr.start();
-       bpage != nullptr &&
-       (scan_all || scanned < BUF_LRU_SEARCH_SCAN_THRESHOLD);
-       ++scanned, bpage = buf_pool->lru_scan_itr.get()) {
+  bool freed = false;
+  ulint examined = 0;
+  ulint decremented = 0;
+
+  /* Termination bound. On the escalated path allow ~2 full passes plus a small
+  margin so a victim is found even when many pages still carry usage; on the
+  cheap path keep the mutex hold short. */
+  const ulint lru_len = UT_LIST_GET_LEN(buf_pool->LRU);
+  const ulint max_examined = scan_all
+                                 ? (2 * lru_len + BUF_LRU_SEARCH_SCAN_THRESHOLD)
+                                 : BUF_LRU_SEARCH_SCAN_THRESHOLD;
+
+  while (examined < max_examined) {
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
-    auto prev = UT_LIST_GET_PREV(LRU, bpage);
-    auto block_mutex = buf_page_get_mutex(bpage);
 
-    buf_pool->lru_scan_itr.set(prev);
+    /* Read the clock hand; reset to the tail when it is uninitialised or has
+    run off the head of the list (circular wrap). */
+    buf_page_t *bpage = buf_pool->lru_scan_itr.get();
+    if (bpage == nullptr) {
+      bpage = buf_pool->lru_scan_itr.start();
+      if (bpage == nullptr) {
+        break; /* LRU list is empty */
+      }
+    }
+
+    /* Advance the hand to the previous page (toward the head); the
+    hazard-pointer machinery keeps this valid across removals. */
+    buf_pool->lru_scan_itr.set(UT_LIST_GET_PREV(LRU, bpage));
 
     ut_ad(bpage->in_LRU_list);
     ut_ad(buf_page_in_file(bpage));
+    ++examined;
 
     const auto accessed = buf_page_is_accessed(bpage);
 
     if (bpage->was_stale()) {
       freed = buf_page_free_stale(buf_pool, bpage);
-      if (!freed) {
-        /* Stale path does not hold the block mutex; cannot inspect the
-        page state, so it lands in the reconciliation bucket. */
-        MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
-      }
-    } else {
-      mutex_enter(block_mutex);
-
-      if (buf_flush_ready_for_replace(bpage)) {
-        freed = buf_LRU_free_page(bpage, true);
-      }
-
-      if (!freed) {
-        /* Categorize why this scanned page could not be freed. The block
-        mutex is held, so io_fix / buf_fix_count / dirtiness are stable.
-        Priority mirrors buf_flush_ready_for_replace(): unrelocatable
-        (I/O- or buffer-fixed) first, then relocatable-but-dirty. */
-        const enum buf_io_fix io_fix = buf_page_get_io_fix(bpage);
-        if (io_fix == BUF_IO_WRITE) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_FLUSHING);
-        } else if (io_fix != BUF_IO_NONE) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_IO_READ);
-        } else if (bpage->buf_fix_count != 0) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_PINNED);
-        } else if (bpage->is_dirty()) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_DIRTY);
-        } else {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
+      if (freed) {
+        if (accessed == std::chrono::steady_clock::time_point{}) {
+          ++buf_pool->stat.n_ra_pages_evicted;
         }
-        mutex_exit(block_mutex);
+        break;
       }
+      continue;
     }
 
-    if (freed && accessed == std::chrono::steady_clock::time_point{}) {
-      /* Keep track of pages that are evicted without
-      ever being accessed. This gives us a measure of
-      the effectiveness of readahead */
-      ++buf_pool->stat.n_ra_pages_evicted;
+    auto block_mutex = buf_page_get_mutex(bpage);
+    mutex_enter(block_mutex);
+
+    if (!buf_flush_ready_for_replace(bpage)) {
+      /* Buffer-fixed, I/O-fixed or dirty: not a candidate this pass. */
+      mutex_exit(block_mutex);
+      continue;
+    }
+
+    uint8_t usage = bpage->access_count.load(std::memory_order_relaxed);
+    if (usage > 0) {
+      /* Second chance: age the page and move on. */
+      bpage->access_count.store(usage - 1, std::memory_order_relaxed);
+      ++decremented;
+      mutex_exit(block_mutex);
+      continue;
+    }
+
+    /* usage == 0 and clean => victim. */
+    freed = buf_LRU_free_page(bpage, true);
+    if (!freed) {
+      mutex_exit(block_mutex);
+      continue;
     }
 
     ut_ad(!mutex_own(block_mutex));
-
-    if (freed) {
-      ++scanned;
-      break;
+    if (accessed == std::chrono::steady_clock::time_point{}) {
+      ++buf_pool->stat.n_ra_pages_evicted;
     }
+    break;
   }
 
-  if (scanned) {
-    MONITOR_INC_VALUE_CUMULATIVE(MONITOR_LRU_SEARCH_SCANNED,
-                                 MONITOR_LRU_SEARCH_SCANNED_NUM_CALL,
-                                 MONITOR_LRU_SEARCH_SCANNED_PER_CALL, scanned);
+  const auto sweep_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - sweep_start)
+                            .count();
+  MONITOR_INC_VALUE(MONITOR_CLOCK_SWEEP_LRU_MTX_US, sweep_us);
+  if (examined) {
+    MONITOR_INC_VALUE_CUMULATIVE(
+        MONITOR_CLOCK_SWEEP_EXAMINED, MONITOR_CLOCK_SWEEP_EXAMINED_NUM_CALL,
+        MONITOR_CLOCK_SWEEP_EXAMINED_PER_CALL, examined);
+  }
+  if (decremented) {
+    MONITOR_INC_VALUE(MONITOR_CLOCK_SWEEP_DECREMENTED, decremented);
+  }
+  if (freed) {
+    MONITOR_INC(MONITOR_CLOCK_SWEEP_EVICTED);
+  } else {
+    MONITOR_INC(MONITOR_CLOCK_SWEEP_GIVEUP);
   }
 
   ut_ad(freed ? !mutex_own(&buf_pool->LRU_list_mutex)
@@ -1881,6 +1922,11 @@ void buf_LRU_add_block(buf_page_t *bpage, /*!< in: control block */
                                   added to the start, regardless of this
                                   parameter */
 {
+  /* Clock-sweep PoC: a page entering the buffer pool starts with a small
+  non-zero usage so it survives at least one sweep pass before becoming
+  evictable. The LRU list position (old vs young) no longer drives the
+  replacement policy, but the list is still maintained as a container. */
+  bpage->access_count.store(CLOCK_SWEEP_INIT_USAGE, std::memory_order_relaxed);
   buf_LRU_add_block_low(bpage, old);
 }
 

@@ -57,6 +57,14 @@ These are low-level functions
 /** Minimum LRU list length for which the LRU_old pointer is defined
 8 megabytes of 16k pages */
 constexpr uint32_t BUF_LRU_OLD_MIN_LEN = 8 * 1024 / 16;
+
+/** Clock-sweep PoC: maximum per-page usage counter (buf_page_t::access_count).
+Higher = pages survive more sweep passes before eviction (PostgreSQL uses 5). */
+constexpr uint8_t CLOCK_SWEEP_MAX_USAGE = 4;
+
+/** Clock-sweep PoC: initial usage counter given to a page when it enters the
+buffer pool. */
+constexpr uint8_t CLOCK_SWEEP_INIT_USAGE = 1;
 #endif /* !UNIV_HOTBACKUP */
 
 /** Flushes all dirty pages or removes all pages belonging to a given

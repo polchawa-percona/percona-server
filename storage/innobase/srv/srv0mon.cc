@@ -625,6 +625,37 @@ static monitor_info_t innodb_counter_info[] = {
      "Scanned LRU pages not freed for any other/uncategorized reason"
      " (e.g. stale-page and unzip-LRU scan paths); reconciliation bucket",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_OTHER},
+    /* ========== Clock-sweep PoC replacement policy (default ON) ========== */
+    {"buffer_clock_sweep_examined", "buffer",
+     "Total pages examined by the eviction clock hand", MONITOR_SET_OWNER,
+     MONITOR_CLOCK_SWEEP_EXAMINED_NUM_CALL, MONITOR_CLOCK_SWEEP_EXAMINED},
+
+    {"buffer_clock_sweep_num_call", "buffer",
+     "Number of clock-sweep victim searches", MONITOR_SET_MEMBER,
+     MONITOR_CLOCK_SWEEP_EXAMINED, MONITOR_CLOCK_SWEEP_EXAMINED_NUM_CALL},
+
+    {"buffer_clock_sweep_examined_per_call", "buffer",
+     "Pages examined per clock-sweep victim search", MONITOR_SET_MEMBER,
+     MONITOR_CLOCK_SWEEP_EXAMINED, MONITOR_CLOCK_SWEEP_EXAMINED_PER_CALL},
+
+    {"buffer_clock_sweep_decremented", "buffer",
+     "Total usage-counter decrements performed by the clock hand"
+     " (second-chance events)",
+     MONITOR_DEFAULT_ON, MONITOR_DEFAULT_START,
+     MONITOR_CLOCK_SWEEP_DECREMENTED},
+
+    {"buffer_clock_sweep_evicted", "buffer",
+     "Victim searches that found and freed a page", MONITOR_DEFAULT_ON,
+     MONITOR_DEFAULT_START, MONITOR_CLOCK_SWEEP_EVICTED},
+
+    {"buffer_clock_sweep_giveup", "buffer",
+     "Victim searches that hit the examine bound without freeing a page"
+     " (eviction pressure / everything pinned or dirty)",
+     MONITOR_DEFAULT_ON, MONITOR_DEFAULT_START, MONITOR_CLOCK_SWEEP_GIVEUP},
+
+    {"buffer_clock_sweep_lru_mutex_us", "buffer",
+     "Total microseconds spent sweeping while holding LRU_list_mutex",
+     MONITOR_DEFAULT_ON, MONITOR_DEFAULT_START, MONITOR_CLOCK_SWEEP_LRU_MTX_US},
 
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",

@@ -1793,9 +1793,14 @@ static std::pair<ulint, ulint> buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
     } else {
       auto acquired = mutex_enter_nowait(block_mutex) == 0;
 
-      if (acquired && buf_flush_ready_for_replace(bpage)) {
-        /* block is ready for eviction i.e., it is
-        clean and is not IO-fixed or buffer fixed. */
+      if (acquired && buf_flush_ready_for_replace(bpage) &&
+          bpage->access_count.load(std::memory_order_relaxed) == 0) {
+        /* block is ready for eviction i.e., it is clean and is not IO-fixed or
+        buffer fixed. Clock-sweep PoC: only evict a clean page here if its usage
+        counter has already aged to 0, so the page cleaner does not evict hot
+        pages behind the clock hand's back (keeps the replacement policy purely
+        clock-driven). Hot clean pages fall through and are left for the clock
+        to age. */
         if (buf_LRU_free_page(bpage, true)) {
           ++evict_count;
           mutex_enter(&buf_pool->LRU_list_mutex);

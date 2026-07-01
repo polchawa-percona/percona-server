@@ -3254,8 +3254,16 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_ad(bpage->buf_fix_count > 0);
   ut_a(buf_page_in_file(bpage));
 
-  if (buf_page_peek_if_too_old(bpage)) {
-    buf_page_make_young(bpage);
+  /* Clock-sweep PoC: record the access by bumping the page's usage counter
+  (saturating at CLOCK_SWEEP_MAX_USAGE) instead of moving the page to the LRU
+  head. This is a lock-free atomic op — no LRU_list_mutex. The eviction clock
+  hand decrements these counters and evicts pages that reach 0. Callers already
+  skip this for PEEK_IF_IN_POOL / SCAN fetches, so scans do not inflate usage
+  (matching PostgreSQL's ring-buffer intent). */
+  uint8_t c = bpage->access_count.load(std::memory_order_relaxed);
+  while (c < CLOCK_SWEEP_MAX_USAGE &&
+         !bpage->access_count.compare_exchange_weak(
+             c, c + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
   }
 }
 
