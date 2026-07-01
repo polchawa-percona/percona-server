@@ -46,6 +46,21 @@ The five buckets reconcile to `(scanned − freed)`.
 `buffer_LRU_get_free_search`, `buffer_LRU_get_free_loops`,
 `buffer_LRU_get_free_waits`, and `buffer_LRU_search_scanned` / `_per_call`.
 
+## Free-block search outcome (baseline)
+
+When the free list is empty, `buf_LRU_get_free_block()` either waits for an
+in-progress LRU flush or issues its own single-page flush. Present on the
+baseline (default ON) so it serves as the A/B denominator for the O2
+single-page-flush cap.
+
+| Counter | Type | Meaning |
+|---|---|---|
+| `buffer_LRU_single_page_flush_issued` | counter | a user thread issued its own single-page LRU flush |
+| `buffer_LRU_awaits` | counter | a user thread waited for an in-progress LRU flush to finish (`buf_flush_await_no_flushing`) instead of issuing its own flush |
+
+On the O2 branch the cap converts would-be `issued` events into waits; compare
+baseline `single_page_flush_issued` against O2 `single_page_flush_capped`.
+
 ## O1 — deferred make-young (LRU promote) queue
 
 Branch: `lru-opt-o1-make-young` · sysvar `innodb_lru_make_young_drain_threshold`

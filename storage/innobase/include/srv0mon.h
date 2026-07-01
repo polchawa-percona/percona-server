@@ -263,6 +263,10 @@ enum monitor_id_t {
   MONITOR_LRU_SCAN_SKIP_FLUSHING,
   MONITOR_LRU_SCAN_SKIP_OTHER,
 
+  /* Free-block search: single-page flush vs waiting for a pending LRU flush. */
+  MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED,
+  MONITOR_LRU_AWAITS,
+
   /* Buffer Page I/O specific counters. */
   MONITOR_MODULE_BUF_PAGE,
   MONITOR_INDEX_LEAF_PAGE_READ,

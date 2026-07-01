@@ -626,6 +626,19 @@ static monitor_info_t innodb_counter_info[] = {
      " (e.g. stale-page and unzip-LRU scan paths); reconciliation bucket",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_OTHER},
 
+    /* Free-block search outcomes when the free list is empty. */
+    {"buffer_LRU_single_page_flush_issued", "buffer",
+     "Times a user thread issued its own single-page LRU flush while"
+     " searching for a free block",
+     MONITOR_DEFAULT_ON, MONITOR_DEFAULT_START,
+     MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED},
+
+    {"buffer_LRU_awaits", "buffer",
+     "Times a user thread waited for an in-progress LRU flush to finish"
+     " (buf_flush_await_no_flushing) instead of issuing its own single-page"
+     " flush while searching for a free block",
+     MONITOR_DEFAULT_ON, MONITOR_DEFAULT_START, MONITOR_LRU_AWAITS},
+
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",
      static_cast<monitor_type_t>(MONITOR_MODULE | MONITOR_GROUP_MODULE),

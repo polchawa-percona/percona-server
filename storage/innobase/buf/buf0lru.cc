@@ -1503,6 +1503,7 @@ loop:
     however, we are not using doublewrite buffer then it is better to
     do our own single page flush instead of waiting for LRU flush to
     end. */
+    MONITOR_INC(MONITOR_LRU_AWAITS);
     buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
     goto loop;
   }
@@ -1584,6 +1585,7 @@ loop:
   involved (particularly in case of compressed pages). We
   can do that in a separate patch sometime in future. */
 
+  MONITOR_INC(MONITOR_LRU_SINGLE_PAGE_FLUSH_ISSUED);
   if (!buf_flush_single_page_from_LRU(buf_pool)) {
     MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
     ++flush_failures;
