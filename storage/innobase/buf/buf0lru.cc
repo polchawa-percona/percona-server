@@ -1170,8 +1170,15 @@ static bool buf_LRU_clock_evict_one(buf_pool_t *buf_pool, ulint budget) {
     so buf_page_in_file() + buf_flush_ready_for_replace() (which itself asserts
     in_LRU_list under UNIV_DEBUG) is the authoritative re-validation. Do not
     reference bpage->in_LRU_list here: it is a UNIV_DEBUG-only field and would
-    break WITH_DEBUG=OFF (release) builds. */
-    if (buf_page_in_file(bpage) &&
+    break WITH_DEBUG=OFF (release) builds.
+
+    Guard get_space() != nullptr first: unlike the classic LRU-list scan, this
+    physical-array hand can reach a relocatable file page whose tablespace
+    reference is transiently null (a half-initialised / orphaned block that is
+    not a genuine, established LRU page). buf_flush_ready_for_replace() ->
+    was_stale() would ut_a(m_space != nullptr) on such a page. m_space is only
+    changed under the block mutex, which we hold, so this check is race-free. */
+    if (buf_page_in_file(bpage) && bpage->get_space() != nullptr &&
         buf_flush_ready_for_replace(bpage) &&
         bpage->access_count.load(std::memory_order_relaxed) == 0) {
       /* buf_LRU_free_page() releases both mutexes on success. */
