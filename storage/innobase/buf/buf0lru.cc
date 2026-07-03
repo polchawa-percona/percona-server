@@ -166,7 +166,7 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
   /* If we crossed the threshold and no other thread is
   currently draining this buf_pool => drain. */
   const uint threshold = buf_LRU_make_young_drain_threshold;
-  if (threshold != 0 && new_len == threshold) {
+  if (threshold != 0 && (new_len == threshold || new_len >= 2*threshold)) {
     bool not_draining = false;
     /* Avoid clash of concurrent promotions. */
     if (buf_pool->LRU_promote_draining.compare_exchange_strong(
