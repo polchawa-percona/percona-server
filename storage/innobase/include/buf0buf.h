@@ -2441,6 +2441,14 @@ struct buf_pool_t {
   buffer pool is being torn down / re-initialised; set again afterwards. */
   os_event_t run_lru;
 
+  /** True while the LRU manager thread may be inside an iteration. Park
+  handshake with buf_pool_invalidate_instance(): the manager sets this
+  before checking run_lru, so once the invalidating thread has reset
+  run_lru and observed this flag false, no manager iteration is in
+  progress and none can start until run_lru is set again (the manager's
+  flag store is ordered before its event check by the event mutex). */
+  std::atomic<bool> lru_manager_running{false};
+
   /** A red-black tree is used exclusively during recovery to speed up
   insertions in the flush_list. This tree contains blocks in order of
   oldest_modification LSN and is kept in sync with the flush_list.  Each

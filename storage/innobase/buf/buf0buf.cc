@@ -6220,6 +6220,16 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   os_event_reset(buf_pool->run_lru);
   auto guard = create_scope_guard([&]() { os_event_set(buf_pool->run_lru); });
 
+  /* The event only gates future iterations; wait until the manager is
+  parked so that no LRU batch (and no write IO it would dispatch) can
+  run concurrently with the invalidation. The manager sets
+  lru_manager_running before checking run_lru, so observing it false
+  here means no iteration is in progress and none can start until the
+  guard sets the event again. */
+  while (buf_pool->lru_manager_running.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
   for (i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
     /* As this function is called during startup and during redo application
     phase during recovery, a flush might be requested either by
