@@ -2039,8 +2039,15 @@ void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
       }
     }
 
-    head->LRU_in_promote_queue.store(false, std::memory_order_release);
+    /* All writes to the node must precede the release store below: the
+    store is the linearization point after which a producer may win the
+    LRU_in_promote_queue CAS, re-enqueue this page and own
+    LRU_promote_next again. Writing LRU_promote_next after the store
+    would race with the producer's link write and could truncate the
+    live queue, orphaning the nodes behind this one with their buf-fix
+    counts leaked. */
     head->LRU_promote_next = nullptr;
+    head->LRU_in_promote_queue.store(false, std::memory_order_release);
 
     buf_block_unfix(head);
 
