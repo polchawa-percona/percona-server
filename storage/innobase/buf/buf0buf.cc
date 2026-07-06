@@ -5012,8 +5012,19 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
 
-  // TODO: compressed pages not supported in this patch
-  ut_a(block != nullptr);
+  /* A compressed-only page (no uncompressed frame) is represented by a
+  bare buf_page_t descriptor which is initialized fully under the LRU
+  list mutex, exactly as before the narrowed ordering was introduced for
+  block-backed pages. Keeping the wide latching order for this rare case
+  (compressed read without immediate decompression) avoids having to
+  re-prove the hash-visible-but-not-in-LRU window for BUF_BLOCK_ZIP_PAGE
+  descriptors; block-backed pages (uncompressed and compressed with an
+  uncompressed frame) take the narrow path below. */
+  const bool zip_only = (block == nullptr);
+
+  if (zip_only) {
+    mutex_enter(&buf_pool->LRU_list_mutex);
+  }
 
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
@@ -5027,6 +5038,10 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
+
+    if (zip_only) {
+      mutex_exit(&buf_pool->LRU_list_mutex);
+    }
 
     rw_lock_x_unlock(hash_lock);
 
@@ -5064,8 +5079,12 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     block->mark_for_read_io();
     buf_page_set_io_fix(bpage, BUF_IO_READ);
 
-    ut_a(!page_size.is_compressed()); // compressed pages not supported in this patch
-    // buf_unzip_LRU_add_block(block, true);
+    if (page_size.is_compressed()) {
+      /* Setting zip.data is still protected by the hash X-latch here:
+      the page is already in the page hash, but no other thread can look
+      it up until the latch is released below. */
+      block->page.zip.data = (page_zip_t *)data;
+    }
 
     rw_lock_x_lock_gen(&block->lock, BUF_IO_READ, UT_LOCATION_HERE);
 
@@ -5084,6 +5103,17 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     need to be in the LRU list already. */
     mutex_enter(&buf_pool->LRU_list_mutex);
     buf_LRU_add_block(bpage, true /* to old blocks */);
+
+    if (page_size.is_compressed()) {
+      /* The block enters the LRU and the unzip_LRU in the same critical
+      section so that every observer of the LRU list sees the invariant
+      block->in_unzip_LRU_list ==
+      buf_page_belongs_to_unzip_LRU(&block->page) hold (zip.data was set
+      above, before the page became reachable through the page hash). */
+      ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
+      buf_unzip_LRU_add_block(block, true);
+    }
+
     mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
     /* Initialize the buf_pool pointer. */
