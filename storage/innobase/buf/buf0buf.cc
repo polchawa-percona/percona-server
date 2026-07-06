@@ -6271,6 +6271,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
   ulint n_flush = 0;
   ulint n_free = 0;
   ulint n_zip = 0;
+  ulint n_lru_add_pending = 0;
 
   ut_ad(buf_pool);
 
@@ -6319,7 +6320,26 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
             }
           }
 
+#ifdef UNIV_DEBUG
+          if (!block->page.in_LRU_list) {
+            /* buf_page_init_for_read() makes the page hash-visible before
+            linking it into the LRU list. Such a page is still io-fixed for
+            read. Reading in_LRU_list is stable here: it is only modified
+            under LRU_list_mutex, which we hold. */
+            ut_a(block->page.was_io_fix_read());
+            n_lru_add_pending++;
+          } else {
+            n_lru++;
+          }
+#else  /* UNIV_DEBUG */
+          /* Without UNIV_DEBUG there is no in_LRU_list flag; count how many
+          FILE_PAGE blocks may legitimately be missing from the LRU list so
+          the length cross-check below can be relaxed by that amount. */
+          if (block->page.was_io_fix_read()) {
+            n_lru_add_pending++;
+          }
           n_lru++;
+#endif /* UNIV_DEBUG */
           break;
 
         case BUF_BLOCK_NOT_USED:
@@ -6420,7 +6440,15 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
         << buf_pool->curr_size << " zip " << n_zip << ". Aborting...";
   }
 
+#ifdef UNIV_DEBUG
+  /* Pages whose read IO is in progress and which are not yet linked into
+  the LRU list were counted into n_lru_add_pending instead of n_lru. */
+  (void)n_lru_add_pending;
   ut_a(UT_LIST_GET_LEN(buf_pool->LRU) == n_lru);
+#else  /* UNIV_DEBUG */
+  ut_a(UT_LIST_GET_LEN(buf_pool->LRU) <= n_lru);
+  ut_a(n_lru <= UT_LIST_GET_LEN(buf_pool->LRU) + n_lru_add_pending);
+#endif /* UNIV_DEBUG */
 
   mutex_exit(&buf_pool->LRU_list_mutex);
   mutex_exit(&buf_pool->chunks_mutex);
