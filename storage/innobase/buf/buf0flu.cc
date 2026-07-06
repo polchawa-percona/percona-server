@@ -3685,8 +3685,10 @@ single_page_flush fall-back as needed; this thread is an additional source
 of LRU-tail pressure that lets the user-thread fall-back stay rare on
 healthy workloads.
 
-The thread runs as long as srv_shutdown_state <= SRV_SHUTDOWN_CLEANUP. The
-buf_pool's run_lru event is set at startup; it is reset only inside
+The thread runs until srv_shutdown_state reaches SRV_SHUTDOWN_FLUSH_PHASE,
+mirroring the page cleaner coordinator's pre-flush loop, so that user
+threads keep finding free pages throughout every earlier shutdown phase.
+The buf_pool's run_lru event is set at startup; it is reset only inside
 buf_pool_invalidate_instance() so the manager pauses while the pool is
 torn down. */
 static void buf_lru_manager_thread(size_t buf_pool_instance) {
@@ -3707,8 +3709,7 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
   and does not immediately back off. */
   size_t lru_n_processed = 1;
 
-  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE ||
-         srv_shutdown_state.load() == SRV_SHUTDOWN_CLEANUP) {
+  while (srv_shutdown_state.load() < SRV_SHUTDOWN_FLUSH_PHASE) {
     ut_d(buf_flush_page_cleaner_disabled_loop());
 
     /* Pause while buf_pool_invalidate_instance() has reset this event. */
