@@ -6203,6 +6203,18 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
 static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   ut_ad(buf_pool);
 
+  /* Pages parked on the deferred make-young queue carry a buf-fix until
+  drained, so they would fail the replaceable check below even though they
+  are clean and evictable - the buf-fix is a transient artifact of the
+  deferred promotion, not real pinning. This check runs at shutdown (after
+  the page cleaner has stopped, so nothing re-enqueues) and, in debug
+  builds, during tablespace extension. In both cases the threshold-crossing
+  and page-cleaner drains may have left a sub-threshold remainder queued, so
+  materialize the deferred promotions here before asserting. Draining an
+  empty queue is a cheap atomic-exchange no-op - the common case and every
+  configuration with innodb_lru_make_young_drain_threshold == 0. */
+  buf_LRU_drain_promote_queue(buf_pool);
+
   buf_chunk_t *chunk = buf_pool->chunks;
 
   for (auto i = buf_pool->n_chunks; i--; chunk++) {
