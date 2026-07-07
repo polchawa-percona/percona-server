@@ -3247,6 +3247,23 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_ad(bpage->buf_fix_count > 0);
   ut_a(buf_page_in_file(bpage));
 
+  /* A page whose read IO is still in progress may not yet be linked into
+  the LRU list: buf_page_init_for_read() makes the page hash-visible before
+  it links it into the LRU list. Such a page must not be promoted -
+  buf_LRU_make_block_young() would unlink a node which is not linked,
+  corrupting the LRU list.
+  Reading the io-fix snapshot without the block mutex is correct here: the
+  LRU-add happens-before the read IO is dispatched, which happens-before
+  io_fix is reset to BUF_IO_NONE at IO completion. Thus observing
+  !was_io_fix_read() implies the LRU-add has already happened, and the
+  buf-fix held by our caller keeps the page in the LRU. Skipping the
+  promotion on a stale BUF_IO_READ snapshot is benign: the page was just
+  added at the head of the old sublist and a subsequent access will promote
+  it. */
+  if (bpage->was_io_fix_read()) {
+    return;
+  }
+
   if (buf_page_peek_if_too_old(bpage)) {
     buf_page_make_young(bpage);
   }
