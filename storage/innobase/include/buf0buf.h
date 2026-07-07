@@ -1268,10 +1268,6 @@ class buf_page_t {
   this page should be discarded. When false is returned, the status of stale is
   checked to be guaranteed. */
   inline bool was_stale() const {
-    if (m_space == nullptr) {
-      // TODO: investigate why this happens sporadically! (page could leak here)
-      return true;
-    }
     ut_a(m_space != nullptr);
     ut_a(id.space() == m_space->id);
     /* If the the version is OK, then the space must not be deleted.
