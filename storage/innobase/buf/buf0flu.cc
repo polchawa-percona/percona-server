@@ -2122,8 +2122,10 @@ bool buf_flush_lists(ulint min_n, lsn_t lsn_limit, ulint *n_processed) {
       continue;
     }
 
-    /* BUF_FLUSH_LIST never evicts, so page_count.second is 0 - TODO: verify */
-    n_flushed += page_count.first + page_count.second;
+    /* BUF_FLUSH_LIST never evicts: buf_flush_batch() reaches the LRU
+    eviction code only for BUF_FLUSH_LRU. */
+    ut_ad(page_count.second == 0);
+    n_flushed += page_count.first;
   }
 
   if (n_flushed) {
