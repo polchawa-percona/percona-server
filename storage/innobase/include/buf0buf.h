@@ -2320,7 +2320,14 @@ struct buf_pool_t {
      for all buf_pool_t-s */
   BufListMutex chunks_mutex;
 
-  /** LRU list mutex */
+  /** LRU list mutex.
+  Latching rule: no thread may perform a blocking acquisition of a block's
+  frame rw-lock (block->lock) while holding this mutex (non-blocking
+  attempts, e.g. rw_lock_sx_lock_nowait() in buf_flush_page(), are fine).
+  buf_page_init_for_read() acquires this mutex while holding the X-latch
+  on the frame of the page being read in; a blocking frame-latch
+  acquisition under this mutex would create a deadlock cycle with that
+  path. */
   BufListMutex LRU_list_mutex;
 
   /** free and withdraw list mutex */
