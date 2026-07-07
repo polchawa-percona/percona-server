@@ -1952,6 +1952,11 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
   /* Minimize buf_pool->zip_free[i] lists */
   buf_buddy_condense_free(buf_pool);
 
+  /* Pages parked on the deferred make-young queue are buf-fixed and thus
+  cannot be relocated or freed; drain the queue so that this withdraw
+  attempt does not retry forever on them. */
+  buf_LRU_drain_promote_queue(buf_pool);
+
   mutex_enter(&buf_pool->free_list_mutex);
   while (UT_LIST_GET_LEN(buf_pool->withdraw) < buf_pool->withdraw_target) {
     /* try to withdraw from free_list */
