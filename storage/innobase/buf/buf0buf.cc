@@ -1954,7 +1954,14 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
 
   /* Pages parked on the deferred make-young queue are buf-fixed and thus
   cannot be relocated or freed; drain the queue so that this withdraw
-  attempt does not retry forever on them. */
+  attempt does not fail on them. This is a per-attempt progress guarantee,
+  not a race-free one: a user thread may enqueue a page right after the
+  drain, making this attempt skip it. That is fine - the caller retries
+  withdrawal and re-drains, the page cleaner coordinator drains every
+  instance about once a second, and a freshly promoted page cannot
+  immediately re-qualify in buf_page_peek_if_too_old() (its
+  freed_page_clock was just refreshed), so a page cannot ping-pong back
+  into the queue across retries. */
   buf_LRU_drain_promote_queue(buf_pool);
 
   mutex_enter(&buf_pool->free_list_mutex);
@@ -6207,7 +6214,11 @@ static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   and page-cleaner drains may have left a sub-threshold remainder queued, so
   materialize the deferred promotions here before asserting. Draining an
   empty queue is a cheap atomic-exchange no-op - the common case and every
-  configuration with innodb_lru_make_young_drain_threshold == 0. */
+  configuration with innodb_lru_make_young_drain_threshold == 0.
+  NOTE: drain-then-assert is free of races only because every caller runs
+  in a quiescent state (shutdown with user threads and the page cleaner
+  stopped, or single-actor recovery); an enqueue racing this function
+  would buf-fix a clean page after the drain and trip the fatal below. */
   buf_LRU_drain_promote_queue(buf_pool);
 
   buf_chunk_t *chunk = buf_pool->chunks;
