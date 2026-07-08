@@ -5012,30 +5012,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
 
-  /* A compressed-only page (no uncompressed frame) is represented by a
-  bare buf_page_t descriptor which is initialized fully under the LRU
-  list mutex, exactly as before the narrowed ordering was introduced for
-  block-backed pages. Keeping the wide latching order for this rare case
-  (compressed read without immediate decompression) avoids having to
-  re-prove the hash-visible-but-not-in-LRU window for BUF_BLOCK_ZIP_PAGE
-  descriptors; block-backed pages (uncompressed and compressed with an
-  uncompressed frame) take the narrow path below.
-
-  Note that the wide order here does not conflict with the narrow path's
-  frame-X-latch-then-LRU-list-mutex order: a BUF_BLOCK_ZIP_PAGE
-  descriptor has no frame and no frame rw-lock, and this path acquires
-  none, so holding the LRU list mutex first adds no edge between the LRU
-  list mutex and any frame latch. Readers of a compressed-only page under
-  read IO synchronize on io_fix (set below) under the zip/block mutex,
-  not on a frame latch. The latches this path does take under the LRU
-  list mutex (page hash X, zip_mutex) follow their registered
-  latch_level_t order and are verified by LatchDebug as usual. */
-  const bool zip_only = (block == nullptr);
-
-  if (zip_only) {
-    mutex_enter(&buf_pool->LRU_list_mutex);
-  }
-
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
@@ -5048,10 +5024,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
-
-    if (zip_only) {
-      mutex_exit(&buf_pool->LRU_list_mutex);
-    }
 
     rw_lock_x_unlock(hash_lock);
 
@@ -5134,6 +5106,24 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
+    /* Compressed-only page: a bare BUF_BLOCK_ZIP_PAGE descriptor with no
+    uncompressed frame (and thus no frame rw-lock). It is initialized and
+    made hash-visible while the page hash X-latch and zip_mutex (this
+    descriptor's "block mutex") are held, and is linked into the LRU list
+    afterwards under a brief LRU_list_mutex hold - the same narrowed
+    latching order as for the block-backed pages above.
+
+    Setting io_fix = BUF_IO_READ before the descriptor becomes reachable
+    through the page hash is what makes the hash-visible-but-not-in-LRU
+    window safe, exactly as for block-backed pages: every path which
+    could move or free the page based on finding it in the page hash
+    backs off from a read-io-fixed page (buf_page_make_young_if_needed()
+    skips it, buf_page_free_stale() bails out, buf_buddy relocation and
+    Buf_fetch<T>::zip_page_handler() require io_fix == BUF_IO_NONE), and
+    readers (e.g. buf_page_get_zip()) wait for the read to complete,
+    which happens-after the LRU-add below, because the read IO is only
+    dispatched after this function returns. */
+
     /* Initialize the buf_pool pointer. */
     bpage->buf_pool_index = buf_pool_index(buf_pool);
 
@@ -5164,6 +5154,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     ut_d(bpage->in_free_list = false);
     ut_d(bpage->in_LRU_list = false);
 
+    buf_page_set_io_fix(bpage, BUF_IO_READ);
+
     ut_d(bpage->in_page_hash = true);
 
     if (watch_page != nullptr) {
@@ -5184,16 +5176,25 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     rw_lock_x_unlock(hash_lock);
 
-    /* The block must be put to the LRU list, to the old blocks.
-    The zip size is already set into the page zip */
+    mutex_exit(&buf_pool->zip_mutex);
+
+    /* The page is hash-visible already (io-fixed for read, see above),
+    but eviction cannot see it (not on the LRU list yet), so no other
+    thread can race with the add. The block must be put to the LRU list,
+    to the old blocks. The zip size is already set into the page zip. */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+#if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
+    /* buf_LRU_insert_zip_clean() requires the zip_mutex; re-acquired
+    here under the LRU list mutex, which follows the registered
+    latch_level_t order (SYNC_BUF_LRU_LIST > SYNC_BUF_BLOCK). */
+    mutex_enter(&buf_pool->zip_mutex);
+#endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     buf_LRU_add_block(bpage, true /* to old blocks */);
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     buf_LRU_insert_zip_clean(bpage);
+    mutex_exit(&buf_pool->zip_mutex);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     mutex_exit(&buf_pool->LRU_list_mutex);
-    buf_page_set_io_fix(bpage, BUF_IO_READ);
-
-    mutex_exit(&buf_pool->zip_mutex);
   }
 
   buf_pool->n_pend_reads.fetch_add(1);
