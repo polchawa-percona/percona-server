@@ -24013,7 +24013,7 @@ static MYSQL_SYSVAR_UINT(
     "read path. When the queue reaches this length it is drained in one "
     "batch under a single mutex acquisition. Set to 0 to disable the "
     "deferred queue and move pages immediately.",
-    nullptr, nullptr, 0, 0, UINT32_MAX, 0);
+    nullptr, nullptr, 128, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_LONG(
     open_files, innobase_open_files, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
