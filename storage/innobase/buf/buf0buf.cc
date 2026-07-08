@@ -5074,8 +5074,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     buf_page_mutex_exit(block);
 
-    ut_ad(!zip_only);
-
     /* The page is hash-visible already, but eviction cannot see it
     (not on LRU yet) and readers are blocked on the frame X-lock,
     so no other thread can race with the add.
@@ -5092,17 +5090,19 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     ignores). */
     mutex_enter(&buf_pool->LRU_list_mutex);
 
+    /* For a compressed page zip.data was set above, before the page
+    became reachable through the page hash, so
+    buf_page_belongs_to_unzip_LRU() already holds and buf_LRU_add_block()
+    links the block into the unzip_LRU list as well, within this same
+    critical section: every observer of the LRU list sees the invariant
+    block->in_unzip_LRU_list ==
+    buf_page_belongs_to_unzip_LRU(&block->page) hold. (This is unlike the
+    pre-narrowing code, which set zip.data only after buf_LRU_add_block()
+    and therefore had to add the block to the unzip_LRU list explicitly
+    afterwards; an explicit second add here would corrupt the list.) */
     buf_LRU_add_block(bpage, true /* to old blocks */);
 
-    if (page_size.is_compressed()) {
-      /* The block enters the LRU and the unzip_LRU in the same critical
-      section so that every observer of the LRU list sees the invariant
-      block->in_unzip_LRU_list ==
-      buf_page_belongs_to_unzip_LRU(&block->page) hold (zip.data was set
-      above, before the page became reachable through the page hash). */
-      ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
-      buf_unzip_LRU_add_block(block, true);
-    }
+    ut_ad(!page_size.is_compressed() || block->in_unzip_LRU_list);
 
     mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
