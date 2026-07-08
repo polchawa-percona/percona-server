@@ -626,49 +626,6 @@ static monitor_info_t innodb_counter_info[] = {
      " (e.g. stale-page and unzip-LRU scan paths); reconciliation bucket",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SCAN_SKIP_OTHER},
 
-    /* ========== O1: deferred make-young (LRU promote) queue ========== */
-    {"buffer_LRU_make_young_calls", "buffer",
-     "Times buf_page_make_young_if_needed() promoted a too-old page"
-     " (both deferred and synchronous paths; denominator for the A/B"
-     " comparison of innodb_lru_make_young_drain_threshold)",
-     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_MAKE_YOUNG_CALLS},
-
-    {"buffer_LRU_promote_enqueued", "buffer",
-     "Pages pushed onto the per-buf-pool deferred make-young queue",
-     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_PROMOTE_ENQUEUED},
-
-    {"buffer_LRU_promote_skip_in_queue", "buffer",
-     "Make-young promotions skipped because the page was already queued",
-     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_PROMOTE_SKIP_IN_QUEUE},
-
-    {"buffer_LRU_promote_skip_draining", "buffer",
-     "Threshold crossings that did not start a drain because another thread"
-     " was already draining the queue",
-     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_PROMOTE_SKIP_DRAINING},
-
-    {"buffer_LRU_promote_queue_len", "buffer",
-     "Current length of the deferred make-young queue (gauge)", MONITOR_NONE,
-     MONITOR_DEFAULT_START, MONITOR_LRU_PROMOTE_QUEUE_LEN},
-
-    /* Cumulative counter for pages drained per drain call (batch size =
-    promotions amortised into one LRU_list_mutex acquisition). */
-    {"buffer_LRU_promote_drain_pages", "buffer",
-     "Total pages promoted by deferred-queue drains", MONITOR_SET_OWNER,
-     MONITOR_LRU_PROMOTE_DRAIN_PAGES_NUM_CALL, MONITOR_LRU_PROMOTE_DRAIN_PAGES},
-
-    {"buffer_LRU_promote_drain_num_call", "buffer",
-     "Number of deferred-queue drains performed", MONITOR_SET_MEMBER,
-     MONITOR_LRU_PROMOTE_DRAIN_PAGES, MONITOR_LRU_PROMOTE_DRAIN_PAGES_NUM_CALL},
-
-    {"buffer_LRU_promote_drain_pages_per_call", "buffer",
-     "Pages promoted per drain (LRU_list_mutex amortisation factor)",
-     MONITOR_SET_MEMBER, MONITOR_LRU_PROMOTE_DRAIN_PAGES,
-     MONITOR_LRU_PROMOTE_DRAIN_PAGES_PER_CALL},
-
-    {"buffer_LRU_promote_drain_lru_mutex_us", "buffer",
-     "Total microseconds the deferred-queue drain held LRU_list_mutex",
-     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_PROMOTE_DRAIN_LRU_MTX_US},
-
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",
      static_cast<monitor_type_t>(MONITOR_MODULE | MONITOR_GROUP_MODULE),
