@@ -5019,7 +5019,17 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
   (compressed read without immediate decompression) avoids having to
   re-prove the hash-visible-but-not-in-LRU window for BUF_BLOCK_ZIP_PAGE
   descriptors; block-backed pages (uncompressed and compressed with an
-  uncompressed frame) take the narrow path below. */
+  uncompressed frame) take the narrow path below.
+
+  Note that the wide order here does not conflict with the narrow path's
+  frame-X-latch-then-LRU-list-mutex order: a BUF_BLOCK_ZIP_PAGE
+  descriptor has no frame and no frame rw-lock, and this path acquires
+  none, so holding the LRU list mutex first adds no edge between the LRU
+  list mutex and any frame latch. Readers of a compressed-only page under
+  read IO synchronize on io_fix (set below) under the zip/block mutex,
+  not on a frame latch. The latches this path does take under the LRU
+  list mutex (page hash X, zip_mutex) follow their registered
+  latch_level_t order and are verified by LatchDebug as usual. */
   const bool zip_only = (block == nullptr);
 
   if (zip_only) {
@@ -5104,10 +5114,10 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     For existing use cases, for that thread to exist, the page would
     need to be in the LRU list already. This latching rule is documented
     at the LRU_list_mutex declaration in buf0buf.h and enforced in debug
-    builds by rw_lock_assert_waiter_holds_no_lru_list_mutex() at the
-    rw-lock wait entry points in sync0rw.cc (it cannot be expressed via
-    latch_level_t ordering: block->lock is SYNC_LEVEL_VARYING, which
-    LatchDebug ignores). */
+    builds by rw_lock_assert_wait_allowed() at the rw-lock wait entry
+    points in sync0rw.cc (it cannot be expressed via latch_level_t
+    ordering: block->lock is SYNC_LEVEL_VARYING, which LatchDebug
+    ignores). */
     mutex_enter(&buf_pool->LRU_list_mutex);
 
     buf_LRU_add_block(bpage, true /* to old blocks */);
@@ -5281,16 +5291,25 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   /* Latch the page before releasing hash lock so that concurrent request for
   this page doesn't see half initialized page. ALTER tablespace for encryption
   and clone page copy can request page for any page id within tablespace
-  size limit. */
+  size limit.
+
+  The nowait variants must be used and cannot fail: the frame comes from
+  the free list, so its latch is unlocked, and the block is unreachable by
+  other threads until the page hash X-latch is released below. This keeps
+  the LRU_list_mutex latching rule (no waiting for a frame latch under the
+  LRU list mutex, see the LRU_list_mutex declaration) free of blocking
+  acquisitions - we hold the LRU list mutex here. */
   mtr_memo_type_t mtr_latch_type;
+  bool latched;
 
   if (rw_latch == RW_X_LATCH) {
-    rw_lock_x_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_x_lock_nowait(&block->lock, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_X_FIX;
   } else {
-    rw_lock_sx_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_sx_lock_nowait(&block->lock, 0, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_SX_FIX;
   }
+  ut_a(latched);
   mtr_memo_push(mtr, block, mtr_latch_type);
 
   rw_lock_x_unlock(hash_lock);

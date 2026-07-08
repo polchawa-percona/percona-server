@@ -271,32 +271,34 @@ rw_lock_t::~rw_lock_t() {
 }
 
 #ifdef UNIV_DEBUG
-/** Asserts that a thread which is about to wait for a buffer block frame
-rw-lock (buf_block_t::lock) does not hold any buffer pool LRU list mutex.
+/** Asserts that the calling thread is allowed to start waiting for the
+given rw-lock.
 
-buf_page_init_for_read() acquires buf_pool_t::LRU_list_mutex while holding
-the X-latch on the frame of the page being read in, so a thread that waits
-for a frame latch while holding the LRU list mutex would form a deadlock
-cycle with that path. This rule cannot be expressed through latch_level_t
-ordering: buf_block_t::lock is registered with SYNC_LEVEL_VARYING (B-tree
-page latching order genuinely varies), and LatchDebug ignores such latches
-entirely - both when they are acquired and when they are held. Hence this
-targeted check at the only spots where a frame-latch acquisition starts to
-wait (every unbounded wait funnels into a sync array reservation).
+This is the hook for latch-order rules which cannot be expressed through
+latch_level_t ordering and which constrain only actual waits, not
+non-blocking acquisitions (the rw_lock_*_nowait() variants never reach
+this, by design: an acquisition that never waits cannot participate in a
+deadlock cycle). It is called at the only spots where an rw-lock
+acquisition starts to wait - every unbounded wait, spinning included,
+funnels into a sync array reservation.
 
-Non-waiting acquisitions are intentionally exempt:
-- the rw_lock_*_nowait() variants never wait, and are what LRU/single-page
-  flushing legitimately uses under the LRU list mutex;
-- buf_page_create() X/SX-latches, under the LRU list mutex, a frame taken
-  from the free list whose latch is provably unlocked and unreachable by
-  other threads (the page hash X-latch is still held), so it never reaches
-  the wait path.
+Currently there is one such rule, for the buffer block frame locks
+(buf_block_t::lock): a thread must not wait for a frame lock while
+holding any buffer pool LRU list mutex. buf_page_init_for_read() acquires
+buf_pool_t::LRU_list_mutex while holding the X-latch on the frame of the
+page being read in, so such a wait would form a deadlock cycle with that
+path. The rule cannot use latch levels because buf_block_t::lock is
+registered with SYNC_LEVEL_VARYING (B-tree page latching order genuinely
+varies), and LatchDebug ignores such latches entirely - both when they
+are acquired and when they are held. The code paths which do latch a
+frame under the LRU list mutex (flushing, and buf_page_create() on a
+block freshly taken from the free list) use the nowait variants, so they
+are exempt by construction.
 
 Note that this check is only effective when LatchDebug is enabled
 (--innodb-sync-debug); an actual deadlock occurrence is additionally caught
 by the sync array deadlock detector, which does track frame rw-locks. */
-static void rw_lock_assert_waiter_holds_no_lru_list_mutex(
-    const rw_lock_t *lock) {
+static void rw_lock_assert_wait_allowed(const rw_lock_t *lock) {
   ut_ad(lock->get_id() != LATCH_ID_BUF_BLOCK_LOCK ||
         sync_check_find(SYNC_BUF_LRU_LIST) == nullptr);
 }
@@ -342,7 +344,7 @@ lock_loop:
 
     ++count_os_wait;
 
-    ut_d(rw_lock_assert_waiter_holds_no_lru_list_mutex(lock));
+    ut_d(rw_lock_assert_wait_allowed(lock));
 
     sync_cell_t *cell;
 
@@ -426,7 +428,7 @@ static inline void rw_lock_x_lock_wait_func(rw_lock_t *lock,
     }
 
     /* If there is still a reader, then go to sleep.*/
-    ut_d(rw_lock_assert_waiter_holds_no_lru_list_mutex(lock));
+    ut_d(rw_lock_assert_wait_allowed(lock));
 
     sync_cell_t *cell;
 
@@ -648,7 +650,7 @@ lock_loop:
     }
   }
 
-  ut_d(rw_lock_assert_waiter_holds_no_lru_list_mutex(lock));
+  ut_d(rw_lock_assert_wait_allowed(lock));
 
   sync_cell_t *cell;
 
@@ -715,7 +717,7 @@ lock_loop:
     }
   }
 
-  ut_d(rw_lock_assert_waiter_holds_no_lru_list_mutex(lock));
+  ut_d(rw_lock_assert_wait_allowed(lock));
 
   sync_cell_t *cell;
 
