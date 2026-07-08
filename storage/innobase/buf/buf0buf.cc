@@ -5092,6 +5092,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     buf_page_mutex_exit(block);
 
+    ut_ad(!zip_only);
+
     /* The page is hash-visible already, but eviction cannot see it
     (not on LRU yet) and readers are blocked on the frame X-lock,
     so no other thread can race with the add.
@@ -5100,8 +5102,14 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     other thread that can try to acquire that frame's S-lock while
     holding already the LRU list mutex (it would be deadlock cycle).
     For existing use cases, for that thread to exist, the page would
-    need to be in the LRU list already. */
+    need to be in the LRU list already. This latching rule is documented
+    at the LRU_list_mutex declaration in buf0buf.h and enforced in debug
+    builds by rw_lock_assert_waiter_holds_no_lru_list_mutex() at the
+    rw-lock wait entry points in sync0rw.cc (it cannot be expressed via
+    latch_level_t ordering: block->lock is SYNC_LEVEL_VARYING, which
+    LatchDebug ignores). */
     mutex_enter(&buf_pool->LRU_list_mutex);
+
     buf_LRU_add_block(bpage, true /* to old blocks */);
 
     if (page_size.is_compressed()) {
