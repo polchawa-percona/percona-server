@@ -1118,11 +1118,6 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
 
     if (bpage->was_stale()) {
       freed = buf_page_free_stale(buf_pool, bpage);
-      if (!freed) {
-        /* Stale path does not hold the block mutex; cannot inspect the
-        page state, so it lands in the reconciliation bucket. */
-        MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
-      }
     } else {
       mutex_enter(block_mutex);
 
@@ -1131,22 +1126,6 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
       }
 
       if (!freed) {
-        /* Categorize why this scanned page could not be freed. The block
-        mutex is held, so io_fix / buf_fix_count / dirtiness are stable.
-        Priority mirrors buf_flush_ready_for_replace(): unrelocatable
-        (I/O- or buffer-fixed) first, then relocatable-but-dirty. */
-        const enum buf_io_fix io_fix = buf_page_get_io_fix(bpage);
-        if (io_fix == BUF_IO_WRITE) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_FLUSHING);
-        } else if (io_fix != BUF_IO_NONE) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_IO_READ);
-        } else if (bpage->buf_fix_count != 0) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_PINNED);
-        } else if (bpage->is_dirty()) {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_DIRTY);
-        } else {
-          MONITOR_INC(MONITOR_LRU_SCAN_SKIP_OTHER);
-        }
         mutex_exit(block_mutex);
       }
     }
