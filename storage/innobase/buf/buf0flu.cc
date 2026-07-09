@@ -2297,6 +2297,16 @@ ulint n_iterations = 0;
 /** Pages flushed till last average rates are computed.*/
 ulint sum_pages = 0;
 
+/** Aggregated LRU-manager stats (summed across all buffer pool instances)
+observed the last time set_average() ran. set_average() runs only on the
+page cleaner coordinator, so it is the single publisher of the
+buffer_LRU_batch_flush_* counters; it derives each interval's values as the
+delta between the current per-instance sums and these. The per-instance
+counters are monotonic, so the deltas are always non-negative. */
+uint64_t prev_lru_flushed_pages = 0;
+uint64_t prev_lru_passes = 0;
+uint64_t prev_lru_flush_time_ms = 0;
+
 /** Initialize flush parameters for current iteration.
 @param[in]      n_pages_last    number of pages flushed in last iteration
 @return true if current iteration should be skipped. */
@@ -2391,11 +2401,39 @@ void set_average() {
 
   mutex_exit(&page_cleaner->mutex);
 
-  /* LRU-tail flushing runs on the per-pool LRU manager threads, not the page
-  cleaner. The values are filled in from those threads' per-instance counters
-  (see below); for now they are zero. */
-  uint64_t lru_tm = 0;
-  ulint lru_pass = 0;
+  /* LRU-tail flushing runs on the per-pool LRU manager threads rather than
+  the page cleaner. Each manager maintains its own monotonic counters; here,
+  on the single coordinator thread, we sum them across instances and take the
+  delta since the previous set_average() to obtain this interval's LRU flush
+  work. Doing the aggregation on one thread keeps the monitor update
+  single-writer, exactly like the flush_list path funnels per-slot counts
+  through the coordinator. */
+  uint64_t lru_flushed_pages_now = 0;
+  uint64_t lru_passes_now = 0;
+  uint64_t lru_flush_time_ms_now = 0;
+  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
+    const buf_pool_t *buf_pool = buf_pool_from_array(i);
+    lru_flushed_pages_now += buf_pool->lru_manager_stat.n_flushed_pages;
+    lru_passes_now += buf_pool->lru_manager_stat.n_passes;
+    lru_flush_time_ms_now += buf_pool->lru_manager_stat.flush_time_ms;
+  }
+
+  const uint64_t lru_flushed_pages =
+      lru_flushed_pages_now - prev_lru_flushed_pages;
+  uint64_t lru_tm = lru_flush_time_ms_now - prev_lru_flush_time_ms;
+  ulint lru_pass = static_cast<ulint>(lru_passes_now - prev_lru_passes);
+
+  prev_lru_flushed_pages = lru_flushed_pages_now;
+  prev_lru_passes = lru_passes_now;
+  prev_lru_flush_time_ms = lru_flush_time_ms_now;
+
+  /* Publish the cumulative LRU-batch flush counters from this single thread,
+  mirroring how the coordinator publishes the flush_list counters. */
+  if (lru_flushed_pages > 0) {
+    MONITOR_INC_VALUE_CUMULATIVE(
+        MONITOR_LRU_BATCH_FLUSH_TOTAL_PAGE, MONITOR_LRU_BATCH_FLUSH_COUNT,
+        MONITOR_LRU_BATCH_FLUSH_PAGES, lru_flushed_pages);
+  }
 
   /* minimum values are 1, to avoid dividing by zero. */
   if (lru_tm < 1) {
@@ -3689,19 +3727,26 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
     /* {n_flushed, n_evicted}: evicting a clean page refills the free list
     just as a flush does, so the adaptive-sleep "made progress" signal must
     consider both. The flush-specific stats below count flushes only. */
+    const auto lru_start = std::chrono::steady_clock::now();
     const auto [lru_n_flushed, lru_n_evicted] = buf_flush_LRU_list(buf_pool);
+    const auto lru_time = std::chrono::steady_clock::now() - lru_start;
     lru_n_processed = lru_n_flushed + lru_n_evicted;
 
     /* Wait for the batch this iteration kicked off (if any) to finish so
     the next iteration sees free pages on the free list. */
     buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
 
+    /* Record this pass's work in our own per-instance counters. The page
+    cleaner coordinator sums these across instances and publishes the
+    buffer_LRU_batch_flush_* monitor counters from a single thread, so this
+    thread never touches those (racy) shared counters directly. */
+    buf_pool->lru_manager_stat.n_flushed_pages += lru_n_flushed;
+    buf_pool->lru_manager_stat.n_passes += 1;
+    buf_pool->lru_manager_stat.flush_time_ms +=
+        std::chrono::duration_cast<std::chrono::milliseconds>(lru_time).count();
+
     if (lru_n_flushed) {
       srv_stats.buf_pool_flushed.add(lru_n_flushed);
-
-      MONITOR_INC_VALUE_CUMULATIVE(
-          MONITOR_LRU_BATCH_FLUSH_TOTAL_PAGE, MONITOR_LRU_BATCH_FLUSH_COUNT,
-          MONITOR_LRU_BATCH_FLUSH_PAGES, lru_n_flushed);
     }
   }
 }
