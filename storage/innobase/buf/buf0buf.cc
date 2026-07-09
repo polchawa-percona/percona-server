@@ -6215,35 +6215,32 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
-  /* Stop the per-pool LRU manager thread from running another iteration
-  while we tear down. It will resume after the guard's scope exits. */
+  /* Tell the per-pool LRU manager thread to park so no LRU batch (and no
+  write IO it would dispatch) runs concurrently with the teardown. Resetting
+  run_lru makes the manager block at os_event_wait(run_lru) once it loops
+  back; the guard sets it again when we are done. */
   os_event_reset(buf_pool->run_lru);
   auto guard = create_scope_guard([&]() { os_event_set(buf_pool->run_lru); });
 
-  /* The event only gates future iterations; wait until the manager is
-  parked so that no LRU batch (and no write IO it would dispatch) can
-  run concurrently with the invalidation. The manager sets
-  lru_manager_running before checking run_lru, so observing it false
-  here means no iteration is in progress and none can start until the
-  guard sets the event again. */
-  while (buf_pool->lru_manager_running.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  mutex_enter(&buf_pool->flush_state_mutex);
 
   for (i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
-    /* As this function is called during startup and during redo application
-    phase during recovery, a flush might be requested either by
-    recv_writer thread (which is not started yet, or paused by writer_mutex), or
-    by our own thread (in which case we wait for it to finish initialization).
-    No new write batch can be in initialization stage at this point.
-    This also explains why we don't need flush_state_mutex to assert this. */
+    /* This function is called during startup and during the redo application
+    phase of recovery. The only threads that can request a flush for this
+    instance are this instance's LRU manager thread (told to park above) and
+    our own thread. A batch that was already posted may still be running,
+    though, so wait for it to finish before proceeding; buffer pool
+    invalidation requires that there is NO write activity happening. */
+    const buf_flush_t type = static_cast<buf_flush_t>(i);
+    if (buf_pool->is_flushing(type)) {
+      mutex_exit(&buf_pool->flush_state_mutex);
+      buf_flush_await_no_flushing(buf_pool, type);
+      mutex_enter(&buf_pool->flush_state_mutex);
+    }
     ut_ad(!buf_pool->init_flush[i]);
-
-    /* However, it is possible that a write batch that has been posted earlier
-    is still not complete. For buffer pool invalidation to proceed we must
-    ensure there is NO write activity happening. */
-    buf_flush_await_no_flushing(buf_pool, static_cast<buf_flush_t>(i));
   }
+
+  mutex_exit(&buf_pool->flush_state_mutex);
 
   ut_d(buf_assert_all_are_replaceable(buf_pool));
 

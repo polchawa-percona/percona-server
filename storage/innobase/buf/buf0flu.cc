@@ -3675,19 +3675,10 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
   while (srv_shutdown_state.load() < SRV_SHUTDOWN_FLUSH_PHASE) {
     ut_d(buf_flush_page_cleaner_disabled_loop());
 
-    /* Park handshake with buf_pool_invalidate_instance(): publish that an
-    iteration may be in progress before checking the pause event. If the
-    event check observes the set state, the event mutex orders our flag
-    store before any subsequent os_event_reset(), so the invalidating
-    thread's poll of lru_manager_running sees true and waits for this
-    iteration to finish. Otherwise we park with the flag cleared. */
-    buf_pool->lru_manager_running.store(true);
-    while (!os_event_is_set(buf_pool->run_lru)) {
-      buf_pool->lru_manager_running.store(false);
-      /* Pause while buf_pool_invalidate_instance() has reset this event. */
-      os_event_wait(buf_pool->run_lru);
-      buf_pool->lru_manager_running.store(true);
-    }
+    /* Park while buf_pool_invalidate_instance() has reset this event, so no
+    LRU batch runs concurrently with a pool teardown. run_lru is set at
+    startup and only reset for the duration of an invalidation. */
+    os_event_wait(buf_pool->run_lru);
 
     buf_lru_manager_sleep_if_needed(next_loop_time);
 
@@ -3712,8 +3703,6 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
           MONITOR_LRU_BATCH_FLUSH_TOTAL_PAGE, MONITOR_LRU_BATCH_FLUSH_COUNT,
           MONITOR_LRU_BATCH_FLUSH_PAGES, lru_n_flushed);
     }
-
-    buf_pool->lru_manager_running.store(false);
   }
 }
 
