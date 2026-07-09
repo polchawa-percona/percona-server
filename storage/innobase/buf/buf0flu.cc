@@ -3230,27 +3230,13 @@ static void buf_flush_page_coordinator_thread() {
       break;
     }
 
-    switch (recv_sys->flush_type) {
-      case BUF_FLUSH_LRU:
-        /* Flush pages from end of LRU if required */
-        pc_request(0, LSN_MAX);
-        while (pc_flush_slot() > 0) {
-        }
-        pc_wait_finished(&n_flushed_lru, &n_flushed_list);
-        break;
-
-      case BUF_FLUSH_LIST:
-        /* Flush all pages */
-        do {
-          pc_request(ULINT_MAX, LSN_MAX);
-          while (pc_flush_slot() > 0) {
-          }
-        } while (!pc_wait_finished(&n_flushed_lru, &n_flushed_list));
-        break;
-
-      default:
-        ut_d(ut_error);
-    }
+    /* Flush all pages. LRU flushing during recovery is handled by the
+    per-pool LRU manager threads, which run alongside this loop. */
+    do {
+      pc_request(ULINT_MAX, LSN_MAX);
+      while (pc_flush_slot() > 0) {
+      }
+    } while (!pc_wait_finished(&n_flushed_lru, &n_flushed_list));
 
     os_event_reset(recv_sys->flush_start);
     os_event_set(recv_sys->flush_end);
