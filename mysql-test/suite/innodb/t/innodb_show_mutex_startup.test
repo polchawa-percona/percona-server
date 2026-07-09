@@ -10,12 +10,16 @@
 #    count_os_wait > 0 are printed, i.e. a thread must have actually
 #    slept on the lock.
 #
-# Consequently a freshly started server with default settings exposes
-# no rows at all. Rows appear "since the very beginning" only when
-# innodb_monitor_enable=latch is set at startup (command line, my.cnf
-# or mysqld-auto.cnf). This behavior is identical across 8.4 releases
-# (verified against Percona-Server-8.4.7-7 and Percona-Server-8.4.8-8:
-# the code path is unchanged).
+# Consequently the mutex section is always empty on a freshly started
+# server with default settings; mutex rows appear "since the very
+# beginning" only when innodb_monitor_enable=latch is set at startup
+# (command line, my.cnf or mysqld-auto.cnf). The rw-lock section is
+# usually empty right after startup too, but it MAY legitimately show
+# entries when the startup sequence itself had to sleep on a rw-lock
+# (e.g. while loading the buffer pool dump) - that is timing-dependent,
+# so this test does not assert on it. This behavior is identical across
+# 8.4 releases (verified against Percona-Server-8.4.7-7 and
+# Percona-Server-8.4.8-8: the code path is unchanged).
 
 --source include/count_sessions.inc
 
@@ -36,34 +40,18 @@ perl;
 EOF
 END_OF_INC
 
-# Helper: count the rw-lock section rows of the SHOW ENGINE INNODB MUTEX
-# output dumped by check_mutex_rows.inc. Only used where the outcome is
-# deterministic (a clean startup).
---write_file $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc END_OF_INC
-perl;
-  my $vardir = $ENV{'MYSQLTEST_VARDIR'};
-  open(my $fh, '<', "$vardir/tmp/show_mutex.txt") or die "cannot open: $!";
-  my $rwlock = 0;
-  while (my $line = <$fh>) {
-    my (undef, $name) = split(/\t/, $line);
-    $rwlock++ if defined($name) && $name =~ /^(sum )?rwlock:/;
-  }
-  close($fh);
-  print "rwlock section rows: " . ($rwlock ? "SOME" : "NONE") . "\n";
-EOF
-END_OF_INC
-
 --echo #
 --echo # Phase 1: freshly started server, default settings.
 --echo # Latch counting is disabled by default, so the mutex section must
---echo # be empty, and a clean startup performs no rw-lock OS waits.
+--echo # be empty. (The rw-lock section is not asserted: it is empty
+--echo # unless the startup sequence itself happened to sleep on a
+--echo # rw-lock, which is timing-dependent.)
 --echo #
 --let $restart_parameters = restart
 --source include/restart_mysqld.inc
 
 SELECT @@global.innodb_monitor_enable AS monitor_enabled_by_default;
 --source $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
---source $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc
 
 --echo #
 --echo # Phase 2: enable the latch monitor at runtime and produce
@@ -129,7 +117,6 @@ CALL insert_load(500);
 DROP PROCEDURE insert_load;
 DROP TABLE t1;
 --remove_file $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
---remove_file $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc
 --remove_file $MYSQLTEST_VARDIR/tmp/show_mutex.txt
 
 # Restore the default configuration for the following tests.

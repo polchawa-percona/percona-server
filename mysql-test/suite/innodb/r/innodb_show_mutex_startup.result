@@ -1,14 +1,15 @@
 #
 # Phase 1: freshly started server, default settings.
 # Latch counting is disabled by default, so the mutex section must
-# be empty, and a clean startup performs no rw-lock OS waits.
+# be empty. (The rw-lock section is not asserted: it is empty
+# unless the startup sequence itself happened to sleep on a
+# rw-lock, which is timing-dependent.)
 #
 # restart
 SELECT @@global.innodb_monitor_enable AS monitor_enabled_by_default;
 monitor_enabled_by_default
 NULL
 mutex section rows: NONE
-rwlock section rows: NONE
 #
 # Phase 2: enable the latch monitor at runtime and produce
 # concurrent load. Now spins/waits are counted and rows appear.
