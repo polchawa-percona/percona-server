@@ -818,6 +818,19 @@ static void buf_flush_dirty_pages(buf_pool_t *buf_pool, space_id_t id,
   dberr_t err;
 
   do {
+    /* Pages parked on the deferred make-young queue are buf-fixed until
+    drained, and buf_flush_page() refuses to single-page-flush a buf-fixed
+    uncompressed page (the flush=false heuristic in buf0flu.cc). So a dirty
+    page of this tablespace sitting on the promote queue can never be
+    flushed by flush_pages_flush_list(), and this loop would spin forever.
+    The page cleaner coordinator normally drains the queue about once a
+    second, but it does not run while the page cleaner is paused (e.g.
+    innodb_page_cleaner_disabled_debug), so drain here on every retry to
+    release the buf-fix and make the page flushable. Draining an empty
+    queue is a cheap atomic-exchange no-op - the common case and every
+    configuration with innodb_lru_make_young_drain_threshold == 0. */
+    buf_LRU_drain_promote_queue(buf_pool);
+
     /* TODO: it should be possible to avoid locking the LRU list
     mutex here. */
     mutex_enter(&buf_pool->LRU_list_mutex);
@@ -863,6 +876,15 @@ static void buf_LRU_remove_all_pages(buf_pool_t *buf_pool, ulint id) {
   buf_page_t *bpage;
 
 scan_again:
+  /* A page parked on the deferred make-young queue is buf-fixed until
+  drained; the buf_fix_count > 0 check below would then treat it as
+  unremovable, setting all_freed = false and retrying this scan forever
+  (the page cleaner coordinator's periodic drain does not run while the
+  page cleaner is paused). Drain on every retry so queued pages of this
+  tablespace are released and can be removed. No-op atomic-exchange when
+  the queue is empty. */
+  buf_LRU_drain_promote_queue(buf_pool);
+
   mutex_enter(&buf_pool->LRU_list_mutex);
 
   auto all_freed = true;
