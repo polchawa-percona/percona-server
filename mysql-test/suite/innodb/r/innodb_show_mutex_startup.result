@@ -1,0 +1,54 @@
+#
+# Phase 1: freshly started server, default settings.
+# Latch counting is disabled by default, so the mutex section must
+# be empty, and a clean startup performs no rw-lock OS waits.
+#
+# restart
+SELECT @@global.innodb_monitor_enable AS monitor_enabled_by_default;
+monitor_enabled_by_default
+NULL
+mutex section rows: NONE
+rwlock section rows: NONE
+#
+# Phase 2: enable the latch monitor at runtime and produce
+# concurrent load. Now spins/waits are counted and rows appear.
+#
+SET GLOBAL innodb_monitor_enable = 'latch';
+CREATE TABLE t1 (a INT AUTO_INCREMENT PRIMARY KEY, b VARCHAR(255)) ENGINE=InnoDB;
+CREATE PROCEDURE insert_load(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+INSERT INTO t1(b) VALUES (REPEAT('x', 200));
+SET i = i + 1;
+END WHILE;
+END|
+CALL insert_load(3000);
+CALL insert_load(3000);
+mutex section rows: SOME
+#
+# Phase 3: disable the monitor and reset the counters.
+# The mutex section becomes empty again - the data is not "lost",
+# it is simply gated by the counters.
+#
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset_all = 'latch';
+mutex section rows: NONE
+#
+# Phase 4: restart with the monitor enabled from startup - the
+# pre-8.4 style "visible since the very beginning" behavior.
+# (A token workload keeps the check independent from how much
+# contention the startup sequence itself produced.)
+#
+# restart: --innodb-monitor-enable=latch
+SELECT @@global.innodb_monitor_enable AS monitor_enabled_from_startup;
+monitor_enabled_from_startup
+latch
+CALL insert_load(500);
+mutex section rows: SOME
+#
+# Cleanup
+#
+DROP PROCEDURE insert_load;
+DROP TABLE t1;
+# restart

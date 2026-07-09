@@ -1,0 +1,138 @@
+# Proof of the SHOW ENGINE INNODB MUTEX visibility rules.
+#
+# The statement has two sections, each with its own gate:
+#  - mutex section: per-latch spin/wait counting is OFF by default
+#    (LatchCounter starts inactive; GenericPolicy::add() and
+#    BlockMutexPolicy::add() return early unless enabled). It is turned
+#    on only by the hidden 'latch' monitor via innodb_monitor_enable.
+#    Rows with zero spins and zero waits are filtered out.
+#  - rw-lock section: always counted, but only rw-locks with
+#    count_os_wait > 0 are printed, i.e. a thread must have actually
+#    slept on the lock.
+#
+# Consequently a freshly started server with default settings exposes
+# no rows at all. Rows appear "since the very beginning" only when
+# innodb_monitor_enable=latch is set at startup (command line, my.cnf
+# or mysqld-auto.cnf). This behavior is identical across 8.4 releases
+# (verified against Percona-Server-8.4.7-7 and Percona-Server-8.4.8-8:
+# the code path is unchanged).
+
+--source include/count_sessions.inc
+
+# Helper: classify and count SHOW ENGINE INNODB MUTEX rows without
+# printing the (non-deterministic) counter values into the result.
+--write_file $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc END_OF_INC
+--exec $MYSQL -N -e "SHOW ENGINE INNODB MUTEX" > $MYSQLTEST_VARDIR/tmp/show_mutex.txt
+perl;
+  my $vardir = $ENV{'MYSQLTEST_VARDIR'};
+  open(my $fh, '<', "$vardir/tmp/show_mutex.txt") or die "cannot open: $!";
+  my $mutex = 0;
+  while (my $line = <$fh>) {
+    my (undef, $name) = split(/\t/, $line);
+    $mutex++ unless defined($name) && $name =~ /^(sum )?rwlock:/;
+  }
+  close($fh);
+  print "mutex section rows: " . ($mutex ? "SOME" : "NONE") . "\n";
+EOF
+END_OF_INC
+
+# Helper: count the rw-lock section rows of the SHOW ENGINE INNODB MUTEX
+# output dumped by check_mutex_rows.inc. Only used where the outcome is
+# deterministic (a clean startup).
+--write_file $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc END_OF_INC
+perl;
+  my $vardir = $ENV{'MYSQLTEST_VARDIR'};
+  open(my $fh, '<', "$vardir/tmp/show_mutex.txt") or die "cannot open: $!";
+  my $rwlock = 0;
+  while (my $line = <$fh>) {
+    my (undef, $name) = split(/\t/, $line);
+    $rwlock++ if defined($name) && $name =~ /^(sum )?rwlock:/;
+  }
+  close($fh);
+  print "rwlock section rows: " . ($rwlock ? "SOME" : "NONE") . "\n";
+EOF
+END_OF_INC
+
+--echo #
+--echo # Phase 1: freshly started server, default settings.
+--echo # Latch counting is disabled by default, so the mutex section must
+--echo # be empty, and a clean startup performs no rw-lock OS waits.
+--echo #
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+SELECT @@global.innodb_monitor_enable AS monitor_enabled_by_default;
+--source $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
+--source $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc
+
+--echo #
+--echo # Phase 2: enable the latch monitor at runtime and produce
+--echo # concurrent load. Now spins/waits are counted and rows appear.
+--echo #
+SET GLOBAL innodb_monitor_enable = 'latch';
+
+CREATE TABLE t1 (a INT AUTO_INCREMENT PRIMARY KEY, b VARCHAR(255)) ENGINE=InnoDB;
+DELIMITER |;
+CREATE PROCEDURE insert_load(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    INSERT INTO t1(b) VALUES (REPEAT('x', 200));
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+
+connect (con1, localhost, root,, test);
+connect (con2, localhost, root,, test);
+--connection con1
+--send CALL insert_load(3000)
+--connection con2
+CALL insert_load(3000);
+--connection con1
+--reap
+--connection default
+
+# rwlock rows are not asserted here: whether a rw-lock reached a full
+# OS wait during the load is timing-dependent.
+--source $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
+
+--echo #
+--echo # Phase 3: disable the monitor and reset the counters.
+--echo # The mutex section becomes empty again - the data is not "lost",
+--echo # it is simply gated by the counters.
+--echo #
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset_all = 'latch';
+
+--source $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
+
+--echo #
+--echo # Phase 4: restart with the monitor enabled from startup - the
+--echo # pre-8.4 style "visible since the very beginning" behavior.
+--echo # (A token workload keeps the check independent from how much
+--echo # contention the startup sequence itself produced.)
+--echo #
+--let $restart_parameters = restart: --innodb-monitor-enable=latch
+--source include/restart_mysqld.inc
+
+SELECT @@global.innodb_monitor_enable AS monitor_enabled_from_startup;
+CALL insert_load(500);
+
+--source $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
+
+--echo #
+--echo # Cleanup
+--echo #
+--disconnect con1
+--disconnect con2
+DROP PROCEDURE insert_load;
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/check_mutex_rows.inc
+--remove_file $MYSQLTEST_VARDIR/tmp/check_rwlock_rows.inc
+--remove_file $MYSQLTEST_VARDIR/tmp/show_mutex.txt
+
+# Restore the default configuration for the following tests.
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+--source include/wait_until_count_sessions.inc
