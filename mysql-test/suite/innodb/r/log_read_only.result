@@ -5,6 +5,7 @@
 SET GLOBAL innodb_redo_log_capacity = 10*1024*1024;
 SET GLOBAL innodb_monitor_enable = module_log;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 0;
+SET GLOBAL innodb_lru_manager_disabled_debug = 0;
 SET GLOBAL innodb_checkpoint_disabled = 1;
 CREATE TABLE t (a INT PRIMARY KEY) ENGINE = INNODB;
 INSERT INTO t (a) VALUES (1);

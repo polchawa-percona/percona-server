@@ -5,6 +5,7 @@ SET GLOBAL innodb_file_per_table = 0;
 # Apparently this testcase wants to do single-page flushing only. Accomodate
 # by setting innodb_empty_free_list_algorithm=legacy in the option file
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 SET GLOBAL innodb_checkpoint_disabled = 1;

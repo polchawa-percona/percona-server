@@ -1,6 +1,7 @@
 CREATE TABLE t (id INT PRIMARY KEY);
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 RENAME TABLE t TO t1;
 RENAME TABLE t1 TO t2;

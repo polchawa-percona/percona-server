@@ -53,6 +53,9 @@ size_t buf_flush_active_lru_managers();
 /** Value of MySQL global variable used to disable page cleaner. */
 extern bool innodb_page_cleaner_disabled_debug;
 
+/** Value of MySQL global variable used to disable LRU manager threads. */
+extern bool innodb_lru_manager_disabled_debug;
+
 #endif /* UNIV_DEBUG */
 
 /** Event to synchronise with the flushing. */
@@ -108,6 +111,16 @@ buf_flush_batch() and buf_flush_page().
 [[nodiscard]] bool buf_flush_page_try(buf_pool_t *buf_pool, buf_block_t *block);
 #endif /* UNIV_DEBUG || UNIV_IBUF_DEBUG */
 
+/** Result of a buffer flush batch. */
+struct buf_flush_batch_result_t {
+  /** Pages for which a write was queued. */
+  ulint n_flushed{};
+  /** Clean or stale pages moved directly to the free list. */
+  ulint n_evicted{};
+  /** Pages examined by the batch. Currently reported for BUF_FLUSH_LRU. */
+  ulint n_scanned{};
+};
+
 /** Do flushing batch of a given type.
 NOTE: The calling thread is not allowed to own any latches on pages!
 @param[in,out]  buf_pool        buffer pool instance
@@ -117,12 +130,12 @@ NOTE: The calling thread is not allowed to own any latches on pages!
 @param[in]      lsn_limit       in the case BUF_FLUSH_LIST all blocks whose
 oldest_modification is smaller than this should be flushed (if their number
 does not exceed min_n), otherwise ignored
-@param[out]     n_processed     {n_flushed, n_evicted} is passed back to the
-caller. n_evicted is always 0 for BUF_FLUSH_LIST. Ignored if NULL
+@param[out]     result          batch result; n_evicted and n_scanned are 0
+for BUF_FLUSH_LIST. Ignored if NULL
 @retval true    if a batch was queued successfully.
 @retval false   if another batch of same type was already running. */
 bool buf_flush_do_batch(buf_pool_t *buf_pool, buf_flush_t type, ulint min_n,
-                        lsn_t lsn_limit, std::pair<ulint, ulint> *n_processed);
+                        lsn_t lsn_limit, buf_flush_batch_result_t *result);
 
 /** This utility flushes dirty blocks from the end of the flush list of all
 buffer pool instances.
@@ -204,6 +217,15 @@ It's used by: SET GLOBAL innodb_page_cleaner_disabled_debug = 1 (0).
 void buf_flush_page_cleaner_disabled_debug_update(THD *thd, SYS_VAR *var,
                                                   void *var_ptr,
                                                   const void *save);
+
+/** Disables LRU manager threads.
+It's used by: SET GLOBAL innodb_lru_manager_disabled_debug = 1 (0).
+@param[in]      thd             thread handle
+@param[in]      var             pointer to system variable
+@param[out]     var_ptr         where the formal string goes
+@param[in]      save            immediate result from check function */
+void buf_lru_manager_disabled_debug_update(THD *thd, SYS_VAR *var,
+                                           void *var_ptr, const void *save);
 #endif /* UNIV_DEBUG */
 
 /** Initialize page_cleaner.  */

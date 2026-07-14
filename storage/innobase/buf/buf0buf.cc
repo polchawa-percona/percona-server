@@ -1424,6 +1424,11 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->run_lru = os_event_create();
   os_event_set(buf_pool->run_lru);
 
+  /* The manager may run from the moment it is started; invalidation flips
+  these under flush_state_mutex. */
+  buf_pool->lru_run_allowed = true;
+  buf_pool->lru_manager_running = false;
+
   buf_pool->watch = (buf_page_t *)ut::zalloc_withkey(
       UT_NEW_THIS_FILE_PSI_KEY, sizeof(*buf_pool->watch) * BUF_POOL_WATCH_SIZE);
   for (i = 0; i < BUF_POOL_WATCH_SIZE; i++) {
@@ -1537,7 +1542,7 @@ static void buf_pool_free() {
   ut::delete_(buf_chunk_map_reg);
   buf_chunk_map_reg = nullptr;
 
-  ut::free(buf_pool_ptr);
+  ut::aligned_free(buf_pool_ptr);
   buf_pool_ptr = nullptr;
 }
 
@@ -1564,8 +1569,16 @@ dberr_t buf_pool_init(ulint total_size, bool populate, ulint n_instances) {
 
   buf_pool_resizing = false;
 
-  buf_pool_ptr = (buf_pool_t *)ut::zalloc_withkey(
-      UT_NEW_THIS_FILE_PSI_KEY, n_instances * sizeof *buf_pool_ptr);
+  /* buf_pool_t has alignas(64) members (the promote-queue atomics and
+  LRU_old are isolated on their own cache lines), so alignof(buf_pool_t) is
+  64. A plain ut::zalloc_withkey() only guarantees max_align_t alignment,
+  which would leave those members mis-aligned (undefined behaviour, and the
+  false-sharing separation they exist for would be lost). Allocate the array
+  with the type's own alignment and release it with the matching
+  ut::aligned_free(). */
+  buf_pool_ptr = (buf_pool_t *)ut::aligned_zalloc_withkey(
+      UT_NEW_THIS_FILE_PSI_KEY, n_instances * sizeof *buf_pool_ptr,
+      alignof(buf_pool_t));
 
   buf_chunk_map_reg =
       ut::new_withkey<buf_pool_chunk_map_t>(UT_NEW_THIS_FILE_PSI_KEY);
@@ -5721,8 +5734,29 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
 
   auto success = buf_page_free_stale(buf_pool, bpage);
 
+  /* Capture this while the LRU mutex still protects bpage's lifetime. Once
+  the mutex is released, an unqueued page may be freed concurrently and must
+  not be inspected. Acquire pairs with the queue flag's release clear; for
+  deciding whether a drain can make this retry progress, a concurrent clear
+  merely causes a harmless no-op drain. */
+  const bool queued_for_promotion =
+      !success && bpage->LRU_in_promote_queue.load(std::memory_order_acquire);
+
   if (!success) {
     mutex_exit(&buf_pool->LRU_list_mutex);
+
+    /* Relocation may have failed because the page is still
+    buf-fixed by a deferred make-young entry parked on the promote queue
+    (buf_LRU_enqueue_promote() fixes the page and the fix is released only
+    when the queue is drained). Callers retry this function in a tight loop
+    until the stale page disappears, and this path can run while the
+    coordinator is in its recovery loop rather than its periodic-maintenance
+    loop. Drain only when this protected page was observed on the queue;
+    failures caused by IO or unrelated buffer fixes should not initiate a
+    pool-wide drain. */
+    if (queued_for_promotion) {
+      buf_LRU_drain_promote_queue(buf_pool);
+    }
   }
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
@@ -6342,11 +6376,33 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
   /* Tell the per-pool LRU manager thread to park so no LRU batch (and no
-  write IO it would dispatch) runs concurrently with the teardown. Resetting
-  run_lru makes the manager block at os_event_wait(run_lru) once it loops
-  back; the guard sets it again when we are done. */
+  write IO it would dispatch) runs concurrently with the teardown.
+
+  Resetting run_lru alone is not enough: it only makes the *next*
+  os_event_wait(run_lru) park, so a manager thread that already returned from
+  the wait (or is in its pre-batch sleep) could still start a batch. We
+  therefore also clear lru_run_allowed under flush_state_mutex - the gate the
+  manager re-checks before every batch - and then wait for any iteration that
+  is already in flight to finish (lru_manager_running). Once we observe
+  lru_manager_running == false while holding the mutex with the gate closed,
+  no batch can be running and none can start until the guard reopens the gate.
+  Invalidation is a rare startup/recovery operation, so the short wait here is
+  acceptable. */
   os_event_reset(buf_pool->run_lru);
-  auto guard = create_scope_guard([&]() { os_event_set(buf_pool->run_lru); });
+  mutex_enter(&buf_pool->flush_state_mutex);
+  buf_pool->lru_run_allowed = false;
+  while (buf_pool->lru_manager_running) {
+    mutex_exit(&buf_pool->flush_state_mutex);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    mutex_enter(&buf_pool->flush_state_mutex);
+  }
+  mutex_exit(&buf_pool->flush_state_mutex);
+  auto guard = create_scope_guard([&]() {
+    mutex_enter(&buf_pool->flush_state_mutex);
+    buf_pool->lru_run_allowed = true;
+    mutex_exit(&buf_pool->flush_state_mutex);
+    os_event_set(buf_pool->run_lru);
+  });
 
   /* Release any pages still parked on the deferred make-young queue so
   their buf_fix counts don't block the LRU invalidation below. */

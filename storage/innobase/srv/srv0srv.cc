@@ -1333,7 +1333,11 @@ void srv_free(void) {
     for (size_t i = 0; i < srv_threads.m_lru_managers_n; ++i) {
       srv_threads.m_lru_managers[i] = {};
     }
-    ut::free(srv_threads.m_lru_managers);
+    /* Allocated with ut::new_arr_withkey<IB_thread>(), so it must be released
+    with ut::delete_arr() (which runs the element destructors and uses the
+    matching array allocator), not ut::free(). This mirrors the
+    m_page_cleaner_workers / m_purge_workers teardown above. */
+    ut::delete_arr(srv_threads.m_lru_managers);
     srv_threads.m_lru_managers = nullptr;
   }
 

@@ -24383,6 +24383,11 @@ static MYSQL_SYSVAR_BOOL(page_cleaner_disabled_debug,
                          PLUGIN_VAR_OPCMDARG, "Disable page cleaner", nullptr,
                          buf_flush_page_cleaner_disabled_debug_update, false);
 
+static MYSQL_SYSVAR_BOOL(lru_manager_disabled_debug,
+                         innodb_lru_manager_disabled_debug, PLUGIN_VAR_OPCMDARG,
+                         "Disable LRU manager threads", nullptr,
+                         buf_lru_manager_disabled_debug_update, false);
+
 static MYSQL_SYSVAR_BOOL(dict_stats_disabled_debug,
                          innodb_dict_stats_disabled_debug, PLUGIN_VAR_OPCMDARG,
                          "Disable dict_stats thread", nullptr,
@@ -24704,6 +24709,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(saved_page_number_debug),
     MYSQL_SYSVAR(compress_debug),
     MYSQL_SYSVAR(page_cleaner_disabled_debug),
+    MYSQL_SYSVAR(lru_manager_disabled_debug),
     MYSQL_SYSVAR(dict_stats_disabled_debug),
     MYSQL_SYSVAR(master_thread_disabled_debug),
     MYSQL_SYSVAR(sync_debug),
