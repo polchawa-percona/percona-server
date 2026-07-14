@@ -1959,6 +1959,18 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
   /* Minimize buf_pool->zip_free[i] lists */
   buf_buddy_condense_free(buf_pool);
 
+  /* Pages parked on the deferred make-young queue are buf-fixed and thus
+  cannot be relocated or freed; drain the queue so that this withdraw
+  attempt does not fail on them. This is a per-attempt progress guarantee,
+  not a race-free one: a user thread may enqueue a page right after the
+  drain, making this attempt skip it. That is fine - the caller retries
+  withdrawal and re-drains, the page cleaner coordinator drains every
+  instance about once a second, and a freshly promoted page cannot
+  immediately re-qualify in buf_page_peek_if_too_old() (its
+  freed_page_clock was just refreshed), so a page cannot ping-pong back
+  into the queue across retries. */
+  buf_LRU_drain_promote_queue(buf_pool);
+
   mutex_enter(&buf_pool->free_list_mutex);
   while (UT_LIST_GET_LEN(buf_pool->withdraw) < buf_pool->withdraw_target) {
     /* try to withdraw from free_list */
@@ -3272,7 +3284,16 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   }
 
   if (buf_page_peek_if_too_old(bpage)) {
-    buf_page_make_young(bpage);
+    /* When innodb_lru_make_young_drain_threshold is non-zero we push
+    onto a per-buf-pool lock-free queue instead of taking the LRU
+    mutex here. The thread that crosses the threshold drains the queue.
+    Thanks to that we decrease the number of threads that compete for
+    the LRU list mutex here. */
+    if (buf_LRU_make_young_drain_threshold != 0) {
+      buf_LRU_enqueue_promote(bpage);
+    } else {
+      buf_page_make_young(bpage);
+    }
   }
 }
 
@@ -6280,6 +6301,22 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
 static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   ut_ad(buf_pool);
 
+  /* Pages parked on the deferred make-young queue carry a buf-fix until
+  drained, so they would fail the replaceable check below even though they
+  are clean and evictable - the buf-fix is a transient artifact of the
+  deferred promotion, not real pinning. This check runs at shutdown (after
+  the page cleaner has stopped, so nothing re-enqueues) and, in debug
+  builds, during tablespace extension. In both cases the threshold-crossing
+  and page-cleaner drains may have left a sub-threshold remainder queued, so
+  materialize the deferred promotions here before asserting. Draining an
+  empty queue is a cheap atomic-exchange no-op - the common case and every
+  configuration with innodb_lru_make_young_drain_threshold == 0.
+  NOTE: drain-then-assert is free of races only because every caller runs
+  in a quiescent state (shutdown with user threads and the page cleaner
+  stopped, or single-actor recovery); an enqueue racing this function
+  would buf-fix a clean page after the drain and trip the fatal below. */
+  buf_LRU_drain_promote_queue(buf_pool);
+
   buf_chunk_t *chunk = buf_pool->chunks;
 
   for (auto i = buf_pool->n_chunks; i--; chunk++) {
@@ -6310,6 +6347,10 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   back; the guard sets it again when we are done. */
   os_event_reset(buf_pool->run_lru);
   auto guard = create_scope_guard([&]() { os_event_set(buf_pool->run_lru); });
+
+  /* Release any pages still parked on the deferred make-young queue so
+  their buf_fix counts don't block the LRU invalidation below. */
+  buf_LRU_drain_promote_queue(buf_pool);
 
   mutex_enter(&buf_pool->flush_state_mutex);
 
