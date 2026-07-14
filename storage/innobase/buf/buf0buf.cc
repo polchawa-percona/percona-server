@@ -3254,6 +3254,23 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_ad(bpage->buf_fix_count > 0);
   ut_a(buf_page_in_file(bpage));
 
+  /* A page whose read IO is still in progress may not yet be linked into
+  the LRU list: buf_page_init_for_read() makes the page hash-visible before
+  it links it into the LRU list. Such a page must not be promoted -
+  buf_LRU_make_block_young() would unlink a node which is not linked,
+  corrupting the LRU list.
+  Reading the io-fix snapshot without the block mutex is correct here: the
+  LRU-add happens-before the read IO is dispatched, which happens-before
+  io_fix is reset to BUF_IO_NONE at IO completion. Thus observing
+  !was_io_fix_read() implies the LRU-add has already happened, and the
+  buf-fix held by our caller keeps the page in the LRU. Skipping the
+  promotion on a stale BUF_IO_READ snapshot is benign: the page was just
+  added at the head of the old sublist and a subsequent access will promote
+  it. */
+  if (bpage->was_io_fix_read()) {
+    return;
+  }
+
   if (buf_page_peek_if_too_old(bpage)) {
     buf_page_make_young(bpage);
   }
@@ -5027,8 +5044,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
-
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
@@ -5041,8 +5056,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
-
-    mutex_exit(&buf_pool->LRU_list_mutex);
 
     rw_lock_x_unlock(hash_lock);
 
@@ -5080,38 +5093,69 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     block->mark_for_read_io();
     buf_page_set_io_fix(bpage, BUF_IO_READ);
 
-    /* The block must be put to the LRU list, to the old blocks */
-    buf_LRU_add_block(bpage, true /* to old blocks */);
-
     if (page_size.is_compressed()) {
+      /* Setting zip.data is still protected by the hash X-latch here:
+      the page is already in the page hash, but no other thread can look
+      it up until the latch is released below. */
       block->page.zip.data = (page_zip_t *)data;
-
-      /* To maintain the invariant
-      block->in_unzip_LRU_list
-      == buf_page_belongs_to_unzip_LRU(&block->page)
-      we have to add this block to unzip_LRU
-      after block->page.zip.data is set. */
-      ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
-      buf_unzip_LRU_add_block(block, true);
     }
-
-    mutex_exit(&buf_pool->LRU_list_mutex);
-
-    /* We set a pass-type x-lock on the frame because then
-    the same thread which called for the read operation
-    (and is running now at this point of code) can wait
-    for the read to complete by waiting for the x-lock on
-    the frame; if the x-lock were recursive, the same
-    thread would illegally get the x-lock before the page
-    read is completed.  The x-lock is cleared by the
-    io-handler thread. */
 
     rw_lock_x_lock_gen(&block->lock, BUF_IO_READ, UT_LOCATION_HERE);
 
     rw_lock_x_unlock(hash_lock);
 
     buf_page_mutex_exit(block);
+
+    /* The page is hash-visible already, but eviction cannot see it
+    (not on LRU yet) and readers are blocked on the frame X-lock,
+    so no other thread can race with the add.
+
+    IMPORTANT: we strongly depend here on the fact that there is no
+    other thread that can try to acquire that frame's S-lock while
+    holding already the LRU list mutex (it would be deadlock cycle).
+    For existing use cases, for that thread to exist, the page would
+    need to be in the LRU list already. This latching rule is documented
+    at the LRU_list_mutex declaration in buf0buf.h and enforced in debug
+    builds by rw_lock_assert_wait_allowed() at the rw-lock wait entry
+    points in sync0rw.cc (it cannot be expressed via latch_level_t
+    ordering: block->lock is SYNC_LEVEL_VARYING, which LatchDebug
+    ignores). */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+
+    /* For a compressed page zip.data was set above, before the page
+    became reachable through the page hash, so
+    buf_page_belongs_to_unzip_LRU() already holds and buf_LRU_add_block()
+    links the block into the unzip_LRU list as well, within this same
+    critical section: every observer of the LRU list sees the invariant
+    block->in_unzip_LRU_list ==
+    buf_page_belongs_to_unzip_LRU(&block->page) hold. (This is unlike the
+    pre-narrowing code, which set zip.data only after buf_LRU_add_block()
+    and therefore had to add the block to the unzip_LRU list explicitly
+    afterwards; an explicit second add here would corrupt the list.) */
+    buf_LRU_add_block(bpage, true /* to old blocks */);
+
+    ut_ad(!page_size.is_compressed() || block->in_unzip_LRU_list);
+
+    mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
+    /* Compressed-only page: a bare BUF_BLOCK_ZIP_PAGE descriptor with no
+    uncompressed frame (and thus no frame rw-lock). It is initialized and
+    made hash-visible while the page hash X-latch and zip_mutex (this
+    descriptor's "block mutex") are held, and is linked into the LRU list
+    afterwards under a brief LRU_list_mutex hold - the same narrowed
+    latching order as for the block-backed pages above.
+
+    Setting io_fix = BUF_IO_READ before the descriptor becomes reachable
+    through the page hash is what makes the hash-visible-but-not-in-LRU
+    window safe, exactly as for block-backed pages: every path which
+    could move or free the page based on finding it in the page hash
+    backs off from a read-io-fixed page (buf_page_make_young_if_needed()
+    skips it, buf_page_free_stale() bails out, buf_buddy relocation and
+    Buf_fetch<T>::zip_page_handler() require io_fix == BUF_IO_NONE), and
+    readers (e.g. buf_page_get_zip()) wait for the read to complete,
+    which happens-after the LRU-add below, because the read IO is only
+    dispatched after this function returns. */
+
     /* Initialize the buf_pool pointer. */
     bpage->buf_pool_index = buf_pool_index(buf_pool);
 
@@ -5142,6 +5186,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     ut_d(bpage->in_free_list = false);
     ut_d(bpage->in_LRU_list = false);
 
+    buf_page_set_io_fix(bpage, BUF_IO_READ);
+
     ut_d(bpage->in_page_hash = true);
 
     if (watch_page != nullptr) {
@@ -5162,16 +5208,25 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     rw_lock_x_unlock(hash_lock);
 
-    /* The block must be put to the LRU list, to the old blocks.
-    The zip size is already set into the page zip */
+    mutex_exit(&buf_pool->zip_mutex);
+
+    /* The page is hash-visible already (io-fixed for read, see above),
+    but eviction cannot see it (not on the LRU list yet), so no other
+    thread can race with the add. The block must be put to the LRU list,
+    to the old blocks. The zip size is already set into the page zip. */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+#if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
+    /* buf_LRU_insert_zip_clean() requires the zip_mutex; re-acquired
+    here under the LRU list mutex, which follows the registered
+    latch_level_t order (SYNC_BUF_LRU_LIST > SYNC_BUF_BLOCK). */
+    mutex_enter(&buf_pool->zip_mutex);
+#endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     buf_LRU_add_block(bpage, true /* to old blocks */);
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     buf_LRU_insert_zip_clean(bpage);
+    mutex_exit(&buf_pool->zip_mutex);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     mutex_exit(&buf_pool->LRU_list_mutex);
-    buf_page_set_io_fix(bpage, BUF_IO_READ);
-
-    mutex_exit(&buf_pool->zip_mutex);
   }
 
   buf_pool->n_pend_reads.fetch_add(1);
@@ -5269,16 +5324,25 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   /* Latch the page before releasing hash lock so that concurrent request for
   this page doesn't see half initialized page. ALTER tablespace for encryption
   and clone page copy can request page for any page id within tablespace
-  size limit. */
+  size limit.
+
+  The nowait variants must be used and cannot fail: the frame comes from
+  the free list, so its latch is unlocked, and the block is unreachable by
+  other threads until the page hash X-latch is released below. This keeps
+  the LRU_list_mutex latching rule (no waiting for a frame latch under the
+  LRU list mutex, see the LRU_list_mutex declaration) free of blocking
+  acquisitions - we hold the LRU list mutex here. */
   mtr_memo_type_t mtr_latch_type;
+  bool latched;
 
   if (rw_latch == RW_X_LATCH) {
-    rw_lock_x_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_x_lock_nowait(&block->lock, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_X_FIX;
   } else {
-    rw_lock_sx_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_sx_lock_nowait(&block->lock, 0, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_SX_FIX;
   }
+  ut_a(latched);
   mtr_memo_push(mtr, block, mtr_latch_type);
 
   rw_lock_x_unlock(hash_lock);
@@ -6309,6 +6373,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
   ulint n_flush = 0;
   ulint n_free = 0;
   ulint n_zip = 0;
+  ulint n_lru_add_pending = 0;
 
   ut_ad(buf_pool);
 
@@ -6357,7 +6422,26 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
             }
           }
 
+#ifdef UNIV_DEBUG
+          if (!block->page.in_LRU_list) {
+            /* buf_page_init_for_read() makes the page hash-visible before
+            linking it into the LRU list. Such a page is still io-fixed for
+            read. Reading in_LRU_list is stable here: it is only modified
+            under LRU_list_mutex, which we hold. */
+            ut_a(block->page.was_io_fix_read());
+            n_lru_add_pending++;
+          } else {
+            n_lru++;
+          }
+#else  /* UNIV_DEBUG */
+          /* Without UNIV_DEBUG there is no in_LRU_list flag; count how many
+          FILE_PAGE blocks may legitimately be missing from the LRU list so
+          the length cross-check below can be relaxed by that amount. */
+          if (block->page.was_io_fix_read()) {
+            n_lru_add_pending++;
+          }
           n_lru++;
+#endif /* UNIV_DEBUG */
           break;
 
         case BUF_BLOCK_NOT_USED:
@@ -6458,7 +6542,15 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
         << buf_pool->curr_size << " zip " << n_zip << ". Aborting...";
   }
 
+#ifdef UNIV_DEBUG
+  /* Pages whose read IO is in progress and which are not yet linked into
+  the LRU list were counted into n_lru_add_pending instead of n_lru. */
+  (void)n_lru_add_pending;
   ut_a(UT_LIST_GET_LEN(buf_pool->LRU) == n_lru);
+#else  /* UNIV_DEBUG */
+  ut_a(UT_LIST_GET_LEN(buf_pool->LRU) <= n_lru);
+  ut_a(n_lru <= UT_LIST_GET_LEN(buf_pool->LRU) + n_lru_add_pending);
+#endif /* UNIV_DEBUG */
 
   mutex_exit(&buf_pool->LRU_list_mutex);
   mutex_exit(&buf_pool->chunks_mutex);

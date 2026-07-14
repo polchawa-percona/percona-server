@@ -682,7 +682,12 @@ const latch_t *LatchDebug::find(const Latches *latches,
 @param[in]      level           The level to lookup
 @return latch if found or NULL */
 const latch_t *LatchDebug::find(latch_level_t level) UNIV_NOTHROW {
-  return (find(thread_latches(), level));
+  /* A thread which has not acquired any latch yet has no latch list
+  allocated (thread_latches() without the create flag returns nullptr)
+  and thus holds nothing at any level. */
+  const Latches *latches = thread_latches();
+
+  return (latches != nullptr ? find(latches, level) : nullptr);
 }
 
 /**
