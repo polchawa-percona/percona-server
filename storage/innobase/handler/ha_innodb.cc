@@ -757,7 +757,6 @@ static PSI_mutex_info all_innodb_mutexes[] = {
     PSI_MUTEX_KEY(dblwr_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(purge_sys_pq_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(recv_sys_mutex, 0, 0, PSI_DOCUMENT_ME),
-    PSI_MUTEX_KEY(recv_writer_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(temp_space_rseg_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(undo_space_rseg_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(trx_sys_rseg_mutex, 0, 0, PSI_DOCUMENT_ME),
@@ -868,8 +867,7 @@ static PSI_thread_info all_innodb_threads[] = {
                    PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(log_flush_notifier_thread, "ib_log_fl_notif",
                    PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
-    PSI_THREAD_KEY(recv_writer_thread, "ib_recv_write", PSI_FLAG_SINGLETON, 0,
-                   PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(buf_lru_manager_thread, "ib_buf_lru", 0, 0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(srv_error_monitor_thread, "ib_srv_err", PSI_FLAG_SINGLETON,
                    0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(srv_lock_timeout_thread, "ib_srv_lock_to",
@@ -24004,6 +24002,17 @@ static MYSQL_SYSVAR_UINT(
     " The timeout is disabled if 0.",
     nullptr, nullptr, 1000, 0, UINT32_MAX, 0);
 
+static MYSQL_SYSVAR_UINT(
+    lru_make_young_drain_threshold, buf_LRU_make_young_drain_threshold,
+    PLUGIN_VAR_OPCMDARG,
+    "If non-zero, moving a page to the head of the buffer pool LRU list "
+    "on access is deferred: the page is pushed onto a per-buffer-pool "
+    "lock-free queue instead of taking the LRU list mutex on the hot "
+    "read path. When the queue reaches this length it is drained in one "
+    "batch under a single mutex acquisition. Set to 0 to disable the "
+    "deferred queue and move pages immediately.",
+    nullptr, nullptr, 128, 0, UINT32_MAX, 0);
+
 static MYSQL_SYSVAR_LONG(
     open_files, innobase_open_files, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
     "How many files at the maximum InnoDB keeps open at the same time.",
@@ -24582,6 +24591,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(max_purge_lag_delay),
     MYSQL_SYSVAR(old_blocks_pct),
     MYSQL_SYSVAR(old_blocks_time),
+    MYSQL_SYSVAR(lru_make_young_drain_threshold),
     MYSQL_SYSVAR(open_files),
     MYSQL_SYSVAR(optimize_fulltext_only),
     MYSQL_SYSVAR(rollback_on_timeout),

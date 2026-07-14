@@ -1700,6 +1700,10 @@ class buf_page_t {
   buffer pool. Protected by block mutex */
   std::chrono::steady_clock::time_point access_time;
 
+  buf_page_t *LRU_promote_next{nullptr};
+
+  std::atomic<bool> LRU_in_promote_queue{false};
+
  private:
   /** Double write instance ordinal value during writes. This is used
   by IO completion (writes) to select the double write instance.*/
@@ -2320,7 +2324,24 @@ struct buf_pool_t {
      for all buf_pool_t-s */
   BufListMutex chunks_mutex;
 
-  /** LRU list mutex */
+  /** LRU list mutex.
+  Latching rule: no thread may WAIT for a block's frame rw-lock
+  (block->lock) while holding this mutex. buf_page_init_for_read()
+  acquires this mutex while holding the X-latch on the frame of the page
+  being read in, so waiting for a frame latch under this mutex would
+  create a deadlock cycle with that path. Consequently, a frame latch may
+  be taken under this mutex only with the rw_lock_*_nowait() variants:
+  flushing does so and handles the failure, and buf_page_create() does so
+  on a frame taken from the free list, asserting success (its latch is
+  unlocked and the block is unreachable by other threads while the page
+  hash X-latch is still held, so the attempt cannot fail). Compressed-only
+  pages (BUF_BLOCK_ZIP_PAGE descriptors) have no frame and no frame
+  rw-lock, so the paths handling them add no edge to this rule.
+  This rule cannot be expressed via latch_level_t ordering, because
+  block->lock is registered with SYNC_LEVEL_VARYING which LatchDebug
+  ignores; instead it is enforced in debug builds (with
+  --innodb-sync-debug) by rw_lock_assert_wait_allowed() at the rw-lock
+  wait entry points in sync0rw.cc. */
   BufListMutex LRU_list_mutex;
 
   /** free and withdraw list mutex */
@@ -2436,6 +2457,28 @@ struct buf_pool_t {
   running. Protected by flush_state_mutex. */
   os_event_t no_flush[BUF_FLUSH_N_TYPES];
 
+  /** Always set at startup so the LRU manager thread does not have to wait.
+  Reset by buf_pool_invalidate_instance() so the manager pauses while the
+  buffer pool is being torn down / re-initialised; set again afterwards. */
+  os_event_t run_lru;
+
+  /** Per-instance LRU-manager flush accounting. Written only by this
+  instance's buf_lru_manager_thread and read (summed across instances) by
+  the page cleaner coordinator in Adaptive_flush::set_average(), which is
+  the single thread that publishes the buffer_LRU_batch_flush_* monitor
+  counters. This mirrors how the flush_list path funnels each worker's
+  per-slot counts through the one coordinator, keeping the monitor update
+  single-writer (no torn min/max). Single writer + single reader and never
+  reset, so the values are monotonic and no latch is needed. */
+  struct lru_manager_stat_t {
+    /** Pages written to disk by LRU batches. */
+    uint64_t n_flushed_pages;
+    /** Number of LRU flush passes (buf_flush_LRU_list() calls). */
+    uint64_t n_passes;
+    /** Cumulative time spent in buf_flush_LRU_list(), in milliseconds. */
+    uint64_t flush_time_ms;
+  } lru_manager_stat;
+
   /** A red-black tree is used exclusively during recovery to speed up
   insertions in the flush_list. This tree contains blocks in order of
   oldest_modification LSN and is kept in sync with the flush_list.  Each
@@ -2498,10 +2541,14 @@ struct buf_pool_t {
   /** Base node of the LRU list */
   UT_LIST_BASE_NODE_T(buf_page_t, LRU) LRU;
 
+  alignas(64) std::atomic<buf_page_t *> LRU_promote_head{nullptr};
+  std::atomic<size_t> LRU_promote_queue_len{0};
+  std::atomic<bool> LRU_promote_draining{false};
+
   /** Pointer to the about LRU_old_ratio/BUF_LRU_OLD_RATIO_DIV oldest blocks in
   the LRU list; NULL if LRU length less than BUF_LRU_OLD_MIN_LEN; NOTE: when
   LRU_old != NULL, its length should always equal LRU_old_len */
-  buf_page_t *LRU_old;
+  alignas(64) buf_page_t *LRU_old;
 
   /** Length of the LRU list from the block to which LRU_old points onward,
   including that block; see buf0lru.cc for the restrictions on this value; 0
