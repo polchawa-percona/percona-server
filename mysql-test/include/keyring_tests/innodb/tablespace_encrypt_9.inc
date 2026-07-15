@@ -69,6 +69,7 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 SET SESSION debug= '+d,alter_encrypt_tablespace_page_10';
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 

@@ -10,6 +10,7 @@ include/assert.inc ['Redo log is logically empty (has 1 block)']
 # Disable page cleaners and prevent page flushing/checkpointing.
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 # Apply some modifications.
 INSERT INTO t(a,b) VALUES (1, REPEAT('x',100)), (2, REPEAT('x',100)), (3, REPEAT('x',100)),
@@ -34,6 +35,7 @@ include/assert.inc ['Redo log increased by at least 100 bytes']
 include/assert.inc ['Redo log increased by no more than 16kB']
 # Enable page cleaners, page flushing and log checkpointing.
 SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_lru_manager_disabled_debug = OFF;
 SET GLOBAL innodb_checkpoint_disabled = OFF;
 # Execute sharp checkpoint.
 SET GLOBAL innodb_log_checkpoint_now = 1;

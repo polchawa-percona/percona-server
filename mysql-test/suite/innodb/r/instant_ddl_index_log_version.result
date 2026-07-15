@@ -10,6 +10,7 @@ SET GLOBAL innodb_fast_shutdown = 0;
 # restart: --datadir=BACKUP/data --log-error=BACKUP/my_restart.err
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 SET SESSION debug="+d,invalid_index_log_version";
 UPDATE t1 SET C2 = "r1c22";

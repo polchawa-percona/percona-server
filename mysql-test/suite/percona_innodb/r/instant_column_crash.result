@@ -17,6 +17,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col6 = '57' WHERE col1 = '4545';
 # Kill and restart
 SELECT * FROM t1;
@@ -44,6 +45,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col4 = '4' WHERE col1 = '1';
 INSERT INTO t1  VALUES ('2', '22', '33', '44', '55', '66', '88', '99');
 # Kill and restart
@@ -73,6 +75,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col4 = '4' WHERE col1 = '1';
 # Kill and restart
 SELECT * FROM t1;
@@ -101,6 +104,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col4 = '4', col6='6', col8='8' WHERE col1 = '1';
 # Kill and restart
 SELECT * FROM t1;
@@ -138,6 +142,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col4 = '4' WHERE col1 = '1';
 UPDATE t1 SET col4 = '4' WHERE col1 = '2';
 UPDATE t1 SET col4 = '4' WHERE col1 = '3';
@@ -186,6 +191,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col4 = '4', col6='6', col8='8' WHERE col1 = '1';
 UPDATE t1 SET col4 = '4', col6='6', col8='8' WHERE col1 = '2';
 UPDATE t1 SET col4 = '4', col6='6', col8='8' WHERE col1 = '3';
@@ -217,6 +223,7 @@ SET GLOBAL innodb_buf_flush_list_now=ON;
 SET GLOBAL innodb_log_checkpoint_now=ON;
 SET GLOBAL innodb_checkpoint_disabled=true;
 SET GLOBAL innodb_page_cleaner_disabled_debug=true;
+SET GLOBAL innodb_lru_manager_disabled_debug=true;
 UPDATE t1 SET col3 = 'hi3';
 # Kill and restart
 SELECT * FROM t1;

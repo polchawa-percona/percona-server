@@ -7,6 +7,7 @@ INSERT INTO t(a,b) VALUES (1,0);
 # Disable page cleaners and prevent page flushing/checkpointing.
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 # Skip log free checks to fill redo log up to its very end.
 SET GLOBAL DEBUG = '+d,log_free_check_skip';
@@ -51,6 +52,7 @@ SET GLOBAL DEBUG = '+d,syncpoint_log_writer_exited_extra_margin';
 # Enable page cleaners.
 ###############################
 SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_lru_manager_disabled_debug = OFF;
 SET GLOBAL innodb_checkpoint_disabled = OFF;
 # Ensure the started DML becomes completed eventually.
 include/assert.inc ['The UPDATE has been completed']
