@@ -1894,15 +1894,20 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   auto block_mutex = buf_page_get_mutex(bpage);
   auto hash_lock = buf_page_hash_lock_get(buf_pool, bpage->id);
 
-  ut_ad(bpage->in_LRU_list);
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
   ut_ad(mutex_own(block_mutex));
-  ut_ad(buf_page_in_file(bpage));
 
   if (!buf_page_can_relocate(bpage)) {
     /* Do not free buffer fixed and I/O-fixed blocks. */
     return (false);
   }
+
+  /* These assertions can only be checked for unfixed pages,
+  because pages become visible in the page hash table before
+  they are linked into the LRU list (they are buffer-fixed
+  before they are linked into the LRU list). */
+  ut_ad(bpage->in_LRU_list);
+  ut_ad(buf_page_in_file(bpage));
 
 #ifdef UNIV_IBUF_COUNT_DEBUG
   ut_a(ibuf_count_get(bpage->id) == 0);
