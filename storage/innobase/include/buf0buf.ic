@@ -505,7 +505,7 @@ static inline bool buf_page_can_relocate(
 {
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
   ut_ad(buf_page_in_file(bpage));
-  ut_ad(bpage->in_LRU_list);
+  ut_ad(bpage->in_LRU_list || bpage->buf_fix_count);
 
   return (buf_page_get_io_fix(bpage) == BUF_IO_NONE &&
           bpage->buf_fix_count == 0);

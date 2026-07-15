@@ -2320,7 +2320,24 @@ struct buf_pool_t {
      for all buf_pool_t-s */
   BufListMutex chunks_mutex;
 
-  /** LRU list mutex */
+  /** LRU list mutex.
+  Latching rule: no thread may WAIT for a block's frame rw-lock
+  (block->lock) while holding this mutex. buf_page_init_for_read()
+  acquires this mutex while holding the X-latch on the frame of the page
+  being read in, so waiting for a frame latch under this mutex would
+  create a deadlock cycle with that path. Consequently, a frame latch may
+  be taken under this mutex only with the rw_lock_*_nowait() variants:
+  flushing does so and handles the failure, and buf_page_create() does so
+  on a frame taken from the free list, asserting success (its latch is
+  unlocked and the block is unreachable by other threads while the page
+  hash X-latch is still held, so the attempt cannot fail). Compressed-only
+  pages (BUF_BLOCK_ZIP_PAGE descriptors) have no frame and no frame
+  rw-lock, so the paths handling them add no edge to this rule.
+  This rule cannot be expressed via latch_level_t ordering, because
+  block->lock is registered with SYNC_LEVEL_VARYING which LatchDebug
+  ignores; instead it is enforced in debug builds (with
+  --innodb-sync-debug) by rw_lock_assert_wait_allowed() at the rw-lock
+  wait entry points in sync0rw.cc. */
   BufListMutex LRU_list_mutex;
 
   /** free and withdraw list mutex */
