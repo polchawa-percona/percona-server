@@ -10,6 +10,7 @@ CREATE TABLE t (a INT);
 --source ../include/truncate_redo_log_and_stop_truncating.inc
 SET GLOBAL innodb_purge_stop_now = 1;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 
 --echo # 1. Commit transaction.
 BEGIN;

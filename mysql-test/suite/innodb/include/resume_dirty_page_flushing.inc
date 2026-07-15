@@ -2,3 +2,4 @@
 # flush_dirty_pages_and_stop_flushing.inc
 
 SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_lru_manager_disabled_debug = OFF;

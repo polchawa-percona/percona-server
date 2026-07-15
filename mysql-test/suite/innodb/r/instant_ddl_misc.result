@@ -1842,6 +1842,7 @@ r1c2	r1c3
 r2c2	r2c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";
@@ -1886,6 +1887,7 @@ r2c4	r2c2	r2c3
 r3c4	r3c2	r3c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";
@@ -3752,6 +3754,7 @@ r1c2	r1c3
 r2c2	r2c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";
@@ -3796,6 +3799,7 @@ r2c4	r2c2	r2c3
 r3c4	r3c2	r3c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";
@@ -5662,6 +5666,7 @@ r1c2	r1c3
 r2c2	r2c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";
@@ -5706,6 +5711,7 @@ r2c4	r2c2	r2c3
 r3c4	r3c2	r3c3
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 Update t1 set c2="r112" where c2="r1c2";

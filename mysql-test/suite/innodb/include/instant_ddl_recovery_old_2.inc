@@ -17,6 +17,7 @@ eval SELECT * FROM t1_$row_format;
 # Make sure nothing is flush and REDO log has entries for INSERT transaction
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 

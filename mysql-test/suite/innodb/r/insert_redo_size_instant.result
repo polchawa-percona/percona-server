@@ -9,6 +9,7 @@ INSERT INTO t1 VALUES (1,1);
 # Disable page cleaners and prevent page flushing/checkpointing.
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 SET GLOBAL DEBUG="+d,page_ins_simulate_differing_versions";
 # Generate redo logs
@@ -30,6 +31,7 @@ test.t1	check	status	OK
 # Disable page cleaners and prevent page flushing/checkpointing.
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+SET GLOBAL innodb_lru_manager_disabled_debug = ON;
 SET GLOBAL innodb_checkpoint_disabled = ON;
 # Generate redo logs
 INSERT INTO t1 VALUES (1,1);
@@ -45,6 +47,7 @@ Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
 # Resume page cleaners after recovery
 SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_lru_manager_disabled_debug = OFF;
 SET GLOBAL innodb_checkpoint_disabled = OFF;
 # Cleanup:
 DROP TABLE t1;

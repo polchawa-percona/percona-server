@@ -2725,8 +2725,6 @@ void srv_pre_dd_shutdown() {
   /* Crash if some query threads are still alive. */
   ut_a(srv_conc_get_active_threads() == 0);
 
-  ut_a(!srv_thread_is_active(srv_threads.m_recv_writer));
-
   /* Avoid fast shutdown, if redo logging is disabled. Otherwise, we won't be
   able to recover. */
   if (mtr_t::s_logging.is_disabled() && srv_fast_shutdown == 2) {
@@ -2935,7 +2933,9 @@ static void srv_shutdown_page_cleaners() {
   here to let it complete the flushing of the buffer pools
   before proceeding further. */
 
-  for (uint32_t count = 0; buf_flush_page_cleaner_is_active(); ++count) {
+  for (uint32_t count = 0; buf_flush_page_cleaner_is_active() ||
+                           buf_flush_active_lru_managers() > 0;
+       ++count) {
     if (count >= SHUTDOWN_SLEEP_ROUNDS) {
       ib::info(ER_IB_MSG_1251);
       count = 0;
@@ -2944,6 +2944,8 @@ static void srv_shutdown_page_cleaners() {
     std::this_thread::sleep_for(
         std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
   }
+
+  ut_ad(buf_flush_active_lru_managers() == 0);
 
   ut_ad(buf_pool_pending_io_reads_count() == 0);
   ut_ad(buf_pool_pending_io_writes_count() == 0);
@@ -3085,7 +3087,6 @@ void srv_shutdown() {
       std::cref(srv_threads.m_purge_coordinator),
       std::cref(srv_threads.m_ts_alter_encrypt),
       std::cref(srv_threads.m_fts_optimize),
-      std::cref(srv_threads.m_recv_writer),
       std::cref(srv_threads.m_dict_stats)};
 
   for (const auto &thread : threads_stopped_before_shutdown) {

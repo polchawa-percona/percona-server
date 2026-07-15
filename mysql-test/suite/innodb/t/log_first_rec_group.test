@@ -62,9 +62,11 @@ while ($pass != 2) {
 
   --echo # 2. Create checkpoint at the current lsn and block further checkpoints
   SET GLOBAL innodb_page_cleaner_disabled_debug = 0;
+  SET GLOBAL innodb_lru_manager_disabled_debug = 0;
   SET GLOBAL innodb_checkpoint_disabled = 0;
   SET GLOBAL innodb_log_checkpoint_now = 1;
   SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+  SET GLOBAL innodb_lru_manager_disabled_debug = 1;
   SET GLOBAL innodb_checkpoint_disabled = 1;
 
   if ($debug_test) {
@@ -178,6 +180,7 @@ while ($pass != 4) {
   # Execute sharp checkpoint (flush all pages) and block further checkpoints
   SET GLOBAL innodb_log_checkpoint_now = 1;
   SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+  SET GLOBAL innodb_lru_manager_disabled_debug = 1;
   SET GLOBAL innodb_checkpoint_disabled = 1;
 
   --echo # 2. Write up to the end of the block.

@@ -35,6 +35,7 @@ c1	c2	c3
 r1c1	r1c2	NULL
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 INSERT INTO t1_redundant VALUES ("r2c1", "r2c2", "r2c3");
@@ -96,6 +97,7 @@ c1	c2	c3
 r1c1	r1c2	NULL
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 INSERT INTO t1_dynamic VALUES ("r2c1", "r2c2", "r2c3");
@@ -157,6 +159,7 @@ c1	c2	c3
 r1c1	r1c2	NULL
 SET GLOBAL innodb_log_checkpoint_now = ON;
 SET GLOBAL innodb_page_cleaner_disabled_debug = 1;
+SET GLOBAL innodb_lru_manager_disabled_debug = 1;
 SET GLOBAL innodb_dict_stats_disabled_debug = 1;
 SET GLOBAL innodb_master_thread_disabled_debug = 1;
 INSERT INTO t1_compact VALUES ("r2c1", "r2c2", "r2c3");
