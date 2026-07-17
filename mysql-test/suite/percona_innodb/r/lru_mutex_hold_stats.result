@@ -1,0 +1,15 @@
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset = 'latch';
+SET GLOBAL innodb_monitor_enable = 'latch';
+CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT, pad CHAR(255)) ENGINE=InnoDB;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2000
+# Expect the hold row to be present:
+Pattern "LRU_list_mutex_hold\[[a-zA-Z0-9_.]+\.cc:[0-9]+\].*count=[1-9]" found
+SET GLOBAL innodb_monitor_reset = 'latch';
+# Expect no hold rows after reset:
+Pattern "LRU_list_mutex_hold\[" not found
+DROP TABLE t1;
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset = 'latch';

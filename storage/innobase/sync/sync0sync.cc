@@ -40,6 +40,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "univ.i"
 
+#include "sync0lru_hold.h"
 #include "sync0rw.h"
 #include "sync0sync.h"
 
@@ -236,8 +237,7 @@ latch was created
 std::string sync_mutex_to_string(latch_id_t id, const std::string &created) {
   std::ostringstream msg;
 
-  msg << "Mutex " << sync_latch_get_name(id) << " "
-      << "created " << created;
+  msg << "Mutex " << sync_latch_get_name(id) << " " << "created " << created;
 
   return (msg.str());
 }
@@ -290,4 +290,7 @@ void MutexMonitor::reset() {
   }
 
   mutex_exit(&rw_lock_list_mutex);
+
+  /* Also clear the LRU_list_mutex hold-time statistics. */
+  lru_hold_stats.reset();
 }

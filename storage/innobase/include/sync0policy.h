@@ -38,6 +38,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <thread>
 
 #include "srv0mon.h"
+#include "sync0lru_hold.h"
 #include "sync0types.h"
 #include "univ.i"
 #include "ut0rnd.h"
@@ -60,8 +61,7 @@ class MutexDebug {
 
     /** Create the context for SyncDebug
     @param[in]  id      ID of the latch to track */
-    Context(latch_id_t id) : latch_t(id) { /* No op */
-    }
+    Context(latch_id_t id) : latch_t(id) { /* No op */ }
 
     /** Set to locked state
     @param[in]  mutex           The mutex to acquire
@@ -130,8 +130,7 @@ class MutexDebug {
   };
 
   /** Constructor. */
-  MutexDebug() : m_magic_n(), m_context() UNIV_NOTHROW { /* No op */
-  }
+  MutexDebug() : m_magic_n(), m_context() UNIV_NOTHROW { /* No op */ }
 
   /* Destructor */
   virtual ~MutexDebug() = default;
@@ -242,6 +241,9 @@ struct GenericPolicy
             const char *filename, uint32_t line) UNIV_NOTHROW {
     m_id = id;
 
+    /* Track hold time only for the buffer pool LRU list mutex. */
+    m_track_hold = (id == LATCH_ID_BUF_POOL_LRU_LIST);
+
     latch_meta_t &meta = sync_latch_get_meta(id);
 
     ut_ad(meta.get_id() == id);
@@ -295,14 +297,24 @@ struct GenericPolicy
   @param[in]    mutex           Mutex instance that is locked
   @param[in]    filename        Filename from where it was called
   @param[in]    line            Line number from where it was called */
-  void locked(const MutexType &IF_DEBUG(mutex), const char *IF_DEBUG(filename),
-              ulint IF_DEBUG(line)) UNIV_NOTHROW {
+  void locked(const MutexType &mutex [[maybe_unused]], const char *filename,
+              ulint line) UNIV_NOTHROW {
+    if (m_track_hold && m_count.m_enabled) {
+      m_hold_file = filename;
+      m_hold_line = static_cast<unsigned>(line);
+      m_hold_start_ns = LruHoldStats::now_ns();
+    }
     ut_d(MutexDebug<MutexType>::locked(&mutex, filename, line));
   }
 
   /** Called when the mutex is released
   @param[in]    mutex           Mutex instance that is released */
-  void release(const MutexType &IF_DEBUG(mutex)) UNIV_NOTHROW {
+  void release(const MutexType &mutex [[maybe_unused]]) UNIV_NOTHROW {
+    if (m_track_hold && m_hold_start_ns != 0) {
+      lru_hold_stats.record(m_hold_file, m_hold_line,
+                            LruHoldStats::now_ns() - m_hold_start_ns);
+      m_hold_start_ns = 0;
+    }
     ut_d(MutexDebug<MutexType>::release(&mutex));
   }
 
@@ -324,6 +336,25 @@ struct GenericPolicy
 
   /** Latch meta data ID */
   latch_id_t m_id;
+
+  /** true iff this latch's hold time is tracked (the buf_pool LRU list
+  mutex).  Set once in init(); false for every other mutex, so the hot-path
+  overhead elsewhere is a single boolean test. */
+  bool m_track_hold{false};
+
+  /* The following three fields describe the current hold and are written in
+  locked() and read in release().  They are only ever touched by the thread
+  that owns the mutex, so no synchronization is needed. */
+
+  /** Source file of the acquisition call-site of the current hold. */
+  const char *m_hold_file{nullptr};
+
+  /** Source line of the acquisition call-site of the current hold. */
+  unsigned m_hold_line{0};
+
+  /** Monotonic start time (ns) of the current tracked hold, or 0 when the
+  current hold is not being sampled (monitor was off at acquire time). */
+  uint64_t m_hold_start_ns{0};
 };
 
 /** Track aggregate metrics policy, used by the page mutex. There are just

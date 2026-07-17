@@ -177,6 +177,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "string_with_len.h"
+#include "sync0lru_hold.h"
 #include "sync0sync.h"
 #ifdef UNIV_DEBUG
 #include "trx0purge.h"
@@ -3763,8 +3764,7 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       It should be able to reuse the deleted smaller ones later */
       auto current_max = m_space_max_id.load();
       while (current_max < space_id &&
-             !m_space_max_id.compare_exchange_weak(current_max, space_id))
-        ;
+             !m_space_max_id.compare_exchange_weak(current_max, space_id));
     }
 
     /* System and temp files are tracked and opened separately.
@@ -3874,9 +3874,8 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       case Fil_state::MISSING:
 
         ib::warn(ER_IB_MSG_526) << prefix << "Tablespace " << space_id << ","
-                                << " name '" << space_name << "',"
-                                << " file '" << dd_path << "'"
-                                << " is missing!";
+                                << " name '" << space_name << "'," << " file '"
+                                << dd_path << "'" << " is missing!";
 
         if (fsp_is_undo_tablespace(space_id)) {
           /* This deserves a special error message. */
@@ -3888,9 +3887,8 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       case Fil_state::DELETED:
 
         ib::warn(ER_IB_MSG_527) << prefix << "Tablespace " << space_id << ","
-                                << " name '" << space_name << "',"
-                                << " file '" << dd_path << "'"
-                                << " was deleted!";
+                                << " name '" << space_name << "'," << " file '"
+                                << dd_path << "'" << " was deleted!";
         ++m_n_deleted;
         continue;
 
@@ -4018,10 +4016,10 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       case DB_CANNOT_OPEN_FILE:
       case DB_WRONG_FILE_NAME:
       default:
-        ib::info(ER_IB_MSG_530) << prefix << "Tablespace " << space_id << ","
-                                << " name '" << space_name << "',"
-                                << " unable to open file"
-                                << " '" << filename << "' - " << ut_strerr(err);
+        ib::info(ER_IB_MSG_530)
+            << prefix << "Tablespace " << space_id << "," << " name '"
+            << space_name << "'," << " unable to open file" << " '" << filename
+            << "' - " << ut_strerr(err);
         ++m_n_missing;
     }
   }
@@ -4048,8 +4046,8 @@ dberr_t Validate_files::validate(const DD_tablespaces &tablespaces) {
   par_for(PFS_NOT_INSTRUMENTED, tablespaces, m_n_threads, check);
 
   std::ostringstream msg;
-  msg << "Scanned " << m_n_to_check << " tablespaces."
-      << " Validated " << m_n_validated.load() << ".";
+  msg << "Scanned " << m_n_to_check << " tablespaces." << " Validated "
+      << m_n_validated.load() << ".";
 
   if (m_n_skipped.load() > 0) {
     msg << " Skipped " << m_n_skipped.load() << ".";
@@ -5815,8 +5813,9 @@ static int innodb_init(void *p) {
       HTON_SUPPORTS_ATOMIC_DDL | HTON_CAN_RECREATE |
       HTON_SUPPORTS_SECONDARY_ENGINE | HTON_SUPPORTS_TABLE_ENCRYPTION |
       HTON_SUPPORTS_GENERATED_INVISIBLE_PK | HTON_SUPPORTS_BULK_LOAD |
-  // TODO(WL9440): to be enabled when distance scan is implemented in innodb.
-  //| HTON_SUPPORTS_DISTANCE_SCAN;
+      // TODO(WL9440): to be enabled when distance scan is implemented in
+      // innodb.
+      //| HTON_SUPPORTS_DISTANCE_SCAN;
       HTON_SUPPORTS_ONLINE_BACKUPS | HTON_SUPPORTS_COMPRESSED_COLUMNS;
 
   innobase_hton->replace_native_transaction_in_thd = innodb_replace_trx_in_thd;
@@ -5985,11 +5984,11 @@ static int innodb_init(void *p) {
 
 #ifdef UNIV_DEBUG
   if (mysql_pfs_key_t::get_count() != global_count) {
-    ib::error(ER_IB_MSG_544) << "You have created new InnoDB PFS key(s) but "
-                             << mysql_pfs_key_t::get_count() - global_count
-                             << " key(s) is/are not registered with PFS. Please"
-                             << " register the keys in PFS arrays in"
-                             << " ha_innodb.cc.";
+    ib::error(ER_IB_MSG_544)
+        << "You have created new InnoDB PFS key(s) but "
+        << mysql_pfs_key_t::get_count() - global_count
+        << " key(s) is/are not registered with PFS. Please"
+        << " register the keys in PFS arrays in" << " ha_innodb.cc.";
 
     return HA_ERR_INITIALIZATION;
   }
@@ -20145,6 +20144,56 @@ static int innodb_show_mutex_status(handlerton *hton, THD *thd,
     return 1;
   }
 
+  /* Append per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
+  These are populated only while the latch monitor is enabled
+  (innodb_monitor_enable='latch'); when it has never been enabled the
+  registry is empty and nothing extra is printed. */
+  uint hton_name_len = (uint)strlen(innobase_hton_name);
+  int lru_err = 0;
+
+  lru_hold_stats.iterate([&](const char *file, unsigned line, uint64_t count,
+                             uint64_t total_ns, uint64_t max_ns) {
+    if (lru_err != 0) {
+      return;
+    }
+
+    char name_buf[IO_SIZE];
+    int name_len =
+        snprintf(name_buf, sizeof(name_buf), "LRU_list_mutex_hold[%s:%u]",
+                 innobase_basename(file), line);
+
+    char status_buf[IO_SIZE];
+    int status_len = snprintf(
+        status_buf, sizeof(status_buf),
+        "count=%llu,total_ns=%llu,max_ns=%llu,avg_ns=%llu",
+        (unsigned long long)count, (unsigned long long)total_ns,
+        (unsigned long long)max_ns, (unsigned long long)(total_ns / count));
+
+    if (stat_print(thd, innobase_hton_name, hton_name_len, name_buf,
+                   static_cast<uint>(name_len), status_buf,
+                   static_cast<uint>(status_len))) {
+      lru_err = 1;
+    }
+  });
+
+  if (lru_err != 0) {
+    return 1;
+  }
+
+  if (lru_hold_stats.overflowed()) {
+    char status_buf[IO_SIZE];
+    int status_len =
+        snprintf(status_buf, sizeof(status_buf),
+                 "note=some call-sites dropped, increase LruHoldStats::"
+                 "MAX_SLOTS");
+    if (stat_print(thd, innobase_hton_name, hton_name_len,
+                   "LRU_list_mutex_hold[overflow]",
+                   (uint)strlen("LRU_list_mutex_hold[overflow]"), status_buf,
+                   static_cast<uint>(status_len))) {
+      return 1;
+    }
+  }
+
   return 0;
 }
 
@@ -24902,11 +24951,11 @@ static const dfield_t *innobase_get_field_from_update_vector(
   return upd_field ? &upd_field->new_val : nullptr;
 }
 
-dfield_t *innobase_get_computed_value(mem_heap_t **compress_heap,
-    const dtuple_t *row, const dict_v_col_t *col, const dict_table_t *table,
-    mem_heap_t **local_heap, mem_heap_t *heap, THD *thd, TABLE *mysql_table,
-    const dict_field_t *ifield, const dict_table_t *old_table,
-    upd_t *row_update) {
+dfield_t *innobase_get_computed_value(
+    mem_heap_t **compress_heap, const dtuple_t *row, const dict_v_col_t *col,
+    const dict_table_t *table, mem_heap_t **local_heap, mem_heap_t *heap,
+    THD *thd, TABLE *mysql_table, const dict_field_t *ifield,
+    const dict_table_t *old_table, upd_t *row_update) {
   byte rec_buf1[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte rec_buf2[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte *mysql_rec;
