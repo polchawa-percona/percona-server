@@ -1,38 +1,52 @@
 --source include/have_debug.inc
 
-# Verification for the trylock-gated deferred make-young path
-# (PS-11141). Under MTR's low concurrency the LRU_list_mutex trylock in
-# buf_page_make_young_if_needed() almost always succeeds, so promotions go
-# through the inline buf_LRU_make_block_young() path. This test drives real
-# buffer-pool churn with make-young enabled so that the inline path and its
-# ut_ad(mutex_own(LRU_list_mutex)) are exercised under a debug build.
+# Debug-assertion exerciser for the trylock-gated make-young path (PS-11141).
+#
+# buf_page_make_young_if_needed() was changed to promote a too-old page inline
+# (grabbing LRU_list_mutex with a non-blocking mutex_enter_nowait and calling
+# buf_LRU_make_block_young()) when the mutex is free, falling back to the
+# deferred queue only under contention. Under a debug build the inline branch
+# carries live assertions (notably buf_LRU_make_block_young()'s
+# ut_ad(mutex_own(LRU_list_mutex))), and at MTR's single-connection concurrency
+# the trylock always succeeds, so this is the branch that runs.
+#
+# make-young only fires once the pool has started evicting (freed_page_clock
+# != 0) and the LRU list exceeds BUF_LRU_OLD_MIN_LEN (512 pages) so the old
+# sublist exists. The small pool (see the .opt) plus a table whose footprint
+# clearly exceeds it meets both conditions, and inserting then repeatedly
+# scanning the table re-accesses old-sublist pages, driving promotions through
+# the inline path. A cold restart makes the pre-eviction/old-sublist state
+# reproducible run to run.
+#
+# NOTE: this asserts on data integrity and clean completion rather than on the
+# Innodb_buffer_pool_pages_made_young counter. The exact number of promotions
+# in any measured window depends on eviction timing and background LRU-manager
+# activity and is not reproducible enough to assert on without flaking; the
+# value here is that the workload drives the inline promote path many times
+# under live assertions, so any regression in it trips a debug assert and fails
+# the test.
 
-# Force pages into the "old" sublist quickly so re-access triggers make-young.
+# Cold, reproducible pre-eviction state.
+--source include/restart_mysqld.inc
+
 SET @old_blocks_time = @@global.innodb_old_blocks_time;
 SET GLOBAL innodb_old_blocks_time = 100;
 
 CREATE TABLE t1 (id INT PRIMARY KEY, pad CHAR(255)) ENGINE=InnoDB;
 
+# Working set larger than the 16MB pool: the insert re-accesses B-tree upper
+# pages while eviction runs, and the scans re-touch resident old-sublist pages,
+# repeatedly driving buf_page_make_young_if_needed() down the inline branch.
 --disable_query_log
 BEGIN;
 --let $i = 0
-while ($i < 20000) {
+while ($i < 60000) {
   eval INSERT INTO t1 VALUES ($i, REPEAT('x', 255));
   --inc $i
 }
 COMMIT;
 --enable_query_log
 
-# First scan: warm the pages (they land in the old sublist).
---disable_result_log
-SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
---enable_result_log
-
-# Let old_blocks_time elapse so the pages qualify as "too old".
---sleep 0.5
-
-# Repeated scans re-access the now-old pages -> make-young fires -> inline
-# promote path (trylock succeeds at MTR concurrency).
 --disable_result_log
 --let $scan = 0
 while ($scan < 5) {
@@ -41,7 +55,10 @@ while ($scan < 5) {
 }
 --enable_result_log
 
+# Deterministic invariants: the workload completed without tripping any debug
+# assertion in the promote path, and the data is intact.
 SELECT COUNT(*) AS rows_ok FROM t1;
+CHECKSUM TABLE t1;
 
 DROP TABLE t1;
 SET GLOBAL innodb_old_blocks_time = @old_blocks_time;

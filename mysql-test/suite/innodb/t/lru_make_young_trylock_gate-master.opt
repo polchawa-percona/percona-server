@@ -1,1 +1,1 @@
---innodb_buffer_pool_size=5242880 --innodb_buffer_pool_instances=1 --innodb_old_blocks_pct=37
+--innodb_buffer_pool_size=16777216 --innodb_buffer_pool_instances=1 --innodb_old_blocks_pct=37 --innodb_buffer_pool_load_at_startup=0 --innodb_buffer_pool_dump_at_shutdown=0

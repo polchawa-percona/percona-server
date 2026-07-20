@@ -1,3 +1,4 @@
+# restart
 SET @old_blocks_time = @@global.innodb_old_blocks_time;
 SET GLOBAL innodb_old_blocks_time = 100;
 CREATE TABLE t1 (id INT PRIMARY KEY, pad CHAR(255)) ENGINE=InnoDB;
@@ -6,9 +7,11 @@ SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
-SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 SELECT COUNT(*) AS rows_ok FROM t1;
 rows_ok
-20000
+60000
+CHECKSUM TABLE t1;
+Table	Checksum
+test.t1	4294937296
 DROP TABLE t1;
 SET GLOBAL innodb_old_blocks_time = @old_blocks_time;
