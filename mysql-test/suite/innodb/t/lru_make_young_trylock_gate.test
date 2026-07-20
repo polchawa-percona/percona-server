@@ -21,10 +21,14 @@
 # NOTE: this asserts on data integrity and clean completion rather than on the
 # Innodb_buffer_pool_pages_made_young counter. The exact number of promotions
 # in any measured window depends on eviction timing and background LRU-manager
-# activity and is not reproducible enough to assert on without flaking; the
-# value here is that the workload drives the inline promote path many times
-# under live assertions, so any regression in it trips a debug assert and fails
-# the test.
+# activity and is not reproducible enough to assert on without flaking - some
+# runs drive the inline branch many times, some not at all. So this test does
+# not guarantee the branch is hit on every run; its value is that on the
+# common (cold) case it does exercise the inline path under live assertions,
+# and any regression reachable by this workload trips a debug assert. Broad,
+# reliable coverage of the inline path comes from running the innodb suite on a
+# debug build (the default innodb_lru_make_young_drain_threshold is non-zero,
+# so every such run exercises this gate), not from this single test.
 
 # Cold, reproducible pre-eviction state.
 --source include/restart_mysqld.inc
