@@ -1,0 +1,47 @@
+--source include/have_debug.inc
+
+# Verification for the trylock-gated deferred make-young path
+# (PS-11141). Under MTR's low concurrency the LRU_list_mutex trylock in
+# buf_page_make_young_if_needed() almost always succeeds, so promotions go
+# through the inline buf_LRU_make_block_young() path. This test drives real
+# buffer-pool churn with make-young enabled so that the inline path and its
+# ut_ad(mutex_own(LRU_list_mutex)) are exercised under a debug build.
+
+# Force pages into the "old" sublist quickly so re-access triggers make-young.
+SET @old_blocks_time = @@global.innodb_old_blocks_time;
+SET GLOBAL innodb_old_blocks_time = 100;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, pad CHAR(255)) ENGINE=InnoDB;
+
+--disable_query_log
+BEGIN;
+--let $i = 0
+while ($i < 20000) {
+  eval INSERT INTO t1 VALUES ($i, REPEAT('x', 255));
+  --inc $i
+}
+COMMIT;
+--enable_query_log
+
+# First scan: warm the pages (they land in the old sublist).
+--disable_result_log
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+--enable_result_log
+
+# Let old_blocks_time elapse so the pages qualify as "too old".
+--sleep 0.5
+
+# Repeated scans re-access the now-old pages -> make-young fires -> inline
+# promote path (trylock succeeds at MTR concurrency).
+--disable_result_log
+--let $scan = 0
+while ($scan < 5) {
+  SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+  --inc $scan
+}
+--enable_result_log
+
+SELECT COUNT(*) AS rows_ok FROM t1;
+
+DROP TABLE t1;
+SET GLOBAL innodb_old_blocks_time = @old_blocks_time;

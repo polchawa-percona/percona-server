@@ -1,0 +1,1 @@
+--innodb_buffer_pool_size=5242880 --innodb_buffer_pool_instances=1 --innodb_old_blocks_pct=37
