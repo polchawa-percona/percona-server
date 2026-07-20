@@ -3262,11 +3262,36 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_a(buf_page_in_file(bpage));
 
   if (buf_page_peek_if_too_old(bpage)) {
-    /* With a non-zero drain threshold, push onto a lock-free per-pool queue
-    instead of taking the LRU list mutex here. A threshold-crossing push
-    or the page cleaner coordinator drains the queue. */
+    /* With a non-zero drain threshold we normally defer the promotion onto a
+    per-pool lock-free queue instead of taking the LRU list mutex on this hot
+    read path; a threshold-crossing push or the page cleaner coordinator
+    drains the queue. But deferring is only a win when the LRU list mutex is
+    contended: the enqueue/drain machinery costs several extra atomics plus a
+    buf-fix/unfix round-trip per promotion, which at thread counts below the
+    core count is pure overhead with no mutex contention to amortize it
+    against. So gate the deferral on contention - try to acquire the LRU list
+    mutex without waiting and, if it is free, promote inline (the original
+    cheap path); only fall back to the queue when the trylock fails, i.e. the
+    mutex is actually contended. */
     if (buf_LRU_make_young_drain_threshold != 0) {
-      buf_LRU_enqueue_promote(bpage);
+      buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+      /* Skip the inline fast path for a page already parked on the queue: it
+      is buf-fixed and will be re-linked by the drain, and its
+      freed_page_clock is not refreshed until then, so it can still look
+      too-old here - promoting it inline as well would splice it twice and
+      double-count n_pages_made_young. buf_LRU_enqueue_promote() dedups such a
+      page for free (its CAS on LRU_in_promote_queue is a no-op). A page that
+      slips from not-queued to queued between this load and the trylock can
+      still be promoted both inline and by a later drain, but that is a benign
+      redundant promotion, matching the over-count the queue already tolerates
+      by design. */
+      if (!bpage->LRU_in_promote_queue.load(std::memory_order_acquire) &&
+          mutex_enter_nowait(&buf_pool->LRU_list_mutex) == 0) {
+        buf_LRU_make_block_young(bpage);
+        mutex_exit(&buf_pool->LRU_list_mutex);
+      } else {
+        buf_LRU_enqueue_promote(bpage);
+      }
     } else {
       buf_page_make_young(bpage);
     }
