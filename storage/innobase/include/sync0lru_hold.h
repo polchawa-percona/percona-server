@@ -48,7 +48,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 /** Aggregates LRU_list_mutex hold times, keyed by acquisition call-site
 (source file + line).  All members use relaxed atomics: this is measurement
@@ -142,30 +141,48 @@ struct LruHoldStats {
 
  private:
   /** Locate the slot for (file, line), claiming a free slot on first use.
+
+  The key is the pair (file pointer, line).  Each acquisition call-site has a
+  single, stable __FILE__ pointer (captured by UT_LOCATION_HERE at the call
+  site), so a plain pointer comparison identifies the file -- no strcmp is
+  needed, and it keeps this in-lock path cheap.
+
+  Claim protocol: publish the file pointer with a CAS first, then store the
+  line.  m_line is 0 in the tiny window between those two steps; because a
+  real __LINE__ is never 0, a reader that sees our file with m_line == 0
+  knows a claim is in progress and waits for the line to appear.  Storing the
+  line before the CAS (as an earlier version did) is racy: a thread that then
+  loses the CAS would have already clobbered the winner's line, corrupting
+  per-call-site attribution.
   @return the slot, or nullptr if all slots are exhausted. */
   Slot *find_or_claim(const char *file, unsigned line) {
     for (Slot &s : m_slots) {
       const char *cur = s.m_file.load(std::memory_order_acquire);
 
       if (cur == nullptr) {
-        /* Free slot: try to claim it.  Publish the line first, then the
-        file pointer as the release marker so a concurrent reader that sees
-        our file also sees the matching line. */
-        s.m_line.store(line, std::memory_order_relaxed);
+        /* Free slot: try to claim it. */
         const char *expected = nullptr;
         if (s.m_file.compare_exchange_strong(expected, file,
-                                             std::memory_order_release,
+                                             std::memory_order_acq_rel,
                                              std::memory_order_acquire)) {
+          /* We own the slot; publish the line only now. */
+          s.m_line.store(line, std::memory_order_release);
           return &s;
         }
-        /* Lost the race: expected now holds whoever won.  Fall through to
-        the match check below against the winner's key. */
+        /* Lost the race: expected now holds the winner's file pointer. */
         cur = expected;
       }
 
-      if ((cur == file || std::strcmp(cur, file) == 0) &&
-          s.m_line.load(std::memory_order_relaxed) == line) {
-        return &s;
+      if (cur == file) {
+        /* Same file.  Wait for the claimer to publish a non-zero line, then
+        check whether this slot is for our line or a different call-site in
+        the same file. */
+        unsigned l;
+        while ((l = s.m_line.load(std::memory_order_acquire)) == 0) {
+        }
+        if (l == line) {
+          return &s;
+        }
       }
     }
     return nullptr;
