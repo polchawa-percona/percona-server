@@ -2008,8 +2008,17 @@ static bool buf_flush_start(buf_pool_t *buf_pool, buf_flush_t flush_type) {
   bool started = false;
   buf_pool->change_flush_state(flush_type, [&]() {
     /* Can't start a new batch of the same type as one already running -
-    various synchronization mechanisms/counters would not work. */
-    if (!buf_pool->is_flushing(flush_type)) {
+    various synchronization mechanisms/counters would not work. Also, for
+    BUF_FLUSH_LRU, don't start one while buf_pool_invalidate_instance() has
+    closed the gate (lru_run_allowed == false) for the duration of a
+    teardown. Checking the gate here, atomically with is_flushing() in the
+    same critical section that sets init_flush[], means a batch either wins
+    the race and becomes visible via is_flushing() right away, or it does not
+    start at all - so the invalidator can rely on the ordinary
+    is_flushing()/buf_flush_await_no_flushing() wait instead of tracking a
+    separate "batch in flight" flag. */
+    if (!buf_pool->is_flushing(flush_type) &&
+        (flush_type != BUF_FLUSH_LRU || buf_pool->lru_run_allowed)) {
       buf_pool->init_flush[flush_type] = true;
       started = true;
     }
@@ -3443,9 +3452,6 @@ static void buf_flush_page_coordinator_thread() {
   the buffer pool but can't be sure that no new pages are being
   dirtied until we enter SRV_SHUTDOWN_FLUSH_PHASE phase which is
   the last phase (meanwhile we visit SRV_SHUTDOWN_MASTER_STOP).
-  Because the LRU manager thread is also flushing at SRV_SHUTDOWN_CLEANUP
-  but not SRV_SHUTDOWN_FLUSH_PHASE, we only leave the
-  SRV_SHUTDOWN_CLEANUP loop when the LRU manager quits.
 
   Note, that if we are handling fatal error, we set the state
   directly to EXIT_THREADS in which case we also might exit the loop
@@ -3503,6 +3509,10 @@ static void buf_flush_page_coordinator_thread() {
   sweep and we'll come out of the loop leaving behind dirty pages
   in the flush_list */
   buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LIST);
+  buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LRU);
+
+  /* The pre-flush loop above only exits once no LRU manager thread is
+  active, so none can dispatch a fresh LRU batch during the final sweep. */
   ut_ad(buf_flush_active_lru_managers() == 0);
 
   bool success;
@@ -3530,6 +3540,7 @@ static void buf_flush_page_coordinator_thread() {
     n_flushed = n_flushed_list;
 
     buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LIST);
+    buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LRU);
 
   } while (!success || n_flushed > 0 || are_any_read_ios_still_underway ||
            buf_get_flush_list_len(nullptr) > 0);
@@ -3636,13 +3647,11 @@ void buf_flush_sync_all_buf_pools() {
   buf_flush_fsync();
 }
 
-/** Make a LRU manager thread sleep until the passed target time, if it's not
-already in the past.
-@param[in]	next_loop_time	desired wake up time */
+/** Sleep the LRU manager thread until next_loop_time, unless we are already
+past it or shutdown is in the flush phase (in which case the manager runs
+without sleeping so it can exit promptly). */
 static void buf_lru_manager_sleep_if_needed(
     std::chrono::steady_clock::time_point next_loop_time) {
-  /* If this is the server shutdown buffer pool flushing phase, skip the
-  sleep to quit this thread faster */
   if (srv_shutdown_state.load() == SRV_SHUTDOWN_FLUSH_PHASE) return;
 
   const auto cur_time = std::chrono::steady_clock::now();
@@ -3687,10 +3696,20 @@ static void buf_lru_manager_adapt_sleep_time(
     /* Free lists filled between 5% and 20%, no change */
   }
 }
-/** LRU manager thread for performing LRU flushed and evictions for buffer pool
-free list refill. One thread is created for each buffer pool instace.
-@param[in] buf_pool_instance buffer pool instance number for this thread
-*/
+
+/** LRU manager thread. One per buf_pool instance. Periodically calls
+buf_flush_LRU_list to keep the free list topped up. The current
+buf_LRU_get_free_block continues to do its own scan_and_free /
+single_page_flush fall-back as needed; this thread is an additional source
+of LRU-tail pressure that lets the user-thread fall-back stay rare on
+healthy workloads.
+
+The thread runs until srv_shutdown_state reaches SRV_SHUTDOWN_FLUSH_PHASE,
+mirroring the page cleaner coordinator's pre-flush loop, so that user
+threads keep finding free pages throughout every earlier shutdown phase.
+The buf_pool's run_lru event is set at startup; it is reset only inside
+buf_pool_invalidate_instance() so the manager pauses while the pool is
+torn down. */
 static void buf_lru_manager_thread(size_t buf_pool_instance) {
 #ifdef UNIV_LINUX
   /* linux might be able to set different setting for each thread
@@ -3709,12 +3728,12 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
   auto next_loop_time = std::chrono::steady_clock::now() + lru_sleep_time;
   ulint lru_n_flushed = 1;
 
-  /* On server shutdown, the LRU manager thread runs through cleanup
-  phase to provide free pages for the master and purge threads.  */
-  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE ||
-         srv_shutdown_state.load() == SRV_SHUTDOWN_CLEANUP) {
+  while (srv_shutdown_state.load() < SRV_SHUTDOWN_FLUSH_PHASE) {
     ut_d(buf_flush_page_cleaner_disabled_loop());
 
+    /* Park while buf_pool_invalidate_instance() has reset this event, so no
+    LRU batch runs concurrently with a pool teardown. run_lru is set at
+    startup and only reset for the duration of an invalidation. */
     os_event_wait(buf_pool->run_lru);
 
     buf_lru_manager_sleep_if_needed(next_loop_time);
@@ -3723,6 +3742,12 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
 
     next_loop_time = std::chrono::steady_clock::now() + lru_sleep_time;
 
+    /* buf_flush_LRU_list() (via buf_flush_start()) is a no-op returning 0 if
+    buf_pool_invalidate_instance() has cleared lru_run_allowed in the
+    meantime; resetting run_lru only guarantees that the *next*
+    os_event_wait() above parks, so this check is what stops a thread that
+    already returned from the wait (or was in the sleep) from starting a
+    batch after invalidation began. */
     lru_n_flushed = buf_flush_LRU_list(buf_pool);
 
     buf_flush_await_no_flushing(buf_pool, BUF_FLUSH_LRU);
