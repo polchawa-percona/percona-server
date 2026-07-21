@@ -172,8 +172,7 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
   flight; > 2*threshold re-arms if the crossing attempt is lost. Remainder
   below threshold is drained periodically by the page cleaner coordinator. */
   const uint threshold = buf_LRU_make_young_drain_threshold;
-  if (threshold != 0 &&
-      (new_len == threshold || new_len > 2 * uint64_t{threshold})) {
+  if (new_len == threshold || new_len > 2 * uint64_t{threshold}) {
     bool not_draining = false;
     /* Avoid clash of concurrent promotions. */
     if (buf_pool->LRU_promote_draining.compare_exchange_strong(
@@ -2015,7 +2014,8 @@ static bool buf_LRU_promote_block_batched(buf_pool_t *buf_pool,
 void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
-  /* This is just to avoid the mutex lock and CAS overhead if the queue was empty. */
+  /* This is just to avoid the mutex lock and CAS overhead if the queue was
+   * empty. */
   if (buf_pool->LRU_promote_head.load(std::memory_order_acquire) == nullptr) {
     return;
   }
