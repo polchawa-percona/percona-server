@@ -1964,7 +1964,7 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
   freed. Drain per withdraw attempt for immediate progress; the caller
   retries on failure. A page enqueued after the drain may be skipped until
   the next attempt. */
-  buf_LRU_drain_promote_queue(buf_pool);
+  buf_apply_deferred_page_operations(buf_pool);
 
   mutex_enter(&buf_pool->free_list_mutex);
   while (UT_LIST_GET_LEN(buf_pool->withdraw) < buf_pool->withdraw_target) {
@@ -3262,6 +3262,14 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_a(buf_page_in_file(bpage));
 
   if (buf_page_peek_if_too_old(bpage)) {
+    /* Threshold 0 disables the deferred promote queue: move the page to the
+    LRU head immediately, taking the LRU list mutex on this path as before the
+    deferral optimization existed. */
+    if (buf_LRU_make_young_drain_threshold == 0) {
+      buf_page_make_young(bpage);
+      return;
+    }
+
     buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
     /* Skip the inline fast path for a page already parked on the queue: it
     is buf-fixed and will be re-linked by the drain, and its
@@ -6258,7 +6266,7 @@ static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   replaceable check below. Materialize them here first; safe only because
   callers run in a quiescent state (shutdown, or single-actor recovery)
   where nothing re-enqueues after the drain. */
-  buf_LRU_drain_promote_queue(buf_pool);
+  buf_apply_deferred_page_operations(buf_pool);
 
   buf_chunk_t *chunk = buf_pool->chunks;
 
@@ -6286,7 +6294,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
 
   /* Release any pages still on the promote queue so their buf_fix counts
   do not block LRU invalidation below. */
-  buf_LRU_drain_promote_queue(buf_pool);
+  buf_apply_deferred_page_operations(buf_pool);
 
   for (i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
     /* As this function is called during startup and during redo application

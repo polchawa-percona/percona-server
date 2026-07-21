@@ -3060,7 +3060,7 @@ static void buf_flush_page_cleaner_disabled_loop(bool drain_promote_queues) {
     Coordinator only; workers pass drain_promote_queues=false. */
     if (drain_promote_queues) {
       for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
-        buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+        buf_apply_deferred_page_operations(buf_pool_from_array(i));
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); /* [A] */
@@ -3194,7 +3194,7 @@ static void buf_flush_page_coordinator_thread() {
     normal coordinator loop does this every ~1s; recovery had no equivalent
     until now. No-op when the queue is empty. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+      buf_apply_deferred_page_operations(buf_pool_from_array(i));
     }
 
     switch (recv_sys->flush_type) {
@@ -3239,7 +3239,7 @@ static void buf_flush_page_coordinator_thread() {
     until drained; on an idle server the coordinator may not run flush slots,
     so drain every instance once per iteration (~1s). No-op when empty. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+      buf_apply_deferred_page_operations(buf_pool_from_array(i));
     }
 
     /* We consider server active if either we have just discovered a first
