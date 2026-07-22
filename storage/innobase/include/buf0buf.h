@@ -2493,6 +2493,57 @@ struct buf_pool_t {
   running. Protected by flush_state_mutex. */
   os_event_t no_flush[BUF_FLUSH_N_TYPES];
 
+  /** Always set at startup so the LRU manager thread does not have to wait.
+  Reset by buf_pool_invalidate_instance() so the manager pauses while the
+  buffer pool is being torn down / re-initialised; set again afterwards. */
+  os_event_t run_lru;
+
+  /** Run gate for the LRU manager thread, checked together with is_flushing()
+  inside buf_flush_start()'s own change_flush_state() critical section before
+  a new BUF_FLUSH_LRU batch is allowed to start. True in normal operation;
+  set to false by buf_pool_invalidate_instance() for the duration of a
+  teardown. Checking this flag in the same critical section that sets
+  init_flush[BUF_FLUSH_LRU] closes the window where a batch could start
+  concurrently with invalidation: a batch either atomically wins the race and
+  becomes visible via is_flushing() (which the invalidator's existing
+  buf_flush_await_no_flushing() loop already waits out), or it does not start
+  at all. Protected by flush_state_mutex. */
+  bool lru_run_allowed;
+
+  /** Per-instance LRU-manager flush accounting. Written only by this
+  instance's buf_lru_manager_thread and read (summed across instances) by
+  the page cleaner coordinator in Adaptive_flush::set_average(), which is
+  the single thread that publishes the buffer_LRU_batch_flush_* monitor
+  counters. This mirrors how the flush_list path funnels each worker's
+  per-slot counts through the one coordinator, keeping the monitor update
+  single-writer (no lost totals or torn min/max). Protected by
+  flush_state_mutex so the coordinator can atomically gather and reset a
+  coherent interval tuple. */
+  struct lru_manager_stat_t {
+    /** Pages written to disk by LRU batches. */
+    uint64_t n_flushed_pages;
+    /** LRU batches that wrote at least one page. */
+    uint64_t n_flush_batches;
+    /** Largest number of pages written by one LRU batch. */
+    uint64_t max_flushed_pages_per_batch;
+    /** Clean or stale pages evicted by LRU batches. */
+    uint64_t n_evicted_pages;
+    /** LRU batches that evicted at least one page. */
+    uint64_t n_evict_batches;
+    /** Largest number of pages evicted by one LRU batch. */
+    uint64_t max_evicted_pages_per_batch;
+    /** Pages examined by LRU batches. */
+    uint64_t n_scanned_pages;
+    /** LRU batches that examined at least one page. */
+    uint64_t n_scan_batches;
+    /** Largest number of pages examined by one LRU batch. */
+    uint64_t max_scanned_pages_per_batch;
+    /** Number of LRU flush passes (buf_flush_LRU_list() calls). */
+    uint64_t n_passes;
+    /** Cumulative time spent in buf_flush_LRU_list(), in milliseconds. */
+    uint64_t flush_time_ms;
+  } lru_manager_stat;
+
   /** A red-black tree is used exclusively during recovery to speed up
   insertions in the flush_list. This tree contains blocks in order of
   oldest_modification LSN and is kept in sync with the flush_list.  Each
