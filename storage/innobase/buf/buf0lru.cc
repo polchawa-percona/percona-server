@@ -1101,7 +1101,12 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
   bool freed{};
   ulint scanned{};
 
-  for (buf_page_t *bpage = buf_pool->lru_scan_itr.start();
+  const bool force_restart = buf_pool->lru_scan_depth >= BUF_LRU_SEARCH_SCAN_THRESHOLD;
+  if (force_restart) {
+    buf_pool->lru_scan_depth = 0;
+  }
+
+  for (buf_page_t *bpage = buf_pool->lru_scan_itr.start(force_restart);
        bpage != nullptr &&
        (scan_all || scanned < BUF_LRU_SEARCH_SCAN_THRESHOLD);
        ++scanned, bpage = buf_pool->lru_scan_itr.get()) {
@@ -1109,6 +1114,7 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
     auto prev = UT_LIST_GET_PREV(LRU, bpage);
     auto block_mutex = buf_page_get_mutex(bpage);
 
+    buf_pool->lru_scan_depth++;
     buf_pool->lru_scan_itr.set(prev);
 
     ut_ad(bpage->in_LRU_list);

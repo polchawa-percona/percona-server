@@ -2131,12 +2131,18 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
 
   mutex_enter(&buf_pool->LRU_list_mutex);
 
-  for (bpage = buf_pool->single_scan_itr.start(), scanned = 0, freed = false;
+  const bool force_restart = buf_pool->single_scan_depth >= 100;
+  if (force_restart) {
+    buf_pool->single_scan_depth = 0;
+  }
+
+  for (bpage = buf_pool->single_scan_itr.start(force_restart), scanned = 0, freed = false;
        bpage != nullptr; ++scanned, bpage = buf_pool->single_scan_itr.get()) {
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
     auto prev = UT_LIST_GET_PREV(LRU, bpage);
 
+    buf_pool->single_scan_depth++;
     buf_pool->single_scan_itr.set(prev);
 
     if (bpage->was_stale()) {

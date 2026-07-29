@@ -1553,8 +1553,12 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   /* Initialize the iterator for LRU scan search */
   new (&buf_pool->lru_scan_itr) LRUItr(buf_pool, &buf_pool->LRU_list_mutex);
 
+  buf_pool->lru_scan_depth = 0;
+
   /* Initialize the iterator for single page scan search */
   new (&buf_pool->single_scan_itr) LRUItr(buf_pool, &buf_pool->LRU_list_mutex);
+
+  buf_pool->single_scan_depth = 0;
 
   err = DB_SUCCESS;
 }
@@ -3111,10 +3115,10 @@ void LRUHp::adjust(const buf_page_t *bpage) {
 the LRU list it resets the value to the tail of the LRU list.
 @return buf_page_t from where to start scan. */
 
-buf_page_t *LRUItr::start() {
+buf_page_t *LRUItr::start(bool force_restart) {
   ut_ad(mutex_own(m_mutex));
 
-  if (!m_hp || !m_hp->old) {
+  if (!m_hp || !m_hp->old || force_restart) {
     m_hp = UT_LIST_GET_LAST(m_buf_pool->LRU);
   }
 

@@ -2202,7 +2202,7 @@ class LRUItr : public LRUHp {
   too deep into the LRU list it resets the value to the tail
   of the LRU list.
   @return buf_page_t from where to start scan. */
-  buf_page_t *start();
+  buf_page_t *start(bool force_restart);
 };
 
 /** Struct that is embedded in the free zip blocks */
@@ -2521,9 +2521,13 @@ struct buf_pool_t {
   replaceable victim. Protected by buf_pool::LRU_list_mutex. */
   LRUItr lru_scan_itr;
 
+  size_t lru_scan_depth;
+
   /** Iterator used to scan the LRU list when searching for
   single page flushing victim.  Protected by buf_pool::LRU_list_mutex. */
   LRUItr single_scan_itr;
+
+  size_t single_scan_depth;
 
   /** Base node of the LRU list */
   UT_LIST_BASE_NODE_T(buf_page_t, LRU) LRU;
