@@ -2131,7 +2131,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
 
   mutex_enter(&buf_pool->LRU_list_mutex);
 
-  const bool force_restart = buf_pool->single_scan_depth >= 100;
+  const bool force_restart = buf_pool->single_scan_depth >= 1000;
   if (force_restart) {
     buf_pool->single_scan_depth = 0;
   }

@@ -1101,7 +1101,7 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
   bool freed{};
   ulint scanned{};
 
-  const bool force_restart = buf_pool->lru_scan_depth >= BUF_LRU_SEARCH_SCAN_THRESHOLD;
+  const bool force_restart = false;//buf_pool->lru_scan_depth >= 10000;
   if (force_restart) {
     buf_pool->lru_scan_depth = 0;
   }
