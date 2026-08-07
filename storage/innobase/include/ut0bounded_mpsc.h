@@ -21,7 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 #define ut0bounded_mpsc_h
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -43,6 +45,57 @@ constexpr size_t BOUNDED_MPSC_CACHE_LINE_SIZE = ut::INNODB_CACHE_LINE_SIZE;
 #endif
 
 namespace ut {
+
+/** Fixed-size producer-side duplicate suppression keyed by a nonzero,
+pool-unique generation. A collision drops the heuristic request rather than
+making a producer search or wait. */
+class Bounded_generation_dedup {
+ public:
+  explicit Bounded_generation_dedup(uint32_t capacity)
+      : m_tags{std::make_unique<std::atomic<uint64_t>[]>(capacity)},
+        m_capacity{capacity} {
+    if (capacity == 0) {
+      std::abort();
+    }
+    for (uint32_t i = 0; i < capacity; ++i) {
+      m_tags[i].store(0, std::memory_order_relaxed);
+    }
+  }
+
+  Bounded_generation_dedup(const Bounded_generation_dedup &) = delete;
+  Bounded_generation_dedup(Bounded_generation_dedup &&) = delete;
+  Bounded_generation_dedup &operator=(const Bounded_generation_dedup &) =
+      delete;
+  Bounded_generation_dedup &operator=(Bounded_generation_dedup &&) = delete;
+
+  /** Reserve the generation's deterministic slot.
+  @return true only when this caller installed the generation */
+  [[nodiscard]] bool try_reserve(uint64_t generation) {
+    if (generation == 0) {
+      return false;
+    }
+    auto &tag = m_tags[generation % m_capacity];
+    uint64_t expected = 0;
+    return tag.compare_exchange_strong(expected, generation,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire);
+  }
+
+  /** Release a slot only if it still contains the exact generation.
+  @return true if the generation was released */
+  [[nodiscard]] bool release(uint64_t generation) {
+    if (generation == 0) {
+      return false;
+    }
+    auto &tag = m_tags[generation % m_capacity];
+    return tag.compare_exchange_strong(generation, 0, std::memory_order_acq_rel,
+                                       std::memory_order_acquire);
+  }
+
+ private:
+  std::unique_ptr<std::atomic<uint64_t>[]> m_tags;
+  const uint32_t m_capacity;
+};
 
 /** Result of a bounded MPSC enqueue attempt. */
 enum class Bounded_mpsc_push_result {
@@ -74,8 +127,11 @@ class Bounded_mpsc_queue {
   @param capacity maximum number of simultaneously reserved/pending values */
   explicit Bounded_mpsc_queue(uint32_t capacity)
       : m_slots{std::make_unique<Slot[]>(capacity)}, m_capacity{capacity} {
-    if (capacity == 0) {
+    if (capacity == 0 || capacity > MAX_CAPACITY) {
       std::abort();
+    }
+    for (auto &word : m_ready_words) {
+      word.store(0, std::memory_order_relaxed);
     }
   }
 
@@ -113,6 +169,7 @@ class Bounded_mpsc_queue {
     const uint32_t previous =
         m_pending_count.value.fetch_add(1, std::memory_order_relaxed);
     slot.state.store(State::ready, std::memory_order_release);
+    publish_ready(static_cast<uint32_t>(ticket % m_capacity));
 
     wake_threshold = std::max(uint32_t{1}, wake_threshold);
     if (previous + 1 < wake_threshold) {
@@ -125,28 +182,58 @@ class Bounded_mpsc_queue {
   }
 
   /** Try to remove one pending value. Must have only one concurrent caller.
-  @return copied value, or nullopt if a complete scan found no ready slot */
+  A two-level ready bitmap locates a published slot without scanning queue
+  capacity.
+  @return copied value, or nullopt if no slot is currently published */
   [[nodiscard]] std::optional<T> try_pop() {
-    for (uint32_t scanned = 0; scanned < m_capacity; ++scanned) {
-      const uint32_t slot_index = (m_consumer_cursor + scanned) % m_capacity;
-      Slot &slot = m_slots[slot_index];
-      if (slot.state.load(std::memory_order_acquire) != State::ready) {
+    for (;;) {
+#ifdef EXTRA_CODE_FOR_UNIT_TESTING
+      ++m_ready_probe_count;
+#endif
+      const uint64_t summary =
+          m_ready_summary.value.load(std::memory_order_acquire);
+      if (summary == 0) {
+        return std::nullopt;
+      }
+
+      const uint32_t word_index = std::countr_zero(summary);
+      const uint64_t summary_bit = uint64_t{1} << word_index;
+#ifdef EXTRA_CODE_FOR_UNIT_TESTING
+      ++m_ready_probe_count;
+#endif
+      const uint64_t ready =
+          m_ready_words[word_index].load(std::memory_order_acquire);
+      if (ready == 0) {
+        clear_summary_bit(word_index, summary_bit);
         continue;
       }
 
+      const uint32_t bit_index = std::countr_zero(ready);
+      const uint64_t ready_bit = uint64_t{1} << bit_index;
+      const uint32_t slot_index = word_index * READY_WORD_BITS + bit_index;
+      const uint64_t previous = m_ready_words[word_index].fetch_and(
+          ~ready_bit, std::memory_order_acq_rel);
+      if ((previous & ready_bit) == 0) {
+        continue;
+      }
+      if ((previous & ~ready_bit) == 0) {
+        clear_summary_bit(word_index, summary_bit);
+      }
+
+      Slot &slot = m_slots[slot_index];
+      if (slot.state.load(std::memory_order_acquire) != State::ready) {
+        std::abort();
+      }
       std::optional<T> value{*slot.value};
       slot.value.reset();
       slot.state.store(State::free, std::memory_order_release);
-      const uint32_t previous =
+      const uint32_t pending_before =
           m_pending_count.value.fetch_sub(1, std::memory_order_relaxed);
-      if (previous == 0) {
+      if (pending_before == 0) {
         std::abort();
       }
-      m_consumer_cursor = (slot_index + 1) % m_capacity;
       return value;
     }
-
-    return std::nullopt;
   }
 
   /** @return maximum simultaneously reserved/pending values */
@@ -159,9 +246,10 @@ class Bounded_mpsc_queue {
 
   /** Complete the consumer's drain-and-sleep handshake.
 
-  Clear the producer wake state, then scan after the clear. If work raced with
-  the clear, re-arm the state and tell the consumer to keep draining. If work
-  arrives after the scan, that producer observes false and signals.
+  Clear the producer wake state, then recheck the O(1) pending count. If work
+  raced with the clear, re-arm the state and tell the consumer to keep
+  draining. If work arrives after the recheck, that producer observes false
+  and signals.
   @return true if the consumer may sleep */
   [[nodiscard]] bool reset_wakeup_if_empty() {
 #ifdef EXTRA_CODE_FOR_UNIT_TESTING
@@ -179,14 +267,9 @@ class Bounded_mpsc_queue {
     return true;
   }
 
-  /** @return true when a complete scan finds no published value */
+  /** @return true when no value is published or being published */
   [[nodiscard]] bool empty() const {
-    for (uint32_t i = 0; i < m_capacity; ++i) {
-      if (m_slots[i].state.load(std::memory_order_acquire) == State::ready) {
-        return false;
-      }
-    }
-    return true;
+    return m_pending_count.value.load(std::memory_order_acquire) == 0;
   }
 
 #ifdef EXTRA_CODE_FOR_UNIT_TESTING
@@ -200,9 +283,21 @@ class Bounded_mpsc_queue {
     m_before_wakeup_clear_hook = std::move(hook);
   }
 
+  /** Reset the number of ready-bitmap probes made by try_pop(). */
+  void reset_ready_probe_count() { m_ready_probe_count = 0; }
+
+  /** @return number of ready-bitmap probes made by try_pop(). */
+  [[nodiscard]] uint32_t ready_probe_count() const {
+    return m_ready_probe_count;
+  }
+
 #endif
 
  private:
+  static constexpr uint32_t READY_WORD_BITS = 64;
+  static constexpr uint32_t READY_SUMMARY_BITS = 64;
+  static constexpr uint32_t MAX_CAPACITY = READY_WORD_BITS * READY_SUMMARY_BITS;
+
   enum class State : uint8_t { free, reserved, ready };
 
   struct Slot {
@@ -211,6 +306,24 @@ class Bounded_mpsc_queue {
   };
 
   static_assert(std::atomic<State>::is_always_lock_free);
+
+  /** Publish one ready slot into the two-level consumer bitmap. */
+  void publish_ready(uint32_t slot_index) {
+    const uint32_t word_index = slot_index / READY_WORD_BITS;
+    const uint32_t bit_index = slot_index % READY_WORD_BITS;
+    m_ready_words[word_index].fetch_or(uint64_t{1} << bit_index,
+                                       std::memory_order_release);
+    m_ready_summary.value.fetch_or(uint64_t{1} << word_index,
+                                   std::memory_order_release);
+  }
+
+  /** Clear a summary bit and restore it if a producer raced the clear. */
+  void clear_summary_bit(uint32_t word_index, uint64_t summary_bit) {
+    m_ready_summary.value.fetch_and(~summary_bit, std::memory_order_acq_rel);
+    if (m_ready_words[word_index].load(std::memory_order_acquire) != 0) {
+      m_ready_summary.value.fetch_or(summary_bit, std::memory_order_release);
+    }
+  }
 
   template <typename U>
   struct alignas(BOUNDED_MPSC_CACHE_LINE_SIZE) Cacheline_atomic {
@@ -228,14 +341,16 @@ class Bounded_mpsc_queue {
 
   std::unique_ptr<Slot[]> m_slots;
   const uint32_t m_capacity;
-  uint32_t m_consumer_cursor{};
+  std::array<std::atomic<uint64_t>, READY_SUMMARY_BITS> m_ready_words{};
   Cacheline_atomic<uint64_t> m_next_ticket;
   Cacheline_atomic<uint32_t> m_pending_count;
   Cacheline_atomic<bool> m_wakeup_pending;
+  Cacheline_atomic<uint64_t> m_ready_summary;
 
 #ifdef EXTRA_CODE_FOR_UNIT_TESTING
   std::function<void()> m_after_reserve_hook;
   std::function<void()> m_before_wakeup_clear_hook;
+  uint32_t m_ready_probe_count{};
 #endif
 };
 

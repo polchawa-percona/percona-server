@@ -1752,11 +1752,7 @@ to this function there will be 'max' blocks in the free list.
 unit, so a candidate group's pages are each tried best-effort (ready-for-
 replace pages evicted, ready-for-flush pages dispatched, others skipped),
 exactly as the pre-grouping code tried each page in flat LRU order. Each
-group's pages[] array is read as one consistent snapshot taken under
-that specific group's own mutex (a brief critical section per group);
-see buf_LRU_free_from_common_LRU_list() for why LRU_list_mutex, held
-throughout this function otherwise, is not by itself enough to make that
-array read race-free. */
+group's pages[] array is snapshotted while LRU_list_mutex is held. */
 static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
                                                          ulint max) {
   ulint scanned = 0;
@@ -1776,27 +1772,21 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
 
   while (group != nullptr && should_continue()) {
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
-    bool restart_from_tail = false;
+    /* Hazard the current group. If an operation below drops LRU_list_mutex
+    and the group is reclaimed, group removal adjusts this pointer to the
+    protected predecessor. If it survives, the next iteration resnapshots
+    the same group and continues past pages made ineligible by this pass.
 
-    auto prev_group = UT_LIST_GET_PREV(LRU, group);
-    buf_pool->lru_hp.set(prev_group);
-
-    /* Snapshot the whole array under one group->mutex critical section
-    instead of one acquisition per slot: the group-mutex-only fast path
-    can concurrently vacate any slot without LRU_list_mutex, so the read
-    needs the group's own mutex, but only for a consistent snapshot, not
-    a separate acquisition per slot. A page a concurrent detach removes
-    from this snapshot afterwards is still a live buf_page_t descriptor,
-    and every use below re-validates it under its own block mutex before
-    acting; buf_LRU_free_page()'s detach reads bpage->lru_group fresh, so
-    it is correct regardless of which group the page has since moved to.
+    A page a concurrent detach removes from this snapshot afterwards is
+    still a live buf_page_t descriptor, and every use below re-validates it
+    under its own block mutex before acting.
     We break out of this loop (see group_maybe_freed below) on the first
     slot whose handling may have freed `group`, so a stale later entry in
     this same snapshot is never dereferenced afterwards. */
+    buf_pool->lru_hp.set(group);
     std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages_snapshot;
-    mutex_enter(&group->mutex);
     pages_snapshot = group->pages;
-    mutex_exit(&group->mutex);
+    bool group_maybe_freed = false;
 
     for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {
       buf_page_t *bpage = pages_snapshot[slot];
@@ -1821,8 +1811,6 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       eviction, or a make-young drain's deferred pass) can empty and
       reclaim -- free -- `group`, so `group` must not be dereferenced
       again afterwards. */
-      bool group_maybe_freed = false;
-
       if (bpage->was_stale()) {
         if (buf_page_free_stale(buf_pool, bpage)) {
           ++evict_count;
@@ -1863,18 +1851,16 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       withdraw_depth = buf_get_withdraw_depth(buf_pool);
 
       if (group_maybe_freed) {
-        /* The operation released LRU_list_mutex, so group may no longer
-        exist. Restart at the current tail instead of following the saved
-        predecessor and permanently skipping the surviving oldest pages. */
-        restart_from_tail = true;
+        /* The hazard points to this group if it survived, or was adjusted
+        to its predecessor before reclamation. */
         break;
       }
     }
 
-    if (restart_from_tail) {
-      buf_pool->lru_hp.set(nullptr);
-      group = UT_LIST_GET_LAST(buf_pool->LRU);
+    if (group_maybe_freed) {
+      group = buf_pool->lru_hp.get();
     } else {
+      buf_pool->lru_hp.set(UT_LIST_GET_PREV(LRU, group));
       group = buf_pool->lru_hp.get();
     }
   }
@@ -2207,11 +2193,9 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
   buf_pool->LRU_single_scan_active.fetch_add(1, std::memory_order_acq_rel);
   mutex_enter(&buf_pool->LRU_list_mutex);
 
-  /* PS-11141 grouped LRU list: scan groups tail-to-head; within a group,
-  scan its pages, read as one consistent snapshot taken under that
-  group's own mutex (see buf_LRU_free_from_common_LRU_list() for why
-  LRU_list_mutex alone is not enough for that array read). See the same
-  function for why this must be a while-loop rather than a for-loop with
+  /* PS-11141 grouped LRU list: scan groups tail-to-head and snapshot each
+  group's pages under LRU_list_mutex. This must be a while-loop rather than
+  a for-loop with
   `.get()` as the increment
   clause (that would call .get() -- asserting LRU_list_mutex ownership --
   even on the iteration where a successful free just released it). */
@@ -2223,15 +2207,10 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
     auto prev_group = UT_LIST_GET_PREV(LRU, group);
     buf_pool->single_scan_itr.set(prev_group);
 
-    /* Snapshot the whole array under one group->mutex critical section
-    instead of one acquisition per slot -- see
-    buf_LRU_free_from_common_LRU_list() for why this is safe: the loop
-    breaks immediately on any successful free, so a stale later entry in
-    this same snapshot is never dereferenced afterwards. */
+    /* Snapshot under LRU_list_mutex. The loop breaks immediately on any
+    successful free, so a stale later entry is never dereferenced. */
     std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages_snapshot;
-    mutex_enter(&group->mutex);
     pages_snapshot = group->pages;
-    mutex_exit(&group->mutex);
 
     for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {
       buf_page_t *bpage = pages_snapshot[slot];
@@ -3065,11 +3044,12 @@ static void buf_flush_page_cleaner_close(void) {
     srv_threads.m_page_cleaner_workers[i].wait();
   }
 
-  /* Wait for all LRU manager threads to exit. They observe
-  srv_shutdown_state > SRV_SHUTDOWN_CLEANUP and break out of their
-  loops; the run_lru event is always set during normal shutdown so they
-  do not block. */
+  /* Wake adaptive waits, then wait for all LRU manager threads to observe
+  shutdown and exit. */
   if (srv_lru_threads_enabled) {
+    for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
+      os_event_set(buf_pool_from_array(i)->lru_manager_event);
+    }
     for (size_t i = 0; i < srv_threads.m_lru_managers_n; ++i) {
       srv_threads.m_lru_managers[i].wait();
     }
@@ -3309,6 +3289,46 @@ static bool buf_flush_page_cleaner_set_priority(int priority) {
 }
 #endif /* UNIV_LINUX */
 
+/** Run bounded promotion, compaction, and group-cache work across buffer pool
+instances. A persistent cursor prevents a hot first instance from starving
+later pools when the elapsed-time budget expires.
+@return true if work remains or not all instances fit in this activation */
+static bool pc_maintain_lru_background() {
+  static ulint next_instance = 0;
+  constexpr auto time_budget = std::chrono::milliseconds{2};
+  if (srv_buf_pool_instances == 0) {
+    return false;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + time_budget;
+  bool first_round = true;
+  bool fixed_work_pending = false;
+
+  for (;;) {
+    bool promotion_pending = false;
+
+    for (ulint visited = 0; visited < srv_buf_pool_instances; ++visited) {
+      const ulint instance = next_instance++ % srv_buf_pool_instances;
+      auto *const buf_pool = buf_pool_from_array(instance);
+      promotion_pending |= buf_LRU_drain_promote_queue(buf_pool);
+      if (first_round) {
+        /* Compaction and group-cache maintenance have per-activation budgets;
+        promotion chunks may continue in fair rounds until the time budget. */
+        fixed_work_pending |= buf_LRU_compact_sparse_groups(buf_pool);
+      }
+
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return fixed_work_pending || promotion_pending ||
+               visited + 1 < srv_buf_pool_instances;
+      }
+    }
+
+    first_round = false;
+    if (!promotion_pending) {
+      return fixed_work_pending;
+    }
+  }
+}
+
 #ifdef UNIV_DEBUG
 /** Loop used to disable page cleaner and LRU manager threads.
 @param[in] drain_promote_queues  true only for the page cleaner coordinator,
@@ -3332,11 +3352,7 @@ static void buf_flush_page_cleaner_disabled_loop(bool drain_promote_queues) {
     /* Debug disabling of flushing must not also stop promote-queue draining.
     Coordinator only; workers pass drain_promote_queues=false. */
     if (drain_promote_queues) {
-      for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
-        auto *const buf_pool = buf_pool_from_array(i);
-        buf_LRU_drain_promote_queue(buf_pool);
-        buf_LRU_compact_sparse_groups(buf_pool);
-      }
+      static_cast<void>(pc_maintain_lru_background());
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); /* [A] */
   }
@@ -3481,11 +3497,7 @@ static void buf_flush_page_coordinator_thread() {
     /* Drain deferred promotions on each recovery wake or 100 ms timeout.
     The timeout also covers log-test and force-recovery configurations that
     do not provide recv_writer flush requests. */
-    for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      auto *const buf_pool = buf_pool_from_array(i);
-      buf_LRU_drain_promote_queue(buf_pool);
-      buf_LRU_compact_sparse_groups(buf_pool);
-    }
+    static_cast<void>(pc_maintain_lru_background());
 
     if (wait_result == OS_SYNC_TIME_EXCEEDED) {
       continue;
@@ -3530,10 +3542,9 @@ static void buf_flush_page_coordinator_thread() {
   while (srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
     /* Periodic fallback for deferred promotions below the wake threshold.
     No-op when the queue is empty. */
-    for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      auto *const buf_pool = buf_pool_from_array(i);
-      buf_LRU_drain_promote_queue(buf_pool);
-      buf_LRU_compact_sparse_groups(buf_pool);
+    if (pc_maintain_lru_background()) {
+      /* Arm one follow-up coordinator activation for all remaining work. */
+      os_event_set(buf_flush_event);
     }
 
     /* We consider server active if either we have just discovered a first
@@ -3962,12 +3973,16 @@ void buf_flush_sync_all_buf_pools() {
   buf_flush_fsync();
 }
 
-/** Sleep the LRU manager thread until next_loop_time, unless we are already
-past it or shutdown is in the flush phase or later (in which case the manager
-runs without sleeping so it can exit promptly). */
+/** Sleep the LRU manager thread until next_loop_time or foreground pressure.
+@param[in,out] buf_pool buffer pool instance
+@param[in] next_loop_time adaptive timer deadline
+@param[in,out] sig_count work-event signal count */
 static void buf_lru_manager_sleep_if_needed(
-    std::chrono::steady_clock::time_point next_loop_time) {
-  if (srv_shutdown_state.load() >= SRV_SHUTDOWN_FLUSH_PHASE) return;
+    buf_pool_t *buf_pool, std::chrono::steady_clock::time_point next_loop_time,
+    int64_t *sig_count) {
+  if (srv_shutdown_state.load() >= SRV_SHUTDOWN_FLUSH_PHASE) {
+    return;
+  }
 
   const auto cur_time = std::chrono::steady_clock::now();
 
@@ -3975,9 +3990,13 @@ static void buf_lru_manager_sleep_if_needed(
     const auto period = std::chrono::duration_cast<std::chrono::milliseconds>(
         next_loop_time - cur_time);
 
-    std::this_thread::sleep_for(
-        std::min(std::chrono::milliseconds{1000L}, period));
+    os_event_wait_time_low(
+        buf_pool->lru_manager_event,
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::min(std::chrono::milliseconds{1000L}, period)),
+        *sig_count);
   }
+  *sig_count = os_event_reset(buf_pool->lru_manager_event);
 }
 
 /** Adjust the LRU manager thread's per-pool sleep time based on free-list
@@ -4040,13 +4059,17 @@ static void buf_lru_manager_thread(size_t buf_pool_instance) {
   /* Seed nonzero so the first adapt iteration treats us as "made progress"
   and does not immediately back off. */
   size_t lru_n_processed = 1;
+  int64_t work_sig_count = os_event_reset(buf_pool->lru_manager_event);
 
   while (srv_shutdown_state.load() < SRV_SHUTDOWN_FLUSH_PHASE) {
     ut_d(buf_flush_page_cleaner_disabled_loop(false));
 
     os_event_wait(buf_pool->run_lru);
 
-    buf_lru_manager_sleep_if_needed(next_loop_time);
+    buf_lru_manager_sleep_if_needed(buf_pool, next_loop_time, &work_sig_count);
+    if (srv_shutdown_state.load() >= SRV_SHUTDOWN_FLUSH_PHASE) {
+      break;
+    }
 
     buf_lru_manager_adapt_sleep_time(buf_pool, lru_n_processed, lru_sleep_time);
 

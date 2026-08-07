@@ -1532,6 +1532,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   buf_pool->run_lru = os_event_create();
   os_event_set(buf_pool->run_lru);
+  buf_pool->lru_manager_event = os_event_create();
 
   buf_pool->flushing_allowed = true;
 
@@ -1547,6 +1548,8 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->LRU_promote_queue =
       ut::new_withkey<ut::Bounded_mpsc_queue<buf_lru_promote_t>>(
           UT_NEW_THIS_FILE_PSI_KEY, BUF_LRU_PROMOTE_QUEUE_CAPACITY);
+  buf_pool->LRU_promote_dedup = ut::new_withkey<ut::Bounded_generation_dedup>(
+      UT_NEW_THIS_FILE_PSI_KEY, BUF_LRU_PROMOTE_QUEUE_CAPACITY);
   buf_pool->LRU_accept_promotions.store(true, std::memory_order_relaxed);
 
   buf_pool->try_LRU_scan = true;
@@ -1587,7 +1590,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->LRU_compaction_sweep_epoch = 0;
 
   /* Create the low-water reserve before foreground LRU activity starts. */
-  buf_LRU_maintain_group_cache(buf_pool);
+  static_cast<void>(buf_LRU_maintain_group_cache(buf_pool, true));
 
   err = DB_SUCCESS;
 }
@@ -1604,6 +1607,8 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   buf_chunk_t *chunk;
   buf_chunk_t *chunks;
 
+  ut::delete_(buf_pool->LRU_promote_dedup);
+  buf_pool->LRU_promote_dedup = nullptr;
   ut::delete_(buf_pool->LRU_promote_queue);
   buf_pool->LRU_promote_queue = nullptr;
 
@@ -1645,7 +1650,6 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
       }
     }
 
-    mutex_free(&group->mutex);
     ut::delete_(group);
 
     group = prev_group;
@@ -1682,6 +1686,7 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   }
 
   os_event_destroy(buf_pool->run_lru);
+  os_event_destroy(buf_pool->lru_manager_event);
 
   ut::free(buf_pool->chunks);
   mutex_exit(&buf_pool->chunks_mutex);
@@ -2157,21 +2162,15 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
     buf_buddy_realloc()/buf_page_realloc() relocate a page's descriptor in
     place (via buf_LRU_relocate_in_group(), same as buf_relocate()) without
     ever removing it from its group, so a plain nested walk is safe here --
-    unlike a real eviction, no group can become empty/freed mid-loop. Each
-    slot is still read under that specific group's own mutex, since a
-    future group-mutex-only fast path (not yet implemented) can vacate a
-    slot without LRU_list_mutex, held throughout this loop otherwise;
-    see buf_LRU_free_from_common_LRU_list() in buf0lru.cc. */
+    unlike a real eviction, no group can become empty/freed mid-loop.
+    LRU_list_mutex protects every slot throughout this loop. */
     bool stop = false;
     for (auto *group : buf_pool->LRU) {
       if (stop) {
         break;
       }
       for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {
-        buf_page_t *bpage;
-        mutex_enter(&group->mutex);
-        bpage = group->pages[slot];
-        mutex_exit(&group->mutex);
+        buf_page_t *bpage = group->pages[slot];
 
         if (bpage == nullptr) {
           continue;
@@ -6616,7 +6615,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   mutex_exit(&buf_pool->LRU_list_mutex);
 
   buf_LRU_empty_group_cache(buf_pool);
-  buf_LRU_maintain_group_cache(buf_pool);
+  static_cast<void>(buf_LRU_maintain_group_cache(buf_pool, true));
 
   buf_pool->stat.reset();
   buf_refresh_io_stats(buf_pool);

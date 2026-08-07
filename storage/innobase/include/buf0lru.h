@@ -219,8 +219,10 @@ void buf_LRU_empty_group_cache(buf_pool_t *buf_pool);
 
 /** Reclaim retired groups and replenish the reusable reserve to its target.
 Allocation and destruction occur outside LRU_list_mutex.
-@param[in,out]  buf_pool        buffer pool instance */
-void buf_LRU_maintain_group_cache(buf_pool_t *buf_pool);
+@param[in,out]  buf_pool        buffer pool instance
+@param[in]      exhaustive      true for quiescent lifecycle maintenance
+@return true if bounded background work remains */
+bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive);
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
 /** Validates the LRU list. */
@@ -281,16 +283,22 @@ constexpr uint32_t BUF_LRU_COMPACT_MERGE_BUDGET = 8;
 /** Maximum adjacent group pairs examined per compaction activation. */
 constexpr uint32_t BUF_LRU_COMPACT_SCAN_BUDGET = 64;
 
+/** Maximum retired groups destroyed by normal background maintenance. */
+constexpr uint32_t BUF_LRU_GROUP_DESTROY_BUDGET = 16;
+
+/** Maximum reserve groups created by normal background maintenance. */
+constexpr uint32_t BUF_LRU_GROUP_CREATE_BUDGET = 8;
+
 struct buf_pool_t;
 
 void buf_LRU_enqueue_promote(buf_page_t *bpage);
-void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool);
+bool buf_LRU_drain_promote_queue(buf_pool_t *buf_pool);
 void buf_LRU_close_promote_queue(buf_pool_t *buf_pool);
 void buf_LRU_open_promote_queue(buf_pool_t *buf_pool);
 
 /** Merge eligible adjacent sparse LRU groups under a fixed budget.
 @param[in,out] buf_pool buffer pool instance */
-void buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool);
+bool buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool);
 /** @} */
 
 /** @brief Statistics for selecting the LRU list for eviction.

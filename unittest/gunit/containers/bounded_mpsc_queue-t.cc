@@ -28,6 +28,42 @@
 
 namespace ut::unittests {
 
+TEST(BoundedGenerationDedup, SuppressesUntilExactGenerationIsReleased) {
+  Bounded_generation_dedup dedup{2};
+
+  EXPECT_TRUE(dedup.try_reserve(2));
+  EXPECT_FALSE(dedup.try_reserve(2));
+
+  /* A colliding generation cannot replace or clear the pending owner. */
+  EXPECT_FALSE(dedup.try_reserve(4));
+  EXPECT_FALSE(dedup.release(4));
+  EXPECT_FALSE(dedup.try_reserve(4));
+
+  EXPECT_TRUE(dedup.release(2));
+  EXPECT_TRUE(dedup.try_reserve(4));
+  EXPECT_TRUE(dedup.release(4));
+}
+
+TEST(BoundedGenerationDedup, OneConcurrentProducerOwnsGeneration) {
+  Bounded_generation_dedup dedup{16};
+  std::atomic_uint32_t reserved{0};
+  std::vector<std::thread> producers;
+
+  for (uint32_t i = 0; i < 16; ++i) {
+    producers.emplace_back([&] {
+      if (dedup.try_reserve(1234)) {
+        reserved.fetch_add(1);
+      }
+    });
+  }
+  for (auto &producer : producers) {
+    producer.join();
+  }
+
+  EXPECT_EQ(reserved.load(), 1U);
+  EXPECT_TRUE(dedup.release(1234));
+}
+
 TEST(BoundedMpscQueue, FullAndReuse) {
   Bounded_mpsc_queue<uint32_t> queue{2};
 
@@ -122,6 +158,27 @@ TEST(BoundedMpscQueue, WakeResetRechecksPublishedSlots) {
   ASSERT_TRUE(queue.try_pop().has_value());
   EXPECT_TRUE(queue.reset_wakeup_if_empty());
   EXPECT_EQ(queue.try_push(3), Bounded_mpsc_push_result::first);
+}
+
+TEST(BoundedMpscQueue, ReadinessChecksDoNotScanCapacity) {
+  Bounded_mpsc_queue<uint32_t> queue{4096};
+
+  queue.reset_ready_probe_count();
+  EXPECT_TRUE(queue.empty());
+  EXPECT_EQ(queue.ready_probe_count(), 0U);
+
+  EXPECT_EQ(queue.try_push(17), Bounded_mpsc_push_result::first);
+  EXPECT_FALSE(queue.empty());
+  EXPECT_EQ(queue.ready_probe_count(), 0U);
+
+  const auto value = queue.try_pop();
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(*value, 17U);
+  EXPECT_LE(queue.ready_probe_count(), 2U);
+
+  EXPECT_TRUE(queue.empty());
+  EXPECT_TRUE(queue.reset_wakeup_if_empty());
+  EXPECT_EQ(queue.ready_probe_count(), 2U);
 }
 
 TEST(BoundedMpscQueue, ProducerRacingWakeClearCannotLoseWake) {

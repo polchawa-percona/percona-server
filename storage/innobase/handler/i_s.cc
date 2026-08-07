@@ -5053,13 +5053,9 @@ static int i_s_innodb_fill_buffer_lru(THD *thd, Table_ref *tables,
 
   DBUG_TRACE;
 
-  /* Obtain buf_pool->LRU_list_mutex before allocate info_buffer, since
-  buf_pool->LRU_n_pages could change. Also exclude a concurrent promotion
-  drain's group-mutex-only fast path (PS-11141 grouped LRU list, not yet
-  implemented) for this whole scan: this is an information_schema query,
-  not a hot path, so it can afford to fully wait out an in-flight drain
-  instead of adding per-group mutex scoping around the group->pages[]
-  read below. */
+  /* Obtain LRU_list_mutex before allocating info_buffer because LRU_n_pages
+  can change. This administrative query also waits out background promotion
+  and compaction for the complete scan. */
   mutex_enter(&buf_pool->LRU_drain_mutex);
   mutex_enter(&buf_pool->LRU_list_mutex);
 

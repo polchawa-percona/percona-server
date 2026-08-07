@@ -1180,6 +1180,7 @@ struct buf_lru_group_t;
 namespace ut {
 template <typename T>
 class Bounded_mpsc_queue;
+class Bounded_generation_dedup;
 }
 
 /** Stable value queued for deferred LRU promotion. */
@@ -1726,14 +1727,12 @@ class buf_page_t {
   uint16_t m_dblwr_id{};
 
  public:
-  /** Group this page belongs to in buf_pool->LRU (PS-11141 grouped LRU
-  list). nullptr until the grouped list is wired in (see
-  PS-11141-8.4-lru-groups phase P2); currently unused. Protected by the
-  owning group's mutex. */
+  /** Group this page belongs to in buf_pool->LRU. Protected by
+  buf_pool->LRU_list_mutex. */
   buf_lru_group_t *lru_group{nullptr};
 
   /** Index of this page within lru_group->pages. Meaningless while
-  lru_group == nullptr. Protected by the owning group's mutex. */
+  lru_group == nullptr. Protected by buf_pool->LRU_list_mutex. */
   uint16_t lru_slot{0};
 
   /** true if the block is in the old blocks in buf_pool->LRU_old */
@@ -2280,33 +2279,24 @@ provides hysteresis across eviction and promotion bursts. */
 constexpr size_t BUF_LRU_GROUP_RESERVE_MAX = 256;
 
 /** A node of buf_pool->LRU: a group of up to BUF_LRU_GROUP_SIZE pages.
-The per-pool LRU_list_mutex protects only the links between groups (the
-`LRU` member below and the group's position relative to buf_pool->LRU_old).
-Everything else here -- the slots, n_pages, old -- is protected by this
-group's own mutex, at latch level SYNC_BUF_LRU_GROUP: BELOW SYNC_BUF_BLOCK
-(a thread holding LRU_list_mutex, a page hash latch, or a page's own block
-mutex may acquire a group mutex; a thread holding only a group mutex may
-not acquire any of those). This mirrors the real call pattern: every
-removal/addition path holds the page's own block mutex before touching
-its group, never the other way around.
-NOTE: this type is introduced as additive foundation; buf_pool->LRU is not
-yet rewired to use it (see PS-11141-8.4-lru-groups P1 vs P2). */
+The per-pool LRU_list_mutex protects links, slots, counts, classification,
+and page back-pointers. Grouped-LRU mutations do not have an independent
+group-only path, so a second mutex would only extend the global critical
+section. */
 struct buf_lru_group_t {
-  /** Protects pages, n_pages, and old. Latch level SYNC_BUF_LRU_GROUP. */
-  BufListMutex mutex;
-
   /** Node linking this group into buf_pool->LRU. Protected by
   buf_pool->LRU_list_mutex. */
   UT_LIST_NODE_T(buf_lru_group_t) LRU;
 
-  /** Member pages; a null entry is a vacated slot. Protected by mutex. */
+  /** Member pages; a null entry is a vacated slot. Protected by
+  buf_pool->LRU_list_mutex. */
   std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages{};
 
-  /** Number of non-null entries in pages. Protected by mutex. */
+  /** Number of non-null entries in pages. Protected by LRU_list_mutex. */
   uint32_t n_pages{0};
 
   /** Bit i is set exactly when pages[i] is non-null. This makes allocation
-  of a vacated slot constant-time. Protected by mutex. */
+  of a vacated slot constant-time. Protected by LRU_list_mutex. */
   uint32_t occupied_slots{0};
 
   /** Monotonic reuse identity assigned when the group is allocated from the
@@ -2314,7 +2304,7 @@ struct buf_lru_group_t {
   uint64_t reuse_generation{0};
 
   /** true if this group is on the old side of buf_pool->LRU_old.
-  Protected by mutex. */
+  Protected by LRU_list_mutex. */
   bool old{false};
 
   /** true while this group is linked into buf_pool->LRU, false while it
@@ -2630,6 +2620,10 @@ struct buf_pool_t {
   buffer pool is being torn down / re-initialised; set again afterwards. */
   os_event_t run_lru;
 
+  /** Interrupts this pool's LRU manager adaptive sleep when foreground
+  allocation observes an empty free list. */
+  os_event_t lru_manager_event;
+
   /** Run gate for flushes, checked by buf_flush_start() inside
   the change_flush_state() critical section that sets init_flush[type].
   True in normal operation; set to false by buf_pool_invalidate_instance()
@@ -2768,9 +2762,9 @@ struct buf_pool_t {
 
   /** Base node of the LRU list (PS-11141 grouped LRU): a list of
   buf_lru_group_t, each holding up to BUF_LRU_GROUP_SIZE pages. Protected by
-  LRU_list_mutex; a group's own mutex additionally protects that group's
-  contents (pages, n_pages, old). NOTE: UT_LIST_GET_LEN(LRU) is now a GROUP
-  count, not a page count -- use LRU_n_pages for the page count. */
+  LRU_list_mutex, including each group's contents (pages, n_pages, old).
+  NOTE: UT_LIST_GET_LEN(LRU) is now a GROUP count, not a page count -- use
+  LRU_n_pages for the page count. */
   UT_LIST_BASE_NODE_T(buf_lru_group_t, LRU) LRU;
 
   /** Total number of live pages across all groups in LRU. Necessary because
@@ -2794,11 +2788,9 @@ struct buf_pool_t {
   buf_lru_group_t::cache_next. Protected by LRU_list_mutex.
   Group create/destroy sits directly in the LRU hot path -- one group is
   created per BUF_LRU_GROUP_SIZE page insertions and destroyed whenever a
-  group's last page leaves -- and both a heap allocation and a
-  mutex_create()/mutex_free() pair (the latter including PFS
-  registration) would otherwise be paid there, while LRU_list_mutex is
-  held. Recycling whole group objects, mutex included, removes that from
-  the steady state for a bounded reserve.
+  group's last page leaves -- and the heap allocation would otherwise be
+  paid while LRU_list_mutex is held. Recycling group objects removes that
+  from the steady state for a bounded reserve.
   Overflow is retired onto LRU_group_retired and destroyed only after
   LRU_list_mutex is released. This is safe now that deferred promotion no
   longer retains raw group pointers across that mutex. */
@@ -2822,6 +2814,9 @@ struct buf_pool_t {
 
   /** Preallocated value queue for deferred make-young requests. */
   ut::Bounded_mpsc_queue<buf_lru_promote_t> *LRU_promote_queue{nullptr};
+
+  /** Fixed producer-side suppression table keyed by residency generation. */
+  ut::Bounded_generation_dedup *LRU_promote_dedup{nullptr};
 
   /** False while promotion production is closed for invalidation/shutdown. */
   alignas(64) std::atomic<bool> LRU_accept_promotions;

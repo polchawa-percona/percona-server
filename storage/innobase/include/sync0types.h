@@ -226,16 +226,6 @@ enum latch_level_t {
   SYNC_BUF_ZIP_HASH,
   SYNC_BUF_FREE_LIST,
   SYNC_BUF_ZIP_FREE,
-  /** Latch level of buf_lru_group_t::mutex (PS-11141 grouped LRU list).
-  Every real call path removing/adding a page holds the page's own block
-  mutex (SYNC_BUF_BLOCK) before touching that page's group -- this mirrors
-  InnoDB's long-standing convention of validating/transitioning a page's
-  state under its block mutex before unlinking it from any list -- so the
-  group mutex must be BELOW SYNC_BUF_BLOCK, acquired last: a thread holding
-  SYNC_BUF_BLOCK, SYNC_BUF_PAGE_HASH, or SYNC_BUF_LRU_LIST may acquire a
-  group mutex; a thread holding only a group mutex may not acquire any of
-  those three (or anything else above it). */
-  SYNC_BUF_LRU_GROUP,
 
   SYNC_BUF_BLOCK,
 
@@ -373,7 +363,6 @@ enum latch_id_t {
   LATCH_ID_BUF_POOL_CHUNKS,
   LATCH_ID_BUF_POOL_ZIP,
   LATCH_ID_BUF_POOL_LRU_LIST,
-  LATCH_ID_BUF_POOL_LRU_GROUP,
   LATCH_ID_BUF_POOL_LRU_DRAIN,
   LATCH_ID_BUF_POOL_FREE_LIST,
   LATCH_ID_BUF_POOL_ZIP_FREE,
