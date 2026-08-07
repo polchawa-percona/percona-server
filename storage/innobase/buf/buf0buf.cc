@@ -1421,6 +1421,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   /* 1. Initialize general fields
   ------------------------------- */
   buf_pool->next_residency_generation.store(1, std::memory_order_relaxed);
+  buf_pool->LRU_group_next_reuse_generation = 1;
   mutex_create(LATCH_ID_BUF_POOL_CHUNKS, &buf_pool->chunks_mutex);
   mutex_create(LATCH_ID_BUF_POOL_LRU_LIST, &buf_pool->LRU_list_mutex);
   mutex_create(LATCH_ID_BUF_POOL_LRU_DRAIN, &buf_pool->LRU_drain_mutex);
