@@ -1772,18 +1772,22 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
 
   while (group != nullptr && should_continue()) {
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
-    /* Hazard the current group. If an operation below drops LRU_list_mutex
-    and the group is reclaimed, group removal adjusts this pointer to the
-    protected predecessor. If it survives, the next iteration resnapshots
-    the same group and continues past pages made ineligible by this pass.
-
-    A page a concurrent detach removes from this snapshot afterwards is
-    still a live buf_page_t descriptor, and every use below re-validates it
-    under its own block mutex before acting.
-    We break out of this loop (see group_maybe_freed below) on the first
-    slot whose handling may have freed `group`, so a stale later entry in
-    this same snapshot is never dereferenced afterwards. */
-    buf_pool->lru_hp.set(group);
+    /* Hazard the PREDECESSOR up front, before touching this group's slots,
+    so the scan unconditionally advances past this group next iteration --
+    regardless of whether any work happened in it. Dispatching a flush (not
+    just evicting) already sets group_maybe_freed on nearly every visited
+    page without emptying the group, so advancing only in the
+    !group_maybe_freed branch (as an earlier version of this function did)
+    re-visits the same group indefinitely as long as it keeps yielding one
+    more flushable page each pass, starving the rest of buf_pool->LRU of
+    any scan time -- this was an observed cause of multi-minute stalls.
+    If this group is itself reclaimed while unlocked below,
+    buf_LRU_adjust_group_hp() redirects the hazard (already pointing at
+    the predecessor, not at `group`) to whatever remains valid; `group`
+    itself is never dereferenced again after this point, only the
+    snapshot taken below. */
+    buf_lru_group_t *const prev_group = UT_LIST_GET_PREV(LRU, group);
+    buf_pool->lru_hp.set(prev_group);
     std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages_snapshot;
     pages_snapshot = group->pages;
     bool group_maybe_freed = false;
@@ -1851,18 +1855,14 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       withdraw_depth = buf_get_withdraw_depth(buf_pool);
 
       if (group_maybe_freed) {
-        /* The hazard points to this group if it survived, or was adjusted
-        to its predecessor before reclamation. */
+        /* `group` must not be dereferenced again; the hazard already
+        points at its predecessor (or wherever that predecessor was
+        adjusted to, if it was itself reclaimed in the meantime). */
         break;
       }
     }
 
-    if (group_maybe_freed) {
-      group = buf_pool->lru_hp.get();
-    } else {
-      buf_pool->lru_hp.set(UT_LIST_GET_PREV(LRU, group));
-      group = buf_pool->lru_hp.get();
-    }
+    group = buf_pool->lru_hp.get();
   }
 
   buf_pool->lru_hp.set(nullptr);
