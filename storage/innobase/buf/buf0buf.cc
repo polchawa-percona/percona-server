@@ -1419,6 +1419,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   /* 1. Initialize general fields
   ------------------------------- */
+  buf_pool->next_residency_generation.store(1, std::memory_order_relaxed);
   mutex_create(LATCH_ID_BUF_POOL_CHUNKS, &buf_pool->chunks_mutex);
   mutex_create(LATCH_ID_BUF_POOL_LRU_LIST, &buf_pool->LRU_list_mutex);
   mutex_create(LATCH_ID_BUF_POOL_LRU_DRAIN, &buf_pool->LRU_drain_mutex);
@@ -5108,6 +5109,19 @@ static void buf_page_init_low(buf_page_t *bpage) noexcept {
   ut_d(bpage->file_page_was_freed = false);
 }
 
+/** Assign a generation to a freshly created page-hash residency.
+@param[in,out] buf_pool buffer pool instance
+@param[in,out] bpage page descriptor about to be inserted */
+static void buf_page_assign_residency_generation(buf_pool_t *buf_pool,
+                                                 buf_page_t *bpage) noexcept {
+  ut_ad(rw_lock_own(buf_page_hash_lock_get(buf_pool, bpage->id), RW_LOCK_X));
+
+  const uint64_t generation = buf_pool->next_residency_generation.fetch_add(
+      1, std::memory_order_relaxed);
+  ut_a(generation != 0);
+  bpage->residency_generation = generation;
+}
+
 /** Inits a page to the buffer buf_pool. The block pointer must be private to
 the calling thread at the start of this function.
 @param[in,out]  buf_pool        buffer pool
@@ -5176,6 +5190,7 @@ static void buf_page_init(buf_pool_t *buf_pool, const page_id_t &page_id,
 
   ut_a(block->page.id == page_id);
   block->page.size.copy_from(page_size);
+  buf_page_assign_residency_generation(buf_pool, &block->page);
 
   HASH_INSERT(buf_page_t, hash, buf_pool->page_hash, page_id.hash(),
               &block->page);
@@ -5402,6 +5417,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       buf_pool_watch_remove(buf_pool, watch_page);
     }
 
+    buf_page_assign_residency_generation(buf_pool, bpage);
     HASH_INSERT(buf_page_t, hash, buf_pool->page_hash, bpage->id.hash(), bpage);
 
     rw_lock_x_unlock(hash_lock);
@@ -6593,6 +6609,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   ut_ad(UT_LIST_GET_LEN(buf_pool->unzip_LRU) == 0);
 
   buf_pool->freed_page_clock = 0;
+  buf_pool->next_residency_generation.store(1, std::memory_order_relaxed);
   buf_pool->LRU_old = nullptr;
   buf_pool->LRU_old_len = 0;
 
@@ -6655,6 +6672,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
 
         case BUF_BLOCK_FILE_PAGE:
           ut_a(buf_page_hash_get_low(buf_pool, block->page.id) == &block->page);
+          ut_a(block->page.residency_generation != 0);
           /* We can't latch buf_page_mutex_enter(block) as we already hold
           lower level latches like free_list_mutex and flush_state_mutex
           thus there is no reliable way here to prevent some io_fix
@@ -6733,6 +6751,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
     as the 'block->mutex' for these bpages. */
     ut_a(!b->is_dirty());
     ut_a(buf_page_hash_get_low(buf_pool, b->id) == b);
+    ut_a(b->residency_generation != 0);
     n_lru++;
     n_zip++;
   }
@@ -6777,6 +6796,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
         break;
     }
     ut_a(buf_page_hash_get_low(buf_pool, b->id) == b);
+    ut_a(b->residency_generation != 0);
   }
 
   ut_a(UT_LIST_GET_LEN(buf_pool->flush_list) == n_flush);

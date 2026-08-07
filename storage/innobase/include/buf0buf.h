@@ -1200,6 +1200,7 @@ class buf_page_t {
         m_flush_observer(other.m_flush_observer),
         m_space(other.m_space),
         freed_page_clock(other.freed_page_clock),
+        residency_generation(other.residency_generation),
         m_version(other.m_version),
         access_time(other.access_time),
         m_dblwr_id(other.m_dblwr_id),
@@ -1692,6 +1693,11 @@ class buf_page_t {
   time put to the head of the LRU list; a thread is allowed to read this
   for heuristic purposes without holding any mutex or latch */
   uint32_t freed_page_clock;
+
+  /** Monotonic per-pool generation assigned when this page obtains a fresh
+  page-hash residency. Immutable until that residency ends and read under the
+  page-hash latch or while the descriptor is buffer-fixed. */
+  uint64_t residency_generation{};
 
   /** @} */
   /** Version of fil_space_t when the page was updated. It can also be viewed as
@@ -2662,6 +2668,11 @@ struct buf_pool_t {
   holding any mutex or latch. For non-heuristic purposes protected by
   LRU_list_mutex */
   ulint freed_page_clock;
+
+  /** Source for fresh buf_page_t::residency_generation values. Zero is
+  reserved for descriptors that are not real page-hash residencies, including
+  buffer-pool watch sentinels. */
+  alignas(64) std::atomic<uint64_t> next_residency_generation;
 
   /** Set to false when an LRU scan for free block fails. This flag is used to
   avoid repeated scans of LRU list when we know that there is no free block

@@ -32,6 +32,7 @@ INCLUDE_DIRECTORIES(SYSTEM
 
 # Add tests
 SET(TESTS
+  bounded_mpsc_queue
   integrals_lockfree_queue)
 
 FOREACH(test ${TESTS})
@@ -39,3 +40,5 @@ FOREACH(test ${TESTS})
   TARGET_LINK_LIBRARIES(${test}-t mysys gunit_small)
 ENDFOREACH()
 
+TARGET_INCLUDE_DIRECTORIES(bounded_mpsc_queue-t PRIVATE
+  ${CMAKE_SOURCE_DIR}/storage/innobase/include)

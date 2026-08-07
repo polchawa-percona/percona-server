@@ -1776,6 +1776,7 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
 
   while (group != nullptr && should_continue()) {
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+    bool restart_from_tail = false;
 
     auto prev_group = UT_LIST_GET_PREV(LRU, group);
     buf_pool->lru_hp.set(prev_group);
@@ -1862,16 +1863,20 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       withdraw_depth = buf_get_withdraw_depth(buf_pool);
 
       if (group_maybe_freed) {
-        /* stop touching group->pages and move on to the next group via
-        the hazard pointer, which was already set to this group's
-        predecessor above. This trades a little in-group batching (the
-        rest of this group, if it survives, is picked up on a later
-        call) for never dereferencing a possibly-freed group. */
+        /* The operation released LRU_list_mutex, so group may no longer
+        exist. Restart at the current tail instead of following the saved
+        predecessor and permanently skipping the surviving oldest pages. */
+        restart_from_tail = true;
         break;
       }
     }
 
-    group = buf_pool->lru_hp.get();
+    if (restart_from_tail) {
+      buf_pool->lru_hp.set(nullptr);
+      group = UT_LIST_GET_LAST(buf_pool->LRU);
+    } else {
+      group = buf_pool->lru_hp.get();
+    }
   }
 
   buf_pool->lru_hp.set(nullptr);
@@ -3965,7 +3970,7 @@ static void buf_lru_manager_adapt_sleep_time(
     std::chrono::milliseconds &lru_sleep_time) {
   const auto free_len = UT_LIST_GET_LEN(buf_pool->free);
   const auto max_free_len =
-      std::min(UT_LIST_GET_LEN(buf_pool->LRU), srv_LRU_scan_depth);
+      std::min(buf_pool->LRU_n_pages, static_cast<size_t>(srv_LRU_scan_depth));
 
   if (free_len < max_free_len / 100 && lru_n_processed) {
     /* Free list < 1% and we made progress last time: don't sleep. */
