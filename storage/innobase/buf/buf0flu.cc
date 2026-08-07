@@ -2022,7 +2022,6 @@ static buf_flush_batch_result_t buf_flush_batch(buf_pool_t *buf_pool,
       mutex_enter(&buf_pool->LRU_list_mutex);
       result = buf_do_LRU_batch(buf_pool, min_n);
       mutex_exit(&buf_pool->LRU_list_mutex);
-      buf_LRU_destroy_retired_groups(buf_pool);
       break;
     case BUF_FLUSH_LIST:
       /* The flush list path only flushes; nothing is evicted here. */
@@ -2205,6 +2204,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
   bool freed = false;
   ulint scanned = 0;
 
+  buf_pool->LRU_single_scan_active.fetch_add(1, std::memory_order_acq_rel);
   mutex_enter(&buf_pool->LRU_list_mutex);
 
   /* PS-11141 grouped LRU list: scan groups tail-to-head; within a group,
@@ -2306,6 +2306,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
+  buf_pool->LRU_single_scan_active.fetch_sub(1, std::memory_order_release);
   return freed;
 }
 

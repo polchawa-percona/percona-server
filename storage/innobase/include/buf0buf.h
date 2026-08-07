@@ -44,6 +44,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0srv.h"
 #include "univ.i"
 #include "ut0byte.h"
+#include "ut0exclusive_scan.h"
 #include "ut0rbt.h"
 
 #include "buf/buf.h"
@@ -2271,8 +2272,12 @@ class LRUGroupItr : public LRUGroupHp {
 grouped LRU list: PS-11141). */
 constexpr uint32_t BUF_LRU_GROUP_SIZE = 32;
 
-/** Maximum number of empty groups retained for reuse per buffer pool. */
-constexpr size_t BUF_LRU_GROUP_RESERVE_MAX = 64;
+/** Background replenishment target for reusable empty groups per pool. */
+constexpr size_t BUF_LRU_GROUP_RESERVE_TARGET = 64;
+
+/** High watermark for reusable empty groups. Keeping this above the target
+provides hysteresis across eviction and promotion bursts. */
+constexpr size_t BUF_LRU_GROUP_RESERVE_MAX = 256;
 
 /** A node of buf_pool->LRU: a group of up to BUF_LRU_GROUP_SIZE pages.
 The per-pool LRU_list_mutex protects only the links between groups (the
@@ -2722,13 +2727,44 @@ struct buf_pool_t {
 
   /** Iterator used to scan the LRU groups when searching for a group with
   a replaceable victim page (PS-11141 grouped LRU list). Protected by
-  buf_pool::LRU_list_mutex. */
+  buf_pool::LRU_list_mutex and LRU_scan_owner. */
   LRUGroupItr lru_scan_itr;
+
+  /** Serializes lru_scan_itr across optimistic windows in which
+  LRU_list_mutex is released. Full scans wait; bounded foreground scans
+  skip the common LRU when another scan is active. */
+  alignas(64) ut::Exclusive_scan LRU_scan_owner;
 
   /** Iterator used to scan the LRU groups when searching for a group with
   a single page flushing victim (PS-11141 grouped LRU list). Protected by
   buf_pool::LRU_list_mutex. */
   LRUGroupItr single_scan_itr;
+
+  /** Number of active users of single_scan_itr. Compaction uses this to
+  distinguish a live hazard from the iterator's persistent resume position. */
+  alignas(64) std::atomic<uint32_t> LRU_single_scan_active;
+
+  /** Persistent reverse compaction cursor. Other group-removal paths adjust
+  this hazard pointer while holding LRU_list_mutex. */
+  LRUGroupHp lru_compact_hp;
+
+  /** True after a page detach creates a non-empty sparse group, until
+  compaction completes one bounded tail-to-head sweep. Protected by
+  LRU_list_mutex. */
+  bool LRU_compaction_pending{false};
+
+  /** True if the current compaction sweep encountered a live hazard and
+  therefore requires another sweep after that hazard may have cleared.
+  Protected by LRU_list_mutex. */
+  bool LRU_compaction_retry{false};
+
+  /** Incremented for each detach that can create fragmentation. Protected by
+  LRU_list_mutex. */
+  uint64_t LRU_compaction_epoch{0};
+
+  /** Fragmentation epoch covered by the active bounded compaction sweep.
+  Protected by LRU_list_mutex. */
+  uint64_t LRU_compaction_sweep_epoch{0};
 
   /** Base node of the LRU list (PS-11141 grouped LRU): a list of
   buf_lru_group_t, each holding up to BUF_LRU_GROUP_SIZE pages. Protected by

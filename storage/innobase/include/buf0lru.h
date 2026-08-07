@@ -95,9 +95,12 @@ The caller must hold the LRU list and buf_page_get_mutex() mutexes.
 @param[in,out]  buf_pool        buffer pool instance
 @param[in]      scan_all        scan whole LRU list if true, otherwise scan
                                 only BUF_LRU_SEARCH_SCAN_THRESHOLD blocks
+@param[in]      exhaustive      wait for scan ownership and page mutexes;
+                                reserved for quiesced invalidation
 @return true if found and freed */
 [[nodiscard]] bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool,
-                                               bool scan_all);
+                                               bool scan_all,
+                                               bool exhaustive = false);
 
 /** Returns a free block from the buf_pool.  The block is taken off the
 free list.  If it is empty, returns NULL.
@@ -214,9 +217,10 @@ LRU_list_mutex is still live. Used after invalidation empties the LRU.
 @param[in,out]  buf_pool        buffer pool instance */
 void buf_LRU_empty_group_cache(buf_pool_t *buf_pool);
 
-/** Steal and destroy retired empty groups outside LRU_list_mutex.
+/** Reclaim retired groups and replenish the reusable reserve to its target.
+Allocation and destruction occur outside LRU_list_mutex.
 @param[in,out]  buf_pool        buffer pool instance */
-void buf_LRU_destroy_retired_groups(buf_pool_t *buf_pool);
+void buf_LRU_maintain_group_cache(buf_pool_t *buf_pool);
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
 /** Validates the LRU list. */
@@ -272,7 +276,10 @@ constexpr uint32_t BUF_LRU_PROMOTE_QUEUE_CAPACITY = 4096;
 constexpr uint32_t BUF_LRU_PROMOTE_DRAIN_CHUNK = 64;
 
 /** Maximum adjacent same-class group merges per compaction activation. */
-constexpr uint32_t BUF_LRU_COMPACT_BUDGET = 8;
+constexpr uint32_t BUF_LRU_COMPACT_MERGE_BUDGET = 8;
+
+/** Maximum adjacent group pairs examined per compaction activation. */
+constexpr uint32_t BUF_LRU_COMPACT_SCAN_BUDGET = 64;
 
 struct buf_pool_t;
 

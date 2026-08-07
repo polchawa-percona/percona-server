@@ -1566,6 +1566,9 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   LRU list) */
   new (&buf_pool->lru_hp) LRUGroupHp(buf_pool, &buf_pool->LRU_list_mutex);
 
+  /* Initialize ownership for optimistic scans that drop LRU_list_mutex. */
+  new (&buf_pool->LRU_scan_owner) ut::Exclusive_scan();
+
   /* Initialize the iterator for LRU group scan search */
   new (&buf_pool->lru_scan_itr)
       LRUGroupItr(buf_pool, &buf_pool->LRU_list_mutex);
@@ -1573,6 +1576,18 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   /* Initialize the iterator for single page scan search (over groups) */
   new (&buf_pool->single_scan_itr)
       LRUGroupItr(buf_pool, &buf_pool->LRU_list_mutex);
+  buf_pool->LRU_single_scan_active.store(0, std::memory_order_relaxed);
+
+  /* Initialize the persistent sparse-group compaction cursor. */
+  new (&buf_pool->lru_compact_hp)
+      LRUGroupHp(buf_pool, &buf_pool->LRU_list_mutex);
+  buf_pool->LRU_compaction_pending = false;
+  buf_pool->LRU_compaction_retry = false;
+  buf_pool->LRU_compaction_epoch = 0;
+  buf_pool->LRU_compaction_sweep_epoch = 0;
+
+  /* Create the low-water reserve before foreground LRU activity starts. */
+  buf_LRU_maintain_group_cache(buf_pool);
 
   err = DB_SUCCESS;
 }
@@ -6577,7 +6592,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
 
   ut_d(buf_assert_all_are_replaceable(buf_pool));
 
-  while (buf_LRU_scan_and_free_block(buf_pool, true)) {
+  while (buf_LRU_scan_and_free_block(buf_pool, true, true)) {
   }
 
   mutex_enter(&buf_pool->LRU_list_mutex);
@@ -6593,10 +6608,15 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   buf_pool->freed_page_clock = 0;
   buf_pool->LRU_old = nullptr;
   buf_pool->LRU_old_len = 0;
+  buf_pool->lru_compact_hp.set(nullptr);
+  buf_pool->LRU_compaction_pending = false;
+  buf_pool->LRU_compaction_retry = false;
+  buf_pool->LRU_compaction_sweep_epoch = buf_pool->LRU_compaction_epoch;
 
   mutex_exit(&buf_pool->LRU_list_mutex);
 
   buf_LRU_empty_group_cache(buf_pool);
+  buf_LRU_maintain_group_cache(buf_pool);
 
   buf_pool->stat.reset();
   buf_refresh_io_stats(buf_pool);

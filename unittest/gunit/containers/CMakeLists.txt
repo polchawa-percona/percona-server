@@ -33,6 +33,7 @@ INCLUDE_DIRECTORIES(SYSTEM
 # Add tests
 SET(TESTS
   bounded_mpsc_queue
+  exclusive_scan
   integrals_lockfree_queue)
 
 FOREACH(test ${TESTS})
@@ -41,4 +42,7 @@ FOREACH(test ${TESTS})
 ENDFOREACH()
 
 TARGET_INCLUDE_DIRECTORIES(bounded_mpsc_queue-t PRIVATE
+  ${CMAKE_SOURCE_DIR}/storage/innobase/include)
+
+TARGET_INCLUDE_DIRECTORIES(exclusive_scan-t PRIVATE
   ${CMAKE_SOURCE_DIR}/storage/innobase/include)

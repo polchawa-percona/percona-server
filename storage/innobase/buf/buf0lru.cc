@@ -90,6 +90,9 @@ static const ulint BUF_LRU_DROP_SEARCH_SIZE = 1024;
 during LRU eviction. */
 static const ulint BUF_LRU_SEARCH_SCAN_THRESHOLD = 100;
 
+static_assert(BUF_LRU_GROUP_RESERVE_TARGET >= BUF_LRU_PROMOTE_DRAIN_CHUNK);
+static_assert(BUF_LRU_GROUP_RESERVE_MAX > BUF_LRU_GROUP_RESERVE_TARGET);
+
 /** If we switch on the InnoDB monitor because there are too few available
 frames in the buffer pool, we set this to true */
 static std::atomic_bool buf_lru_switched_on_innodb_mon = false;
@@ -1184,9 +1187,11 @@ On success, LRU_list_mutex is released by the free path. On failure, neither
 LRU_list_mutex nor the block mutex is held.
 @param[in,out] buf_pool buffer pool instance
 @param[in] identity page identity from the snapshot
+@param[in] exhaustive whether this is a quiesced invalidation scan
 @return true if a page was freed */
-static bool buf_LRU_try_evict_tail_identity(
-    buf_pool_t *buf_pool, const buf_lru_promote_t &identity) {
+static bool buf_LRU_try_evict_tail_identity(buf_pool_t *buf_pool,
+                                            const buf_lru_promote_t &identity,
+                                            bool exhaustive) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
   rw_lock_t *hash_lock = nullptr;
@@ -1204,7 +1209,9 @@ static bool buf_LRU_try_evict_tail_identity(
   }
 
   auto *block_mutex = buf_page_get_mutex(bpage);
-  if (mutex_enter_nowait(block_mutex) != 0) {
+  if (exhaustive) {
+    mutex_enter(block_mutex);
+  } else if (mutex_enter_nowait(block_mutex) != 0) {
     rw_lock_s_unlock(hash_lock);
     return false;
   }
@@ -1238,7 +1245,13 @@ static bool buf_LRU_try_evict_tail_identity(
   /* Keep-zip eviction can replace the descriptor while preserving
   residency_generation; rebind the page mutex to the current object. */
   block_mutex = buf_page_get_mutex(bpage);
-  mutex_enter(block_mutex);
+  if (exhaustive) {
+    mutex_enter(block_mutex);
+  } else if (mutex_enter_nowait(block_mutex) != 0) {
+    rw_lock_s_unlock(hash_lock);
+    mutex_exit(&buf_pool->LRU_list_mutex);
+    return false;
+  }
   rw_lock_s_unlock(hash_lock);
 
   bool freed = false;
@@ -1275,7 +1288,7 @@ static bool buf_LRU_try_evict_tail_identity(
 }
 
 static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
-                                              bool scan_all) {
+                                              bool scan_all, bool exhaustive) {
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
   ulint scanned{};
@@ -1314,7 +1327,8 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
     bool freed = false;
     for (uint32_t i = 0; i < candidate_count; ++i) {
       ++scanned;
-      if (buf_LRU_try_evict_tail_identity(buf_pool, *candidates[i])) {
+      if (buf_LRU_try_evict_tail_identity(buf_pool, *candidates[i],
+                                          exhaustive)) {
         freed = true;
         break;
       }
@@ -1334,6 +1348,7 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
     }
 
     if (!scan_all && scanned >= BUF_LRU_SEARCH_SCAN_THRESHOLD) {
+      mutex_enter(&buf_pool->LRU_list_mutex);
       break;
     }
 
@@ -1351,9 +1366,16 @@ static bool buf_LRU_free_from_common_LRU_list(buf_pool_t *buf_pool,
   return false;
 }
 
-bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all) {
+bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all,
+                                 bool exhaustive) {
   bool freed = false;
+  bool owns_common_scan = false;
   bool use_unzip_list = UT_LIST_GET_LEN(buf_pool->unzip_LRU) > 0;
+
+  if (scan_all) {
+    buf_pool->LRU_scan_owner.acquire();
+    owns_common_scan = true;
+  }
 
   mutex_enter(&buf_pool->LRU_list_mutex);
 
@@ -1362,7 +1384,12 @@ bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all) {
   }
 
   if (!freed) {
-    freed = buf_LRU_free_from_common_LRU_list(buf_pool, scan_all);
+    if (!owns_common_scan) {
+      owns_common_scan = buf_pool->LRU_scan_owner.try_acquire();
+    }
+    if (owns_common_scan) {
+      freed = buf_LRU_free_from_common_LRU_list(buf_pool, scan_all, exhaustive);
+    }
   }
 
   if (!freed) {
@@ -1371,7 +1398,9 @@ bool buf_LRU_scan_and_free_block(buf_pool_t *buf_pool, bool scan_all) {
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
-  buf_LRU_destroy_retired_groups(buf_pool);
+  if (owns_common_scan) {
+    buf_pool->LRU_scan_owner.release();
+  }
 
   return (freed);
 }
@@ -1988,6 +2017,7 @@ void buf_LRU_adjust_group_hp(buf_pool_t *buf_pool,
   buf_pool->lru_hp.adjust(group);
   buf_pool->lru_scan_itr.adjust(group);
   buf_pool->single_scan_itr.adjust(group);
+  buf_pool->lru_compact_hp.adjust(group);
 }
 
 /** Replace bpage's slot in its LRU group with dpage, without moving the
@@ -2009,6 +2039,19 @@ void buf_LRU_relocate_in_group(buf_page_t *bpage, buf_page_t *dpage) {
   dpage->lru_slot = bpage->lru_slot;
   bpage->lru_group = nullptr;
   mutex_exit(&group->mutex);
+}
+
+/** Allocate and initialize one reusable LRU group. No LRU mutex is required. */
+static buf_lru_group_t *buf_lru_group_create() {
+  auto *group = ut::new_withkey<buf_lru_group_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  mutex_create(LATCH_ID_BUF_POOL_LRU_GROUP, &group->mutex);
+  group->pages.fill(nullptr);
+  group->n_pages = 0;
+  group->occupied_slots = 0;
+  group->old = false;
+  group->in_LRU_list = false;
+  group->cache_next = nullptr;
+  return group;
 }
 
 /** Obtains an empty LRU group (PS-11141 grouped LRU list), reusing one from
@@ -2033,14 +2076,7 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
     ut_ad(!group->in_LRU_list);
     group->old = false;
   } else {
-    group = ut::new_withkey<buf_lru_group_t>(UT_NEW_THIS_FILE_PSI_KEY);
-    mutex_create(LATCH_ID_BUF_POOL_LRU_GROUP, &group->mutex);
-    group->pages.fill(nullptr);
-    group->n_pages = 0;
-    group->occupied_slots = 0;
-    group->old = false;
-    group->in_LRU_list = false;
-    group->cache_next = nullptr;
+    group = buf_lru_group_create();
   }
 
   const uint64_t generation = buf_pool->LRU_group_next_reuse_generation++;
@@ -2151,16 +2187,45 @@ void buf_LRU_empty_group_cache(buf_pool_t *buf_pool) {
   buf_lru_group_destroy_list(retired);
 }
 
-/** Steal and destroy retired empty groups outside LRU_list_mutex.
-@param[in,out]  buf_pool        buffer pool instance */
-void buf_LRU_destroy_retired_groups(buf_pool_t *buf_pool) {
+/** Reclaim retired groups and replenish the reserve outside LRU_list_mutex.
+The target and maximum form low/high watermarks: background work refills only
+after the reserve falls below the target, while hot-path releases may retain
+up to the higher maximum before retiring overflow. */
+void buf_LRU_maintain_group_cache(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
   mutex_enter(&buf_pool->LRU_list_mutex);
   buf_lru_group_t *retired = buf_lru_group_steal_retired(buf_pool);
+  const size_t reserve_len = buf_pool->LRU_group_cache_len;
   mutex_exit(&buf_pool->LRU_list_mutex);
 
   buf_lru_group_destroy_list(retired);
+
+  if (reserve_len >= BUF_LRU_GROUP_RESERVE_TARGET) {
+    return;
+  }
+
+  const size_t created = BUF_LRU_GROUP_RESERVE_TARGET - reserve_len;
+  buf_lru_group_t *fresh = nullptr;
+  for (size_t i = 0; i < created; ++i) {
+    buf_lru_group_t *group = buf_lru_group_create();
+    group->cache_next = fresh;
+    fresh = group;
+  }
+
+  mutex_enter(&buf_pool->LRU_list_mutex);
+  while (fresh != nullptr &&
+         buf_pool->LRU_group_cache_len < BUF_LRU_GROUP_RESERVE_TARGET) {
+    buf_lru_group_t *group = fresh;
+    fresh = fresh->cache_next;
+    group->cache_next = buf_pool->LRU_group_cache;
+    buf_pool->LRU_group_cache = group;
+    buf_pool->LRU_group_cache_len++;
+  }
+  mutex_exit(&buf_pool->LRU_list_mutex);
+
+  /* A concurrent release may have filled the reserve while creation ran. */
+  buf_lru_group_destroy_list(fresh);
 }
 
 /** Result of detaching a page while holding its group mutex. */
@@ -2186,6 +2251,8 @@ hasn't.
 @return see Detach_from_group_result */
 static inline Detach_from_group_result buf_LRU_detach_from_group(
     buf_page_t *bpage) {
+  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
   buf_lru_group_t *group = bpage->lru_group;
   ut_a(group);
 
@@ -2200,6 +2267,11 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   const bool now_empty = (group->n_pages == 0);
   bpage->lru_group = nullptr;
   mutex_exit(&group->mutex);
+
+  /* A sparse survivor may merge directly, while removing an empty group can
+  make its former neighbors newly adjacent and mergeable. */
+  buf_pool->LRU_compaction_pending = true;
+  ++buf_pool->LRU_compaction_epoch;
 
   return {now_empty, was_old, group};
 }
@@ -2662,24 +2734,33 @@ void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
   }
 
   const bool backlog = !queue->reset_wakeup_if_empty();
-  mutex_exit(&buf_pool->LRU_drain_mutex);
 
   if (backlog) {
     os_event_set(buf_flush_event);
   }
 
-  buf_LRU_destroy_retired_groups(buf_pool);
+  buf_LRU_maintain_group_cache(buf_pool);
+  mutex_exit(&buf_pool->LRU_drain_mutex);
 }
 
-/** True if compaction must leave this group alone. */
-static bool buf_lru_group_skip_compaction(const buf_pool_t *buf_pool,
-                                          const buf_lru_group_t *group) {
+/** True if compaction must leave this active classification group alone. */
+static bool buf_lru_group_is_active(const buf_pool_t *buf_pool,
+                                    const buf_lru_group_t *group) {
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
   return group == buf_pool->LRU_old || group == buf_pool->LRU_fill_group ||
-         group == buf_pool->LRU_young_fill_group ||
-         group == buf_pool->lru_hp.get() ||
-         group == buf_pool->lru_scan_itr.get() ||
-         group == buf_pool->single_scan_itr.get();
+         group == buf_pool->LRU_young_fill_group;
+}
+
+/** True if an active unlocked scan currently hazards this group. */
+static bool buf_lru_group_has_live_hazard(const buf_pool_t *buf_pool,
+                                          const buf_lru_group_t *group) {
+  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+  return group == buf_pool->lru_hp.get() ||
+         (buf_pool->LRU_scan_owner.is_owned() &&
+          group == buf_pool->lru_scan_itr.get()) ||
+         (buf_pool->LRU_single_scan_active.load(std::memory_order_acquire) !=
+              0 &&
+          group == buf_pool->single_scan_itr.get());
 }
 
 /** Merge pages from right into left, preserving flattened page order, then
@@ -2737,7 +2818,9 @@ static bool buf_lru_group_try_merge(buf_pool_t *buf_pool, buf_lru_group_t *left,
   return true;
 }
 
-/** Merge eligible adjacent sparse LRU groups under a fixed budget.
+/** Merge eligible adjacent sparse LRU groups under fixed scan and merge
+budgets. A persistent reverse hazard cursor makes each activation O(budget)
+and completes a tail-to-head sweep across activations.
 @param[in,out] buf_pool buffer pool instance */
 void buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
@@ -2756,29 +2839,64 @@ void buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool) {
 
   mutex_enter(&buf_pool->LRU_list_mutex);
 
+  if (!buf_pool->LRU_compaction_pending) {
+    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_LRU_maintain_group_cache(buf_pool);
+    mutex_exit(&buf_pool->LRU_drain_mutex);
+    return;
+  }
+
+  uint32_t examined = 0;
   uint32_t merges = 0;
-  buf_lru_group_t *group = UT_LIST_GET_FIRST(buf_pool->LRU);
-  while (group != nullptr && merges < BUF_LRU_COMPACT_BUDGET) {
-    buf_lru_group_t *next = UT_LIST_GET_NEXT(LRU, group);
-    if (next == nullptr) {
+  buf_lru_group_t *right = buf_pool->lru_compact_hp.get();
+  if (right == nullptr) {
+    right = UT_LIST_GET_LAST(buf_pool->LRU);
+    buf_pool->LRU_compaction_sweep_epoch = buf_pool->LRU_compaction_epoch;
+    buf_pool->LRU_compaction_retry = false;
+  }
+
+  const auto finish_sweep = [buf_pool]() {
+    buf_pool->lru_compact_hp.set(nullptr);
+    buf_pool->LRU_compaction_pending =
+        buf_pool->LRU_compaction_epoch != buf_pool->LRU_compaction_sweep_epoch;
+    buf_pool->LRU_compaction_pending |= buf_pool->LRU_compaction_retry;
+  };
+
+  while (right != nullptr && examined < BUF_LRU_COMPACT_SCAN_BUDGET &&
+         merges < BUF_LRU_COMPACT_MERGE_BUDGET) {
+    buf_lru_group_t *left = UT_LIST_GET_PREV(LRU, right);
+    if (left == nullptr) {
+      finish_sweep();
       break;
     }
 
-    if (buf_lru_group_skip_compaction(buf_pool, group) ||
-        buf_lru_group_skip_compaction(buf_pool, next) ||
-        !buf_lru_group_try_merge(buf_pool, group, next)) {
-      group = next;
-      continue;
+    /* Advance the hazard before right can be reclaimed by a merge. */
+    buf_pool->lru_compact_hp.set(left);
+    ++examined;
+
+    const bool live_hazard = buf_lru_group_has_live_hazard(buf_pool, left) ||
+                             buf_lru_group_has_live_hazard(buf_pool, right);
+    buf_pool->LRU_compaction_retry |= live_hazard;
+
+    if (!live_hazard && !buf_lru_group_is_active(buf_pool, left) &&
+        !buf_lru_group_is_active(buf_pool, right) &&
+        buf_lru_group_try_merge(buf_pool, left, right)) {
+      ++merges;
     }
 
-    ++merges;
-    /* `group` absorbed `next`; continue from the same predecessor so a
-    chain of sparse successors can collapse within the budget. */
+    right = left;
   }
 
+  if (right == nullptr) {
+    finish_sweep();
+  }
+
+  ut_ad(examined <= BUF_LRU_COMPACT_SCAN_BUDGET);
+  ut_ad(merges <= BUF_LRU_COMPACT_MERGE_BUDGET);
+
   mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_LRU_maintain_group_cache(buf_pool);
   mutex_exit(&buf_pool->LRU_drain_mutex);
-  buf_LRU_destroy_retired_groups(buf_pool);
 }
 
 /** Stop accepting new deferred promotions.
