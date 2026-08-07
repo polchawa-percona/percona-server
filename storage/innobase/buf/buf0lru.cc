@@ -2018,6 +2018,7 @@ void buf_LRU_relocate_in_group(buf_page_t *bpage, buf_page_t *dpage) {
 /** Allocate and initialize one reusable LRU group. No LRU mutex is required. */
 static buf_lru_group_t *buf_lru_group_create() {
   auto *group = ut::new_withkey<buf_lru_group_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  mutex_create(LATCH_ID_BUF_POOL_LRU_GROUP, &group->mutex);
   group->pages.fill(nullptr);
   group->n_pages = 0;
   group->occupied_slots = 0;
@@ -2063,6 +2064,7 @@ static void buf_lru_group_destroy(buf_lru_group_t *group) {
   ut_ad(group->n_pages == 0);
   ut_ad(group->occupied_slots == 0);
   ut_ad(!group->in_LRU_list);
+  mutex_free(&group->mutex);
   ut::delete_(group);
 }
 

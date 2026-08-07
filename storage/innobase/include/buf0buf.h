@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef buf0buf_h
 #define buf0buf_h
 
+#include "buf0lru_topology.h"
 #include "buf0types.h"
 #include "fil0fil.h"
 #include "hash0hash.h"
@@ -2284,6 +2285,15 @@ and page back-pointers. Grouped-LRU mutations do not have an independent
 group-only path, so a second mutex would only extend the global critical
 section. */
 struct buf_lru_group_t {
+  /** Protects pages, n_pages, and occupied_slots (PS-11141 two-level
+  grouped LRU locking). Latch level SYNC_BUF_LRU_GROUP: below the topology
+  latch (buf_pool->LRU_list_mutex) and below page block/zip mutexes, and
+  always the innermost/last latch acquired on any path that touches a
+  group. Reintroduced additively for now (created/destroyed with the
+  group, not yet taken by any real critical section) -- see the two-level
+  locking REQUIREMENTS.md, Implementation Plan step 1. */
+  BufListMutex mutex;
+
   /** Node linking this group into buf_pool->LRU. Protected by
   buf_pool->LRU_list_mutex. */
   UT_LIST_NODE_T(buf_lru_group_t) LRU;
@@ -2483,6 +2493,14 @@ struct buf_pool_t {
   --innodb-sync-debug) by rw_lock_assert_wait_allowed() at the rw-lock
   wait entry points in sync0rw.cc. */
   BufListMutex LRU_list_mutex;
+
+  /** Topology S/X latch for the two-level grouped LRU list (PS-11141).
+  Not yet wired into any real critical section -- see
+  Buf_LRU_topology_latch and the two-level locking REQUIREMENTS.md,
+  Implementation Plan step 1. Created and destroyed alongside
+  LRU_list_mutex, which remains the live protection for group topology
+  until step 2 migrates its call sites onto this latch. */
+  Buf_LRU_topology_latch LRU_topology_latch;
 
   /** Serializes the sole background promotion consumer and sparse-group
   compaction with debug validators (PS-11141 grouped LRU list, latch level

@@ -227,9 +227,24 @@ enum latch_level_t {
   SYNC_BUF_FREE_LIST,
   SYNC_BUF_ZIP_FREE,
 
+  /** Latch level of buf_lru_group_t::mutex (PS-11141 two-level grouped LRU
+  locking). Below SYNC_BUF_BLOCK: a thread holding the topology latch (see
+  SYNC_BUF_LRU_LIST), a page hash latch, or a page's own block/zip mutex may
+  acquire a group mutex; a thread holding only a group mutex may not
+  acquire any of those. The group mutex is always the innermost/last
+  latch acquired in any path that touches a group. */
+  SYNC_BUF_LRU_GROUP,
+
   SYNC_BUF_BLOCK,
 
   SYNC_BUF_PAGE_HASH,
+
+  /** Latch level of buf_pool_t::LRU_list_mutex today, and of the topology
+  S/X latch that is planned to replace it in place (PS-11141 two-level
+  grouped LRU locking; see Buf_LRU_topology_latch). Unchanged by that
+  migration: it stabilizes group topology/lifetime, and a holder may
+  acquire a group mutex (SYNC_BUF_LRU_GROUP) or block/zip mutex
+  (SYNC_BUF_BLOCK), never the reverse. */
   SYNC_BUF_LRU_LIST,
 
   /** Latch level of buf_pool_t::LRU_drain_mutex (PS-11141 grouped LRU
@@ -363,6 +378,8 @@ enum latch_id_t {
   LATCH_ID_BUF_POOL_CHUNKS,
   LATCH_ID_BUF_POOL_ZIP,
   LATCH_ID_BUF_POOL_LRU_LIST,
+  LATCH_ID_BUF_POOL_LRU_GROUP,
+  LATCH_ID_BUF_POOL_LRU_TOPOLOGY,
   LATCH_ID_BUF_POOL_LRU_DRAIN,
   LATCH_ID_BUF_POOL_FREE_LIST,
   LATCH_ID_BUF_POOL_ZIP_FREE,

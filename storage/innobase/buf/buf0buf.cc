@@ -1424,6 +1424,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->LRU_group_next_reuse_generation = 1;
   mutex_create(LATCH_ID_BUF_POOL_CHUNKS, &buf_pool->chunks_mutex);
   mutex_create(LATCH_ID_BUF_POOL_LRU_LIST, &buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.create();
   mutex_create(LATCH_ID_BUF_POOL_LRU_DRAIN, &buf_pool->LRU_drain_mutex);
   mutex_create(LATCH_ID_BUF_POOL_FREE_LIST, &buf_pool->free_list_mutex);
   mutex_create(LATCH_ID_BUF_POOL_ZIP_FREE, &buf_pool->zip_free_mutex);
@@ -1614,6 +1615,7 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   buf_pool->LRU_promote_queue = nullptr;
 
   mutex_free(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.free();
   mutex_free(&buf_pool->LRU_drain_mutex);
   mutex_free(&buf_pool->free_list_mutex);
   mutex_free(&buf_pool->zip_free_mutex);
@@ -1626,7 +1628,10 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   group's pages, freeing zip-only descriptors as before; additionally,
   each buf_lru_group_t is individually heap-allocated (unlike buf_page_t,
   which lives inside a chunk's memory), so it -- and its mutex -- must be
-  explicitly freed here too, or every shutdown leaks it. No concurrency
+  explicitly freed here too, or every shutdown leaks it. This bypasses
+  buf_lru_group_destroy() (which also frees the mutex, for groups that go
+  through the reserve/retired cache instead), so the mutex_free() below
+  is mandatory here, not merely mirroring that function. No concurrency
   concerns: buf_pool->LRU_list_mutex was already destroyed above, and this
   whole instance is being torn down. */
   for (buf_lru_group_t *group = UT_LIST_GET_LAST(buf_pool->LRU);
@@ -1651,6 +1656,7 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
       }
     }
 
+    mutex_free(&group->mutex);
     ut::delete_(group);
 
     group = prev_group;

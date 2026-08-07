@@ -37,6 +37,7 @@ ENDIF()
 
 SET(TESTS
   #example
+  buf0lru_topology
   fil_path
   fts0vlc
   ha_innodb

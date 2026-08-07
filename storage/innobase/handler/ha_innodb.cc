@@ -709,6 +709,7 @@ static PSI_mutex_info all_innodb_mutexes[] = {
     PSI_MUTEX_KEY(buf_pool_flush_state_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_LRU_list_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_free_list_mutex, 0, 0, PSI_DOCUMENT_ME),
+    PSI_MUTEX_KEY(buf_pool_lru_group_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_lru_drain_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_zip_free_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_zip_hash_mutex, 0, 0, PSI_DOCUMENT_ME),
@@ -814,6 +815,7 @@ static PSI_rwlock_info all_innodb_rwlocks[] = {
 #ifdef UNIV_DEBUG
     PSI_RWLOCK_KEY(buf_block_debug_latch, 0, PSI_DOCUMENT_ME),
 #endif /* UNIV_DEBUG */
+    PSI_RWLOCK_KEY(buf_pool_lru_topology_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(dict_operation_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(fil_space_latch, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(log_sn_lock, 0, PSI_DOCUMENT_ME),
