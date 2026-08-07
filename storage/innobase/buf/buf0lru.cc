@@ -33,6 +33,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "buf0lru.h"
 
+#include <bit>
+
 #include "btr0btr.h"
 #include "btr0sea.h"
 #include "buf0buddy.h"
@@ -55,10 +57,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0start.h"
 #include "sync0rw.h"
 #include "trx0trx.h"
+#include "ut0bounded_mpsc.h"
 #include "ut0byte.h"
 #include "ut0rnd.h"
-
-#include <vector>
 
 /** The number of blocks from the LRU_old pointer onward, including
 the block pointed to, must be buf_pool->LRU_old_ratio/BUF_LRU_OLD_RATIO_DIV
@@ -140,51 +141,30 @@ std::chrono::milliseconds get_buf_LRU_old_threshold() {
 uint buf_LRU_make_young_drain_threshold;
 
 void buf_LRU_enqueue_promote(buf_page_t *bpage) {
-  /* Only one enqueue in-flight per page. */
-  bool expected = false;
-  if (!bpage->LRU_in_promote_queue.compare_exchange_strong(
-          expected, true, std::memory_order_acquire,
-          std::memory_order_relaxed)) {
-    /* Page already on the queue: the lock-free fast path elided this
-    promotion entirely (no LRU_list_mutex, no enqueue). */
+  ut_ad(bpage->buf_fix_count > 0);
+
+  auto *const buf_pool = buf_pool_from_bpage(bpage);
+  if (!buf_pool->LRU_accept_promotions.load(std::memory_order_acquire)) {
     return;
   }
 
-  /* Eviction skips pages with buf_fix_count > 0.
-  The drain unfixes after re-linking the page on the LRU. */
-  buf_block_fix(bpage);
+  const auto identity =
+      buf_lru_promote_t{bpage->id, bpage->residency_generation};
+  auto *const queue = buf_pool->LRU_promote_queue;
+  const uint32_t wake_threshold =
+      std::min<uint32_t>(buf_LRU_make_young_drain_threshold,
+                         queue->capacity());
 
-  const auto buf_pool = buf_pool_from_bpage(bpage);
+  /* Promotion is heuristic. A busy selected slot is dropped immediately;
+  producers never pin the descriptor, allocate, take an InnoDB mutex, or
+  drain foreground work. */
+  const auto result = queue->try_push(identity, wake_threshold);
+  if (result == ut::Bounded_mpsc_push_result::full) {
+    return;
+  }
 
-  /* Increment queue length before linking the node: a drainer only observes
-  nodes once they are linked, so fetch_add-before-CAS prevents the counter
-  from underflowing if a drain runs between our length update and head CAS. */
-  const size_t new_len =
-      buf_pool->LRU_promote_queue_len.fetch_add(1, std::memory_order_relaxed) +
-      1;
-
-  auto old_head = buf_pool->LRU_promote_head.load(std::memory_order_relaxed);
-  do {
-    bpage->LRU_promote_next = old_head;
-  } while (!buf_pool->LRU_promote_head.compare_exchange_weak(
-      old_head, bpage, std::memory_order_release, std::memory_order_relaxed));
-
-  /* Drain when this push crosses the threshold. Use == (not >=) to avoid
-  every producer contending on LRU_promote_draining while a drain is in
-  flight; > 2*threshold re-arms if the crossing attempt is lost. Remainder
-  below threshold is drained periodically by the page cleaner coordinator. */
-  const uint threshold = buf_LRU_make_young_drain_threshold;
-  if (threshold != 0 &&
-      (new_len == threshold || new_len > 2 * uint64_t{threshold})) {
-    bool not_draining = false;
-    /* Avoid clash of concurrent promotions. */
-    if (buf_pool->LRU_promote_draining.compare_exchange_strong(
-            not_draining, true, std::memory_order_acquire,
-            std::memory_order_relaxed)) {
-      buf_LRU_drain_promote_queue(buf_pool);
-      buf_pool->LRU_promote_draining.store(false, std::memory_order_release);
-    }
-    /* else: another thread owns the drain; we just pushed and moved on. */
+  if (result == ut::Bounded_mpsc_push_result::first) {
+    os_event_set(buf_flush_event);
   }
 }
 
@@ -828,12 +808,6 @@ static void buf_flush_dirty_pages(buf_pool_t *buf_pool, space_id_t id,
   dberr_t err;
 
   do {
-    /* Pages on the deferred make-young queue are buf-fixed until drained;
-    flush_pages_flush_list() cannot flush them and this loop would spin.
-    Drain synchronously on each retry; do not rely on background progress
-    (coordinator interval is ~1s, and synchronous DDL cannot wait). */
-    buf_LRU_drain_promote_queue(buf_pool);
-
     /* TODO: it should be possible to avoid locking the LRU list
     mutex here. */
     mutex_enter(&buf_pool->LRU_list_mutex);
@@ -877,13 +851,6 @@ buffer pool instance when we are DISCARDing the tablespace.
 @param[in]      id              space id */
 static void buf_LRU_remove_all_pages(buf_pool_t *buf_pool, ulint id) {
 scan_again:
-  /* Pages on the promote queue are buf-fixed; the buf_fix_count check below
-  would treat them as unremovable and retry forever. Drain on every scan;
-  no-op when the queue is empty. This must happen before acquiring
-  LRU_drain_mutex just below, not after: buf_LRU_drain_promote_queue()
-  acquires that same mutex itself, and it is not recursive. */
-  buf_LRU_drain_promote_queue(buf_pool);
-
   /* PS-11141 grouped LRU list: see the matching comment in
   buf_LRU_drop_page_hash_for_tablespace() -- this is likewise
   administrative (DISCARD TABLESPACE), not a hot path, so it fully
@@ -1970,6 +1937,7 @@ void buf_LRU_relocate_in_group(buf_page_t *bpage, buf_page_t *dpage) {
 
   mutex_enter(&group->mutex);
   ut_ad(group->pages[bpage->lru_slot] == bpage);
+  ut_ad(group->occupied_slots & (uint32_t{1} << bpage->lru_slot));
   group->pages[bpage->lru_slot] = dpage;
   dpage->lru_group = group;
   dpage->lru_slot = bpage->lru_slot;
@@ -1993,6 +1961,7 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
     unlinked group, so its slots are all still null and its mutex is
     still live: only the classification flags need resetting. */
     ut_ad(group->n_pages == 0);
+    ut_ad(group->occupied_slots == 0);
     ut_ad(!group->in_LRU_list);
     group->old = false;
     return group;
@@ -2002,6 +1971,7 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
   mutex_create(LATCH_ID_BUF_POOL_LRU_GROUP, &group->mutex);
   group->pages.fill(nullptr);
   group->n_pages = 0;
+  group->occupied_slots = 0;
   group->old = false;
   group->in_LRU_list = false;
   group->cache_next = nullptr;
@@ -2017,6 +1987,7 @@ static void buf_lru_group_release(buf_pool_t *buf_pool,
                                   buf_lru_group_t *group) {
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
   ut_ad(group->n_pages == 0);
+  ut_ad(group->occupied_slots == 0);
   ut_ad(!group->in_LRU_list);
 
   /* Deliberately unconditional: see buf_pool_t::LRU_group_cache for why
@@ -2038,56 +2009,25 @@ void buf_LRU_free_group_cache(buf_pool_t *buf_pool) {
   buf_pool->LRU_group_cache_len = 0;
 }
 
-/** Return type of buf_LRU_detach_from_group(): every field is read/decided
-while holding the page's group mutex, so a caller with no other protection
-(a group-mutex-only fast path) still observes them consistently with any
-concurrent writer that also needs that same group's mutex. */
+/** Result of detaching a page while holding its group mutex. */
 struct Detach_from_group_result {
-  /** True if the group's page count reached zero: a candidate for reclaim
-  by the caller's buf_LRU_remove_block_finish() or, in a deferred fast
-  path, by a later batched pass. */
+  /** True if the group's page count reached zero. */
   bool group_now_empty;
   /** buf_page_is_old(bpage) as observed at the moment of detach. */
   bool was_old;
-  /** The group the page was detached from. Safe to retain even without
-  LRU_list_mutex (group objects are recycled, never freed, while the pool
-  lives), but may be stale by the time a deferred caller looks at it -- see
-  Drained_page_info for the predicate such a caller must re-check. */
+  /** The group the page was detached from. */
   buf_lru_group_t *group;
 };
 
-/** Group-mutex-only half of block removal (PS-11141 grouped LRU list,
-split out of the original buf_LRU_remove_block() so a future group-mutex-
-only fast path can reuse this half without the buf_pool->LRU_list_mutex-
-held remainder). Vacates bpage's slot in its current group and decrements
-that group's page count; touches nothing that requires
-buf_pool->LRU_list_mutex, only bpage's own fields and its group's mutex.
+/** Vacate a page's slot in its current LRU group.
+
+The caller holds LRU_list_mutex; the group mutex keeps slot and page
+back-pointer changes atomic for group readers.
 bpage->lru_group is cleared inside the same group->mutex critical section
 as the slot vacate (not after releasing it), so that any reader who takes
 group->mutex to look at group->pages[] observes both the slot and this
 field flip together, with no window where one has changed and the other
 hasn't.
-Deliberately does NOT clear bpage->in_LRU_list here, unlike the original
-pre-fast-path version: buf_pool_validate_instance()'s in_LRU_list check
-(buf0buf.cc) documents that field as modified only under LRU_list_mutex,
-which this group-mutex-only detach does not hold -- clearing it here would
-let that validator (or anything else relying on the same documented
-invariant) observe, under only LRU_list_mutex, a page that is neither
-linked into a group nor pending its initial read, between this detach and
-the deferred pass's buf_LRU_remove_block_finish() catching up. That
-function clears it instead, always under LRU_list_mutex, whether called
-immediately (defer_reclaim=false) or from the fast path's later batched
-pass (defer_reclaim=true).
-bpage->old is read in this same critical section rather than left to the
-caller, for the same reason "no other unsynchronized read": every writer
-of a page's "old" flag (buf_LRU_old_adjust_len()'s grow/shrink branches,
-buf_LRU_reclaim_empty_group()'s boundary shift, buf_LRU_remove_block_
-finish()'s "list too short" fallback) holds that page's group's mutex
-while flipping it, in addition to buf_pool->LRU_list_mutex -- so a caller
-that does not hold LRU_list_mutex (the drain's fast path) still reads a
-properly synchronized value by reading it here, instead of via
-buf_page_is_old(), whose own assertion only recognizes LRU_list_mutex or
-the block mutex as valid protection.
 @param[in,out]  bpage   control block, still linked into its group
 @return see Detach_from_group_result */
 static inline Detach_from_group_result buf_LRU_detach_from_group(
@@ -2099,7 +2039,9 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   ut_ad(group->pages[bpage->lru_slot] == bpage);
   const bool was_old = bpage->old;
   ut_ad(was_old == group->old);
+  ut_ad(group->occupied_slots & (uint32_t{1} << bpage->lru_slot));
   group->pages[bpage->lru_slot] = nullptr;
+  group->occupied_slots &= ~(uint32_t{1} << bpage->lru_slot);
   group->n_pages--;
   const bool now_empty = (group->n_pages == 0);
   bpage->lru_group = nullptr;
@@ -2108,10 +2050,8 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   return {now_empty, was_old, group};
 }
 
-/** Reclaims an empty LRU group (PS-11141 grouped LRU list), split out of
-the original buf_LRU_remove_block() so both the immediate removal path and
-a future deferred/batched fast path can share it. If the group was the
-LRU_old boundary, shifts the boundary to its predecessor group first
+/** Reclaims an empty LRU group (PS-11141 grouped LRU list). If the group was
+the LRU_old boundary, shifts the boundary to its predecessor group first
 (mirroring the page-model's handling of "bpage == LRU_old"): the
 predecessor is guaranteed to exist, because LRU_old is only allowed to
 differ from the strict buf_pool->LRU_old_ratio/BUF_LRU_OLD_RATIO_DIV target
@@ -2163,33 +2103,18 @@ static void buf_LRU_reclaim_empty_group(buf_pool_t *buf_pool,
   buf_lru_group_release(buf_pool, group);
 }
 
-/** buf_pool->LRU_list_mutex-held remainder of block removal (PS-11141
-grouped LRU list), split out of the original buf_LRU_remove_block() so a
-future group-mutex-only fast path can defer this remainder and batch it
-once per drain instead of once per removed page.
+/** Complete block removal after its group slot was vacated.
 @param[in]      bpage           the same page passed to the preceding
                                 buf_LRU_detach_from_group() call
 @param[in]      group           bpage->lru_group as observed before that
                                 call (bpage->lru_group is nullptr by now)
 @param[in]      was_old         buf_page_is_old(bpage) as observed before
                                 that call
-@param[in]      group_now_empty return value of that call
-@param[in]      defer_reclaim   if true, apply only the counter/unzip_LRU
-                                bookkeeping below and return immediately:
-                                the caller is responsible for empty-group
-                                reclaim (via buf_LRU_reclaim_empty_group(),
-                                after re-checking group->n_pages == 0 under
-                                the group's own mutex -- it may have been
-                                reused as a fill group in the meantime),
-                                the "list too short" fallback, and calling
-                                buf_LRU_old_adjust_len(), each intended to
-                                be done once for a whole batch rather than
-                                once per page */
+@param[in]      group_now_empty return value of that call */
 static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
                                                buf_lru_group_t *group,
                                                bool was_old,
-                                               bool group_now_empty,
-                                               bool defer_reclaim) {
+                                               bool group_now_empty) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
@@ -2208,10 +2133,6 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
 
   if (was_old) {
     buf_pool->LRU_old_len--;
-  }
-
-  if (defer_reclaim) {
-    return;
   }
 
   if (group_now_empty) {
@@ -2268,8 +2189,7 @@ static inline void buf_LRU_remove_block(buf_page_t *bpage) {
   const auto detached = buf_LRU_detach_from_group(bpage);
 
   buf_LRU_remove_block_finish(bpage, group, detached.was_old,
-                              detached.group_now_empty,
-                              /*defer_reclaim=*/false);
+                              detached.group_now_empty);
 }
 
 /** Adds a block to the LRU list of decompressed zip pages.
@@ -2293,18 +2213,33 @@ void buf_unzip_LRU_add_block(buf_block_t *block, bool old) {
   }
 }
 
-/** Finds an empty slot in group and returns its index. The group must not
-already be full.
-@param[in]      group   group to search
+/** Finds an empty slot in constant time. The group must not already be full.
+@param[in]      group   group whose mutex is held
 @return index of an empty (null) slot */
 static inline uint32_t buf_lru_group_find_free_slot(
     const buf_lru_group_t *group) {
-  uint32_t slot = 0;
-  while (group->pages[slot] != nullptr) {
-    ++slot;
-    ut_a(slot < BUF_LRU_GROUP_SIZE);
-  }
+  ut_ad(mutex_own(&group->mutex));
+  static_assert(BUF_LRU_GROUP_SIZE == sizeof(group->occupied_slots) * 8);
+  ut_a(group->occupied_slots != UINT32_MAX);
+  const uint32_t slot = std::countr_zero(~group->occupied_slots);
+  ut_ad(group->pages[slot] == nullptr);
   return slot;
+}
+
+/** Appends a page to a non-full group.
+@param[in,out] group group whose mutex is held
+@param[in,out] bpage page not currently belonging to a group */
+static inline void buf_lru_group_append_page(buf_lru_group_t *group,
+                                             buf_page_t *bpage) {
+  ut_ad(mutex_own(&group->mutex));
+  ut_ad(bpage->lru_group == nullptr);
+
+  const uint32_t slot = buf_lru_group_find_free_slot(group);
+  group->pages[slot] = bpage;
+  group->occupied_slots |= uint32_t{1} << slot;
+  group->n_pages++;
+  bpage->lru_group = group;
+  bpage->lru_slot = slot;
 }
 
 /** Appends bpage to buf_pool->LRU_young_fill_group (the young/MRU-side fill
@@ -2323,41 +2258,26 @@ static void buf_LRU_append_to_young_fill_group(buf_pool_t *buf_pool,
   ut_ad(bpage->lru_group == nullptr);
 
   buf_lru_group_t *group = buf_pool->LRU_young_fill_group;
-  bool group_usable = false;
   if (group != nullptr) {
-    /* Peek group->n_pages/old under its own mutex, not just
-    LRU_list_mutex: a future group-mutex-only fast path can concurrently
-    decrement group->n_pages (never group->old -- see the abandonment
-    comment below) without LRU_list_mutex. The peek can only go stale in
-    the "more room than we saw" direction before we re-check under the
-    same mutex at the actual append below, since nothing else can append
-    to this exact group without LRU_list_mutex, which we hold throughout;
-    see that append's own comment. */
     mutex_enter(&group->mutex);
-    group_usable = group->n_pages < BUF_LRU_GROUP_SIZE;
+    if (group->n_pages < BUF_LRU_GROUP_SIZE && !group->old) {
+      buf_lru_group_append_page(group, bpage);
+      mutex_exit(&group->mutex);
+      buf_pool->LRU_n_pages++;
+      return;
+    }
     mutex_exit(&group->mutex);
-    group_usable = group_usable && !group->old;
-  }
-  if (!group_usable) {
-    /* group->old can flip true out from under the fill-group pointer (an
-    old/young boundary shift promoting this exact group, e.g. via
-    buf_LRU_old_adjust_len() or buf_LRU_old_init()); appending into it here
-    would silently mix a young page into an old-marked group and desync
-    LRU_old_len. Abandon the stale pointer and start a fresh group instead. */
-    group = buf_lru_group_alloc(buf_pool);
-    UT_LIST_ADD_FIRST(buf_pool->LRU, group);
-    group->in_LRU_list = true;
-    buf_pool->LRU_young_fill_group = group;
   }
 
+  /* A full or reclassified fill group is abandoned; start a fresh group. */
+  group = buf_lru_group_alloc(buf_pool);
+  UT_LIST_ADD_FIRST(buf_pool->LRU, group);
+  group->in_LRU_list = true;
+  buf_pool->LRU_young_fill_group = group;
   mutex_enter(&group->mutex);
-  const uint32_t slot = buf_lru_group_find_free_slot(group);
-  group->pages[slot] = bpage;
-  group->n_pages++;
+  buf_lru_group_append_page(group, bpage);
   mutex_exit(&group->mutex);
 
-  bpage->lru_group = group;
-  bpage->lru_slot = slot;
   buf_pool->LRU_n_pages++;
 }
 
@@ -2379,43 +2299,34 @@ static void buf_LRU_append_to_old_fill_group(buf_pool_t *buf_pool,
   ut_ad(bpage->lru_group == nullptr);
 
   buf_lru_group_t *group = buf_pool->LRU_fill_group;
-  bool group_usable = false;
   if (group != nullptr) {
-    /* See the matching comment in buf_LRU_append_to_young_fill_group():
-    peek group->n_pages under its own mutex (group->old is safe to read
-    under LRU_list_mutex alone -- the fast path never touches it). */
     mutex_enter(&group->mutex);
-    group_usable = group->n_pages < BUF_LRU_GROUP_SIZE;
-    mutex_exit(&group->mutex);
-    group_usable = group_usable && group->old;
-  }
-  if (!group_usable) {
-    /* group->old can flip false out from under the fill-group pointer (a
-    boundary shift demoting this exact group, e.g. via
-    buf_LRU_old_adjust_len()'s shrink branch); appending into it here would
-    silently mix an old page into a young-marked group and desync
-    LRU_old_len. Abandon the stale pointer and start a fresh group instead. */
-    group = buf_lru_group_alloc(buf_pool);
-    group->old = true;
-    if (buf_pool->LRU_old != nullptr) {
-      UT_LIST_INSERT_AFTER(buf_pool->LRU, buf_pool->LRU_old, group);
-    } else {
-      /* Defensive fallback; not reachable via buf_LRU_add_block_low(),
-      whose length check ensures LRU_old is already defined here. */
-      UT_LIST_ADD_FIRST(buf_pool->LRU, group);
+    if (group->n_pages < BUF_LRU_GROUP_SIZE && group->old) {
+      buf_lru_group_append_page(group, bpage);
+      mutex_exit(&group->mutex);
+      buf_pool->LRU_n_pages++;
+      buf_pool->LRU_old_len++;
+      return;
     }
-    group->in_LRU_list = true;
-    buf_pool->LRU_fill_group = group;
+    mutex_exit(&group->mutex);
   }
 
+  /* A full or reclassified fill group is abandoned; start a fresh group. */
+  group = buf_lru_group_alloc(buf_pool);
+  group->old = true;
+  if (buf_pool->LRU_old != nullptr) {
+    UT_LIST_INSERT_AFTER(buf_pool->LRU, buf_pool->LRU_old, group);
+  } else {
+    /* Defensive fallback; not reachable via buf_LRU_add_block_low(),
+    whose length check ensures LRU_old is already defined here. */
+    UT_LIST_ADD_FIRST(buf_pool->LRU, group);
+  }
+  group->in_LRU_list = true;
+  buf_pool->LRU_fill_group = group;
   mutex_enter(&group->mutex);
-  const uint32_t slot = buf_lru_group_find_free_slot(group);
-  group->pages[slot] = bpage;
-  group->n_pages++;
+  buf_lru_group_append_page(group, bpage);
   mutex_exit(&group->mutex);
 
-  bpage->lru_group = group;
-  bpage->lru_slot = slot;
   buf_pool->LRU_n_pages++;
   buf_pool->LRU_old_len++;
 }
@@ -2428,16 +2339,8 @@ page_size from the buffer page when adding a block into LRU
 @param[in]      old     true if should be put to the old blocks in the LRU list,
                         else put to the start; if the LRU list is very short,
                         the block is added to the start, regardless of this
-                        parameter
-@param[in]      defer_old_adjust  if true, skip the trailing
-                        buf_LRU_old_adjust_len() call below: the caller is
-                        batching several additions and will call it once
-                        itself afterwards. Does not affect the one-time
-                        LRU_n_pages == BUF_LRU_OLD_MIN_LEN -> buf_LRU_old_init()
-                        transition, which is not a repeated adjustment and
-                        must still run inline the moment it applies */
-static inline void buf_LRU_add_block_low(buf_page_t *bpage, bool old,
-                                         bool defer_old_adjust = false) {
+                        parameter */
+static inline void buf_LRU_add_block_low(buf_page_t *bpage, bool old) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
@@ -2472,9 +2375,7 @@ static inline void buf_LRU_add_block_low(buf_page_t *bpage, bool old,
     /* Adjust the length of the old block list if necessary */
 
     buf_page_set_old(bpage, old);
-    if (!defer_old_adjust) {
-      buf_LRU_old_adjust_len(buf_pool);
-    }
+    buf_LRU_old_adjust_len(buf_pool);
 
   } else if (buf_pool->LRU_n_pages == BUF_LRU_OLD_MIN_LEN) {
     /* The LRU list is now long enough for LRU_old to become
@@ -2512,32 +2413,6 @@ void buf_LRU_make_block_young(buf_page_t *bpage) {
 
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
-  /* A page owned by the promotion drain's pipeline (PS-11141 grouped LRU
-  list) must not have its group membership touched by anyone else, from
-  the moment it is enqueued until the drain's deferred pass has finished
-  re-appending it: buf_LRU_enqueue_promote() buffer-fixes the page for
-  that whole window, and LRU_in_promote_queue stays true for exactly the
-  same window (cleared only in the drain's final unfix loop, after the
-  deferred pass -- see buf_LRU_drain_promote_queue()). An unrelated caller
-  holding its own, separate buf-fix on the same page can legitimately
-  reach here while it is queued -- e.g. purge's
-  ibuf_update_free_bits_if_full() calls buf_page_make_young() directly,
-  bypassing the threshold/queue routing that buf_page_make_young_if_needed()
-  applies -- so checking only bpage->lru_group == nullptr is not enough:
-  that catches the page already having been detached by the drain's fast
-  pass, but not the reverse interleaving, where this call's own
-  buf_LRU_remove_block() -> buf_LRU_detach_from_group() wins the group's
-  mutex first, moves the page to a different group, and the drain's fast
-  pass -- already holding a pointer to the *old* group from before this
-  call ran -- then fails its own slot-consistency check against a group
-  it no longer belongs to. Checking the flag instead of the group pointer
-  avoids entering the race at all: if the page is queued, skip entirely
-  and let the drain's own re-append (which already lands the page at the
-  young head) satisfy this call's intent. */
-  if (bpage->LRU_in_promote_queue.load(std::memory_order_acquire)) {
-    return;
-  }
-
   if (bpage->old) {
     buf_pool->stat.n_pages_made_young++;
   }
@@ -2553,242 +2428,118 @@ void buf_LRU_make_block_old(buf_page_t *bpage) {
 
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
-  /* See the matching comment in buf_LRU_make_block_young(): a page owned
-  by the promotion drain's pipeline must not have its group membership
-  touched by anyone else for as long as LRU_in_promote_queue is true.
-  Unlike make-young, the drain's re-append always lands the page in a
-  fresh *young* group, so skipping here silently drops this call's "push
-  toward old" intent for one attempt -- acceptable, since normal aging
-  will demote the page again on a later pass, and the alternative is a
-  crash (either an assert on a null group, or a slot-consistency assert
-  in the drain's own detach once this call's write and the drain's read
-  race each other). */
-  if (bpage->LRU_in_promote_queue.load(std::memory_order_acquire)) {
-    return;
-  }
-
   buf_LRU_remove_block(bpage);
   buf_LRU_add_block_low(bpage, true);
 }
 
-/** One drained page's state, captured during buf_LRU_drain_promote_queue()'s
-group-mutex-only fast pass for use by its later LRU_list_mutex-held
-deferred pass (PS-11141 grouped LRU list): buf_page_is_old(bpage) is no
-longer meaningful (its group membership is gone) once the fast pass detaches
-the page, so was_old must be captured before that happens.
-emptied_group is the page's former group when this detach took its last
-page (nullptr otherwise), recorded so the deferred pass can reclaim exactly
-the groups this batch emptied instead of rescanning the whole list.
-Dereferencing it later is safe even though it is captured without
-LRU_list_mutex: group objects are recycled through
-buf_pool->LRU_group_cache and never returned to the heap while the pool
-lives (see that member), so the pointer cannot dangle. It can, however, go
-stale -- between this detach and the deferred pass, the group may be
-repopulated by a concurrent fresh-page insertion, or emptied and reclaimed
-by an unrelated remover and then reused as a different group entirely. The
-deferred pass therefore does not trust the capture: it re-checks
-in_LRU_list && n_pages == 0 under LRU_list_mutex and reclaims only on that
-predicate, which is correct regardless of identity, since reclaiming *any*
-linked, empty group is always a legitimate action. */
-struct Drained_page_info {
-  buf_page_t *bpage;
-  bool was_old;
-  buf_lru_group_t *emptied_group;
-};
+/** Resolve and apply one deferred make-young identity.
+@param[in,out] buf_pool buffer pool instance
+@param[in] identity page residency requested by a producer */
+static void buf_LRU_promote_identity(buf_pool_t *buf_pool,
+                                     const buf_lru_promote_t &identity) {
+  rw_lock_t *hash_lock;
+  buf_page_t *bpage =
+      buf_page_hash_get_s_locked(buf_pool, identity.page_id, &hash_lock);
 
-/** Drains the deferred make-young promotion queue (PS-11141 grouped LRU
-list) in two passes. The first, fast pass detaches each drained page from
-its current group using only that group's own mutex -- never
-buf_pool->LRU_list_mutex -- so unrelated eviction, fresh-page insertion,
-and buf_LRU_old_adjust_len() traffic is not blocked for the whole batch;
-this is the structural contention-reduction goal the grouped LRU list was
-originally introduced for (see the design notes in .requirements/), not
-realized by the P2 rewrite that first wired groups in, which -- like every
-other LRU mutation -- still took LRU_list_mutex around this loop.
-All buf_pool-level bookkeeping that empties a group can trigger (an
-LRU_old boundary shift, clearing buf_pool->LRU_fill_group/
-LRU_young_fill_group, hazard pointer adjustment, unlinking and freeing the
-group) is deferred to the second, batched pass below, along with the
-buf_pool->LRU_n_pages/LRU_old_len/stat.LRU_bytes counters and appending
-every drained page into a fresh or existing young-fill group -- all done
-once per drain call rather than once per page, which also restores the
-pre-grouping implementation's batching of buf_LRU_old_adjust_len() to a
-single end-of-batch call (the original P2 rewrite ran it once per drained
-page instead, a documented, now-superseded efficiency regression). */
+  if (bpage == nullptr) {
+    return;
+  }
+
+  if (buf_pool_watch_is_sentinel(buf_pool, bpage) ||
+      bpage->residency_generation != identity.residency_generation ||
+      !buf_page_in_file(bpage)) {
+    rw_lock_s_unlock(hash_lock);
+    return;
+  }
+
+  /* The hash latch stabilizes the descriptor until this temporary consumer
+  pin is installed. The pin then bridges the required hash-to-LRU latch-order
+  transition without extending descriptor lifetime from the producer. */
+  buf_block_fix(bpage);
+  rw_lock_s_unlock(hash_lock);
+
+  mutex_enter(&buf_pool->LRU_list_mutex);
+
+  if (bpage->id == identity.page_id &&
+      bpage->residency_generation == identity.residency_generation &&
+      buf_page_in_file(bpage) && !bpage->was_stale() &&
+      bpage->lru_group != nullptr &&
+      buf_page_peek_if_too_old(bpage)) {
+    buf_LRU_make_block_young(bpage);
+  }
+
+  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_block_unfix(bpage);
+}
+
+/** Drain a bounded chunk of deferred make-young identities.
+
+Entries carry values rather than descriptor pointers. Each current residency
+is resolved under its page-hash latch and pinned only by this consumer before
+ordinary LRU mutation. LRU_drain_mutex temporarily preserves single-consumer
+operation until the lifecycle stage removes all legacy synchronous callers. */
 void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
   ut_ad(!mutex_own(&buf_pool->LRU_drain_mutex));
 
-  /* This is just to avoid the mutex lock and CAS overhead if the queue was
-   * empty. */
-  if (buf_pool->LRU_promote_head.load(std::memory_order_acquire) == nullptr) {
+  if (!buf_pool->LRU_accept_promotions.load(std::memory_order_acquire)) {
     return;
   }
 
-  /* PS-11141 grouped LRU list: LRU_drain_mutex, acquired before
-  LRU_list_mutex, brackets both passes below. The fast pass mutates group
-  contents without LRU_list_mutex; LRU_drain_mutex is what lets
-  buf_LRU_validate_instance() (which also acquires it) prove it never
-  observes that in-flight -- between the fast pass detaching a page and
-  the deferred pass correcting buf_pool->LRU_n_pages/LRU_old_len to
-  match, those counters are deliberately, transiently stale-high by up to
-  this batch's size. Validators that run from inside LRU_list_mutex-held
-  code cannot acquire this mutex (that would invert this function's own
-  acquisition order), so any such validator must not check invariants
-  this window deliberately breaks -- only the top-level
-  buf_LRU_validate_instance(), which brackets itself with this mutex,
-  may. */
+  auto *const queue = buf_pool->LRU_promote_queue;
+  if (queue->empty()) {
+    return;
+  }
+
   mutex_enter(&buf_pool->LRU_drain_mutex);
 
-  buf_page_t *head =
-      buf_pool->LRU_promote_head.exchange(nullptr, std::memory_order_acquire);
-
-  if (head == nullptr) {
+  if (!buf_pool->LRU_accept_promotions.load(std::memory_order_acquire)) {
     mutex_exit(&buf_pool->LRU_drain_mutex);
     return;
   }
 
-  /* Fast pass: group-mutex only, no LRU_list_mutex. A page whose queue
-  entry has outlived its eviction (buf_page_in_file() false) was already
-  fully removed from the LRU by whatever evicted it -- lru_group is
-  already null, was_old/its group are both meaningless -- so it is simply
-  skipped, exactly as the pre-fast-path version skipped it. */
-  std::vector<Drained_page_info> drained_pages;
-
-  for (buf_page_t *bpage = head; bpage != nullptr;
-       bpage = bpage->LRU_promote_next) {
-    if (!buf_page_in_file(bpage)) {
-      continue;
+  for (uint32_t consumed = 0; consumed < BUF_LRU_PROMOTE_DRAIN_CHUNK;
+       ++consumed) {
+    const auto identity = queue->try_pop();
+    if (!identity.has_value()) {
+      break;
     }
-    /* was_old must come from buf_LRU_detach_from_group()'s own
-    group-mutex-protected read, not a separate buf_page_is_old(bpage)
-    call here: this fast pass holds neither buf_pool->LRU_list_mutex nor
-    bpage's block mutex, the only two protections buf_page_is_old()'s
-    assertion recognizes, and an unsynchronized read here would race
-    against a concurrent buf_LRU_old_adjust_len() flipping this exact
-    page's "old" flag under this same group's mutex. The group pointer is
-    recorded only when this detach emptied the group, giving the deferred
-    pass the exact, O(batch)-sized set of reclaim candidates; see
-    Drained_page_info for why retaining it is safe and what the deferred
-    pass must re-check before acting on it. */
-    const auto detached = buf_LRU_detach_from_group(bpage);
-    drained_pages.push_back(
-        {bpage, detached.was_old,
-         detached.group_now_empty ? detached.group : nullptr});
+    buf_LRU_promote_identity(buf_pool, *identity);
   }
 
-  /* Deferred batched pass: LRU_list_mutex held once for the whole batch. */
-  mutex_enter(&buf_pool->LRU_list_mutex);
-
-  /* Per-page buf_pool-level counters and unzip_LRU bookkeeping FIRST, before
-  the group-level reclaim walk below: every was_old delta here is a
-  per-page snapshot taken during the fast pass, while the reclaim walk
-  applies bulk, group-level "old" flag flips (promoting/leaving a whole
-  group) derived from *live* group->n_pages. Applying the snapshot deltas
-  first means the reclaim walk's bulk re-reads always start from a
-  buf_pool->LRU_old_len that already matches live group state for every
-  page this batch removed -- so a promoted group's current n_pages (which
-  never includes this batch's already-removed pages) cannot be added on
-  top of a not-yet-subtracted snapshot for those same pages. Reclaim is
-  not repeated here (defer_reclaim=true); it runs in the walk below.
-  group/group_now_empty are passed as unused placeholders: with
-  defer_reclaim=true, buf_LRU_remove_block_finish() returns before ever
-  reading either. */
-  for (const auto &info : drained_pages) {
-    buf_LRU_remove_block_finish(info.bpage, /*group=*/nullptr, info.was_old,
-                                /*group_now_empty=*/false,
-                                /*defer_reclaim=*/true);
-  }
-  /* Reclaim exactly the groups this batch emptied, O(batch) rather than
-  O(all groups in the pool). An earlier version instead walked the whole
-  buf_pool->LRU list here whenever the batch had emptied anything, to
-  avoid re-dereferencing a group pointer captured by the fast pass without
-  LRU_list_mutex. That walk turned out to be a serious scalability
-  problem: it runs while holding LRU_list_mutex, its length is
-  proportional to the buffer pool size (pool pages / BUF_LRU_GROUP_SIZE --
-  tens of thousands of groups on a large pool), and under real eviction
-  pressure the "did this batch empty anything" gate is true most of the
-  time, so it was very far from the O(batch) common case it was assumed to
-  be.
-  Acting on the captured pointers is safe now that group objects are
-  recycled through buf_pool->LRU_group_cache instead of being freed, so
-  they cannot dangle; a capture can still be stale, which the
-  in_LRU_list && n_pages == 0 re-check below handles. That predicate is
-  evaluated here under LRU_list_mutex and is sufficient on its own:
-  reclaiming any linked, empty group is always legitimate, so it does not
-  matter whether the pointer still designates the same logical group it
-  did at capture time. n_pages can be read without the group's own mutex
-  for the same reason as before -- the only writer that does not hold
-  LRU_list_mutex is a drain's fast pass, only one drain runs at a time
-  (LRU_drain_mutex), and this one has already finished its fast pass.
-  Duplicate captures (a group emptied, refilled and re-emptied within one
-  batch) are harmless: the first reclaim clears in_LRU_list, so later
-  entries for it fail the predicate. Must still run before the re-append
-  loop below, which can allocate new groups that must not be reclaimed
-  here. buf_LRU_reclaim_empty_group() re-reads buf_pool->LRU_old itself,
-  so consecutive empty groups chain through correctly, and an empty group
-  contributes zero pages when promoted, so no count is ever
-  double-added. */
-  for (const auto &info : drained_pages) {
-    buf_lru_group_t *const group = info.emptied_group;
-    if (group != nullptr && group->in_LRU_list && group->n_pages == 0) {
-      buf_LRU_reclaim_empty_group(buf_pool, group);
-    }
-  }
-
-  /* Re-append every drained page as a fresh young insertion, exactly as
-  buf_LRU_make_block_young() did per page before this batching -- creating
-  and sealing BUF_LRU_GROUP_SIZE-page groups as needed and linking them at
-  the LRU head. defer_old_adjust=true skips only the trailing
-  buf_LRU_old_adjust_len() call each append would otherwise make; the one
-  case that isn't a repeated adjustment -- LRU_n_pages crossing
-  BUF_LRU_OLD_MIN_LEN and calling buf_LRU_old_init() -- still runs inline
-  the moment it applies, exactly once, regardless of this flag. */
-  for (const auto &info : drained_pages) {
-    buf_LRU_add_block_low(info.bpage, false, /*defer_old_adjust=*/true);
-  }
-
-  /* Single end-of-batch adjustment. If LRU_old just became defined via
-  buf_LRU_old_init() inside the loop above, that already called this once
-  internally; calling it again here is a cheap, tolerance-satisfied no-op
-  in that case, not a correctness concern. */
-  if (buf_pool->LRU_old != nullptr) {
-    buf_LRU_old_adjust_len(buf_pool);
-  }
-
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  const bool backlog = !queue->reset_wakeup_if_empty();
   mutex_exit(&buf_pool->LRU_drain_mutex);
 
-  /* Release the drained nodes in a second pass, outside the critical
-  section: neither the queue-flag store nor buf_block_unfix() needs the
-  LRU list mutex (the nodes were detached by the exchange above and are
-  owned exclusively by this thread until the flag is cleared), so keeping
-  them in the first loop would only lengthen the mutex hold time. */
-  size_t drained = 0;
-
-  while (head != nullptr) {
-    buf_page_t *const next = head->LRU_promote_next;
-
-    /* All writes to the node must precede the release store below: the
-    store is the linearization point after which a producer may win the
-    LRU_in_promote_queue CAS, re-enqueue this page and own
-    LRU_promote_next again. Writing LRU_promote_next after the store
-    would race with the producer's link write and could truncate the
-    live queue, orphaning the nodes behind this one with their buf-fix
-    counts leaked. */
-    head->LRU_promote_next = nullptr;
-    head->LRU_in_promote_queue.store(false, std::memory_order_release);
-
-    /* Unfix only after the flag is cleared: once unfixed the page may be
-    freed and its descriptor reused, which must not observe a stale
-    in-queue flag. */
-    buf_block_unfix(head);
-
-    head = next;
-    drained++;
+  if (backlog) {
+    os_event_set(buf_flush_event);
   }
+}
 
-  buf_pool->LRU_promote_queue_len.fetch_sub(drained, std::memory_order_relaxed);
+/** Stop accepting new deferred promotions.
+
+Published identities are deliberately retained. A producer that passed the
+gate before this store may still finish publication, so destructive discard
+would require foreground producer rendezvous. Retention is safe because
+residency generations never repeat during the pool lifetime; after
+invalidation these entries resolve as stale, and at shutdown the queue
+outlives all producer threads.
+@param[in,out] buf_pool buffer pool instance */
+void buf_LRU_close_promote_queue(buf_pool_t *buf_pool) {
+  buf_pool->LRU_accept_promotions.store(false, std::memory_order_release);
+
+  /* Rendezvous with a consumer that passed its open check before the store.
+  A later consumer rechecks the gate after taking this mutex and exits. */
+  mutex_enter(&buf_pool->LRU_drain_mutex);
+  mutex_exit(&buf_pool->LRU_drain_mutex);
+}
+
+/** Re-enable deferred promotion production after invalidation.
+@param[in,out] buf_pool buffer pool instance */
+void buf_LRU_open_promote_queue(buf_pool_t *buf_pool) {
+  buf_pool->LRU_accept_promotions.store(true, std::memory_order_release);
+  if (!buf_pool->LRU_promote_queue->empty()) {
+    os_event_set(buf_flush_event);
+  }
 }
 
 bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
@@ -3574,10 +3325,13 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
       ut_a(!seen_old);
     }
 
-    for (auto *bpage : group->pages) {
+    uint32_t observed_slots = 0;
+    for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {
+      auto *bpage = group->pages[slot];
       if (bpage == nullptr) {
         continue;
       }
+      observed_slots |= uint32_t{1} << slot;
       ++page_count;
 
       switch (buf_page_get_state(bpage)) {
@@ -3597,7 +3351,12 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
       }
 
       ut_a(buf_page_is_old(bpage) == group->old);
+      ut_a(bpage->lru_group == group);
+      ut_a(bpage->lru_slot == slot);
     }
+    ut_a(group->occupied_slots == observed_slots);
+    ut_a(group->n_pages ==
+         static_cast<uint32_t>(std::popcount(observed_slots)));
   }
 
   ut_a(page_count == buf_pool->LRU_n_pages);

@@ -24021,9 +24021,9 @@ static MYSQL_SYSVAR_UINT(
     "If non-zero, moving a page to the head of the buffer pool LRU list "
     "on access is deferred: the page is pushed onto a per-buffer-pool "
     "lock-free queue instead of taking the LRU list mutex on the hot "
-    "read path. When the queue reaches this length it is drained in one "
-    "batch under a single mutex acquisition. Set to 0 to disable the "
-    "deferred queue and move pages immediately.",
+    "read path. This value is a background-wakeup threshold capped at the "
+    "queue capacity; draining proceeds in bounded chunks. Set to 0 to "
+    "disable the deferred queue and move pages immediately.",
     nullptr, nullptr, 128, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_LONG(

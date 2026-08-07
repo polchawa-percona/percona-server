@@ -85,9 +85,12 @@ group before the conventional atomic eviction commit.
    read-only, and recovery operation, independent of `innodb_lru_threads`.
    The recovery branch of that coordinator must use a promotion-aware wake
    plus periodic fallback because it does not universally wait on
-   `buf_flush_event`. Shutdown and invalidation must close enqueue,
-   synchronize with the consumer, discard or drain queued values, then
-   reset/reopen as appropriate. Background work must have fixed queue
+   `buf_flush_event`. Shutdown and invalidation must close enqueue and
+   rendezvous with the sole consumer. Values already published or racing with
+   close may be retained safely because generations never repeat;
+   invalidation reopens and background-revalidates them, while shutdown
+   destroys them only after producer quiescence.
+   Background work must have fixed queue
    capacity, dequeue chunk, temporary-fix count, chunks-per-activation, and
    time-slice/resignal behavior. Remaining work must be rescheduled without a
    foreground fallback.
@@ -132,8 +135,10 @@ group before the conventional atomic eviction commit.
 ## Acceptance Criteria
 
 1. No foreground, DDL, resize, invalidation, or assertion call path can
-   execute `buf_LRU_drain_promote_queue()`. Queue shutdown is coordinated by
-   close-and-discard/drain with the background owner.
+   execute `buf_LRU_drain_promote_queue()`. Closing production is
+   non-destructive until producer quiescence, so a producer already past the
+   gate cannot race queue storage reclamation; close waits out any active
+   consumer before invalidation continues.
 2. Enqueue contains no `buf_block_fix()` and no raw page pointer is stored in
    queue storage. A page evicted and reloaded while its old identity remains
    queued has a different generation and is not promoted by that entry.
@@ -231,8 +236,9 @@ counters but will not claim TPS acceptance without that external run.
    `LRU_drain_mutex` scaffolding once no caller needs them.
 5. Make the page-cleaner coordinator the sole consumer in normal, read-only,
    and recovery phases. Make its recovery wait promotion-wake-aware with a
-   periodic fallback, and implement close, drain/discard, reset, and reopen
-   protocols for shutdown/invalidation. Remove every
+   periodic fallback, and implement non-destructive close/reopen protocols
+   for shutdown/invalidation, retaining generation-safe values until
+   background revalidation or quiescent teardown. Remove every
    foreground/DDL/resize/assertion synchronous drain.
 6. Add fixed dequeue/chunk/fix/time budgets, reliable wake-state rechecking,
    threshold-to-capacity capping, and rescheduling. Cache-line-separate queue

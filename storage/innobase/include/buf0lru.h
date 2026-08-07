@@ -256,10 +256,18 @@ std::chrono::milliseconds get_buf_LRU_old_threshold();
 
 extern uint buf_LRU_make_young_drain_threshold;
 
+/** Preallocated deferred-promotion slots per buffer-pool instance. */
+constexpr uint32_t BUF_LRU_PROMOTE_QUEUE_CAPACITY = 4096;
+
+/** Maximum identities consumed by one drain invocation. */
+constexpr uint32_t BUF_LRU_PROMOTE_DRAIN_CHUNK = 64;
+
 struct buf_pool_t;
 
 void buf_LRU_enqueue_promote(buf_page_t *bpage);
 void buf_LRU_drain_promote_queue(buf_pool_t *buf_pool);
+void buf_LRU_close_promote_queue(buf_pool_t *buf_pool);
+void buf_LRU_open_promote_queue(buf_pool_t *buf_pool);
 /** @} */
 
 /** @brief Statistics for selecting the LRU list for eviction.

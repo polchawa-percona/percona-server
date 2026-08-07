@@ -3466,18 +3466,23 @@ static void buf_flush_page_coordinator_thread() {
     buf_flush_batch_result_t lru_result{};
     ulint n_flushed_list = 0;
 
-    os_event_wait(recv_sys->flush_start);
+    const ulint wait_result = os_event_wait_time(
+        recv_sys->flush_start, std::chrono::milliseconds{100});
 
     if (srv_shutdown_state.load() >= SRV_SHUTDOWN_CLEANUP ||
         recv_sys->spaces == nullptr) {
       break;
     }
 
-    /* Drain deferred promotions on each recv_writer wakeup (~100ms). The
-    normal coordinator loop does this every ~1s; recovery had no equivalent
-    until now. No-op when the queue is empty. */
+    /* Drain deferred promotions on each recovery wake or 100 ms timeout.
+    The timeout also covers log-test and force-recovery configurations that
+    do not provide recv_writer flush requests. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
       buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+    }
+
+    if (wait_result == OS_SYNC_TIME_EXCEEDED) {
+      continue;
     }
 
     switch (recv_sys->flush_type) {
@@ -3517,9 +3522,8 @@ static void buf_flush_page_coordinator_thread() {
   int64_t sig_count = os_event_reset(buf_flush_event);
 
   while (srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
-    /* Bound the lifetime of deferred promotions. Queued pages are buf-fixed
-    until drained; on an idle server the coordinator may not run flush slots,
-    so drain every instance once per iteration (~1s). No-op when empty. */
+    /* Periodic fallback for deferred promotions below the wake threshold.
+    No-op when the queue is empty. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
       buf_LRU_drain_promote_queue(buf_pool_from_array(i));
     }
@@ -3720,6 +3724,12 @@ static void buf_flush_page_coordinator_thread() {
     }
 
     ut_d(buf_flush_page_cleaner_disabled_loop(true));
+  }
+
+  /* No background promotion owner exists after this point. Producers in
+  later shutdown phases must fall back to dropping the heuristic request. */
+  for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
+    buf_LRU_close_promote_queue(buf_pool_from_array(i));
   }
 
   /* This is just for test scenarios. */

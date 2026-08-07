@@ -87,6 +87,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sync0sync.h"
 #include "sync0types.h"
 #include "trx0trx.h"
+#include "ut0bounded_mpsc.h"
 #include "ut0dbg.h"
 #include "ut0lst.h"
 #include "ut0mutex.h"
@@ -1543,6 +1544,11 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   /* All fields are initialized by ut::zalloc_withkey(UT_NEW_THIS_FILE_PSI_KEY).
    */
 
+  buf_pool->LRU_promote_queue =
+      ut::new_withkey<ut::Bounded_mpsc_queue<buf_lru_promote_t>>(
+          UT_NEW_THIS_FILE_PSI_KEY, BUF_LRU_PROMOTE_QUEUE_CAPACITY);
+  buf_pool->LRU_accept_promotions.store(true, std::memory_order_relaxed);
+
   buf_pool->try_LRU_scan = true;
 
   /* Dirty Page Tracking is disabled by default. */
@@ -1582,6 +1588,9 @@ void buf_page_free_descriptor(buf_page_t *bpage) {
 static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   buf_chunk_t *chunk;
   buf_chunk_t *chunks;
+
+  ut::delete_(buf_pool->LRU_promote_queue);
+  buf_pool->LRU_promote_queue = nullptr;
 
   mutex_free(&buf_pool->LRU_list_mutex);
   mutex_free(&buf_pool->LRU_drain_mutex);
@@ -2094,12 +2103,6 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
 
   /* Minimize buf_pool->zip_free[i] lists */
   buf_buddy_condense_free(buf_pool);
-
-  /* Pages on the promote queue are buf-fixed and cannot be relocated or
-  freed. Drain per withdraw attempt for immediate progress; the caller
-  retries on failure. A page enqueued after the drain may be skipped until
-  the next attempt. */
-  buf_LRU_drain_promote_queue(buf_pool);
 
   mutex_enter(&buf_pool->free_list_mutex);
   while (UT_LIST_GET_LEN(buf_pool->withdraw) < buf_pool->withdraw_target) {
@@ -5923,19 +5926,7 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
   auto success = buf_page_free_stale(buf_pool, bpage);
 
   if (!success) {
-    /* Read LRU_in_promote_queue while the LRU mutex still protects bpage;
-    once released, an unqueued page may be freed concurrently. */
-    const bool queued_for_promotion =
-        bpage->LRU_in_promote_queue.load(std::memory_order_acquire);
-
     mutex_exit(&buf_pool->LRU_list_mutex);
-
-    /* Failure may be due to a buf-fix held by a deferred promotion on the
-    queue. Drain only when this page was queued; IO or unrelated buf-fixes
-    should not trigger a pool-wide drain. Callers retry in a loop. */
-    if (queued_for_promotion) {
-      buf_LRU_drain_promote_queue(buf_pool);
-    }
   }
 
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
@@ -6538,12 +6529,6 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
 static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   ut_ad(buf_pool);
 
-  /* Deferred promotions carry a transient buf-fix that would fail the
-  replaceable check below. Materialize them here first; safe only because
-  callers run in a quiescent state (shutdown, or single-actor recovery)
-  where nothing re-enqueues after the drain. */
-  buf_LRU_drain_promote_queue(buf_pool);
-
   buf_chunk_t *chunk = buf_pool->chunks;
 
   for (auto i = buf_pool->n_chunks; i--; chunk++) {
@@ -6570,10 +6555,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
 
   /* Pause LRU threads on event. */
   os_event_reset(buf_pool->run_lru);
-
-  /* Release any pages still on the promote queue so their buf_fix counts
-  do not block LRU invalidation below. */
-  buf_LRU_drain_promote_queue(buf_pool);
+  buf_LRU_close_promote_queue(buf_pool);
 
   /* Prevent new flushes to start (buf_flush_start() checks this flag,
   when starting a new flush). */
@@ -6582,6 +6564,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   mutex_exit(&buf_pool->flush_state_mutex);
 
   auto guard = create_scope_guard([&]() {
+    buf_LRU_open_promote_queue(buf_pool);
     mutex_enter(&buf_pool->flush_state_mutex);
     buf_pool->flushing_allowed = true;
     mutex_exit(&buf_pool->flush_state_mutex);
@@ -6609,7 +6592,6 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   ut_ad(UT_LIST_GET_LEN(buf_pool->unzip_LRU) == 0);
 
   buf_pool->freed_page_clock = 0;
-  buf_pool->next_residency_generation.store(1, std::memory_order_relaxed);
   buf_pool->LRU_old = nullptr;
   buf_pool->LRU_old_len = 0;
 

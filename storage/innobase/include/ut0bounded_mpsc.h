@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 
 #include "ut0cpu_cache.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -40,9 +41,9 @@ namespace ut {
 enum class Bounded_mpsc_push_result {
   /** No free preallocated node was available. */
   full,
-  /** The item changed the pending set from empty to nonempty. */
+  /** This producer armed the consumer wakeup. */
   first,
-  /** Other items were already pending. */
+  /** The item was published without arming a wakeup. */
   pending
 };
 
@@ -79,8 +80,12 @@ class Bounded_mpsc_queue {
   Bounded_mpsc_queue &operator=(Bounded_mpsc_queue &&) = delete;
 
   /** Try to enqueue a copied value without allocating or taking a mutex.
-  @return full, first pending value, or additional pending value */
-  [[nodiscard]] Bounded_mpsc_push_result try_push(const T &value) {
+  @param value value to copy
+  @param wake_threshold pending count at which one producer arms a wakeup;
+  zero is normalized to one
+  @return full, wakeup owner, or published without wakeup */
+  [[nodiscard]] Bounded_mpsc_push_result try_push(
+      const T &value, uint32_t wake_threshold = 1) {
     const uint64_t ticket =
         m_next_ticket.value.fetch_add(1, std::memory_order_relaxed);
     Slot &slot = m_slots[ticket % m_capacity];
@@ -98,7 +103,14 @@ class Bounded_mpsc_queue {
 #endif
 
     slot.value.emplace(value);
+    const uint32_t previous =
+        m_pending_count.value.fetch_add(1, std::memory_order_relaxed);
     slot.state.store(State::ready, std::memory_order_release);
+
+    wake_threshold = std::max(uint32_t{1}, wake_threshold);
+    if (previous + 1 < wake_threshold) {
+      return Bounded_mpsc_push_result::pending;
+    }
 
     return m_wakeup_pending.value.exchange(true, std::memory_order_acq_rel)
                ? Bounded_mpsc_push_result::pending
@@ -118,6 +130,11 @@ class Bounded_mpsc_queue {
       std::optional<T> value{*slot.value};
       slot.value.reset();
       slot.state.store(State::free, std::memory_order_release);
+      const uint32_t previous =
+          m_pending_count.value.fetch_sub(1, std::memory_order_relaxed);
+      if (previous == 0) {
+        std::abort();
+      }
       m_consumer_cursor = (slot_index + 1) % m_capacity;
       return value;
     }
@@ -127,6 +144,11 @@ class Bounded_mpsc_queue {
 
   /** @return maximum simultaneously reserved/pending values */
   [[nodiscard]] uint32_t capacity() const { return m_capacity; }
+
+  /** @return published or publishing values, for wakeup heuristics */
+  [[nodiscard]] uint32_t size() const {
+    return m_pending_count.value.load(std::memory_order_relaxed);
+  }
 
   /** Complete the consumer's drain-and-sleep handshake.
 
@@ -190,6 +212,8 @@ class Bounded_mpsc_queue {
 
   static_assert(
       decltype(Cacheline_atomic<uint64_t>::value)::is_always_lock_free);
+  static_assert(
+      decltype(Cacheline_atomic<uint32_t>::value)::is_always_lock_free);
   static_assert(decltype(Cacheline_atomic<bool>::value)::is_always_lock_free);
   static_assert(sizeof(Cacheline_atomic<uint64_t>) ==
                 ut::INNODB_CACHE_LINE_SIZE);
@@ -199,6 +223,7 @@ class Bounded_mpsc_queue {
   const uint32_t m_capacity;
   uint32_t m_consumer_cursor{};
   Cacheline_atomic<uint64_t> m_next_ticket;
+  Cacheline_atomic<uint32_t> m_pending_count;
   Cacheline_atomic<bool> m_wakeup_pending;
 
 #ifdef EXTRA_CODE_FOR_UNIT_TESTING

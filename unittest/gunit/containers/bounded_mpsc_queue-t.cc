@@ -35,6 +35,7 @@ TEST(BoundedMpscQueue, FullAndReuse) {
   EXPECT_EQ(queue.try_push(10), Bounded_mpsc_push_result::first);
   EXPECT_EQ(queue.try_push(20), Bounded_mpsc_push_result::pending);
   EXPECT_EQ(queue.try_push(30), Bounded_mpsc_push_result::full);
+  EXPECT_EQ(queue.size(), 2U);
 
   auto value = queue.try_pop();
   ASSERT_TRUE(value.has_value());
@@ -43,12 +44,27 @@ TEST(BoundedMpscQueue, FullAndReuse) {
   ASSERT_TRUE(value.has_value());
   EXPECT_EQ(*value, 20);
   EXPECT_FALSE(queue.try_pop().has_value());
+  EXPECT_EQ(queue.size(), 0U);
 
   EXPECT_TRUE(queue.reset_wakeup_if_empty());
   EXPECT_EQ(queue.try_push(30), Bounded_mpsc_push_result::first);
   value = queue.try_pop();
   ASSERT_TRUE(value.has_value());
   EXPECT_EQ(*value, 30);
+}
+
+TEST(BoundedMpscQueue, ArmsWakeupOnlyAtThreshold) {
+  Bounded_mpsc_queue<uint32_t> queue{4};
+
+  EXPECT_EQ(queue.try_push(10, 3), Bounded_mpsc_push_result::pending);
+  EXPECT_EQ(queue.try_push(20, 3), Bounded_mpsc_push_result::pending);
+  EXPECT_EQ(queue.try_push(30, 3), Bounded_mpsc_push_result::first);
+  EXPECT_EQ(queue.try_push(40, 3), Bounded_mpsc_push_result::pending);
+
+  while (queue.try_pop().has_value()) {
+  }
+  EXPECT_TRUE(queue.reset_wakeup_if_empty());
+  EXPECT_EQ(queue.try_push(50, 0), Bounded_mpsc_push_result::first);
 }
 
 TEST(BoundedMpscQueue, ReservedProducerDoesNotBlockPublishedWork) {

@@ -1176,6 +1176,17 @@ definition further below. Forward-declared here so buf_page_t can hold a
 back-pointer to its owning group. */
 struct buf_lru_group_t;
 
+namespace ut {
+template <typename T>
+class Bounded_mpsc_queue;
+}
+
+/** Stable value queued for deferred LRU promotion. */
+struct buf_lru_promote_t {
+  page_id_t page_id;
+  uint64_t residency_generation;
+};
+
 class buf_page_t {
  public:
   /** Copy constructor.
@@ -1707,10 +1718,6 @@ class buf_page_t {
   /** Time of first access, or 0 if the block was never accessed in the
   buffer pool. Protected by block mutex */
   std::chrono::steady_clock::time_point access_time;
-
-  buf_page_t *LRU_promote_next{nullptr};
-
-  std::atomic<bool> LRU_in_promote_queue{false};
 
  private:
   /** Double write instance ordinal value during writes. This is used
@@ -2290,6 +2297,10 @@ struct buf_lru_group_t {
   /** Number of non-null entries in pages. Protected by mutex. */
   uint32_t n_pages{0};
 
+  /** Bit i is set exactly when pages[i] is non-null. This makes allocation
+  of a vacated slot constant-time. Protected by mutex. */
+  uint32_t occupied_slots{0};
+
   /** true if this group is on the old side of buf_pool->LRU_old.
   Protected by mutex. */
   bool old{false};
@@ -2777,9 +2788,11 @@ struct buf_pool_t {
   acts on this to bound the cache. */
   size_t LRU_group_cache_len{0};
 
-  alignas(64) std::atomic<buf_page_t *> LRU_promote_head{nullptr};
-  std::atomic<size_t> LRU_promote_queue_len{0};
-  std::atomic<bool> LRU_promote_draining{false};
+  /** Preallocated value queue for deferred make-young requests. */
+  ut::Bounded_mpsc_queue<buf_lru_promote_t> *LRU_promote_queue{nullptr};
+
+  /** False while promotion production is closed for invalidation/shutdown. */
+  alignas(64) std::atomic<bool> LRU_accept_promotions;
 
   /** Pointer to the group at the boundary between the young and old
   sublists of groups: groups before it are young, it and its successors are
