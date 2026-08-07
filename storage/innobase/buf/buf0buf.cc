@@ -1636,9 +1636,8 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
     group = prev_group;
   }
 
-  /* Groups retired from the list are recycled through
-  buf_pool->LRU_group_cache rather than freed (PS-11141 grouped LRU list),
-  so whatever is still cached at teardown must be freed here too. */
+  /* Groups emptied during the pool lifetime may sit on the bounded
+  reserve or retired list; free both now that the instance is quiescent. */
   buf_LRU_free_group_cache(buf_pool);
 
   ut::free(buf_pool->watch);
@@ -6596,6 +6595,8 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   buf_pool->LRU_old_len = 0;
 
   mutex_exit(&buf_pool->LRU_list_mutex);
+
+  buf_LRU_empty_group_cache(buf_pool);
 
   buf_pool->stat.reset();
   buf_refresh_io_stats(buf_pool);

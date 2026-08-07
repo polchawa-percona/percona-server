@@ -24019,11 +24019,12 @@ static MYSQL_SYSVAR_UINT(
     lru_make_young_drain_threshold, buf_LRU_make_young_drain_threshold,
     PLUGIN_VAR_OPCMDARG,
     "If non-zero, moving a page to the head of the buffer pool LRU list "
-    "on access is deferred: the page is pushed onto a per-buffer-pool "
-    "lock-free queue instead of taking the LRU list mutex on the hot "
+    "on access is deferred: the page identity is pushed onto a per-buffer-pool "
+    "bounded MPSC queue instead of taking the LRU list mutex on the hot "
     "read path. This value is a background-wakeup threshold capped at the "
-    "queue capacity; draining proceeds in bounded chunks. Set to 0 to "
-    "disable the deferred queue and move pages immediately.",
+    "fixed queue capacity; the page-cleaner coordinator drains in bounded "
+    "chunks. Set to 0 to disable the deferred queue and move pages "
+    "immediately.",
     nullptr, nullptr, 128, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_LONG(

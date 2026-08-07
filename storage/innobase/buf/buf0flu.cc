@@ -2022,6 +2022,7 @@ static buf_flush_batch_result_t buf_flush_batch(buf_pool_t *buf_pool,
       mutex_enter(&buf_pool->LRU_list_mutex);
       result = buf_do_LRU_batch(buf_pool, min_n);
       mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_LRU_destroy_retired_groups(buf_pool);
       break;
     case BUF_FLUSH_LIST:
       /* The flush list path only flushes; nothing is evicted here. */
@@ -3331,7 +3332,9 @@ static void buf_flush_page_cleaner_disabled_loop(bool drain_promote_queues) {
     Coordinator only; workers pass drain_promote_queues=false. */
     if (drain_promote_queues) {
       for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
-        buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+        auto *const buf_pool = buf_pool_from_array(i);
+        buf_LRU_drain_promote_queue(buf_pool);
+        buf_LRU_compact_sparse_groups(buf_pool);
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); /* [A] */
@@ -3478,7 +3481,9 @@ static void buf_flush_page_coordinator_thread() {
     The timeout also covers log-test and force-recovery configurations that
     do not provide recv_writer flush requests. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+      auto *const buf_pool = buf_pool_from_array(i);
+      buf_LRU_drain_promote_queue(buf_pool);
+      buf_LRU_compact_sparse_groups(buf_pool);
     }
 
     if (wait_result == OS_SYNC_TIME_EXCEEDED) {
@@ -3525,7 +3530,9 @@ static void buf_flush_page_coordinator_thread() {
     /* Periodic fallback for deferred promotions below the wake threshold.
     No-op when the queue is empty. */
     for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-      buf_LRU_drain_promote_queue(buf_pool_from_array(i));
+      auto *const buf_pool = buf_pool_from_array(i);
+      buf_LRU_drain_promote_queue(buf_pool);
+      buf_LRU_compact_sparse_groups(buf_pool);
     }
 
     /* We consider server active if either we have just discovered a first

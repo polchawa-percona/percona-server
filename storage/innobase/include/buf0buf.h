@@ -2271,6 +2271,9 @@ class LRUGroupItr : public LRUGroupHp {
 grouped LRU list: PS-11141). */
 constexpr uint32_t BUF_LRU_GROUP_SIZE = 32;
 
+/** Maximum number of empty groups retained for reuse per buffer pool. */
+constexpr size_t BUF_LRU_GROUP_RESERVE_MAX = 64;
+
 /** A node of buf_pool->LRU: a group of up to BUF_LRU_GROUP_SIZE pages.
 The per-pool LRU_list_mutex protects only the links between groups (the
 `LRU` member below and the group's position relative to buf_pool->LRU_old).
@@ -2301,23 +2304,22 @@ struct buf_lru_group_t {
   of a vacated slot constant-time. Protected by mutex. */
   uint32_t occupied_slots{0};
 
+  /** Monotonic reuse identity assigned when the group is allocated from the
+  reserve or freshly constructed. Protected by buf_pool->LRU_list_mutex. */
+  uint64_t reuse_generation{0};
+
   /** true if this group is on the old side of buf_pool->LRU_old.
   Protected by mutex. */
   bool old{false};
 
   /** true while this group is linked into buf_pool->LRU, false while it
-  sits on buf_pool->LRU_group_cache instead (PS-11141 grouped LRU list).
-  Protected by buf_pool->LRU_list_mutex, like the LRU node itself.
-  Group objects are recycled through that cache rather than returned to
-  the heap, so a group pointer captured without LRU_list_mutex (the
-  promotion drain's fast pass records the groups its detaches emptied)
-  always remains safe to dereference; this flag is what lets the drain's
-  deferred pass tell, under LRU_list_mutex, whether such a pointer still
-  designates a linked group before acting on it. */
+  sits on buf_pool->LRU_group_cache or LRU_group_retired instead
+  (PS-11141 grouped LRU list). Protected by buf_pool->LRU_list_mutex,
+  like the LRU node itself. */
   bool in_LRU_list{false};
 
-  /** Next group on buf_pool->LRU_group_cache; meaningless (and not
-  maintained) while in_LRU_list is true. Protected by
+  /** Next group on buf_pool->LRU_group_cache or LRU_group_retired;
+  meaningless (and not maintained) while in_LRU_list is true. Protected by
   buf_pool->LRU_list_mutex. */
   buf_lru_group_t *cache_next{nullptr};
 };
@@ -2487,16 +2489,12 @@ struct buf_pool_t {
   wait entry points in sync0rw.cc. */
   BufListMutex LRU_list_mutex;
 
-  /** Mutual exclusion between the promotion drain's group-mutex-only fast
-  path and the debug validators (PS-11141 grouped LRU list, latch level
+  /** Serializes the sole background promotion consumer and sparse-group
+  compaction with debug validators (PS-11141 grouped LRU list, latch level
   SYNC_BUF_LRU_DRAIN, acquired before LRU_list_mutex). Held by
-  buf_LRU_drain_promote_queue() for the whole of its fast pass plus
-  deferred batched pass, and by buf_LRU_validate_instance() for its whole
-  check: the drain's fast pass mutates group contents under only a
-  group's own mutex, without this one or LRU_list_mutex, so this is the
-  only thing that can guarantee the validator never observes a state
-  mid-drain (some groups already reduced, buf_pool-level counters not yet
-  corrected to match). Nothing else needs to acquire it. */
+  buf_LRU_drain_promote_queue() / buf_LRU_compact_sparse_groups() while
+  they accept work, by buf_LRU_close_promote_queue() for the close
+  rendezvous, and by buf_LRU_validate_instance() for its whole check. */
   BufListMutex LRU_drain_mutex;
 
   /** free and withdraw list mutex */
@@ -2755,38 +2753,36 @@ struct buf_pool_t {
   LRU_old's immediate group-successor. Protected by LRU_list_mutex. */
   buf_lru_group_t *LRU_fill_group{nullptr};
 
-  /** Head of a cache of unlinked, empty buf_lru_group_t objects available
-  for reuse (PS-11141 grouped LRU list), singly linked through
+  /** Head of a bounded reserve of unlinked, empty buf_lru_group_t objects
+  available for reuse (PS-11141 grouped LRU list), singly linked through
   buf_lru_group_t::cache_next. Protected by LRU_list_mutex.
   Group create/destroy sits directly in the LRU hot path -- one group is
   created per BUF_LRU_GROUP_SIZE page insertions and destroyed whenever a
   group's last page leaves -- and both a heap allocation and a
   mutex_create()/mutex_free() pair (the latter including PFS
   registration) would otherwise be paid there, while LRU_list_mutex is
-  held. Recycling whole group objects, mutex included, removes all of
-  that from the steady state.
-  Deliberately unbounded: a group object is never returned to the heap
-  while the pool lives (only buf_LRU_free_group_cache(), at teardown,
-  frees any of these), which is what makes a group pointer captured
-  without LRU_list_mutex (the promotion drain's fast pass records which
-  group its detach emptied) safe to dereference later, under
-  LRU_list_mutex, without a use-after-free -- see buf_lru_group_t::
-  in_LRU_list. A bounded cache that heap-frees its overflow would break
-  that: the drain's captured pointer is read again in its own deferred
-  pass, arbitrarily later and without any lock held in between, so
-  nothing prevents an unrelated thread from independently reclaiming and,
-  had the cache been full, freeing that same group first. The memory this
-  can pin is bounded by the pool's peak historical group count, at
-  roughly one buf_lru_group_t (a mutex plus BUF_LRU_GROUP_SIZE pointers)
-  per BUF_LRU_GROUP_SIZE pages of peak footprint -- a small fraction of
-  the pool's own memory budget, and a firm bound rather than the
-  unbounded growth a real leak would produce. */
+  held. Recycling whole group objects, mutex included, removes that from
+  the steady state for a bounded reserve.
+  Overflow is retired onto LRU_group_retired and destroyed only after
+  LRU_list_mutex is released. This is safe now that deferred promotion no
+  longer retains raw group pointers across that mutex. */
   buf_lru_group_t *LRU_group_cache{nullptr};
 
   /** Number of groups currently on LRU_group_cache. Protected by
-  LRU_list_mutex. Diagnostic only; see LRU_group_cache for why nothing
-  acts on this to bound the cache. */
+  LRU_list_mutex. Must remain <= BUF_LRU_GROUP_RESERVE_MAX. */
   size_t LRU_group_cache_len{0};
+
+  /** Empty groups awaiting destruction outside LRU_list_mutex. Linked
+  through cache_next. Protected by LRU_list_mutex. */
+  buf_lru_group_t *LRU_group_retired{nullptr};
+
+  /** Number of groups currently on LRU_group_retired. Protected by
+  LRU_list_mutex. */
+  size_t LRU_group_retired_len{0};
+
+  /** Next reuse generation for allocated LRU groups. Protected by
+  LRU_list_mutex. */
+  uint64_t LRU_group_next_reuse_generation{1};
 
   /** Preallocated value queue for deferred make-young requests. */
   ut::Bounded_mpsc_queue<buf_lru_promote_t> *LRU_promote_queue{nullptr};

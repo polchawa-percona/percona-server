@@ -13,7 +13,6 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA */
 
-#include "buf0types.h"
 #include "ut0bounded_mpsc.h"
 
 #include <gtest/gtest.h>
@@ -247,22 +246,31 @@ TEST(BoundedMpscQueue, ConcurrentProducersAndConsumer) {
   }
 }
 
+struct Non_default_id {
+  explicit Non_default_id(uint32_t space_id, uint32_t page_no)
+      : space_id{space_id}, page_no{page_no} {}
+
+  uint32_t space_id;
+  uint32_t page_no;
+};
+
 struct Promotion_identity {
-  page_id_t page_id;
+  Non_default_id page_id;
   uint64_t residency_generation;
 };
 
 static_assert(std::is_trivially_copyable_v<Promotion_identity>);
+static_assert(!std::is_default_constructible_v<Non_default_id>);
 
 TEST(BoundedMpscQueue, SupportsPromotionIdentityWithoutDefaultConstructor) {
   Bounded_mpsc_queue<Promotion_identity> queue{2};
-  const Promotion_identity identity{page_id_t{42, 17}, 1234};
+  const Promotion_identity identity{Non_default_id{42, 17}, 1234};
 
   EXPECT_EQ(queue.try_push(identity), Bounded_mpsc_push_result::first);
   const auto popped = queue.try_pop();
   ASSERT_TRUE(popped.has_value());
-  EXPECT_EQ(popped->page_id.space(), identity.page_id.space());
-  EXPECT_EQ(popped->page_id.page_no(), identity.page_id.page_no());
+  EXPECT_EQ(popped->page_id.space_id, identity.page_id.space_id);
+  EXPECT_EQ(popped->page_id.page_no, identity.page_id.page_no);
   EXPECT_EQ(popped->residency_generation, identity.residency_generation);
 }
 

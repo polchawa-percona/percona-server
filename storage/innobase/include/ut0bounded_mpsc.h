@@ -20,16 +20,23 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 #ifndef ut0bounded_mpsc_h
 #define ut0bounded_mpsc_h
 
-#include "ut0cpu_cache.h"
-
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
 #include <type_traits>
 #include <utility>
+
+#ifdef EXTRA_CODE_FOR_UNIT_TESTING
+/* Keep the standalone gunit target free of the InnoDB sync/include tree. */
+constexpr size_t BOUNDED_MPSC_CACHE_LINE_SIZE = 64;
+#else
+#include "ut0cpu_cache.h"
+constexpr size_t BOUNDED_MPSC_CACHE_LINE_SIZE = ut::INNODB_CACHE_LINE_SIZE;
+#endif
 
 #ifdef EXTRA_CODE_FOR_UNIT_TESTING
 #include <functional>
@@ -206,7 +213,7 @@ class Bounded_mpsc_queue {
   static_assert(std::atomic<State>::is_always_lock_free);
 
   template <typename U>
-  struct alignas(ut::INNODB_CACHE_LINE_SIZE) Cacheline_atomic {
+  struct alignas(BOUNDED_MPSC_CACHE_LINE_SIZE) Cacheline_atomic {
     std::atomic<U> value{};
   };
 
@@ -216,8 +223,8 @@ class Bounded_mpsc_queue {
       decltype(Cacheline_atomic<uint32_t>::value)::is_always_lock_free);
   static_assert(decltype(Cacheline_atomic<bool>::value)::is_always_lock_free);
   static_assert(sizeof(Cacheline_atomic<uint64_t>) ==
-                ut::INNODB_CACHE_LINE_SIZE);
-  static_assert(sizeof(Cacheline_atomic<bool>) == ut::INNODB_CACHE_LINE_SIZE);
+                BOUNDED_MPSC_CACHE_LINE_SIZE);
+  static_assert(sizeof(Cacheline_atomic<bool>) == BOUNDED_MPSC_CACHE_LINE_SIZE);
 
   std::unique_ptr<Slot[]> m_slots;
   const uint32_t m_capacity;
