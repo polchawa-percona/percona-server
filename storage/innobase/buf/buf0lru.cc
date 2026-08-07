@@ -1170,7 +1170,22 @@ commit through the existing free paths after full revalidation. The group
 hazard pointer (lru_scan_itr) protects the next position across that window. */
 static bool buf_LRU_provisionally_replaceable(const buf_page_t *bpage) {
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
-  if (!buf_page_in_file(bpage) || !buf_page_can_relocate(bpage)) {
+  if (!buf_page_in_file(bpage)) {
+    return false;
+  }
+  /* Deliberately not buf_page_can_relocate(): its
+  ut_ad(bpage->in_LRU_list || io_fix == BUF_IO_READ) assumes the caller
+  holds LRU_list_mutex, which this provisional (lock-dropped) check does
+  not. A concurrent make-young/promotion reposition
+  (buf_LRU_remove_block() + buf_LRU_add_block_low(), via
+  buf_LRU_detach_from_group()) protects in_LRU_list under LRU_list_mutex
+  alone, not this page's block mutex, so it can transiently clear
+  in_LRU_list on this exact page without evicting it at all -- observing
+  that here is expected, not a bug. The verdict below is re-verified
+  under LRU_list_mutex before anything commits (see
+  buf_LRU_try_evict_tail_identity()), so a stale answer either way is
+  harmless. */
+  if (buf_page_get_io_fix(bpage) != BUF_IO_NONE || bpage->buf_fix_count != 0) {
     return false;
   }
   if (bpage->was_stale()) {
