@@ -1254,8 +1254,7 @@ static bool buf_LRU_try_evict_tail_identity(buf_pool_t *buf_pool,
   bool freed = false;
   if (bpage->id == identity.page_id &&
       bpage->residency_generation == identity.residency_generation &&
-      buf_page_in_file(bpage) && bpage->in_LRU_list &&
-      bpage->lru_group != nullptr) {
+      buf_page_in_file(bpage) && bpage->lru_group != nullptr) {
     if (bpage->was_stale()) {
       mutex_exit(block_mutex);
       freed = buf_page_free_stale(buf_pool, bpage);
