@@ -5057,7 +5057,7 @@ static int i_s_innodb_fill_buffer_lru(THD *thd, Table_ref *tables,
   can change. This administrative query also waits out background promotion
   and compaction for the complete scan. */
   mutex_enter(&buf_pool->LRU_drain_mutex);
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   lru_len = buf_pool->LRU_n_pages;
 
@@ -5097,7 +5097,7 @@ static int i_s_innodb_fill_buffer_lru(THD *thd, Table_ref *tables,
   ut_ad(lru_pos == buf_pool->LRU_n_pages);
 
 exit:
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
   mutex_exit(&buf_pool->LRU_drain_mutex);
 
   if (info_buffer) {

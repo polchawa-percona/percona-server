@@ -1569,23 +1569,23 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   /* Initialize the hazard pointer for LRU group batches (PS-11141 grouped
   LRU list) */
-  new (&buf_pool->lru_hp) LRUGroupHp(buf_pool, &buf_pool->LRU_list_mutex);
+  new (&buf_pool->lru_hp) LRUGroupHp(buf_pool, &buf_pool->LRU_topology_latch);
 
   /* Initialize ownership for optimistic scans that drop LRU_list_mutex. */
   new (&buf_pool->LRU_scan_owner) ut::Exclusive_scan();
 
   /* Initialize the iterator for LRU group scan search */
   new (&buf_pool->lru_scan_itr)
-      LRUGroupItr(buf_pool, &buf_pool->LRU_list_mutex);
+      LRUGroupItr(buf_pool, &buf_pool->LRU_topology_latch);
 
   /* Initialize the iterator for single page scan search (over groups) */
   new (&buf_pool->single_scan_itr)
-      LRUGroupItr(buf_pool, &buf_pool->LRU_list_mutex);
+      LRUGroupItr(buf_pool, &buf_pool->LRU_topology_latch);
   buf_pool->LRU_single_scan_active.store(0, std::memory_order_relaxed);
 
   /* Initialize the persistent sparse-group compaction cursor. */
   new (&buf_pool->lru_compact_hp)
-      LRUGroupHp(buf_pool, &buf_pool->LRU_list_mutex);
+      LRUGroupHp(buf_pool, &buf_pool->LRU_topology_latch);
   buf_pool->LRU_compaction_pending = false;
   buf_pool->LRU_compaction_retry = false;
   buf_pool->LRU_compaction_epoch = 0;
@@ -1834,7 +1834,7 @@ dberr_t buf_pool_init(ulint total_size, bool populate, ulint n_instances) {
 static bool buf_page_realloc(buf_pool_t *buf_pool, buf_block_t *block) {
   buf_block_t *new_block;
 
-  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
   ut_ad(!btr_search_enabled);
 
   /* Try allocating from the buf_pool->free list if it is not empty. This
@@ -2164,7 +2164,7 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
     auto loop_start_time = std::chrono::steady_clock::now();
     uint32_t remove_loop_count = 0;
 
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
     /* PS-11141 grouped LRU list: walk groups, then each group's pages.
     buf_buddy_realloc()/buf_page_realloc() relocate a page's descriptor in
     place (via buf_LRU_relocate_in_group(), same as buf_relocate()) without
@@ -2240,7 +2240,7 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
       }
     }
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
 
     mutex_enter(&buf_pool->free_list_mutex);
 
@@ -2630,7 +2630,7 @@ withdraw_retry:
   buf_resize_status_progress_update(1, 7);
 
   for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
-    mutex_enter(&(buf_pool_from_array(i)->LRU_list_mutex));
+    buf_pool_from_array(i)->LRU_topology_latch.x_lock();
   }
   buf_resize_status_progress_update(2, 7);
 
@@ -2861,7 +2861,7 @@ withdraw_retry:
     mutex_exit(&buf_pool->free_list_mutex);
     mutex_exit(&buf_pool->zip_free_mutex);
     hash_unlock_x_all(buf_pool->page_hash);
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
   buf_pool_resizing = false;
 
@@ -3057,7 +3057,7 @@ The caller must take care of relocating bpage->list.
 static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
-  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
   ut_ad(buf_page_hash_lock_held_x(buf_pool, bpage));
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
   ut_a(buf_page_get_io_fix(bpage) == BUF_IO_NONE);
@@ -3175,7 +3175,7 @@ into the LRU group list it resets the value to the tail of the LRU group
 list (PS-11141 grouped LRU list).
 @return buf_lru_group_t from where to start scan. */
 buf_lru_group_t *LRUGroupItr::start() {
-  ut_ad(mutex_own(m_mutex));
+  ut_ad(m_latch->owns_x());
 
   if (!m_hp || !m_hp->old) {
     m_hp = UT_LIST_GET_LAST(m_buf_pool->LRU);
@@ -3403,25 +3403,25 @@ the buffer pool.
 void buf_page_make_young(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   ut_a(buf_page_in_file(bpage));
 
   buf_LRU_make_block_young(bpage);
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 void buf_page_make_old(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   ut_a(buf_page_in_file(bpage));
 
   buf_LRU_make_block_old(bpage);
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 /** Moves a page to the start of the buffer pool LRU list if it is too old.
@@ -3429,7 +3429,7 @@ This high-level function can be used to prevent an important page from
 slipping out of the buffer pool. The page must be fixed to the buffer pool.
 @param[in,out]  bpage   buffer block of a file page */
 static void buf_page_make_young_if_needed(buf_page_t *bpage) {
-  ut_ad(!mutex_own(&buf_pool_from_bpage(bpage)->LRU_list_mutex));
+  ut_ad(!buf_pool_from_bpage(bpage)->LRU_topology_latch.owns_x());
   ut_ad(bpage->buf_fix_count > 0);
   ut_a(buf_page_in_file(bpage));
 
@@ -3532,7 +3532,7 @@ static void buf_block_try_discard_uncompressed(const page_id_t &page_id) {
   release the page_hash mutex. This means that the block in question
   can move out of page_hash. Therefore we need to check again if the
   block is still in page_hash. */
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   bpage = buf_page_hash_get(buf_pool, page_id);
 
@@ -3547,7 +3547,7 @@ static void buf_block_try_discard_uncompressed(const page_id_t &page_id) {
     mutex_exit(block_mutex);
   }
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 /** Get read access to a compressed page (usually of type
@@ -4212,7 +4212,7 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
 
   auto block = buf_LRU_get_free_block(m_buf_pool);
 
-  mutex_enter(&m_buf_pool->LRU_list_mutex);
+  m_buf_pool->LRU_topology_latch.x_lock();
 
   /* We hold the LRU list mutex, which blocks a concurrent buffer pool
   resize (buf_pool_resize() takes it), so page_hash cannot be rehashed
@@ -4239,7 +4239,7 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
     This should be extremely unlikely, for example, if buf_page_get_zip()
     was invoked. */
 
-    mutex_exit(&m_buf_pool->LRU_list_mutex);
+    m_buf_pool->LRU_topology_latch.x_unlock();
 
     rw_lock_x_unlock(m_hash_lock);
 
@@ -4283,7 +4283,7 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
   /* Insert at the front of unzip_LRU list. */
   buf_unzip_LRU_add_block(block, false);
 
-  mutex_exit(&m_buf_pool->LRU_list_mutex);
+  m_buf_pool->LRU_topology_latch.x_unlock();
 
   buf_block_set_io_fix(block, BUF_IO_READ);
 
@@ -4499,7 +4499,7 @@ dberr_t Buf_fetch<T>::debug_check(buf_block_t *fix_block) {
     /* Try to evict the block from the buffer pool, to use the
     insert buffer (change buffer) as much as possible. */
 
-    mutex_enter(&m_buf_pool->LRU_list_mutex);
+    m_buf_pool->LRU_topology_latch.x_lock();
 
     buf_block_unfix(fix_block);
 
@@ -4565,7 +4565,7 @@ dberr_t Buf_fetch<T>::debug_check(buf_block_t *fix_block) {
       return (DB_FAIL);
     }
 
-    mutex_exit(&m_buf_pool->LRU_list_mutex);
+    m_buf_pool->LRU_topology_latch.x_unlock();
 
     buf_block_fix(fix_block);
 
@@ -5356,7 +5356,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
         "buf_page_init_for_read_delay_lru_add",
         std::this_thread::sleep_for(std::chrono::microseconds(100)););
 
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     /* For a compressed page zip.data was set above, before the page
     became reachable through the page hash, so
@@ -5372,7 +5372,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     ut_ad(!page_size.is_compressed() || block->in_unzip_LRU_list);
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   } else {
     /* Compressed-only page: a bare BUF_BLOCK_ZIP_PAGE descriptor with no
     uncompressed frame (and thus no frame rw-lock). It is initialized and
@@ -5457,7 +5457,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     but eviction cannot see it (not on the LRU list yet), so no other
     thread can race with the add. The block must be put to the LRU list,
     to the old blocks. The zip size is already set into the page zip. */
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     /* buf_LRU_insert_zip_clean() requires the zip_mutex; re-acquired
     here under the LRU list mutex, which follows the registered
@@ -5469,7 +5469,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     buf_LRU_insert_zip_clean(bpage);
     mutex_exit(&buf_pool->zip_mutex);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
 
   buf_pool->n_pend_reads.fetch_add(1);
@@ -5501,7 +5501,7 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   free_block = buf_LRU_get_free_block(buf_pool);
 
   for (;;) {
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
@@ -5520,7 +5520,7 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
           /* The page is during IO and can't be released. We wait some to not go
           into loop that would consume CPU. This is not something that will be
           hit frequently. */
-          mutex_exit(&buf_pool->LRU_list_mutex);
+          buf_pool->LRU_topology_latch.x_unlock();
           std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
         /* The hash lock was released, we should try again lookup for the page
@@ -5537,7 +5537,7 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
       ut_ad(!block->page.was_stale());
 
       /* Page can be found in buf_pool */
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
       rw_lock_x_unlock(hash_lock);
 
       buf_block_free(free_block);
@@ -5598,11 +5598,11 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   buf_pool->stat.n_pages_created.fetch_add(1);
 
   if (page_size.is_compressed()) {
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
 
     auto data = buf_buddy_alloc(buf_pool, page_size.physical());
 
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     buf_page_mutex_enter(block);
     block->page.zip.data = (page_zip_t *)data;
@@ -5617,7 +5617,7 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
     buf_unzip_LRU_add_block(block, false);
   }
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 
   /* Change buffer will not contain entries for undo tablespaces or temporary
   tablespaces. */
@@ -5782,7 +5782,7 @@ void buf_read_page_handle_error(buf_page_t *bpage) {
   const auto uncompressed = (buf_page_get_state(bpage) == BUF_BLOCK_FILE_PAGE);
 
   /* First unfix and release lock on the bpage */
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   rw_lock_t *hash_lock = buf_page_hash_lock_get(buf_pool, bpage->id);
 
@@ -5806,7 +5806,7 @@ void buf_read_page_handle_error(buf_page_t *bpage) {
   ut_ad(!rw_lock_own(hash_lock, RW_LOCK_X) &&
         !rw_lock_own(hash_lock, RW_LOCK_S));
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 
   ut_ad(buf_pool->n_pend_reads > 0);
   buf_pool->n_pend_reads.fetch_sub(1);
@@ -5816,7 +5816,7 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage) noexcept {
   /* If a page was seen as stale it will still be stale, because we have LRU
   mutex.*/
   ut_ad(bpage->was_stale());
-  ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
   auto *block_mutex = buf_page_get_mutex(bpage);
 
@@ -5835,10 +5835,10 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage) noexcept {
   }
 
   if (success) {
-    ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+    ut_ad(!buf_pool->LRU_topology_latch.owns_x());
   } else {
     mutex_exit(block_mutex);
-    ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+    ut_ad(buf_pool->LRU_topology_latch.owns_x());
   }
 
   ut_ad(!mutex_own(block_mutex));
@@ -5862,17 +5862,17 @@ void buf_page_force_evict(const page_id_t &page_id,
                          UT_LOCATION_HERE, &mtr, false);
     buf_page_t *bpage = reinterpret_cast<buf_page_t *>(block);
     if (bpage->was_stale()) {
-      mutex_enter(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_lock();
       mtr.commit();
       ut_ad(buf_page_peek(page_id));
       bool success = buf_page_free_stale(buf_pool, bpage);
       if (success) {
         break;
       }
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
     } else if (!bpage->is_dirty()) {
       /* A clean page. */
-      mutex_enter(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_lock();
       mtr.commit();
       ut_ad(buf_page_peek(page_id));
       mutex_enter(&block->mutex);
@@ -5880,12 +5880,12 @@ void buf_page_force_evict(const page_id_t &page_id,
       if (success) {
         break;
       }
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
       mutex_exit(&block->mutex);
     } else {
       ut_a(dirty_is_ok);
       /* The buffer page is not stale and it is dirty. */
-      mutex_enter(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_lock();
       mtr.commit();
       ut_ad(buf_page_peek(page_id));
       mutex_enter(&block->mutex);
@@ -5895,7 +5895,7 @@ void buf_page_force_evict(const page_id_t &page_id,
         success = buf_flush_page(buf_pool, bpage, BUF_FLUSH_SINGLE_PAGE, sync);
       }
       if (!success) {
-        mutex_exit(&buf_pool->LRU_list_mutex);
+        buf_pool->LRU_topology_latch.x_unlock();
         mutex_exit(&block->mutex);
       }
     }
@@ -5913,7 +5913,7 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
   ut_ad(hash_lock == buf_page_hash_lock_get(buf_pool, bpage->id));
   /* the lock is taken in S-mode */
   ut_ad(rw_lock_own(hash_lock, RW_LOCK_S));
-  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
 
   if (bpage->was_io_fixed()) {
     /* This method must release the hash lock before exiting. */
@@ -5938,7 +5938,7 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
   DBUG_EXECUTE_IF("buf_page_free_stale_delay_lru_mutex_acquisition",
                   std::this_thread::sleep_for(std::chrono::milliseconds(10)););
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   /* Prepare to free, we own the LRU. */
   buf_block_unfix(bpage);
@@ -5946,10 +5946,10 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
   auto success = buf_page_free_stale(buf_pool, bpage);
 
   if (!success) {
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
 
-  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
   return success;
 }
 
@@ -5960,7 +5960,7 @@ void buf_page_free_stale_during_write(buf_page_t *bpage,
   ut_a(bpage->is_io_fix_write());
   ut_ad(bpage->current_thread_has_io_responsibility());
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   auto block_mutex = buf_page_get_mutex(bpage);
   mutex_enter(block_mutex);
@@ -6001,11 +6001,11 @@ void buf_page_free_stale_during_write(buf_page_t *bpage,
   can be during a flush that will end up on this line.*/
   if (!buf_LRU_free_page(bpage, true)) {
     mutex_exit(block_mutex);
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
 
   ut_ad(!mutex_own(block_mutex));
-  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
 }
 
 #ifdef UNIV_DEBUG
@@ -6465,7 +6465,7 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     ) {
       has_LRU_mutex = true;
-      mutex_enter(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_lock();
     }
   }
   mutex_enter(block_mutex);
@@ -6528,7 +6528,7 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
         mutex_exit(block_mutex);
       }
       if (has_LRU_mutex) {
-        mutex_exit(&buf_pool->LRU_list_mutex);
+        buf_pool->LRU_topology_latch.x_unlock();
       }
 
       break;
@@ -6552,9 +6552,9 @@ static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   buf_chunk_t *chunk = buf_pool->chunks;
 
   for (auto i = buf_pool->n_chunks; i--; chunk++) {
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
     buf_assert_all_are_replaceable(chunk);
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
 }
 
@@ -6571,7 +6571,7 @@ static void buf_refresh_io_stats(buf_pool_t *buf_pool) {
 static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   ulint i;
 
-  ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
+  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
 
   /* Pause LRU threads on event. */
   os_event_reset(buf_pool->run_lru);
@@ -6601,7 +6601,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   while (buf_LRU_scan_and_free_block(buf_pool, true, true)) {
   }
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   /* PS-11141 grouped LRU list: once every page is gone, every group should
   have emptied and been freed too (buf_LRU_remove_block() reclaims a group
@@ -6619,7 +6619,7 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   buf_pool->LRU_compaction_retry = false;
   buf_pool->LRU_compaction_sweep_epoch = buf_pool->LRU_compaction_epoch;
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 
   buf_LRU_empty_group_cache(buf_pool);
   static_cast<void>(buf_LRU_maintain_group_cache(buf_pool, true));
@@ -6655,7 +6655,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
   ut_ad(buf_pool);
 
   mutex_enter(&buf_pool->chunks_mutex);
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
   hash_lock_x_all(buf_pool->page_hash);
   mutex_enter(&buf_pool->zip_mutex);
   mutex_enter(&buf_pool->free_list_mutex);
@@ -6832,7 +6832,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
   ut_a(n_lru <= buf_pool->LRU_n_pages + n_lru_add_pending);
 #endif /* UNIV_DEBUG */
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
   mutex_exit(&buf_pool->chunks_mutex);
 
   if (buf_pool->curr_size == buf_pool->old_size &&
@@ -6893,7 +6893,7 @@ static void buf_print_instance(buf_pool_t *buf_pool) {
   counts = static_cast<ulint *>(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, sizeof(ulint) * size));
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
   mutex_enter(&buf_pool->free_list_mutex);
   mutex_enter(&buf_pool->flush_state_mutex);
   buf_flush_list_mutex_enter(buf_pool);
@@ -6941,7 +6941,7 @@ static void buf_print_instance(buf_pool_t *buf_pool) {
     }
   }
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 
   for (i = 0; i < n_found; i++) {
     ib::info info(ER_IB_MSG_1217);
@@ -6978,7 +6978,7 @@ static ulint buf_get_latched_pages_number_instance(buf_pool_t *buf_pool) {
   buf_chunk_t *chunk;
   ulint fixed_pages_number = 0;
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
 
   chunk = buf_pool->chunks;
 
@@ -7000,7 +7000,7 @@ static ulint buf_get_latched_pages_number_instance(buf_pool_t *buf_pool) {
     }
   }
 
-  mutex_exit(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_unlock();
 
   mutex_enter(&buf_pool->zip_mutex);
 
@@ -7515,7 +7515,7 @@ void meb_page_init(const page_id_t &page_id, const page_size_t &page_size,
 std::ostream &operator<<(std::ostream &out, const buf_pool_t &buf_pool) {
 #ifndef UNIV_HOTBACKUP
   /* These locking requirements might be relaxed if desired */
-  ut_ad(mutex_own(&buf_pool.LRU_list_mutex));
+  ut_ad(buf_pool.LRU_topology_latch.owns_x());
   ut_ad(mutex_own(&buf_pool.free_list_mutex));
   ut_ad(mutex_own(&buf_pool.flush_state_mutex));
   ut_ad(buf_flush_list_mutex_own(&buf_pool));

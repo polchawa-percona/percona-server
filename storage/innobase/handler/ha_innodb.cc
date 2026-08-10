@@ -22236,7 +22236,7 @@ Keep the compressed pages in the buffer pool.
   for (ulint i = 0; i < srv_buf_pool_instances; i++) {
     buf_pool_t *buf_pool = &buf_pool_ptr[i];
 
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     for (buf_block_t *block = UT_LIST_GET_LAST(buf_pool->unzip_LRU);
          block != nullptr;) {
@@ -22253,14 +22253,14 @@ Keep the compressed pages in the buffer pool.
       } else {
         /* buf_LRU_free_page() released LRU_list_mutex.
         have to restart the unzip_LRU scan. */
-        mutex_enter(&buf_pool->LRU_list_mutex);
+        buf_pool->LRU_topology_latch.x_lock();
         block = UT_LIST_GET_LAST(buf_pool->unzip_LRU);
         continue;
       }
       block = prev_block;
     }
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
   }
 
   return (all_evicted);

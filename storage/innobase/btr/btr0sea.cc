@@ -1311,7 +1311,7 @@ static void btr_drop_next_batch(const page_size_t &page_size,
     /* This periodic AHI-drop scan waits out background promotion and
     compaction for its complete best-effort batch collection. */
     mutex_enter(&buf_pool->LRU_drain_mutex);
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     /* PS-11141 grouped LRU list: walk groups tail-to-head, then each
     group's pages; order beyond that doesn't matter here (a read-only
@@ -1351,7 +1351,7 @@ static void btr_drop_next_batch(const page_size_t &page_size,
       }
     }
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
     mutex_exit(&buf_pool->LRU_drain_mutex);
 
     for (const page_id_t &page_id : to_drop) {
@@ -1954,7 +1954,7 @@ static bool btr_search_hash_table_validate(ulint part_id) {
       const auto buf_pool = buf_pool_from_bpage((buf_page_t *)block);
       /* Prevent BUF_BLOCK_FILE_PAGE -> BUF_BLOCK_REMOVE_HASH
       transition until we lock the block mutex */
-      mutex_enter(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_lock();
 
       if (UNIV_LIKELY(buf_block_get_state(block) == BUF_BLOCK_FILE_PAGE)) {
         /* The space and offset are only valid
@@ -1985,7 +1985,7 @@ static bool btr_search_hash_table_validate(ulint part_id) {
       }
 
       mutex_enter(&block->mutex);
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
 
       const auto index = block->ahi.index.load();
       const auto prefix_info = block->ahi.prefix_info.load();

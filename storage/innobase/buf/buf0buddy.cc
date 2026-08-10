@@ -555,7 +555,7 @@ static bool buf_buddy_relocate(buf_pool_t *buf_pool, void *src, void *dst,
     in which we hold LRU_list_mutex already, see
     buf_pool_withdraw_blocks(). */
     ut_ad(force);
-    ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+    ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
     /* PS-11141 grouped LRU list: walk groups, then each group's pages.
     LRU_list_mutex is already held by buf_pool_withdraw_blocks(). */

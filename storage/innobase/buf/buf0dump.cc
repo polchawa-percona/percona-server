@@ -265,13 +265,13 @@ static void buf_dump(bool obey_shutdown) {
     change. This administrative scan also waits out background promotion
     and compaction. */
     mutex_enter(&buf_pool->LRU_drain_mutex);
-    mutex_enter(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_lock();
 
     size_t n_pages = buf_pool->LRU_n_pages;
 
     /* skip empty buffer pools */
     if (n_pages == 0) {
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
       mutex_exit(&buf_pool->LRU_drain_mutex);
       continue;
     }
@@ -290,7 +290,7 @@ static void buf_dump(bool obey_shutdown) {
         ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, n_pages * sizeof(*dump)));
 
     if (dump == nullptr) {
-      mutex_exit(&buf_pool->LRU_list_mutex);
+      buf_pool->LRU_topology_latch.x_unlock();
       mutex_exit(&buf_pool->LRU_drain_mutex);
       fclose(f);
       buf_dump_status(STATUS_ERR, "Cannot allocate %zu bytes: %s",
@@ -316,7 +316,7 @@ static void buf_dump(bool obey_shutdown) {
       ut_a(j == n_pages);
     }
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
     mutex_exit(&buf_pool->LRU_drain_mutex);
 
     for (size_t j = 0; j < n_pages && !SHOULD_QUIT(); j++) {

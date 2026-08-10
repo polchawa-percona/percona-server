@@ -1030,7 +1030,7 @@ void blob_free(dict_index_t *index, buf_block_t *block, bool all, mtr_t *mtr) {
 
   mtr_commit(mtr);
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
+  buf_pool->LRU_topology_latch.x_lock();
   buf_page_mutex_enter(block);
 
   /* Only free the block if it is still allocated to
@@ -1051,7 +1051,7 @@ void blob_free(dict_index_t *index, buf_block_t *block, bool all, mtr_t *mtr) {
   }
 
   if (!freed) {
-    mutex_exit(&buf_pool->LRU_list_mutex);
+    buf_pool->LRU_topology_latch.x_unlock();
     buf_page_mutex_exit(block);
   }
 }

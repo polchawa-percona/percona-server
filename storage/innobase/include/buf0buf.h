@@ -2204,21 +2204,21 @@ their very last step. Only forward declares are needed here; buf_lru_group_t
 is defined later in this file. */
 class LRUGroupHp {
  public:
-  LRUGroupHp(const buf_pool_t *buf_pool, const ib_mutex_t *mutex)
-      : m_buf_pool(buf_pool) IF_DEBUG(, m_mutex(mutex)), m_hp() {}
+  LRUGroupHp(const buf_pool_t *buf_pool, const Buf_LRU_topology_latch *latch)
+      : m_buf_pool(buf_pool), m_latch(latch), m_hp() {}
 
   virtual ~LRUGroupHp() = default;
 
   /** Get current value */
   buf_lru_group_t *get() const {
-    ut_ad(mutex_own(m_mutex));
+    ut_ad(m_latch->owns_x());
     return m_hp;
   }
 
   /** Set current value
   @param group  group to be set as hp */
   void set(buf_lru_group_t *group) {
-    ut_ad(mutex_own(m_mutex));
+    ut_ad(m_latch->owns_x());
     m_hp = group;
   }
 
@@ -2226,7 +2226,7 @@ class LRUGroupHp {
   @param group  group to be compared
   @return true if it is hp */
   bool is_hp(const buf_lru_group_t *group) {
-    ut_ad(mutex_own(m_mutex));
+    ut_ad(m_latch->owns_x());
     return group == m_hp;
   }
 
@@ -2243,10 +2243,11 @@ class LRUGroupHp {
   /** Buffer pool instance */
   const buf_pool_t *m_buf_pool;
 
-#ifdef UNIV_DEBUG
-  /** mutex that protects access to m_hp. */
-  const ib_mutex_t *m_mutex;
-#endif /* UNIV_DEBUG */
+  /** Latch that protects access to m_hp -- stored as a direct pointer to
+  the sub-object (not reached via m_buf_pool) because buf_pool_t is only
+  forward-declared at this point in the header, so its members are not
+  yet accessible inline. */
+  const Buf_LRU_topology_latch *m_latch;
 
   /** hazard pointer. */
   buf_lru_group_t *m_hp;
@@ -2257,8 +2258,8 @@ for groups (PS-11141 grouped LRU list). Reuses LRUGroupHp::adjust as-is,
 only adding start(). */
 class LRUGroupItr : public LRUGroupHp {
  public:
-  LRUGroupItr(const buf_pool_t *buf_pool, const ib_mutex_t *mutex)
-      : LRUGroupHp(buf_pool, mutex) {}
+  LRUGroupItr(const buf_pool_t *buf_pool, const Buf_LRU_topology_latch *latch)
+      : LRUGroupHp(buf_pool, latch) {}
 
   ~LRUGroupItr() override = default;
 

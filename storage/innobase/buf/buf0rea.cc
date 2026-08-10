@@ -113,7 +113,7 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
               (unsigned)unzip, sync ? "sync" : "async"));
 
   ut_ad(buf_page_in_file(bpage));
-  ut_ad(!mutex_own(&buf_pool_from_bpage(bpage)->LRU_list_mutex));
+  ut_ad(!buf_pool_from_bpage(bpage)->LRU_topology_latch.owns_x());
 
   if (sync) {
     thd_wait_begin(nullptr, THD_WAIT_DISKIO);
