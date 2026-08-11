@@ -1,0 +1,236 @@
+Bug#39244016 / upstream b9892d521d6c68580eb17e8b8fe993e51828cd5e -- 8.4 reachability investigation
+=====================================================================================================
+
+OUTCOME (this round): REPRODUCED. Full red/green validation done.
+  RED (unfixed):  deterministic SIGABRT crash of mysqld, same assertion
+                  every time, within the exact do_io() call the race targets.
+  GREEN (fixed):  identical test passes cleanly, server stays alive, a
+                  bounded-timeout probe against the same shard returns
+                  immediately.
+
+This supersedes the PREVIOUS round's conclusion ("NOT REPRODUCED / genuine
+structural wall"). That conclusion was wrong -- not because the underlying
+InnoDB reasoning was wrong, but because of a SEPARATE, unrelated
+test-harness bug: connecting the "C" mysqltest connection AFTER connection
+B's `--send SET GLOBAL innodb_buf_flush_list_now` deadlocks C's own THD
+creation against a MySQL-server-level lock (LOCK_global_system_variables)
+that B holds for the whole duration of the flush -- which is exactly as
+long as the pause lasts. This produces symptoms indistinguishable from "the
+truncate genuinely can't proceed" (the file doesn't shrink until B's flush
+statement fully returns) without it actually being an InnoDB fil-layer
+issue at all. See "WHAT WAS ACTUALLY BLOCKING" below for the full story,
+including a gdb stack trace that pinned it down.
+
+THE BUG
+-------
+Fil_shard::do_io() (storage/innobase/fil/fil0fil.cc), in the branch guarded
+by "file->size <= page_no && space->id != TRX_SYS_SPACE" combined with
+"req_type.is_write() && bpage != nullptr && bpage->is_stale()", returns
+DB_PAGE_IS_STALE without calling mutex_release() first. Fil_shard::m_mutex
+is a plain ib_mutex_t (no RAII), so this leaks it forever the first time the
+branch is taken.
+
+To reach this branch, `file->size` must be smaller than `page_no` at the
+point of the recheck, for a page whose bpage->is_stale() is true -- i.e. a
+concurrent Fil_shard::space_truncate() must have shrunk the tablespace and
+bumped its version WHILE this do_io() call is in flight, using a `file`
+pointer resolved (via get_file_for_io()) BEFORE the truncate.
+
+DECISIVE PRE-BUILD CHECK (from advisor, done before any build)
+----------------------------------------------------------------
+Before building anything, we checked whether get_file_for_io() ->
+fil_space_t::get_file_node() can even return a non-null `file` once
+file->size <= page_no. For a single-file tablespace (session temp
+tablespaces have exactly one file) that is NOT an .ibd tablespace,
+get_file_node() returns nullptr once page_no >= file->size -- meaning if the
+DEBUG_SYNC pause point sits BEFORE get_file_for_io() (as in the previous
+round's diff), resuming AFTER a truncate has already shrunk the file makes
+get_file_for_io() itself return nullptr, sending do_io() down the
+"if (file == nullptr)" branch a few lines above -- which DOES call
+mutex_release() correctly. That path can never reach the buggy branch.
+
+CONSEQUENCE: the DEBUG_SYNC point had to be relocated to AFTER
+get_file_for_io() succeeds (so `file` is a resolved, non-null pointer to the
+SAME fil_node_t object whose ->size field the truncate mutates in place)
+and BEFORE prepare_file_for_io() (so this specific write has NOT yet
+incremented file->n_pending_ios, and therefore does not itself block
+Fil_shard::wait_for_pending_operations() -- see below). This relocation is
+what's in the current git diff of fil0fil.cc. Getting this placement right
+was a precondition for the race being reachable at all, independent of
+everything else in this investigation.
+
+WHAT WAS ACTUALLY BLOCKING (previous round's "structural wall")
+-------------------------------------------------------------------
+With the corrected placement, instrumented with ib::info()/fprintf prints
+(since removed) at Fil_shard::wait_for_pending_operations()'s entry, its
+"pending IO" loop, and Fil_shard::space_truncate()'s entry, PLUS
+wall-clock timestamps precise enough to establish real ordering across
+threads (raw log-line order is NOT reliable ordering evidence across
+threads -- learned the hard way, see below):
+
+  - space->n_pending_flushes and file.n_pending_ios were 0/0 the FIRST time
+    they were checked, every single time. The fil-shard "pending I/O"
+    counters were NEVER the blocker in this investigation, contradicting
+    what a naive reading of the previous round's report would suggest.
+  - Despite that, Tablespace_pool::free_ts() (and hence
+    Fil_shard::space_truncate()) did not even START executing until AFTER
+    the paused do_io() call had already resumed from its full 20-second
+    timeout -- i.e., something upstream of the fil layer entirely was
+    blocking connA's disconnect-driven cleanup for the whole pause window.
+  - A live gdb thread dump (`thread apply all bt`) taken ~3s into the pause
+    nailed it: the mysqltest connection for "C" was stuck in
+    THD::init() -> plugin_thdvar_init() -> mysql_mutex_lock(&
+    LOCK_global_system_variables), while connection B's thread (paused
+    inside our DEBUG_SYNC point, confirmed by its own frame in the same
+    dump: debug_sync_execute -> Fil_shard::do_io -> fil_io ->
+    Double_write::write_to_datafile -> dblwr::write -> buf_flush_write_block_low
+    -> ... -> buf_flush_list_now_set -> sys_var_pluginvar::global_update)
+    was holding that SAME lock for the entire `SET GLOBAL
+    innodb_buf_flush_list_now` statement, i.e. for the whole pause.
+  - Because the original test connected C AFTER B's `--send`, C's own THD
+    creation raced against B's already-in-flight SET GLOBAL and lost,
+    blocking C's connect() (not C's WAIT_FOR DEBUG_SYNC statement -- the
+    TCP-level connection setup itself) for the full ~20s. Everything
+    downstream in the test script (disconnecting A, checking the file size)
+    was serialized behind that, producing exactly the previous round's
+    observation: the tablespace file doesn't shrink until B's whole
+    SET GLOBAL fully returns.
+  - FIX FOR THE HARNESS (not for InnoDB): connect B and C BOTH before B's
+    `--send`. With that reordering, C's DEBUG_SYNC WAIT_FOR succeeds
+    immediately (well within the pause), connA's disconnect proceeds
+    immediately, and Fil_shard::space_truncate() completes (confirmed via
+    timestamps: entry to bump_version() in under 30 microseconds once
+    reached) while B's write is still parked, every time.
+
+HOW THE RACE ACTUALLY PLAYS OUT ONCE THE HARNESS ARTIFACT IS FIXED
+-----------------------------------------------------------------
+Only ONE dirty page is needed (page 5, i.e. the first page beyond the
+5-page/80KB initial session-temp-tablespace extent) -- growing the test
+table by more rows just creates more sibling dirty pages, which is
+harmless: any page that does NOT match the DEBUG_SYNC filter
+(fsp_is_session_temporary() && page_no >= FIL_IBT_FILE_INITIAL_SIZE)
+completes its I/O normally and immediately, contributing to
+file.n_pending_ios only transiently. Multi-page and single-page variants
+(4 rows vs 30 rows) both reproduce identically.
+
+Sequence (unfixed code):
+  1. conA creates a session temp table, grows it past the initial extent.
+  2. conB arms the sync point and issues (async) SET GLOBAL
+     innodb_buf_flush_list_now, which flushes the dirty page(s) via
+     buf_flush_page() -> ... -> Fil_shard::do_io(). This holds
+     LOCK_global_system_variables for its whole duration.
+  3. conC (already connected) waits for the "paused" signal -- succeeds
+     immediately once B's do_io() call for the target page hits the
+     (relocated) DEBUG_SYNC point, mutex released, `file` already resolved
+     to a valid pointer with the OLD (pre-truncate) size.
+  4. conA disconnects. Its InnoDB session teardown reaches
+     Tablespace_pool::free_ts() -> Tablespace::truncate() ->
+     Fil_shard::space_truncate() -> wait_for_pending_operations() (sees
+     n_pending_ops == 0 and n_pending_ios == 0 -- the paused write hasn't
+     incremented it yet) -> bump_version() -> physically truncates the
+     .ibt file back to 5 pages.
+  5. conB's write resumes (after its own 20s WAIT_FOR ... TIMEOUT). Its
+     `file` pointer's ->size field now reads 5 (mutated in place by step 4)
+     while page_no is still 5 -- "file->size <= page_no" is now true, and
+     bpage->is_stale() is now true (version was bumped). Unfixed code
+     enters the buggy branch and returns DB_PAGE_IS_STALE WITHOUT releasing
+     the shard mutex.
+  6. IMMEDIATE CONSEQUENCE IN A DEBUG BUILD: dblwr::write() (the caller a
+     few frames up, which invoked fil_io()/do_io() to begin with) checks
+     for DB_PAGE_IS_STALE right where do_io() returns to it, and on that
+     path calls buf_page_free_stale_during_write() -> buf_page_t::was_stale()
+     -> fil_space_t::was_not_deleted(), whose ut_ad() asserts the shard
+     mutex is NOT held by the current thread. It IS still held (leaked one
+     frame earlier), so this asserts and aborts the server (SIGABRT) --
+     deterministically, every run, whether 1 or 10 sibling pages are dirty.
+     NOTE: this is a debug-build-only side effect of an unrelated ut_ad()
+     coincidentally catching the corruption within the same call stack. In
+     a release build (ut_ad compiled out), the code would instead silently
+     continue holding the leaked mutex, and the NEXT unrelated caller that
+     needs THAT shard's mutex would hang forever -- matching the bug
+     report's literal description. Both are consequences of the exact same
+     missing mutex_release().
+
+RED/GREEN VALIDATION
+---------------------
+Built debug (WITH_DEBUG=ON, ENABLED_DEBUG_SYNC) mysqld/mysqltest/mysql from
+this tree; ccache-assisted full build ~10 minutes on 32 cores. Ran
+repro.test (single dirty page, 4 rows) repeatedly:
+
+  RED (git-diff's mutex_release() line commented out): mysqld crashes with
+  SIGABRT every run, same assertion:
+    #5 fil_space_t::was_not_deleted() fil0fil.cc:12036 (ut_ad(!mutex_owned()))
+    #6 buf_page_t::was_stale() buf0buf.h:1277
+    #7 buf_page_free_stale_during_write() buf0buf.cc:5892
+    #8 dblwr::write() buf0dblwr.cc:2526
+    #9 buf_flush_write_block_low() buf0flu.cc:1257
+    ... buf_flush_page -> buf_flush_try_neighbors -> ... ->
+    buf_flush_sync_all_buf_pools -> buf_flush_list_now_set ->
+    sys_var_pluginvar::global_update
+  mysqltest reports "Query 'reap' failed. ERROR 2013 (HY000): Lost
+  connection to MySQL server during query", server process is dead.
+
+  GREEN (mutex_release() present, i.e. current committed state of
+  fil0fil.cc): test passes cleanly ("ok"), server stays alive
+  (confirmed via `ps`), and the bounded-timeout probe.sh (a fresh
+  connection issuing SET GLOBAL innodb_buf_flush_list_now, needing every
+  shard's mutex including the one just exercised) returns PROBE_OK
+  immediately (rc=0), not a timeout.
+
+  Repeated 3x in each direction; fully deterministic both ways.
+
+WHAT WORKED / LESSONS FOR THE NEXT ATTEMPT
+--------------------------------------------
+- The sync-point filter (fsp_is_session_temporary(page_id.space()) &&
+  page_id.page_no() >= FIL_IBT_FILE_INITIAL_SIZE) reliably isolates the
+  target page/space. Its PLACEMENT within do_io() matters a lot (see
+  "DECISIVE PRE-BUILD CHECK" above) -- before vs. after get_file_for_io()
+  changes which branch the resumed call lands in entirely.
+- innodb_page_cleaner_disabled_debug=ON is required for determinism.
+- --loose-debug-sync-timeout=600 is REQUIRED when starting mysqld by hand.
+- Only ONE dirty page is needed; no need to grow the table by hundreds of
+  rows. session-temp-tablespace extension jumps in a fixed-size chunk (this
+  build: 16 pages) as soon as any growth beyond the initial 5-page extent is
+  needed, but only pages that actually hold row data get dirtied/flushed --
+  4 rows of ~4000 bytes each dirty exactly page 5 and nothing else.
+- CRITICAL test-harness pitfall (cost most of this round's time): any
+  mysqltest connection opened AFTER a `--send SET GLOBAL <var>` on another
+  connection can block on LOCK_global_system_variables for as long as that
+  SET GLOBAL's on-update callback runs. If that callback is the thing you're
+  trying to race against (as here), this makes an unrelated MySQL-server
+  lock look exactly like an InnoDB-level blocker. Always pre-connect every
+  mysqltest connection you'll need before sending any long-running
+  SET GLOBAL.
+- Raw fprintf()-to-stderr line order in a multi-threaded server log is NOT
+  reliable evidence of real chronological order, even with fflush() after
+  every call. Add explicit wall-clock timestamps (clock_gettime) to any
+  cross-thread ordering argument, or better, use gdb to get a live stack
+  dump of every thread during the disputed window -- that's what actually
+  resolved this investigation.
+- A live `gdb -p <pid> -batch -ex "thread apply all bt"` snapshot taken a
+  couple seconds into the pause window is a very effective way to see
+  exactly what every thread is blocked on, without needing more
+  instrumentation/rebuild cycles.
+
+FILES IN THIS DIRECTORY:
+--------------------------
+- repro.test: the mysqltest harness that reproduces the crash/leak (single
+  dirty page variant, 4 rows). Self-contained; run directly via the
+  mysqltest binary against a hand-started debug mysqld. Hardcoded paths
+  are marked ADJUST-PATH.
+- probe.sh: the bounded-timeout probe repro.test shells out to via --exec.
+  Reads MYSQL_BIN_DIR / MYSQLD_SOCKET env vars (or falls back to this
+  investigation's scratch paths under /tmp, which no longer exist after
+  cleanup).
+
+CURRENT STATE OF fil0fil.cc ON THIS BRANCH:
+----------------------------------------------
+Two changes, both left in place (see `git diff`):
+  1. The relocated DEBUG_SYNC point in do_io() (UNIV_DEBUG only, no
+     behavior change in release builds).
+  2. The actual fix: mutex_release() added before the
+     "return DB_PAGE_IS_STALE;" in the previously-buggy branch. This IS a
+     real, validated fix (red/green as documented above) -- not left
+     speculative like the previous round, which had no green run to pair a
+     fix with. No PR was opened (out of scope / not authorized here); this
+     is left as a validated candidate fix for whoever picks this up next.

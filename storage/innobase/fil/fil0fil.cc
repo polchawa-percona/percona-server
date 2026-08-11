@@ -7799,6 +7799,29 @@ dberr_t Fil_shard::do_io(const IORequest &type, bool sync,
                                    req_type.is_read());
   }
 
+#ifdef UNIV_DEBUG
+  /* Bug#39244016 reachability sync point. Placed AFTER get_file_for_io()
+  succeeded (so `file` is a valid, non-null pointer whose ->size field may
+  still be mutated in place by a concurrent Fil_shard::space_truncate())
+  and BEFORE prepare_file_for_io() (so this in-flight write has NOT yet
+  incremented file->n_pending_ios, and therefore does not itself block
+  Fil_shard::wait_for_pending_operations()). This is the window in do_io()
+  where a concurrent truncate can shrink file->size and bump the space
+  version out from under an already-resolved `file` pointer, making the
+  later "file->size <= page_no" recheck observe the NEW (shrunk) size
+  against the OLD (pre-truncate) file pointer -- reaching the branch a few
+  lines below that is missing mutex_release() before returning
+  DB_PAGE_IS_STALE. See .bug39244016_repro/ for the harness and NOTES.txt
+  for the full investigation writeup. */
+  if (req_type.is_write() && bpage != nullptr && file != nullptr &&
+      fsp_is_session_temporary(page_id.space()) &&
+      page_id.page_no() >= FIL_IBT_FILE_INITIAL_SIZE) {
+    mutex_release();
+    DEBUG_SYNC_C("innodb_fil_do_io_before_stale_recheck");
+    mutex_acquire();
+  }
+#endif /* UNIV_DEBUG */
+
 #ifndef UNIV_HOTBACKUP
   if (UNIV_UNLIKELY(space->is_corrupt && srv_pass_corrupt_table)) {
     /* should ignore i/o for the crashed space */
@@ -7860,6 +7883,11 @@ dberr_t Fil_shard::do_io(const IORequest &type, bool sync,
 #ifndef UNIV_HOTBACKUP
     if (req_type.is_write() && bpage != nullptr && bpage->is_stale()) {
       ut_a(bpage->get_space()->id == page_id.space());
+      /* Bug#39244016: this branch used to return without releasing the
+      shard mutex acquired at the top of do_io(), leaking it forever (plain
+      ib_mutex_t, no RAII). Reproduced and validated red/green -- see
+      .bug39244016_repro/NOTES.txt. */
+      mutex_release();
       return DB_PAGE_IS_STALE;
     }
 #endif /* !UNIV_HOTBACKUP */
