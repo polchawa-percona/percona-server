@@ -1971,7 +1971,7 @@ static void buf_LRU_old_init(buf_pool_t *buf_pool) {
         ut_ad(buf_page_in_file(bpage));
         /* This loop temporarily violates the assertions of
         buf_page_set_old(). */
-        bpage->old = true;
+        bpage->old.store(true, std::memory_order_relaxed);
       }
     }
   }
@@ -2302,6 +2302,46 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   return {now_empty, was_old, group};
 }
 
+/** Increments buf_pool->LRU_n_pages by one page. Requires topology-X --
+today, the sole mutator. Relaxed ordering is sufficient because topology-X
+itself supplies the ordering for every current caller; a future topology-S
+mover (Step 7+) that updates this counter without X will need its own
+argument for why relaxed remains sufficient there.
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_LRU_n_pages_inc(buf_pool_t *buf_pool) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  buf_pool->LRU_n_pages.fetch_add(1, std::memory_order_relaxed);
+}
+
+/** Decrements buf_pool->LRU_n_pages by one page. See buf_LRU_n_pages_inc().
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_LRU_n_pages_dec(buf_pool_t *buf_pool) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  buf_pool->LRU_n_pages.fetch_sub(1, std::memory_order_relaxed);
+}
+
+/** Adds delta pages to buf_pool->LRU_old_len. See buf_LRU_n_pages_inc() for
+the ordering rationale.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in]      delta     number of pages to add */
+static inline void buf_LRU_old_len_add(buf_pool_t *buf_pool, size_t delta) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  buf_pool->LRU_old_len.fetch_add(delta, std::memory_order_relaxed);
+}
+
+/** Increments buf_pool->LRU_old_len by one page. See buf_LRU_n_pages_inc().
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_LRU_old_len_inc(buf_pool_t *buf_pool) {
+  buf_LRU_old_len_add(buf_pool, 1);
+}
+
+/** Decrements buf_pool->LRU_old_len by one page. See buf_LRU_n_pages_inc().
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_LRU_old_len_dec(buf_pool_t *buf_pool) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  buf_pool->LRU_old_len.fetch_sub(1, std::memory_order_relaxed);
+}
+
 /** Reclaims an empty LRU group (PS-11141 grouped LRU list). If the group was
 the LRU_old boundary, shifts the boundary to its predecessor group first
 (mirroring the page-model's handling of "bpage == LRU_old"): the
@@ -2332,7 +2372,7 @@ static void buf_LRU_reclaim_empty_group(buf_pool_t *buf_pool,
         buf_page_set_old(p, true);
       }
     }
-    buf_pool->LRU_old_len += prev_group->n_pages;
+    buf_LRU_old_len_add(buf_pool, prev_group->n_pages);
 
     buf_pool->LRU_old = prev_group;
   }
@@ -2373,12 +2413,12 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
   ut_d(bpage->in_LRU_list = false);
 
   buf_pool->stat.LRU_bytes -= bpage->size.physical();
-  buf_pool->LRU_n_pages--;
+  buf_LRU_n_pages_dec(buf_pool);
 
   buf_unzip_LRU_remove_block_if_needed(bpage);
 
   if (was_old) {
-    buf_pool->LRU_old_len--;
+    buf_LRU_old_len_dec(buf_pool);
   }
 
   if (group_now_empty) {
@@ -2399,7 +2439,7 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
       g->old = false;
       for (auto *p : g->pages) {
         if (p != nullptr) {
-          p->old = false;
+          p->old.store(false, std::memory_order_relaxed);
         }
       }
     }
@@ -2506,7 +2546,7 @@ static void buf_LRU_append_to_young_fill_group(buf_pool_t *buf_pool,
   if (group != nullptr) {
     if (group->n_pages < BUF_LRU_GROUP_SIZE && !group->old) {
       buf_lru_group_append_page(group, bpage);
-      buf_pool->LRU_n_pages++;
+      buf_LRU_n_pages_inc(buf_pool);
       return;
     }
   }
@@ -2518,7 +2558,7 @@ static void buf_LRU_append_to_young_fill_group(buf_pool_t *buf_pool,
   buf_pool->LRU_young_fill_group = group;
   buf_lru_group_append_page(group, bpage);
 
-  buf_pool->LRU_n_pages++;
+  buf_LRU_n_pages_inc(buf_pool);
 }
 
 /** Appends bpage to buf_pool->LRU_fill_group (the old-side fill group),
@@ -2542,8 +2582,8 @@ static void buf_LRU_append_to_old_fill_group(buf_pool_t *buf_pool,
   if (group != nullptr) {
     if (group->n_pages < BUF_LRU_GROUP_SIZE && group->old) {
       buf_lru_group_append_page(group, bpage);
-      buf_pool->LRU_n_pages++;
-      buf_pool->LRU_old_len++;
+      buf_LRU_n_pages_inc(buf_pool);
+      buf_LRU_old_len_inc(buf_pool);
       return;
     }
   }
@@ -2562,8 +2602,8 @@ static void buf_LRU_append_to_old_fill_group(buf_pool_t *buf_pool,
   buf_pool->LRU_fill_group = group;
   buf_lru_group_append_page(group, bpage);
 
-  buf_pool->LRU_n_pages++;
-  buf_pool->LRU_old_len++;
+  buf_LRU_n_pages_inc(buf_pool);
+  buf_LRU_old_len_inc(buf_pool);
 }
 
 /** Adds a block to the LRU list. Please make sure that the page_size is

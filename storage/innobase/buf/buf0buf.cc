@@ -7616,7 +7616,7 @@ std::ostream &operator<<(std::ostream &outs, const buf_page_t &page) {
               << ",\"is_dirty\":" << page.is_dirty() << ",\"flush_type\":\""
               << page.flush_type
               << "\",\"dblwr_batch_id\":" << page.get_dblwr_batch_id()
-              << ",\"old\":" << page.old
+              << ",\"old\":" << page.old.load()
               << ",\"first_accessed\":" << time_elapsed(page.access_time)
 #ifdef UNIV_DEBUG
               << ",\"file_page_was_freed\":" << page.file_page_was_freed

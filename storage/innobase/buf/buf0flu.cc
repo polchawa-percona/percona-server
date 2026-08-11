@@ -4009,7 +4009,8 @@ static void buf_lru_manager_adapt_sleep_time(
     std::chrono::milliseconds &lru_sleep_time) {
   const auto free_len = UT_LIST_GET_LEN(buf_pool->free);
   const auto max_free_len =
-      std::min(buf_pool->LRU_n_pages, static_cast<size_t>(srv_LRU_scan_depth));
+      std::min(buf_pool->LRU_n_pages.load(std::memory_order_relaxed),
+               static_cast<size_t>(srv_LRU_scan_depth));
 
   if (free_len < max_free_len / 100 && lru_n_processed) {
     /* Free list < 1% and we made progress last time: don't sleep. */

@@ -566,7 +566,7 @@ static inline void buf_page_set_old(buf_page_t *bpage, bool old) {
   ut_a(bpage->lru_group == nullptr || old == bpage->lru_group->old);
 #endif /* UNIV_LRU_DEBUG */
 
-  bpage->old = old;
+  bpage->old.store(old, std::memory_order_relaxed);
 }
 
 static inline std::chrono::steady_clock::time_point buf_page_is_accessed(

@@ -1736,8 +1736,12 @@ class buf_page_t {
   lru_group == nullptr. Protected by buf_pool->LRU_list_mutex. */
   uint16_t lru_slot{0};
 
-  /** true if the block is in the old blocks in buf_pool->LRU_old */
-  bool old;
+  /** true if the block is in the old blocks in buf_pool->LRU_old. Atomic
+  (copyable_atomic_t, mirroring buf_fix_count_atomic_t) so that existing
+  block-mutex-only readers and topology/group writers have no C++ data
+  race; the topology latch and group mutex remain what actually
+  synchronizes changes to this flag (see buf_page_set_old()). */
+  copyable_atomic_t<bool> old;
 
   bool is_corrupt;
 #ifdef UNIV_DEBUG
@@ -2374,20 +2378,18 @@ struct buf_pool_stat_t {
   /** Number of pages read in as part of read ahead. */
   std::atomic<uint64_t> n_ra_pages_read;
 
-  /** Number of read ahead pages that are evicted without being accessed.
-  Protected by LRU_list_mutex. */
-  uint64_t n_ra_pages_evicted;
+  /** Number of read ahead pages that are evicted without being accessed. */
+  std::atomic<uint64_t> n_ra_pages_evicted;
 
-  /** Number of pages made young, in calls to buf_LRU_make_block_young().
-  Protected by LRU_list_mutex. */
-  uint64_t n_pages_made_young;
+  /** Number of pages made young, in calls to buf_LRU_make_block_young(). */
+  std::atomic<uint64_t> n_pages_made_young;
 
   /** Number of pages not made young because the first access was not long
   enough ago, in buf_page_peek_if_too_old(). Not protected. */
   uint64_t n_pages_not_made_young;
 
-  /** LRU size in bytes. Protected by LRU_list_mutex. */
-  uint64_t LRU_bytes;
+  /** LRU size in bytes. */
+  std::atomic<uint64_t> LRU_bytes;
 
   /** Flush_list size in bytes.  Protected by flush_list_mutex */
   uint64_t flush_list_bytes;
@@ -2407,13 +2409,13 @@ struct buf_pool_stat_t {
 
     dst.n_ra_pages_read.store(src.n_ra_pages_read.load());
 
-    dst.n_ra_pages_evicted = src.n_ra_pages_evicted;
+    dst.n_ra_pages_evicted.store(src.n_ra_pages_evicted.load());
 
-    dst.n_pages_made_young = src.n_pages_made_young;
+    dst.n_pages_made_young.store(src.n_pages_made_young.load());
 
     dst.n_pages_not_made_young = src.n_pages_not_made_young;
 
-    dst.LRU_bytes = src.LRU_bytes;
+    dst.LRU_bytes.store(src.LRU_bytes.load());
 
     dst.flush_list_bytes = src.flush_list_bytes;
 
@@ -2691,10 +2693,9 @@ struct buf_pool_t {
 
   /** A sequence number used to count the number of buffer blocks removed from
   the end of the LRU list; NOTE that this counter may wrap around at 4
-  billion! A thread is allowed to read this for heuristic purposes without
-  holding any mutex or latch. For non-heuristic purposes protected by
-  LRU_list_mutex */
-  ulint freed_page_clock;
+  billion! Atomic so every reader (heuristic or exact) sees a consistent
+  value regardless of which latch, if any, it holds. */
+  std::atomic<ulint> freed_page_clock;
 
   /** Source for fresh buf_page_t::residency_generation values. Zero is
   reserved for descriptors that are not real page-hash residencies, including
@@ -2787,8 +2788,12 @@ struct buf_pool_t {
   UT_LIST_BASE_NODE_T(buf_lru_group_t, LRU) LRU;
 
   /** Total number of live pages across all groups in LRU. Necessary because
-  UT_LIST_GET_LEN(LRU) now counts groups. Protected by LRU_list_mutex. */
-  size_t LRU_n_pages{0};
+  UT_LIST_GET_LEN(LRU) now counts groups. An exact atomic count, updated via
+  the buf_LRU_n_pages_inc()/_dec() choke point in buf0lru.cc: today every
+  update happens under topology-X, which is what actually orders the
+  updates, but the atomic type lets a future topology-S mover (Step 7+)
+  update it without escalating to X. */
+  std::atomic<size_t> LRU_n_pages{0};
 
   /** The group currently being appended to by young-side (MRU) page
   insertions: both the immediate buf_LRU_make_block_young() path and, per
@@ -2850,8 +2855,10 @@ struct buf_pool_t {
   /** Number of pages (not groups) from the group to which LRU_old points
   onward, including that group; see buf0lru.cc for the restrictions on this
   value; 0 if LRU_old == NULL; NOTE: LRU_old_len must be adjusted whenever
-  LRU_old shrinks or grows! */
-  ulint LRU_old_len;
+  LRU_old shrinks or grows! An exact atomic count for the same reason as
+  LRU_n_pages above -- see buf_LRU_old_len_inc()/_dec()/_add() in
+  buf0lru.cc. */
+  std::atomic<ulint> LRU_old_len;
 
   /** Base node of the unzip_LRU list. The list is protected by the
   LRU_list_mutex. */
