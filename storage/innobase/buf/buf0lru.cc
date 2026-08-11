@@ -2009,6 +2009,7 @@ void buf_LRU_adjust_group_hp(buf_pool_t *buf_pool,
   buf_pool->lru_scan_itr.adjust(group);
   buf_pool->single_scan_itr.adjust(group);
   buf_pool->lru_compact_hp.adjust(group);
+  buf_pool->LRU_empty_scan_cursor.adjust(group);
 }
 
 /** Replace bpage's slot in its LRU group with dpage, without moving the
@@ -2038,8 +2039,10 @@ static buf_lru_group_t *buf_lru_group_create() {
   group->n_pages = 0;
   group->occupied_slots = 0;
   group->old = false;
-  group->in_LRU_list = false;
+  group->state = buf_lru_group_state_t::RESERVE;
   group->cache_next = nullptr;
+  group->n_maintenance_refs = 0;
+  group->empty_candidate_pending.store(false, std::memory_order_relaxed);
   return group;
 }
 
@@ -2061,7 +2064,9 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
     flags and the reuse generation need updating. */
     ut_ad(group->n_pages == 0);
     ut_ad(group->occupied_slots == 0);
-    ut_ad(!group->in_LRU_list);
+    ut_ad(group->state == buf_lru_group_state_t::RESERVE);
+    ut_ad(group->n_maintenance_refs == 0);
+    ut_ad(!group->empty_candidate_pending.load(std::memory_order_relaxed));
     group->old = false;
   } else {
     group = buf_lru_group_create();
@@ -2078,29 +2083,40 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
 static void buf_lru_group_destroy(buf_lru_group_t *group) {
   ut_ad(group->n_pages == 0);
   ut_ad(group->occupied_slots == 0);
-  ut_ad(!group->in_LRU_list);
+  ut_ad(group->state == buf_lru_group_state_t::RESERVE ||
+        group->state == buf_lru_group_state_t::RETIRED);
+  ut_ad(group->n_maintenance_refs == 0);
+  ut_ad(!group->empty_candidate_pending.load(std::memory_order_relaxed));
   mutex_free(&group->mutex);
   ut::delete_(group);
 }
 
 /** Releases an empty LRU group into the bounded reserve, or retires it for
-later destruction outside LRU_list_mutex when the reserve is full.
+later destruction outside LRU_list_mutex when the reserve is full. Performs
+the LINKED -> RESERVE/RETIRED state transition; the caller must not have
+already changed group->state.
 @param[in,out]  buf_pool        buffer pool instance
-@param[in,out]  group           empty, unlinked group to release */
+@param[in,out]  group           empty group, already unlinked from
+                                buf_pool->LRU via UT_LIST_REMOVE but still
+                                marked LINKED */
 static void buf_lru_group_release(buf_pool_t *buf_pool,
                                   buf_lru_group_t *group) {
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
   ut_ad(group->n_pages == 0);
   ut_ad(group->occupied_slots == 0);
-  ut_ad(!group->in_LRU_list);
+  ut_ad(group->state == buf_lru_group_state_t::LINKED);
+  ut_ad(group->n_maintenance_refs == 0);
+  ut_ad(!group->empty_candidate_pending.load(std::memory_order_relaxed));
 
   if (buf_pool->LRU_group_cache_len < BUF_LRU_GROUP_RESERVE_MAX) {
+    group->state = buf_lru_group_state_t::RESERVE;
     group->cache_next = buf_pool->LRU_group_cache;
     buf_pool->LRU_group_cache = group;
     buf_pool->LRU_group_cache_len++;
     return;
   }
 
+  group->state = buf_lru_group_state_t::RETIRED;
   group->cache_next = buf_pool->LRU_group_retired;
   buf_pool->LRU_group_retired = group;
   buf_pool->LRU_group_retired_len++;
@@ -2213,7 +2229,13 @@ bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive) {
   const size_t create_budget =
       exhaustive ? BUF_LRU_GROUP_RESERVE_TARGET : BUF_LRU_GROUP_CREATE_BUDGET;
 
+  const size_t empty_candidate_budget =
+      exhaustive ? std::numeric_limits<size_t>::max()
+                 : BUF_LRU_EMPTY_CANDIDATE_DRAIN_BUDGET;
+
   buf_pool->LRU_topology_latch.x_lock();
+  bool empty_candidates_pending =
+      buf_LRU_process_empty_candidates(buf_pool, empty_candidate_budget);
   buf_lru_group_t *retired =
       buf_pool->LRU_group_retired == nullptr
           ? nullptr
@@ -2225,7 +2247,8 @@ bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive) {
 
   if (reserve_len >= BUF_LRU_GROUP_RESERVE_TARGET) {
     buf_pool->LRU_topology_latch.x_lock();
-    const bool pending = buf_pool->LRU_group_retired != nullptr;
+    const bool pending =
+        buf_pool->LRU_group_retired != nullptr || empty_candidates_pending;
     buf_pool->LRU_topology_latch.x_unlock();
     return pending;
   }
@@ -2256,7 +2279,8 @@ bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive) {
   buf_pool->LRU_topology_latch.x_lock();
   const bool pending =
       buf_pool->LRU_group_retired != nullptr ||
-      buf_pool->LRU_group_cache_len < BUF_LRU_GROUP_RESERVE_TARGET;
+      buf_pool->LRU_group_cache_len < BUF_LRU_GROUP_RESERVE_TARGET ||
+      empty_candidates_pending;
   buf_pool->LRU_topology_latch.x_unlock();
   return pending;
 }
@@ -2389,8 +2413,213 @@ static void buf_LRU_reclaim_empty_group(buf_pool_t *buf_pool,
   buf_LRU_adjust_group_hp(buf_pool, group);
 
   UT_LIST_REMOVE(buf_pool->LRU, group);
-  group->in_LRU_list = false;
   buf_lru_group_release(buf_pool, group);
+}
+
+/** True if an active unlocked scan currently hazards this group. Defined
+below; forward-declared here so the empty-candidate machinery (which
+predates buf_lru_group_is_active()/buf_lru_group_has_live_hazard() in file
+order) can use it. */
+static bool buf_lru_group_has_live_hazard(const buf_pool_t *buf_pool,
+                                          const buf_lru_group_t *group);
+
+/** Attempts to enqueue an empty, LINKED, pending group onto
+buf_pool->LRU_empty_candidates, taking the maintenance reference that keeps
+it alive until buf_LRU_process_empty_candidates() consumes it. On overflow,
+falls back to the persistent fallback scan instead (PS-11141 Requirement 9):
+does not block or allocate.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  group     empty, LINKED group with empty_candidate_pending
+                          already set by the caller */
+static void buf_LRU_enqueue_empty_candidate(buf_pool_t *buf_pool,
+                                            buf_lru_group_t *group) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(group->n_pages == 0);
+  ut_ad(group->state == buf_lru_group_state_t::LINKED);
+  ut_ad(group->empty_candidate_pending.load(std::memory_order_relaxed));
+
+  if (buf_pool->LRU_empty_candidates_len >= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP) {
+    /* Overflow: this group stays pending and LINKED, but untracked by the
+    queue. The fallback scan below will find it via n_pages == 0 &&
+    empty_candidate_pending, so no reference is needed for this path --
+    there is no raw pointer sitting outside the natural buf_pool->LRU
+    traversal that could go stale. */
+    buf_pool->LRU_empty_scan_pending = true;
+    return;
+  }
+
+  group->n_maintenance_refs++;
+  const size_t tail = (buf_pool->LRU_empty_candidates_head +
+                       buf_pool->LRU_empty_candidates_len) %
+                      BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
+  buf_pool->LRU_empty_candidates[tail] = group;
+  buf_pool->LRU_empty_candidates_len++;
+}
+
+/** Publishes a newly-emptied, still-LINKED group as a reclaim candidate
+instead of reclaiming it inline (PS-11141 Requirement 8/9). Idempotent: a
+group already marked pending is not published twice.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  group     empty, LINKED group */
+static void buf_LRU_publish_empty_candidate(buf_pool_t *buf_pool,
+                                            buf_lru_group_t *group) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(group->n_pages == 0);
+  ut_ad(group->state == buf_lru_group_state_t::LINKED);
+
+  if (group->empty_candidate_pending.exchange(true,
+                                              std::memory_order_relaxed)) {
+    return;
+  }
+  buf_LRU_enqueue_empty_candidate(buf_pool, group);
+}
+
+/** Re-validates a group pulled off buf_pool->LRU_empty_candidates or found
+by the fallback scan, then reclaims it if still eligible (PS-11141
+Requirement 8). The caller has already released any queue reference; this
+function only clears empty_candidate_pending and hands off to
+buf_LRU_reclaim_empty_group() when safe.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  group     candidate group; must not be referenced again by
+                          the caller once this returns, since it may have
+                          been unlinked and freed */
+static void buf_LRU_try_reclaim_pending_group(buf_pool_t *buf_pool,
+                                              buf_lru_group_t *group) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+
+  if (group->state != buf_lru_group_state_t::LINKED || group->n_pages != 0 ||
+      group->n_maintenance_refs != 0 ||
+      buf_lru_group_has_live_hazard(buf_pool, group)) {
+    /* No longer eligible right now (or already reclaimed via another
+    path); leave it pending so a later pass retries it. Only the hazard
+    check can make an otherwise-empty LINKED group ineligible today, and
+    per buf_LRU_reclaim_empty_group()'s own contract that can only be
+    transient. */
+    return;
+  }
+
+  group->empty_candidate_pending.store(false, std::memory_order_relaxed);
+  buf_LRU_reclaim_empty_group(buf_pool, group);
+}
+
+/** Sweeps buf_pool->LRU for pending-but-unqueued empty groups left behind
+by a buf_LRU_enqueue_empty_candidate() overflow (PS-11141 Requirement 9),
+resuming from LRU_empty_scan_cursor across bounded passes.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in]      budget    maximum groups to examine this call */
+static void buf_LRU_scan_for_empty_groups(buf_pool_t *buf_pool, size_t budget) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+
+  if (!buf_pool->LRU_empty_scan_pending) {
+    return;
+  }
+
+  buf_lru_group_t *group = buf_pool->LRU_empty_scan_cursor.get();
+  if (group == nullptr) {
+    group = UT_LIST_GET_LAST(buf_pool->LRU);
+  }
+
+  size_t examined = 0;
+  while (group != nullptr && examined < budget) {
+    /* Hazard the predecessor before touching group, mirroring the flush
+    scan in buf_flush_LRU_list_batch(): group may be unlinked and freed
+    below (via buf_LRU_try_reclaim_pending_group), so it must not be
+    dereferenced again after that call. */
+    buf_lru_group_t *const prev = UT_LIST_GET_PREV(LRU, group);
+    buf_pool->LRU_empty_scan_cursor.set(prev);
+    ++examined;
+
+    if (group->n_pages == 0 &&
+        group->empty_candidate_pending.load(std::memory_order_relaxed)) {
+      buf_LRU_try_reclaim_pending_group(buf_pool, group);
+    }
+
+    group = buf_pool->LRU_empty_scan_cursor.get();
+  }
+
+  if (group == nullptr) {
+    /* Reached the head: one full pass complete. */
+    buf_pool->LRU_empty_scan_pending = false;
+  }
+}
+
+/** Drains up to budget entries from buf_pool->LRU_empty_candidates,
+reclaiming each if still eligible, then runs the fallback scan for any
+overflow left behind (PS-11141 Requirement 8/9). Called periodically from
+buf_LRU_maintain_group_cache() and exhaustively during invalidation.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in]      budget    maximum candidates to drain from the queue this
+                          call; the fallback scan gets the same budget
+@return true if candidates or a pending scan remain */
+bool buf_LRU_process_empty_candidates(buf_pool_t *buf_pool, size_t budget) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+
+  size_t processed = 0;
+  while (processed < budget && buf_pool->LRU_empty_candidates_len > 0) {
+    buf_lru_group_t *group =
+        buf_pool->LRU_empty_candidates[buf_pool->LRU_empty_candidates_head];
+    buf_pool->LRU_empty_candidates[buf_pool->LRU_empty_candidates_head] =
+        nullptr;
+    buf_pool->LRU_empty_candidates_head =
+        (buf_pool->LRU_empty_candidates_head + 1) %
+        BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
+    buf_pool->LRU_empty_candidates_len--;
+    ++processed;
+
+    ut_a(group->n_maintenance_refs > 0);
+    group->n_maintenance_refs--;
+    buf_LRU_try_reclaim_pending_group(buf_pool, group);
+  }
+
+  buf_LRU_scan_for_empty_groups(buf_pool, budget);
+
+  return buf_pool->LRU_empty_candidates_len > 0 ||
+         buf_pool->LRU_empty_scan_pending;
+}
+
+/** Decides whether a newly-emptied, still-LINKED group can be reclaimed
+inline or must be deferred to buf_pool->LRU_empty_candidates (PS-11141
+Requirement 8/9). Today this always takes the inline path in production:
+every current caller holds topology-X for the group's entire empty-to-gone
+transition, so buf_lru_group_has_live_hazard() is always false here (a
+live hazard only ever targets a group's *neighbor*, precisely so the
+group under examination stays freely reclaimable -- see
+buf_flush_LRU_list_batch()). The deferred path exists so it has a real,
+testable consumer before Step 6+ gives it a genuine topology-S producer;
+buf_lru_group_force_deferred_reclaim forces it for that purpose.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  group     empty group (caller observes group->n_pages == 0
+                          under LRU_list_mutex); must not be referenced
+                          again by the caller after this call */
+static void buf_LRU_group_became_empty(buf_pool_t *buf_pool,
+                                       buf_lru_group_t *group) {
+  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(group->n_pages == 0);
+
+  /* An empty group must never remain a fill target, whether it is
+  reclaimed inline below or deferred: buf_LRU_append_to_{young,old}_fill_
+  group() only check n_pages/old before appending into buf_pool->LRU_
+  {young_,}fill_group, so a pending-but-still-linked group left as a fill
+  pointer would silently un-empty itself while empty_candidate_pending
+  stayed set -- caught by buf_LRU_validate_instance() the hard way once
+  already. buf_LRU_reclaim_empty_group() repeats this clearing on the
+  inline path; that is a harmless no-op once already done here. */
+  if (buf_pool->LRU_fill_group == group) {
+    buf_pool->LRU_fill_group = nullptr;
+  }
+  if (buf_pool->LRU_young_fill_group == group) {
+    buf_pool->LRU_young_fill_group = nullptr;
+  }
+
+  bool defer = buf_lru_group_has_live_hazard(buf_pool, group);
+  DBUG_EXECUTE_IF("buf_lru_group_force_deferred_reclaim", defer = true;);
+
+  if (defer) {
+    buf_LRU_publish_empty_candidate(buf_pool, group);
+    return;
+  }
+
+  buf_LRU_reclaim_empty_group(buf_pool, group);
 }
 
 /** Complete block removal after its group slot was vacated.
@@ -2422,7 +2651,7 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
   }
 
   if (group_now_empty) {
-    buf_LRU_reclaim_empty_group(buf_pool, group);
+    buf_LRU_group_became_empty(buf_pool, group);
   }
 
   if (!adjust_old) {
@@ -2554,7 +2783,7 @@ static void buf_LRU_append_to_young_fill_group(buf_pool_t *buf_pool,
   /* A full or reclassified fill group is abandoned; start a fresh group. */
   group = buf_lru_group_alloc(buf_pool);
   UT_LIST_ADD_FIRST(buf_pool->LRU, group);
-  group->in_LRU_list = true;
+  group->state = buf_lru_group_state_t::LINKED;
   buf_pool->LRU_young_fill_group = group;
   buf_lru_group_append_page(group, bpage);
 
@@ -2598,7 +2827,7 @@ static void buf_LRU_append_to_old_fill_group(buf_pool_t *buf_pool,
     whose length check ensures LRU_old is already defined here. */
     UT_LIST_ADD_FIRST(buf_pool->LRU, group);
   }
-  group->in_LRU_list = true;
+  group->state = buf_lru_group_state_t::LINKED;
   buf_pool->LRU_fill_group = group;
   buf_lru_group_append_page(group, bpage);
 
@@ -3809,8 +4038,20 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   bool seen_old = false;
 
   for (auto *group : buf_pool->LRU) {
-    ut_a(group->in_LRU_list);
+    ut_a(group->state == buf_lru_group_state_t::LINKED);
     ut_a(group->reuse_generation != 0);
+    if (group->n_pages == 0) {
+      /* A group can be empty-but-still-linked while it awaits a deferred
+      reclaim (PS-11141 Requirement 8/9): either queued on
+      LRU_empty_candidates (n_maintenance_refs > 0) or only found by the
+      persistent fallback scan (n_maintenance_refs == 0 but
+      empty_candidate_pending). Either way it must be flagged pending;
+      nothing empties a group without also publishing it as a candidate. */
+      ut_a(group->empty_candidate_pending.load(std::memory_order_relaxed));
+    } else {
+      ut_a(group->n_maintenance_refs == 0);
+      ut_a(!group->empty_candidate_pending.load(std::memory_order_relaxed));
+    }
     if (group->old) {
       if (!seen_old) {
         ut_a(buf_pool->LRU_old == group);
@@ -3862,9 +4103,11 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   size_t reserve_len = 0;
   for (buf_lru_group_t *group = buf_pool->LRU_group_cache; group != nullptr;
        group = group->cache_next) {
-    ut_a(!group->in_LRU_list);
+    ut_a(group->state == buf_lru_group_state_t::RESERVE);
     ut_a(group->n_pages == 0);
     ut_a(group->occupied_slots == 0);
+    ut_a(group->n_maintenance_refs == 0);
+    ut_a(!group->empty_candidate_pending.load(std::memory_order_relaxed));
     ++reserve_len;
   }
   ut_a(reserve_len == buf_pool->LRU_group_cache_len);
@@ -3872,12 +4115,26 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   size_t retired_len = 0;
   for (buf_lru_group_t *group = buf_pool->LRU_group_retired; group != nullptr;
        group = group->cache_next) {
-    ut_a(!group->in_LRU_list);
+    ut_a(group->state == buf_lru_group_state_t::RETIRED);
     ut_a(group->n_pages == 0);
     ut_a(group->occupied_slots == 0);
+    ut_a(group->n_maintenance_refs == 0);
+    ut_a(!group->empty_candidate_pending.load(std::memory_order_relaxed));
     ++retired_len;
   }
   ut_a(retired_len == buf_pool->LRU_group_retired_len);
+
+  ut_a(buf_pool->LRU_empty_candidates_len <= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP);
+  for (size_t i = 0; i < buf_pool->LRU_empty_candidates_len; ++i) {
+    const size_t idx = (buf_pool->LRU_empty_candidates_head + i) %
+                       BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
+    const buf_lru_group_t *group = buf_pool->LRU_empty_candidates[idx];
+    ut_a(group != nullptr);
+    ut_a(group->state == buf_lru_group_state_t::LINKED);
+    ut_a(group->n_pages == 0);
+    ut_a(group->n_maintenance_refs > 0);
+    ut_a(group->empty_candidate_pending.load(std::memory_order_relaxed));
+  }
 
   buf_pool->LRU_topology_latch.x_unlock();
 

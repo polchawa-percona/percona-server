@@ -2284,6 +2284,29 @@ constexpr size_t BUF_LRU_GROUP_RESERVE_TARGET = 64;
 provides hysteresis across eviction and promotion bursts. */
 constexpr size_t BUF_LRU_GROUP_RESERVE_MAX = 256;
 
+/** Capacity of buf_pool->LRU_empty_candidates (PS-11141 Requirement 8/9).
+Deliberately modest: overflow degrades gracefully to the persistent-cursor
+fallback scan rather than blocking or allocating while a page/group lock is
+held, so there is no correctness reason to size this generously. */
+constexpr size_t BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP = 64;
+
+/** Explicit lifecycle state of a buf_lru_group_t (PS-11141 two-level
+locking, Requirement 3). Replaces the previous plain in_LRU_list bool so
+every transition is named instead of implied. */
+enum class buf_lru_group_state_t {
+  /** Linked into buf_pool->LRU; participates in traversal, flush, and
+  eviction scans. */
+  LINKED,
+  /** Reserved for the Step 6 private promotion-staging protocol. Not yet
+  produced or consumed by any code path. */
+  STAGING,
+  /** Unlinked and empty, held on buf_pool->LRU_group_cache for reuse. */
+  RESERVE,
+  /** Unlinked and empty, held on buf_pool->LRU_group_retired pending
+  destruction outside the topology latch. */
+  RETIRED,
+};
+
 /** A node of buf_pool->LRU: a group of up to BUF_LRU_GROUP_SIZE pages.
 The per-pool LRU_list_mutex protects links, slots, counts, classification,
 and page back-pointers. Grouped-LRU mutations do not have an independent
@@ -2322,16 +2345,35 @@ struct buf_lru_group_t {
   Protected by LRU_list_mutex. */
   bool old{false};
 
-  /** true while this group is linked into buf_pool->LRU, false while it
-  sits on buf_pool->LRU_group_cache or LRU_group_retired instead
-  (PS-11141 grouped LRU list). Protected by buf_pool->LRU_list_mutex,
+  /** Explicit lifecycle state (PS-11141 Requirement 3): LINKED while in
+  buf_pool->LRU, RESERVE/RETIRED while on the corresponding free list,
+  STAGING unused before Step 6. Protected by buf_pool->LRU_list_mutex,
   like the LRU node itself. */
-  bool in_LRU_list{false};
+  buf_lru_group_state_t state{buf_lru_group_state_t::RESERVE};
 
   /** Next group on buf_pool->LRU_group_cache or LRU_group_retired;
-  meaningless (and not maintained) while in_LRU_list is true. Protected by
+  meaningless (and not maintained) while state == LINKED. Protected by
   buf_pool->LRU_list_mutex. */
   buf_lru_group_t *cache_next{nullptr};
+
+  /** Explicit maintenance references keeping this LINKED-but-empty group
+  alive and stable beyond a single topology-X critical section (PS-11141
+  Requirement 8/9): one is held per outstanding entry on
+  buf_pool->LRU_empty_candidates. While this is nonzero the group must not
+  be reclaimed, reused, or destroyed. Protected by buf_pool->LRU_list_mutex;
+  nothing increments this outside topology-X yet, since no topology-S
+  mutator exists before Step 6. */
+  uint32_t n_maintenance_refs{0};
+
+  /** True while this group is known to be empty and awaiting reclaim by a
+  topology-X maintenance batch (PS-11141 Requirement 8/9), whether tracked
+  by an entry on buf_pool->LRU_empty_candidates or, if that queue
+  overflowed, only by the persistent fallback scan
+  (buf_pool->LRU_empty_scan_cursor). Prevents publishing the same group
+  twice. Atomic in type only -- like buf_page_t::old, every current writer
+  already holds topology-X, so the atomic exists for a future topology-S
+  producer (Step 6+), not for correctness today. */
+  std::atomic<bool> empty_candidate_pending{false};
 };
 
 /** Struct that is embedded in the free zip blocks */
@@ -2835,6 +2877,40 @@ struct buf_pool_t {
   /** Next reuse generation for allocated LRU groups. Protected by
   LRU_list_mutex. */
   uint64_t LRU_group_next_reuse_generation{1};
+
+  /** Bounded queue of LINKED-but-empty groups awaiting reclaim by a
+  topology-X maintenance batch (PS-11141 Requirement 8/9): see
+  buf_LRU_publish_empty_candidate()/buf_LRU_process_empty_candidates() in
+  buf0lru.cc. Each entry holds one buf_lru_group_t::n_maintenance_refs
+  reference, so the raw pointer cannot be retired or reused before
+  consumption. Protected by LRU_list_mutex. No topology-S producer exists
+  yet (Step 6+); today only the buf_lru_group_force_deferred_reclaim
+  DBUG_EXECUTE_IF hook ever populates this. */
+  std::array<buf_lru_group_t *, BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP>
+      LRU_empty_candidates{};
+
+  /** Index of the oldest entry in LRU_empty_candidates. Protected by
+  LRU_list_mutex. */
+  size_t LRU_empty_candidates_head{0};
+
+  /** Number of live entries in LRU_empty_candidates. Protected by
+  LRU_list_mutex. Must remain <= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP. */
+  size_t LRU_empty_candidates_len{0};
+
+  /** Set when buf_LRU_publish_empty_candidate() overflows
+  LRU_empty_candidates: at least one empty group exists that the queue does
+  not track. buf_LRU_process_empty_candidates() then sweeps buf_pool->LRU
+  for untracked empty groups (resuming via LRU_empty_scan_cursor across
+  bounded passes) until none remain, then clears this. Protected by
+  LRU_list_mutex. */
+  bool LRU_empty_scan_pending{false};
+
+  /** Persistent resume position for the overflow fallback scan above, so a
+  single scan session can span multiple bounded maintenance passes without
+  missing or re-visiting groups. Adjusted like the other group hazard
+  pointers (buf_LRU_adjust_group_hp()) whenever its target is reclaimed.
+  Protected by LRU_list_mutex. */
+  LRUGroupHp LRU_empty_scan_cursor;
 
   /** Preallocated value queue for deferred make-young requests. */
   ut::Bounded_mpsc_queue<buf_lru_promote_t> *LRU_promote_queue{nullptr};

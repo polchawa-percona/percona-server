@@ -68,6 +68,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <stdarg.h>
 #include <sys/types.h>
 #include <time.h>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <new>
@@ -1590,6 +1591,15 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->LRU_compaction_retry = false;
   buf_pool->LRU_compaction_epoch = 0;
   buf_pool->LRU_compaction_sweep_epoch = 0;
+
+  /* Initialize the persistent empty-group fallback-scan cursor (PS-11141
+  Requirement 9). */
+  new (&buf_pool->LRU_empty_scan_cursor)
+      LRUGroupHp(buf_pool, &buf_pool->LRU_topology_latch);
+  buf_pool->LRU_empty_candidates.fill(nullptr);
+  buf_pool->LRU_empty_candidates_head = 0;
+  buf_pool->LRU_empty_candidates_len = 0;
+  buf_pool->LRU_empty_scan_pending = false;
 
   /* Create the low-water reserve before foreground LRU activity starts. */
   static_cast<void>(buf_LRU_maintain_group_cache(buf_pool, true));
@@ -6602,6 +6612,15 @@ static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
   }
 
   buf_pool->LRU_topology_latch.x_lock();
+
+  /* PS-11141 two-level locking Requirement 3: invalidation must drain all
+  outstanding maintenance references before group destruction. Exhaustive
+  so it clears every group, however many the DBUG_EXECUTE_IF-forced
+  deferred-reclaim path (buf_lru_group_force_deferred_reclaim) may have
+  accumulated during the preceding workload -- normal production traffic
+  never defers, so this is a no-op there. */
+  static_cast<void>(buf_LRU_process_empty_candidates(
+      buf_pool, std::numeric_limits<size_t>::max()));
 
   /* PS-11141 grouped LRU list: once every page is gone, every group should
   have emptied and been freed too (buf_LRU_remove_block() reclaims a group

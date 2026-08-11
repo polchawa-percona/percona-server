@@ -224,6 +224,17 @@ Allocation and destruction occur outside LRU_list_mutex.
 @return true if bounded background work remains */
 bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive);
 
+/** Drains up to budget entries from buf_pool->LRU_empty_candidates,
+reclaiming each if still eligible, then runs the persistent-cursor
+fallback scan for any overflow left behind (PS-11141 Requirement 8/9).
+Requires buf_pool->LRU_topology_latch in X mode.
+@param[in,out]  buf_pool        buffer pool instance
+@param[in]      budget          maximum candidates to drain from the queue
+                                this call; the fallback scan gets the same
+                                budget
+@return true if candidates or a pending scan remain */
+bool buf_LRU_process_empty_candidates(buf_pool_t *buf_pool, size_t budget);
+
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
 /** Validates the LRU list. */
 void buf_LRU_validate(void);
@@ -288,6 +299,11 @@ constexpr uint32_t BUF_LRU_GROUP_DESTROY_BUDGET = 16;
 
 /** Maximum reserve groups created by normal background maintenance. */
 constexpr uint32_t BUF_LRU_GROUP_CREATE_BUDGET = 8;
+
+/** Maximum empty-candidate queue entries (and fallback-scan groups)
+processed per normal background maintenance call (PS-11141 Requirement
+8/9). */
+constexpr uint32_t BUF_LRU_EMPTY_CANDIDATE_DRAIN_BUDGET = 16;
 
 struct buf_pool_t;
 
