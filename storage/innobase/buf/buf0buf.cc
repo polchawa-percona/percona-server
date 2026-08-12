@@ -3411,27 +3411,18 @@ function can be used to prevent an important page from slipping out of
 the buffer pool.
 @param[in,out]  bpage   buffer block of a file page */
 void buf_page_make_young(buf_page_t *bpage) {
-  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-
-  buf_pool->LRU_topology_latch.x_lock();
-
   ut_a(buf_page_in_file(bpage));
 
+  /* buf_LRU_make_block_young() is self-locking as of PS-11141 Step 7: it
+  tries topology-S before falling back to topology-X itself. */
   buf_LRU_make_block_young(bpage);
-
-  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 void buf_page_make_old(buf_page_t *bpage) {
-  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-
-  buf_pool->LRU_topology_latch.x_lock();
-
   ut_a(buf_page_in_file(bpage));
 
+  /* See buf_page_make_young()'s comment. */
   buf_LRU_make_block_old(bpage);
-
-  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 /** Moves a page to the start of the buffer pool LRU list if it is too old.
@@ -5140,7 +5131,7 @@ static void buf_page_init_low(buf_page_t *bpage) noexcept {
   bpage->reinit_io_fix();
   ut_a(bpage->buf_fix_count == 0);
   bpage->buf_fix_count.store(0);
-  bpage->freed_page_clock = 0;
+  bpage->freed_page_clock.store(0, std::memory_order_relaxed);
   bpage->access_time = {};
   bpage->set_newest_lsn(0);
   bpage->set_clean_low();
@@ -5375,23 +5366,22 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
         "buf_page_init_for_read_delay_lru_add",
         std::this_thread::sleep_for(std::chrono::microseconds(100)););
 
-    buf_pool->LRU_topology_latch.x_lock();
-
-    /* For a compressed page zip.data was set above, before the page
-    became reachable through the page hash, so
-    buf_page_belongs_to_unzip_LRU() already holds and buf_LRU_add_block()
-    links the block into the unzip_LRU list as well, within this same
-    critical section: every observer of the LRU list sees the invariant
-    block->in_unzip_LRU_list ==
-    buf_page_belongs_to_unzip_LRU(&block->page) hold. (This is unlike the
-    pre-narrowing code, which set zip.data only after buf_LRU_add_block()
-    and therefore had to add the block to the unzip_LRU list explicitly
-    afterwards; an explicit second add here would corrupt the list.) */
-    buf_LRU_add_block(bpage, true /* to old blocks */);
+    /* buf_LRU_add_fresh_page() is self-locking (PS-11141 Requirement 7):
+    it tries topology-S first, falling back to topology-X internally. A
+    compressed page's zip.data was set above, before the page became
+    reachable through the page hash, so buf_page_belongs_to_unzip_LRU()
+    already holds; buf_LRU_add_fresh_page() detects that and always
+    defers such a page to its topology-X fallback (which links it into
+    the unzip_LRU list too, exactly as buf_LRU_add_block() used to here),
+    since that list is not yet safe to touch under topology-S alone
+    (Requirement 11's dedicated unzip_LRU latch is not yet implemented).
+    Either way every observer of the LRU list sees the invariant
+    block->in_unzip_LRU_list == buf_page_belongs_to_unzip_LRU(&block->page)
+    hold, since the two updates happen in the same critical section
+    regardless of which path was taken. */
+    buf_LRU_add_fresh_page(bpage, true /* to old blocks */);
 
     ut_ad(!page_size.is_compressed() || block->in_unzip_LRU_list);
-
-    buf_pool->LRU_topology_latch.x_unlock();
   } else {
     /* Compressed-only page: a bare BUF_BLOCK_ZIP_PAGE descriptor with no
     uncompressed frame (and thus no frame rw-lock). It is initialized and

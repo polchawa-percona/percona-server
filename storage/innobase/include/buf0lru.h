@@ -146,12 +146,27 @@ void buf_LRU_block_free_non_file_page(buf_block_t *block);
 
 /** Adds a block to the LRU list. Please make sure that the page_size is
  already set when invoking the function, so that we can get correct
- page_size from the buffer page when adding a block into LRU */
+ page_size from the buffer page when adding a block into LRU. Requires the
+ caller to already hold topology-X (unchanged contract; used by
+ buf_page_create() and other sites that hold topology-X for other reasons
+ spanning the call). For a self-locking entry point that tries topology-S
+ first, see buf_LRU_add_fresh_page() (PS-11141 Requirement 7). */
 void buf_LRU_add_block(buf_page_t *bpage, /*!< in: control block */
                        bool old); /*!< in: true if should be put to the old
                                    blocks in the LRU list, else put to the
                                    start; if the LRU list is very short, added
                                    to the start regardless of this parameter */
+
+/** Adds a freshly-read or freshly-created block to the LRU list (PS-11141
+Requirement 7). Self-locking: the caller must hold neither topology mode on
+entry. Tries topology-S plus the destination fill group's mutex first,
+falling back to topology-X only when needed -- see the definition in
+buf0lru.cc for the exact fallback conditions.
+@param[in,out]  bpage   control block, not yet in the LRU list
+@param[in]      old     true if should be put to the old blocks in the LRU
+                        list, else put to the start; if the LRU list is
+                        very short, added to the start regardless */
+void buf_LRU_add_fresh_page(buf_page_t *bpage, bool old);
 
 /** Adds a block to the LRU list of decompressed zip pages.
 @param[in]      block   control block
@@ -159,11 +174,13 @@ void buf_LRU_add_block(buf_page_t *bpage, /*!< in: control block */
                         else put to the start */
 void buf_unzip_LRU_add_block(buf_block_t *block, bool old);
 
-/** Moves a block to the start of the LRU list.
+/** Moves a block to the start of the LRU list. Self-locking (PS-11141
+Requirement 7): the caller must hold neither topology mode on entry.
 @param[in]      bpage   control block */
 void buf_LRU_make_block_young(buf_page_t *bpage);
 
-/** Moves a block to the end of the LRU list.
+/** Moves a block to the end of the LRU list. Self-locking (PS-11141
+Requirement 7): the caller must hold neither topology mode on entry.
 @param[in]      bpage   control block */
 void buf_LRU_make_block_old(buf_page_t *bpage);
 

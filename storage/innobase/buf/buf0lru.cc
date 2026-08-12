@@ -227,7 +227,7 @@ static void buf_LRU_block_free_hashed_page(buf_block_t *block) noexcept;
 @param[in]      buf_pool        buffer pool instance */
 static inline void incr_LRU_size_in_bytes(buf_page_t *bpage,
                                           buf_pool_t *buf_pool) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
 
   buf_pool->stat.LRU_bytes += bpage->size.physical();
 
@@ -2367,21 +2367,23 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   return {false, now_empty, was_old, group};
 }
 
-/** Increments buf_pool->LRU_n_pages by one page. Requires topology-X --
-today, the sole mutator. Relaxed ordering is sufficient because topology-X
-itself supplies the ordering for every current caller; a future topology-S
-mover (Step 7+) that updates this counter without X will need its own
-argument for why relaxed remains sufficient there.
+/** Increments buf_pool->LRU_n_pages by one page. Topology-X was the sole
+mutator through PS-11141 Step 6; as of Step 7, buf_LRU_try_append_fresh_S()
+also calls this under topology-S plus the destination group's mutex.
+Relaxed ordering remains sufficient under S for the same reason it does
+under X: the destination group's mutex, taken and revalidated by every
+caller before this runs, is what actually orders concurrent updates -- the
+atomic operation itself only needs to avoid a torn read/write.
 @param[in,out]  buf_pool  buffer pool instance */
 static inline void buf_LRU_n_pages_inc(buf_pool_t *buf_pool) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   buf_pool->LRU_n_pages.fetch_add(1, std::memory_order_relaxed);
 }
 
 /** Decrements buf_pool->LRU_n_pages by one page. See buf_LRU_n_pages_inc().
 @param[in,out]  buf_pool  buffer pool instance */
 static inline void buf_LRU_n_pages_dec(buf_pool_t *buf_pool) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   buf_pool->LRU_n_pages.fetch_sub(1, std::memory_order_relaxed);
 }
 
@@ -2912,7 +2914,9 @@ static inline void buf_LRU_add_block_low(buf_page_t *bpage, bool old,
   if (!old || (buf_pool->LRU_n_pages < BUF_LRU_OLD_MIN_LEN)) {
     buf_LRU_append_to_young_fill_group(buf_pool, bpage);
 
-    bpage->freed_page_clock = buf_pool->freed_page_clock;
+    bpage->freed_page_clock.store(
+        buf_pool->freed_page_clock.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
   } else {
 #ifdef UNIV_LRU_DEBUG
     /* buf_pool->LRU_old must be the first group in the LRU list whose
@@ -2971,19 +2975,299 @@ void buf_LRU_add_block(buf_page_t *bpage, /*!< in: control block */
   buf_LRU_add_block_low(bpage, old);
 }
 
-/** Moves a block to the start of the LRU list.
+/** Locks two distinct group mutexes in a deterministic order (by pointer
+address) to avoid an AB-BA deadlock on any path that must hold both at once
+(PS-11141 Requirement 2: "multiple group locks must use one deterministic
+order"). */
+static void buf_lru_group_pair_lock(buf_lru_group_t *a, buf_lru_group_t *b) {
+  ut_ad(a != b);
+  if (a < b) {
+    mutex_enter(&a->mutex);
+    mutex_enter(&b->mutex);
+  } else {
+    mutex_enter(&b->mutex);
+    mutex_enter(&a->mutex);
+  }
+}
+
+/** Unlocks a pair locked by buf_lru_group_pair_lock(). Order does not
+matter for release. */
+static void buf_lru_group_pair_unlock(buf_lru_group_t *a, buf_lru_group_t *b) {
+  mutex_exit(&a->mutex);
+  mutex_exit(&b->mutex);
+}
+
+/** PS-11141 Requirement 7 topology-S fast path for buf_LRU_add_fresh_page():
+attempts to append bpage into the current young or old fill group under
+topology-S plus that group's mutex, without ever taking topology-X.
+
+Bails (returns false) to the topology-X fallback -- which is simply
+buf_LRU_add_block_low(), unchanged -- in every case that requires X:
+  - warm-up, i.e. buf_pool->LRU_n_pages has not yet passed
+    BUF_LRU_OLD_MIN_LEN. Crossing that threshold is a one-time, X-only
+    structural transition (Requirement 12; buf_LRU_old_init()) and is rare
+    enough that carving it out of the fast path costs nothing measurable.
+  - bpage belongs to unzip_LRU. That list is still protected solely by
+    topology-X (Requirement 11's dedicated unzip_LRU latch is not yet
+    implemented); compressed-page territory is deliberately deferred
+    throughout this effort (see Step 5).
+  - no usable fill group exists: missing, full, wrong classification, or
+    concurrently replaced since being read (revalidated under the group's
+    own mutex, mirroring buf_LRU_stage_promote_page()'s authoritative
+    re-check).
+Deliberately does not call buf_LRU_old_adjust_len(): see the comment on
+buf_LRU_add_fresh_page() for why the fast path leaves boundary convergence
+to the natural fill-group-rollover cadence instead of running it on every
+insertion.
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  bpage     control block, not yet in the LRU list
+@param[in]      old       true to place among old blocks
+@return true if bpage was appended; false if the caller must fall back to
+        topology-X */
+static bool buf_LRU_try_append_fresh_S(buf_pool_t *buf_pool, buf_page_t *bpage,
+                                       bool old) {
+  ut_a(buf_page_in_file(bpage));
+  ut_ad(!bpage->in_LRU_list);
+
+  if (buf_pool->LRU_n_pages.load(std::memory_order_relaxed) <=
+          BUF_LRU_OLD_MIN_LEN ||
+      buf_page_belongs_to_unzip_LRU(bpage)) {
+    return false;
+  }
+
+  std::atomic<buf_lru_group_t *> &fill_ptr =
+      old ? buf_pool->LRU_fill_group : buf_pool->LRU_young_fill_group;
+
+  buf_pool->LRU_topology_latch.s_lock();
+
+  buf_lru_group_t *group = fill_ptr.load(std::memory_order_relaxed);
+  if (group == nullptr) {
+    buf_pool->LRU_topology_latch.s_unlock();
+    return false;
+  }
+
+  mutex_enter(&group->mutex);
+
+  const bool usable = group->state == buf_lru_group_state_t::LINKED &&
+                      group->n_pages < BUF_LRU_GROUP_SIZE &&
+                      group->old == old &&
+                      fill_ptr.load(std::memory_order_relaxed) == group;
+  if (!usable) {
+    mutex_exit(&group->mutex);
+    buf_pool->LRU_topology_latch.s_unlock();
+    return false;
+  }
+
+  /* Classification before publish (Requirement 10). */
+  bpage->old.store(old, std::memory_order_relaxed);
+  if (!old) {
+    bpage->freed_page_clock.store(
+        buf_pool->freed_page_clock.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+  }
+
+  buf_lru_group_append_page(group, bpage);
+  ut_d(bpage->in_LRU_list = true);
+  incr_LRU_size_in_bytes(bpage, buf_pool);
+  buf_LRU_n_pages_inc(buf_pool);
+  if (old) {
+    buf_LRU_old_len_inc(buf_pool);
+  }
+
+  mutex_exit(&group->mutex);
+  buf_pool->LRU_topology_latch.s_unlock();
+  return true;
+}
+
+/** Adds a freshly-read or freshly-created block to the LRU list (PS-11141
+Requirement 7). Self-locking: the caller must hold neither topology mode on
+entry. Tries the topology-S fast path above first; falls back to
+topology-X plus the unchanged buf_LRU_add_block_low() otherwise. Replaces
+the callers in buf_page_init_for_read() that used to wrap a call to
+buf_LRU_add_block() in their own topology-X acquisition -- that wrap is now
+internal to this function and only taken when actually needed.
+
+The fast path skips buf_LRU_old_adjust_len(): unlike topology-X, which
+serializes every insertion pool-wide, topology-S lets concurrent inserters
+each append to their own group-mutex-protected fill group, so making every
+one of them also probe/adjust the old/young boundary would put back most of
+the contention this step exists to remove. Convergence instead rides the
+natural rollover cadence: a fill group holds at most BUF_LRU_GROUP_SIZE
+pages, so it fills and rolls over (falling back to topology-X, which does
+call buf_LRU_old_adjust_len() via buf_LRU_add_block_low(), unchanged) at
+least once every BUF_LRU_GROUP_SIZE insertions on each side -- the same
+granularity at which the boundary already moves. buf_LRU_validate_instance()
+additionally forces one bounded adjustment before its ratio-tolerance
+assertion, so a quiet period between rollovers cannot trip it (PS-11141
+Requirement 10: "reschedules convergence without a self-wake loop").
+@param[in,out]  bpage   control block, not yet in the LRU list
+@param[in]      old     true to place among old blocks; if the LRU list is
+                        very short, the block is added to the start
+                        regardless */
+void buf_LRU_add_fresh_page(buf_page_t *bpage, bool old) {
+  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
+
+  if (buf_LRU_try_append_fresh_S(buf_pool, bpage, old)) {
+    return;
+  }
+
+  buf_pool->LRU_topology_latch.x_lock();
+  buf_LRU_add_block_low(bpage, old);
+  buf_pool->LRU_topology_latch.x_unlock();
+}
+
+/** PS-11141 Requirement 7 topology-S fast path for buf_LRU_make_block_young()
+and buf_LRU_make_block_old(): moves bpage from its current group into the
+young or old fill group under topology-S plus a deterministically-ordered
+pair of group mutexes, without ever taking topology-X.
+
+Bails (returns false) to the topology-X fallback in every case Step 8 (not
+this step) is responsible for making S-safe, or that Requirement 11's
+still-missing dedicated unzip_LRU latch would otherwise be needed for:
+  - bpage's group is not LINKED (Requirement 16: mid-promotion in a drain's
+    private staging group).
+  - the move would empty the source group. Publishing an empty-linked-group
+    reclaim candidate (buf_LRU_publish_empty_candidate()) still requires
+    topology-X (Requirement 8/9 territory); this fast path never empties a
+    group, full stop.
+  - bpage belongs to unzip_LRU (see buf_LRU_try_append_fresh_S()).
+  - no destination fill group exists, or revalidation under the pair-locked
+    mutexes finds it stale/full/reclassified, or finds the source no longer
+    matches (a concurrent detach raced us between reading bpage->lru_group
+    and locking it).
+Destination capacity is confirmed before the source is touched in any way,
+so a page is never left detached while this function decides whether it
+can complete the move (Requirement 7's "a page is never detached while
+obtaining one").
+@param[in,out]  bpage       control block, currently linked into a group
+@param[in]      want_old    true to reclassify old (make-old), false to
+                            reclassify young (make-young)
+@param[out]     was_old     set to bpage's old classification as observed
+                            before the move, iff this returns true
+@return true if the move completed under topology-S; false if the caller
+        must fall back to topology-X */
+static bool buf_LRU_try_reclassify_S(buf_page_t *bpage, bool want_old,
+                                     bool *was_old) {
+  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
+
+  if (buf_page_belongs_to_unzip_LRU(bpage)) {
+    return false;
+  }
+
+  std::atomic<buf_lru_group_t *> &fill_ptr =
+      want_old ? buf_pool->LRU_fill_group : buf_pool->LRU_young_fill_group;
+
+  buf_pool->LRU_topology_latch.s_lock();
+
+  BPageMutex *block_mutex = buf_page_get_mutex(bpage);
+  mutex_enter(block_mutex);
+
+  /* Only bpage->lru_group itself (a page-level field, synchronized by
+  block_mutex -- every writer holds block_mutex throughout its critical
+  section, mirroring buf_LRU_stage_promote_page()) is safe to read here.
+  source->state/n_pages/pages[] are group-level fields synchronized by
+  source->mutex, not by block_mutex or topology-S alone, so they must not
+  be read before source is pair-locked below -- a concurrent S-mode mover
+  (e.g. another buf_LRU_stage_promote_page() call) could be mutating them
+  right now under only source->mutex. */
+  buf_lru_group_t *source = bpage->lru_group;
+  ut_a(source);
+
+  buf_lru_group_t *dest = fill_ptr.load(std::memory_order_relaxed);
+  if (dest == nullptr || source == dest) {
+    /* No destination yet, or bpage is already there: every member of a
+    group shares its "old" classification, so want_old already holds and
+    there is nothing to move (the grouped design's coarser MRU-positioning
+    precision, already accepted elsewhere -- see
+    buf_LRU_stage_promote_page()). Also sidesteps pair-locking a group
+    against itself, which buf_lru_group_pair_lock() disallows. */
+    mutex_exit(block_mutex);
+    buf_pool->LRU_topology_latch.s_unlock();
+    return false;
+  }
+
+  buf_lru_group_pair_lock(source, dest);
+
+  const bool usable =
+      source->state == buf_lru_group_state_t::LINKED &&  // Requirement 16
+      source->pages[bpage->lru_slot] == bpage &&
+      source->n_pages > 1 &&  // never empty source -- see header comment
+      dest->state == buf_lru_group_state_t::LINKED &&
+      dest->n_pages < BUF_LRU_GROUP_SIZE &&
+      /* A fill pointer's target can be reclassified out from under it by
+      buf_LRU_old_adjust_len() (X-only, does not clear/repoint the fill
+      pointers): if the LRU is short enough that the boundary sits next to
+      a fill group, a boundary move can flip that very group's "old" flag
+      without anyone updating LRU_fill_group/LRU_young_fill_group to
+      match. buf_LRU_append_to_old_fill_group()/_young_fill_group() guard
+      against this exact drift (their own "&& !group->old"/"&& group->old"
+      checks); this is the same guard for the reclassify path. */
+      dest->old == want_old && fill_ptr.load(std::memory_order_relaxed) == dest;
+
+  if (!usable) {
+    buf_lru_group_pair_unlock(source, dest);
+    mutex_exit(block_mutex);
+    buf_pool->LRU_topology_latch.s_unlock();
+    return false;
+  }
+
+  *was_old = source->old;
+
+  source->pages[bpage->lru_slot] = nullptr;
+  source->occupied_slots &= ~(uint32_t{1} << bpage->lru_slot);
+  source->n_pages--;
+  bpage->lru_group = nullptr;
+
+  /* Classification before publish (Requirement 10). */
+  bpage->old.store(want_old, std::memory_order_relaxed);
+  if (!want_old) {
+    bpage->freed_page_clock.store(
+        buf_pool->freed_page_clock.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+  }
+
+  buf_lru_group_append_page(dest, bpage);
+
+  if (*was_old && !want_old) {
+    buf_LRU_old_len_dec(buf_pool);
+  } else if (!*was_old && want_old) {
+    buf_LRU_old_len_inc(buf_pool);
+  }
+
+  buf_lru_group_pair_unlock(source, dest);
+  mutex_exit(block_mutex);
+  buf_pool->LRU_topology_latch.s_unlock();
+  return true;
+}
+
+/** Moves a block to the start of the LRU list. Self-locking: the caller
+must hold neither topology mode on entry (PS-11141 Requirement 7 replaced
+this function's former contract of requiring the caller to already hold
+topology-X).
 @param[in]      bpage   control block */
 void buf_LRU_make_block_young(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  bool was_old = false;
+  if (buf_LRU_try_reclassify_S(bpage, false, &was_old)) {
+    if (was_old) {
+      buf_pool->stat.n_pages_made_young++;
+    }
+    return;
+  }
 
-  const bool was_old = bpage->old;
+  buf_pool->LRU_topology_latch.x_lock();
+
+  was_old = bpage->old;
 
   /* PS-11141 Requirement 16: a false return means bpage is mid-promotion
   in a drain's private staging group; nothing was mutated, so there is
   nothing left to do (see buf_LRU_detach_from_group()'s comment). */
   if (!buf_LRU_remove_block(bpage)) {
+    buf_pool->LRU_topology_latch.x_unlock();
     return;
   }
 
@@ -2992,21 +3276,31 @@ void buf_LRU_make_block_young(buf_page_t *bpage) {
   }
 
   buf_LRU_add_block_low(bpage, false);
+  buf_pool->LRU_topology_latch.x_unlock();
 }
 
-/** Moves a block to the end of the LRU list.
+/** Moves a block to the end of the LRU list. Self-locking: see
+buf_LRU_make_block_young()'s comment.
 @param[in]      bpage   control block */
 void buf_LRU_make_block_old(buf_page_t *bpage) {
-  ut_d(buf_pool_t *buf_pool =) buf_pool_from_bpage(bpage);
+  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  bool was_old = false;
+  if (buf_LRU_try_reclassify_S(bpage, true, &was_old)) {
+    return;
+  }
+
+  buf_pool->LRU_topology_latch.x_lock();
 
   /* See buf_LRU_make_block_young()'s comment on the false case. */
   if (!buf_LRU_remove_block(bpage)) {
+    buf_pool->LRU_topology_latch.x_unlock();
     return;
   }
 
   buf_LRU_add_block_low(bpage, true);
+  buf_pool->LRU_topology_latch.x_unlock();
 }
 
 /** Resolve and temporarily pin one deferred make-young identity.
@@ -3036,28 +3330,6 @@ static buf_page_t *buf_LRU_pin_promote_identity(
   buf_block_fix(bpage);
   rw_lock_s_unlock(hash_lock);
   return bpage;
-}
-
-/** Locks two distinct group mutexes in a deterministic order (by pointer
-address) to avoid an AB-BA deadlock on any path that must hold both at once
-(PS-11141 Requirement 2: "multiple group locks must use one deterministic
-order"). */
-static void buf_lru_group_pair_lock(buf_lru_group_t *a, buf_lru_group_t *b) {
-  ut_ad(a != b);
-  if (a < b) {
-    mutex_enter(&a->mutex);
-    mutex_enter(&b->mutex);
-  } else {
-    mutex_enter(&b->mutex);
-    mutex_enter(&a->mutex);
-  }
-}
-
-/** Unlocks a pair locked by buf_lru_group_pair_lock(). Order does not
-matter for release. */
-static void buf_lru_group_pair_unlock(buf_lru_group_t *a, buf_lru_group_t *b) {
-  mutex_exit(&a->mutex);
-  mutex_exit(&b->mutex);
 }
 
 /** Result of one buf_LRU_stage_promote_page() attempt. */
@@ -3166,12 +3438,13 @@ static Stage_promote_result buf_LRU_stage_promote_page(
     (buf_LRU_detach_from_group() encountering a non-LINKED group): no lock
     is held here, so it is safe to simulate the race a concurrent
     buf_page_make_young()/buf_page_make_old() caller would hit against this
-    same page while it sits in the still-unpublished staging group. */
-    DBUG_EXECUTE_IF("buf_lru_promote_stage_force_conflicting_reclassify", {
-      buf_pool->LRU_topology_latch.x_lock();
-      buf_LRU_make_block_young(bpage);
-      buf_pool->LRU_topology_latch.x_unlock();
-    });
+    same page while it sits in the still-unpublished staging group.
+    buf_LRU_make_block_young() is self-locking as of Step 7 and will try
+    its own topology-S fast path first; since bpage's group is STAGING
+    (not LINKED), buf_LRU_try_reclassify_S() bails and it falls through to
+    the topology-X path this hook means to exercise, same as before. */
+    DBUG_EXECUTE_IF("buf_lru_promote_stage_force_conflicting_reclassify",
+                    buf_LRU_make_block_young(bpage););
   }
 
   return result;
@@ -4264,6 +4537,20 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
 
   if (buf_pool->LRU_n_pages >= BUF_LRU_OLD_MIN_LEN) {
     ut_a(buf_pool->LRU_old);
+
+    /* PS-11141 Requirement 10/Step 7: the topology-S insertion and
+    make-young/make-old fast paths deliberately do not call
+    buf_LRU_old_adjust_len() on every page (see buf_LRU_add_fresh_page()'s
+    comment) -- convergence instead rides the natural fill-group-rollover
+    cadence. A quiet period between rollovers could otherwise leave
+    LRU_old_len outside tolerance of the ratio target below through no
+    fault of the exact-count bookkeeping, which is unconditionally
+    maintained regardless of that deferral. Force one bounded, idempotent
+    adjustment here -- this function already holds topology-X for its
+    entire body -- so this assertion checks the design's real invariant
+    (bounded convergence is always reachable) instead of an artifact of
+    how recently a fill group happened to roll over. */
+    buf_LRU_old_adjust_len(buf_pool);
 
     const size_t new_len = calculate_desired_LRU_old_size(buf_pool);
 

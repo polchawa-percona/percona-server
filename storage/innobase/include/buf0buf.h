@@ -1705,8 +1705,14 @@ class buf_page_t {
 
   /** The value of buf_pool->freed_page_clock when this block was the last
   time put to the head of the LRU list; a thread is allowed to read this
-  for heuristic purposes without holding any mutex or latch */
-  uint32_t freed_page_clock;
+  for heuristic purposes without holding any mutex or latch. Atomic (PS-11141
+  Requirement 10) because buf_LRU_try_append_fresh_S() writes it under
+  topology-S plus the block and destination-group mutexes -- a weaker
+  combination than the topology-X every other writer holds, so a plain
+  field would be a data race against the lock-free heuristic readers.
+  copyable_atomic_t, like buf_page_t::old just below, so the hand-written
+  copy constructor above keeps compiling. */
+  copyable_atomic_t<uint32_t> freed_page_clock;
 
   /** Monotonic per-pool generation assigned when this page obtains a fresh
   page-hash residency. Immutable until that residency ends and read under the
@@ -2841,13 +2847,20 @@ struct buf_pool_t {
   insertions: both the immediate buf_LRU_make_block_young() path and, per
   page, the batched promotion-queue drain. When full, a fresh group is
   created, linked at the LRU head, and becomes the new LRU_young_fill_group.
-  Protected by LRU_list_mutex. */
-  buf_lru_group_t *LRU_young_fill_group{nullptr};
+  Installed/replaced only under topology-X (LRU_list_mutex), like every
+  other field on this line; atomic (PS-11141 Requirement 7) solely so
+  buf_LRU_try_append_fresh_S()/buf_LRU_try_reclassify_S() may read it under
+  topology-S alone without a C++ data race -- relaxed ordering is
+  sufficient because the destination group's own mutex, taken and
+  revalidated against this pointer before any mutation, supplies the real
+  ordering (the same argument as buf_LRU_old_len_add()). */
+  std::atomic<buf_lru_group_t *> LRU_young_fill_group{nullptr};
 
   /** The group currently being appended to by old-side page insertions:
   fresh page reads and buf_LRU_make_block_old(). When (re)created, linked as
-  LRU_old's immediate group-successor. Protected by LRU_list_mutex. */
-  buf_lru_group_t *LRU_fill_group{nullptr};
+  LRU_old's immediate group-successor. See LRU_young_fill_group above for
+  why this is atomic. */
+  std::atomic<buf_lru_group_t *> LRU_fill_group{nullptr};
 
   /** Head of a bounded reserve of unlinked, empty buf_lru_group_t objects
   available for reuse (PS-11141 grouped LRU list), singly linked through
