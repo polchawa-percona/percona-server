@@ -93,6 +93,9 @@ static const ulint BUF_LRU_SEARCH_SCAN_THRESHOLD = 100;
 
 static_assert(BUF_LRU_GROUP_RESERVE_TARGET >= BUF_LRU_PROMOTE_DRAIN_CHUNK);
 static_assert(BUF_LRU_GROUP_RESERVE_MAX > BUF_LRU_GROUP_RESERVE_TARGET);
+static_assert(BUF_LRU_PROMOTE_DRAIN_CHUNK == BUF_LRU_GROUP_SIZE,
+              "PS-11141 Requirement 5: one drained chunk must fill exactly "
+              "one private staging group");
 
 /** If we switch on the InnoDB monitor because there are too few available
 frames in the buffer pool, we set this to true */
@@ -2031,7 +2034,15 @@ void buf_LRU_relocate_in_group(buf_page_t *bpage, buf_page_t *dpage) {
   bpage->lru_group = nullptr;
 }
 
-/** Allocate and initialize one reusable LRU group. No LRU mutex is required. */
+/** Allocate and initialize one reusable LRU group. No LRU mutex is required.
+Does NOT assign reuse_generation, since that counter
+(LRU_group_next_reuse_generation) is protected by topology-X and this
+function deliberately takes no lock. buf_lru_group_alloc() assigns it right
+after calling this in its own reserve-empty branch; any other direct caller
+(e.g. buf_LRU_drain_promote_queue()'s private staging group, PS-11141
+Requirement 5) must assign it itself under topology-X before linking the
+group into buf_pool->LRU -- buf_LRU_validate_instance() asserts
+reuse_generation != 0 for every LINKED group. */
 static buf_lru_group_t *buf_lru_group_create() {
   auto *group = ut::new_withkey<buf_lru_group_t>(UT_NEW_THIS_FILE_PSI_KEY);
   mutex_create(LATCH_ID_BUF_POOL_LRU_GROUP, &group->mutex);
@@ -2079,12 +2090,17 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
 }
 
 /** Destroy one empty, unlinked group. Must not hold LRU_list_mutex.
+STAGING is included because a drain's private staging group
+(buf_LRU_drain_promote_queue(), PS-11141 Requirement 5) is destroyed this
+same way when a chunk stages nothing: it is never put through
+buf_lru_group_release() into the shared reserve/retired lists.
 @param[in,out]  group group to destroy */
 static void buf_lru_group_destroy(buf_lru_group_t *group) {
   ut_ad(group->n_pages == 0);
   ut_ad(group->occupied_slots == 0);
   ut_ad(group->state == buf_lru_group_state_t::RESERVE ||
-        group->state == buf_lru_group_state_t::RETIRED);
+        group->state == buf_lru_group_state_t::RETIRED ||
+        group->state == buf_lru_group_state_t::STAGING);
   ut_ad(group->n_maintenance_refs == 0);
   ut_ad(!group->empty_candidate_pending.load(std::memory_order_relaxed));
   mutex_free(&group->mutex);
@@ -2287,6 +2303,10 @@ bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive) {
 
 /** Result of detaching a page while holding LRU_list_mutex. */
 struct Detach_from_group_result {
+  /** True if the page's group is not LINKED (it is mid-promotion in a
+  drain's private staging group, PS-11141 Requirement 16): nothing was
+  mutated, and group/group_now_empty/was_old below are meaningless. */
+  bool skipped_staging;
   /** True if the group's page count reached zero. */
   bool group_now_empty;
   /** buf_page_is_old(bpage) as observed at the moment of detach. */
@@ -2308,6 +2328,27 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   buf_lru_group_t *group = bpage->lru_group;
   ut_a(group);
 
+  if (group->state != buf_lru_group_state_t::LINKED) {
+    DBUG_PRINT("ib_buf", ("skip reclassify of page " UINT32PF ":" UINT32PF
+                          " -- its group is mid-promotion (state %u)",
+                          bpage->id.space(), bpage->id.page_no(),
+                          static_cast<unsigned>(group->state)));
+    /* PS-11141 Requirement 16: the page is mid-promotion, sitting in a
+    drain's private staging group under only LRU_drain_mutex plus
+    topology-S/block/group protection -- topology-X alone does not make
+    it safe to touch (the staging group is not linked into buf_pool->LRU,
+    so nothing here stabilizes it against the drain's own concurrent S-mode
+    move). Skip: the caller's requested reclassification (make old/young)
+    is a heuristic, not a correctness requirement, so losing this one
+    request to an in-flight promotion is benign -- the same class of
+    benign skip as the was_io_fix_read() early return in
+    buf_page_make_young_if_needed(). The eviction path can never reach
+    this branch: buf_LRU_block_remove_hashed() already asserts
+    buf_fix_count == 0 before calling buf_LRU_remove_block(), and every
+    staged page stays fixed until the drain publishes it. */
+    return {true, false, false, nullptr};
+  }
+
   ut_ad(group->pages[bpage->lru_slot] == bpage);
   const bool was_old = bpage->old;
   ut_ad(was_old == group->old);
@@ -2323,7 +2364,7 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
   buf_pool->LRU_compaction_pending = true;
   ++buf_pool->LRU_compaction_epoch;
 
-  return {now_empty, was_old, group};
+  return {false, now_empty, was_old, group};
 }
 
 /** Increments buf_pool->LRU_n_pages by one page. Requires topology-X --
@@ -2345,11 +2386,18 @@ static inline void buf_LRU_n_pages_dec(buf_pool_t *buf_pool) {
 }
 
 /** Adds delta pages to buf_pool->LRU_old_len. See buf_LRU_n_pages_inc() for
-the ordering rationale.
+the ordering rationale. Unlike LRU_n_pages, this one does have a real
+topology-S caller as of PS-11141 Step 6: buf_LRU_stage_promote_page() moves
+a page out of an old-classified source group into the (young) staging
+group under S plus both groups' mutexes. Relaxed remains sufficient there
+for the same reason it does under X: the source and destination group
+mutexes serialize the two halves of any given move, so no reader can
+observe a torn delta -- the group mutex is what supplies the ordering for
+that specific update, not the atomic operation itself.
 @param[in,out]  buf_pool  buffer pool instance
 @param[in]      delta     number of pages to add */
 static inline void buf_LRU_old_len_add(buf_pool_t *buf_pool, size_t delta) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   buf_pool->LRU_old_len.fetch_add(delta, std::memory_order_relaxed);
 }
 
@@ -2359,10 +2407,11 @@ static inline void buf_LRU_old_len_inc(buf_pool_t *buf_pool) {
   buf_LRU_old_len_add(buf_pool, 1);
 }
 
-/** Decrements buf_pool->LRU_old_len by one page. See buf_LRU_n_pages_inc().
+/** Decrements buf_pool->LRU_old_len by one page. See
+buf_LRU_old_len_add() for why topology-S is sufficient here too.
 @param[in,out]  buf_pool  buffer pool instance */
 static inline void buf_LRU_old_len_dec(buf_pool_t *buf_pool) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   buf_pool->LRU_old_len.fetch_sub(1, std::memory_order_relaxed);
 }
 
@@ -2689,8 +2738,11 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
 its slot in its group, and if that empties the group, unlinks and frees the
 group. buf_pool->LRU_list_mutex is held throughout by every current caller,
 so detach and list bookkeeping run back-to-back with no deferral.
-@param[in]      bpage   control block */
-static inline void buf_LRU_remove_block(buf_page_t *bpage) {
+@param[in]      bpage   control block
+@return false if the page is mid-promotion in a drain's private staging
+        group and nothing was mutated (PS-11141 Requirement 16); true if
+        the page was removed */
+static inline bool buf_LRU_remove_block(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
@@ -2703,9 +2755,13 @@ static inline void buf_LRU_remove_block(buf_page_t *bpage) {
   ut_a(group);
 
   const auto detached = buf_LRU_detach_from_group(bpage);
+  if (detached.skipped_staging) {
+    return false;
+  }
 
   buf_LRU_remove_block_finish(bpage, group, detached.was_old,
                               detached.group_now_empty, true);
+  return true;
 }
 
 /** Adds a block to the LRU list of decompressed zip pages.
@@ -2922,33 +2978,20 @@ void buf_LRU_make_block_young(buf_page_t *bpage) {
 
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
-  if (bpage->old) {
+  const bool was_old = bpage->old;
+
+  /* PS-11141 Requirement 16: a false return means bpage is mid-promotion
+  in a drain's private staging group; nothing was mutated, so there is
+  nothing left to do (see buf_LRU_detach_from_group()'s comment). */
+  if (!buf_LRU_remove_block(bpage)) {
+    return;
+  }
+
+  if (was_old) {
     buf_pool->stat.n_pages_made_young++;
   }
 
-  buf_LRU_remove_block(bpage);
   buf_LRU_add_block_low(bpage, false);
-}
-
-/** Moves a block to the young fill group without adjusting the old boundary.
-The caller performs one adjustment after a mature-list batch.
-@param[in,out] bpage block to move */
-static void buf_LRU_make_block_young_deferred_adjust(buf_page_t *bpage) {
-  buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
-  ut_ad(buf_pool->LRU_n_pages > BUF_LRU_OLD_MIN_LEN + 1);
-
-  if (bpage->old) {
-    buf_pool->stat.n_pages_made_young++;
-  }
-
-  buf_lru_group_t *group = bpage->lru_group;
-  ut_a(group);
-  const auto detached = buf_LRU_detach_from_group(bpage);
-  buf_LRU_remove_block_finish(bpage, group, detached.was_old,
-                              detached.group_now_empty, false);
-  buf_LRU_add_block_low(bpage, false, false);
 }
 
 /** Moves a block to the end of the LRU list.
@@ -2958,7 +3001,11 @@ void buf_LRU_make_block_old(buf_page_t *bpage) {
 
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
-  buf_LRU_remove_block(bpage);
+  /* See buf_LRU_make_block_young()'s comment on the false case. */
+  if (!buf_LRU_remove_block(bpage)) {
+    return;
+  }
+
   buf_LRU_add_block_low(bpage, true);
 }
 
@@ -2991,14 +3038,161 @@ static buf_page_t *buf_LRU_pin_promote_identity(
   return bpage;
 }
 
+/** Locks two distinct group mutexes in a deterministic order (by pointer
+address) to avoid an AB-BA deadlock on any path that must hold both at once
+(PS-11141 Requirement 2: "multiple group locks must use one deterministic
+order"). */
+static void buf_lru_group_pair_lock(buf_lru_group_t *a, buf_lru_group_t *b) {
+  ut_ad(a != b);
+  if (a < b) {
+    mutex_enter(&a->mutex);
+    mutex_enter(&b->mutex);
+  } else {
+    mutex_enter(&b->mutex);
+    mutex_enter(&a->mutex);
+  }
+}
+
+/** Unlocks a pair locked by buf_lru_group_pair_lock(). Order does not
+matter for release. */
+static void buf_lru_group_pair_unlock(buf_lru_group_t *a, buf_lru_group_t *b) {
+  mutex_exit(&a->mutex);
+  mutex_exit(&b->mutex);
+}
+
+/** Result of one buf_LRU_stage_promote_page() attempt. */
+struct Stage_promote_result {
+  /** True if the page was moved into the staging group. */
+  bool staged;
+  /** The page's former group, if staged and it became empty as a result;
+  nullptr otherwise. Not yet published to buf_pool->LRU_empty_candidates --
+  the caller collects these locally and hands them to
+  buf_LRU_group_became_empty() during the batch's single topology-X
+  phase (PS-11141 Requirement 6). */
+  buf_lru_group_t *emptied_source;
+};
+
+/** Attempts to move one pinned page from its current LRU group into the
+drain's private staging group under topology-S (PS-11141 Requirement 5) --
+no topology-X is taken. Acquisition order is topology-S, then the page's
+block mutex, then the two groups' mutexes (buf_lru_group_pair_lock()),
+matching SYNC_BUF_LRU_LIST > SYNC_BUF_BLOCK > SYNC_BUF_LRU_GROUP in
+sync0types.h.
+
+Re-validates the same identity/liveness predicates the legacy X-mode drain
+used, plus the slot back-pointer, since time has passed since the page
+was pinned under the page-hash latch in buf_LRU_pin_promote_identity():
+the checks are duplicated once under only the block mutex (cheap,
+filters obviously-stale pins) and once more under the block and group
+mutexes together (authoritative, immediately before mutating).
+@param[in,out]  buf_pool  buffer pool instance
+@param[in,out]  staging   drain-private staging group; must have a free
+                          slot
+@param[in]      identity  producer-requested identity
+@param[in,out]  bpage     pinned candidate; the caller keeps owning the pin
+                          regardless of outcome
+@return see Stage_promote_result */
+static Stage_promote_result buf_LRU_stage_promote_page(
+    buf_pool_t *buf_pool, buf_lru_group_t *staging,
+    const buf_lru_promote_t &identity, buf_page_t *bpage) {
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
+  ut_ad(staging->n_pages < BUF_LRU_GROUP_SIZE);
+
+  Stage_promote_result result{false, nullptr};
+
+  buf_pool->LRU_topology_latch.s_lock();
+
+  BPageMutex *block_mutex = buf_page_get_mutex(bpage);
+  mutex_enter(block_mutex);
+
+  buf_lru_group_t *source = bpage->lru_group;
+  /* buf_page_peek_if_too_old() has no X-only precondition: it reads
+  buf_pool-wide heuristics (freed_page_clock, LRU_old_ratio) and bpage->old,
+  and its buf_page_peek_if_young() call asserts buf_fix_count > 0, which the
+  caller's pin on bpage already satisfies. It bumps
+  stat.n_pages_not_made_young non-atomically; a lost update under topology-S
+  is the same benign approximation every other unsynchronized buf_pool
+  stat counter already accepts. */
+  /* Test-only: paired with the same-named hook in
+  buf_page_make_young_if_needed() so a test can force real pages through
+  the enqueue-drain-stage pipeline without needing to naturally trigger
+  buf_page_peek_if_too_old()'s buffer-pool-aging heuristics (freed_page_clock
+  drift, old_blocks_time). No effect unless the debug flag is set. */
+  bool skip_too_old_recheck_for_test = false;
+  DBUG_EXECUTE_IF("buf_lru_force_enqueue_promote",
+                  skip_too_old_recheck_for_test = true;);
+  if (bpage->id == identity.page_id &&
+      bpage->residency_generation == identity.residency_generation &&
+      buf_page_in_file(bpage) && !bpage->was_stale() && source != nullptr &&
+      (buf_page_peek_if_too_old(bpage) || skip_too_old_recheck_for_test)) {
+    buf_lru_group_pair_lock(source, staging);
+
+    /* Authoritative re-check: nothing above rules out a concurrent detach
+    between reading bpage->lru_group and locking it (e.g. the source group
+    itself being merged by compaction, which requires topology-X and so
+    cannot race the move below, but could have completed in the gap
+    between this thread's S-lock and its block-mutex lock). */
+    if (source->pages[bpage->lru_slot] == bpage &&
+        bpage->residency_generation == identity.residency_generation) {
+      const bool was_old = bpage->old.load(std::memory_order_relaxed);
+
+      source->pages[bpage->lru_slot] = nullptr;
+      source->occupied_slots &= ~(uint32_t{1} << bpage->lru_slot);
+      source->n_pages--;
+      bpage->lru_group = nullptr;
+
+      buf_lru_group_append_page(staging, bpage);
+      bpage->old.store(false, std::memory_order_relaxed);
+
+      if (was_old) {
+        buf_LRU_old_len_dec(buf_pool);
+        buf_pool->stat.n_pages_made_young++;
+      }
+
+      if (source->n_pages == 0) {
+        result.emptied_source = source;
+      }
+      result.staged = true;
+    }
+
+    buf_lru_group_pair_unlock(source, staging);
+  }
+
+  mutex_exit(block_mutex);
+  buf_pool->LRU_topology_latch.s_unlock();
+
+  if (result.staged) {
+    /* Deterministic reproducer for PS-11141 Requirement 16's skip branch
+    (buf_LRU_detach_from_group() encountering a non-LINKED group): no lock
+    is held here, so it is safe to simulate the race a concurrent
+    buf_page_make_young()/buf_page_make_old() caller would hit against this
+    same page while it sits in the still-unpublished staging group. */
+    DBUG_EXECUTE_IF("buf_lru_promote_stage_force_conflicting_reclassify", {
+      buf_pool->LRU_topology_latch.x_lock();
+      buf_LRU_make_block_young(bpage);
+      buf_pool->LRU_topology_latch.x_unlock();
+    });
+  }
+
+  return result;
+}
+
 /** Drain a bounded chunk of deferred make-young identities.
 
 Entries carry values rather than descriptor pointers. Each current residency
 is resolved under its page-hash latch and pinned only by this consumer before
-ordinary LRU mutation. LRU_drain_mutex temporarily preserves single-consumer
-operation until the lifecycle stage removes all legacy synchronous callers. */
+ordinary LRU mutation. LRU_drain_mutex preserves single-consumer operation.
+
+PS-11141 Requirements 5/6: the per-page move runs under topology-S plus the
+source/staging group mutexes (buf_LRU_stage_promote_page()) instead of
+holding topology-X for the whole chunk. A single topology-X phase at the
+end publishes the one staging group at the young head, reclaims any source
+groups the chunk emptied (via the Step 4 empty-candidate machinery), and
+performs one bounded old-boundary adjustment. The staging group is never
+retained across activations: a chunk that stages nothing destroys it
+before returning. */
 bool buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
-  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(!mutex_own(&buf_pool->LRU_drain_mutex));
 
   if (!buf_pool->LRU_accept_promotions.load(std::memory_order_acquire)) {
@@ -3031,35 +3225,82 @@ bool buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
     pinned[consumed] = buf_LRU_pin_promote_identity(buf_pool, *identity);
   }
 
-  if (consumed > 0) {
-    buf_pool->LRU_topology_latch.x_lock();
+  /* Allocated outside every lock (buf_lru_group_create() needs none) and
+  never taken from the shared reserve (PS-11141 Requirement 5). */
+  buf_lru_group_t *staging = buf_lru_group_create();
+  staging->state = buf_lru_group_state_t::STAGING;
 
-    const bool defer_old_adjust =
-        buf_pool->LRU_n_pages > BUF_LRU_OLD_MIN_LEN + 1;
-    bool promoted = false;
-    for (uint32_t i = 0; i < consumed; ++i) {
-      buf_page_t *bpage = pinned[i];
-      if (bpage == nullptr) {
-        continue;
-      }
-      const auto &identity = *identities[i];
-      if (bpage->id == identity.page_id &&
-          bpage->residency_generation == identity.residency_generation &&
-          buf_page_in_file(bpage) && !bpage->was_stale() &&
-          bpage->lru_group != nullptr && buf_page_peek_if_too_old(bpage)) {
-        if (defer_old_adjust) {
-          buf_LRU_make_block_young_deferred_adjust(bpage);
-        } else {
-          buf_LRU_make_block_young(bpage);
-        }
-        promoted = true;
-      }
+  std::array<buf_lru_group_t *, BUF_LRU_PROMOTE_DRAIN_CHUNK> emptied_sources{};
+  uint32_t n_emptied = 0;
+
+  for (uint32_t i = 0; i < consumed; ++i) {
+    buf_page_t *bpage = pinned[i];
+    if (bpage == nullptr) {
+      continue;
     }
+    /* consumed <= BUF_LRU_PROMOTE_DRAIN_CHUNK == BUF_LRU_GROUP_SIZE, and
+    this loop stages at most one page per iteration, so staging->n_pages
+    can never reach BUF_LRU_GROUP_SIZE before the last iteration runs. */
+    ut_a(staging->n_pages < BUF_LRU_GROUP_SIZE);
+    const auto staged =
+        buf_LRU_stage_promote_page(buf_pool, staging, *identities[i], bpage);
+    if (staged.staged && staged.emptied_source != nullptr &&
+        n_emptied < BUF_LRU_PROMOTE_DRAIN_CHUNK) {
+      emptied_sources[n_emptied++] = staged.emptied_source;
+    }
+  }
 
-    if (promoted && defer_old_adjust) {
+  /* Widens the gap between the S-phase above and the topology-X phase
+  below for testing (PS-11141 Requirement 16): with this active, a
+  concurrent buf_page_make_old() (the one X-mode path that does not take
+  LRU_drain_mutex; see buf_LRU_detach_from_group()) has a real window to
+  observe a page sitting in the still-unlinked, STAGING-classified
+  `staging` group. */
+  DBUG_EXECUTE_IF("buf_lru_promote_stage_before_publish",
+                  std::this_thread::sleep_for(std::chrono::microseconds(100)););
+
+  buf_pool->LRU_topology_latch.x_lock();
+
+  for (uint32_t i = 0; i < n_emptied; ++i) {
+    buf_lru_group_t *source = emptied_sources[i];
+    if (source->n_pages == 0 &&
+        source->state == buf_lru_group_state_t::LINKED) {
+      buf_LRU_group_became_empty(buf_pool, source);
+    }
+  }
+
+  bool published = false;
+  if (staging->n_pages > 0) {
+    /* A batch that moved at least one page is exactly the sparsening
+    event LRU_compaction_pending exists to signal; see
+    buf_LRU_detach_from_group(). Bumped once per batch here rather than
+    once per page, matching Requirement 6's "at most a fixed number of
+    ... steps" batching -- this field is a hint for the background
+    compactor, not a correctness-critical exact count. */
+    buf_pool->LRU_compaction_pending = true;
+    ++buf_pool->LRU_compaction_epoch;
+
+    /* buf_lru_group_create() deliberately assigns no reuse_generation --
+    that counter is protected by topology-X (see buf_lru_group_alloc()),
+    which this drain-private staging group is created without holding.
+    Assign it now, under the X already held for publication. */
+    const uint64_t generation = buf_pool->LRU_group_next_reuse_generation++;
+    ut_a(generation != 0);
+    staging->reuse_generation = generation;
+
+    staging->state = buf_lru_group_state_t::LINKED;
+    UT_LIST_ADD_FIRST(buf_pool->LRU, staging);
+    published = true;
+
+    if (buf_pool->LRU_old != nullptr) {
       buf_LRU_old_adjust_len(buf_pool);
     }
-    buf_pool->LRU_topology_latch.x_unlock();
+  }
+
+  buf_pool->LRU_topology_latch.x_unlock();
+
+  if (!published) {
+    buf_lru_group_destroy(staging);
   }
 
   for (uint32_t i = 0; i < consumed; ++i) {
@@ -3650,7 +3891,10 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
   ut_a(buf_page_get_io_fix(bpage) == BUF_IO_NONE);
   ut_a(bpage->buf_fix_count == 0);
 
-  buf_LRU_remove_block(bpage);
+  /* buf_fix_count == 0 above already rules out the staging-skip case
+  (PS-11141 Requirement 16): every page in a drain's private staging
+  group stays fixed until publication, so this can never be false here. */
+  ut_a(buf_LRU_remove_block(bpage));
 
   buf_pool->freed_page_clock += 1;
 

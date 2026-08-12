@@ -3463,7 +3463,16 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
     return;
   }
 
-  if (buf_page_peek_if_too_old(bpage)) {
+  /* Test-only: forces every accessed page through the enqueue-drain-stage
+  promotion pipeline regardless of buf_page_peek_if_too_old()'s heuristic,
+  so a test can exercise that pipeline deterministically instead of waiting
+  on real buffer-pool aging pressure. No effect unless the debug flag is
+  set; see the matching hook in buf_LRU_stage_promote_page(). */
+  bool force_enqueue_for_test = false;
+  DBUG_EXECUTE_IF("buf_lru_force_enqueue_promote",
+                  force_enqueue_for_test = true;);
+
+  if (buf_page_peek_if_too_old(bpage) || force_enqueue_for_test) {
     /* With a non-zero drain threshold, push onto a lock-free per-pool queue
     instead of taking the LRU list mutex here. A threshold-crossing push
     or the page cleaner coordinator drains the queue. */

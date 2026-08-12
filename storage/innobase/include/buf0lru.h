@@ -285,8 +285,13 @@ extern uint buf_LRU_make_young_drain_threshold;
 /** Preallocated deferred-promotion slots per buffer-pool instance. */
 constexpr uint32_t BUF_LRU_PROMOTE_QUEUE_CAPACITY = 4096;
 
-/** Maximum identities consumed by one drain invocation. */
-constexpr uint32_t BUF_LRU_PROMOTE_DRAIN_CHUNK = 64;
+/** Maximum identities consumed by one drain invocation. Must equal
+BUF_LRU_GROUP_SIZE (PS-11141 Requirement 5: "Set BUF_LRU_PROMOTE_DRAIN_CHUNK
+to BUF_LRU_GROUP_SIZE") so one drained chunk fills exactly one private
+staging group. Hardcoded rather than referencing BUF_LRU_GROUP_SIZE
+directly to avoid including buf0buf.h here; buf0lru.cc statically asserts
+the two stay equal. */
+constexpr uint32_t BUF_LRU_PROMOTE_DRAIN_CHUNK = 32;
 
 /** Maximum adjacent same-class group merges per compaction activation. */
 constexpr uint32_t BUF_LRU_COMPACT_MERGE_BUDGET = 8;
