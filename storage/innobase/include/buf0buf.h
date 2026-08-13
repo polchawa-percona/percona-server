@@ -1734,12 +1734,19 @@ class buf_page_t {
   uint16_t m_dblwr_id{};
 
  public:
-  /** Group this page belongs to in buf_pool->LRU. Protected by
-  buf_pool->LRU_topology_latch. */
+  /** Group this page belongs to in buf_pool->LRU. Writers under
+  topology-X need nothing more: X excludes every topology-S reader for the
+  whole write. Writers under topology-S (PS-11141 Requirement 7/9) must
+  additionally hold this page's own block/zip mutex, since S alone does not
+  exclude other S holders: buf_LRU_try_append_fresh_S() writes it before the
+  page is linked into the LRU, when the caller may hold neither block mutex
+  nor topology-X, so topology-S plus the block mutex is what excludes a
+  concurrent topology-S reader (e.g. buf_flush_lru_still_linked()) that only
+  holds this page's block mutex. */
   buf_lru_group_t *lru_group{nullptr};
 
   /** Index of this page within lru_group->pages. Meaningless while
-  lru_group == nullptr. Protected by buf_pool->LRU_topology_latch. */
+  lru_group == nullptr. Protected the same way as lru_group above. */
   uint16_t lru_slot{0};
 
   /** true if the block is in the old blocks in buf_pool->LRU_old. Atomic

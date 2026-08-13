@@ -3176,8 +3176,22 @@ static bool buf_LRU_try_append_fresh_S(buf_pool_t *buf_pool, buf_page_t *bpage,
 
   buf_pool->LRU_topology_latch.s_lock();
 
+  /* bpage is already hash-visible but not yet on the LRU list (its own
+  block_mutex was released by the caller before this function was reached,
+  per Requirement 7's design). A concurrent topology-S flush/eviction scan
+  holding only this exact block's mutex -- having reacquired it after this
+  descriptor's previous occupant was evicted -- can read bpage->lru_group at
+  any time (buf_flush_lru_still_linked() in buf0flu.cc). Taking block_mutex
+  here too, ordered after the topology latch and before the group mutex per
+  SYNC_BUF_BLOCK > SYNC_BUF_LRU_GROUP, makes the write below and that read
+  mutually exclusive instead of a data race. Matches the invariant already
+  documented on buf_page_t::freed_page_clock. */
+  BPageMutex *block_mutex = buf_page_get_mutex(bpage);
+  mutex_enter(block_mutex);
+
   buf_lru_group_t *group = fill_ptr.load(std::memory_order_relaxed);
   if (group == nullptr) {
+    mutex_exit(block_mutex);
     buf_pool->LRU_topology_latch.s_unlock();
     return false;
   }
@@ -3190,6 +3204,7 @@ static bool buf_LRU_try_append_fresh_S(buf_pool_t *buf_pool, buf_page_t *bpage,
                       fill_ptr.load(std::memory_order_relaxed) == group;
   if (!usable) {
     mutex_exit(&group->mutex);
+    mutex_exit(block_mutex);
     buf_pool->LRU_topology_latch.s_unlock();
     return false;
   }
@@ -3211,6 +3226,7 @@ static bool buf_LRU_try_append_fresh_S(buf_pool_t *buf_pool, buf_page_t *bpage,
   }
 
   mutex_exit(&group->mutex);
+  mutex_exit(block_mutex);
   buf_pool->LRU_topology_latch.s_unlock();
   return true;
 }

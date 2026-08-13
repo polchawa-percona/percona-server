@@ -1609,6 +1609,30 @@ static ulint buf_flush_try_neighbors(const page_id_t &page_id,
   return (count);
 }
 
+/** True if bpage still looks like a legitimate, LRU-linked candidate worth
+handing to buf_flush_ready_for_replace()/buf_flush_ready_for_flush() (PS-11141
+Requirement 8/9). Callers reached this point via a topology-S snapshot taken
+without holding this page's group mutex the whole time (buf_flush_LRU_list_
+batch()'s pages_snapshot), or after a block_mutex gap during a topology mode
+switch -- in either case, a concurrent topology-S eviction elsewhere can have
+fully recycled this exact block descriptor for an unrelated fresh read in the
+meantime (the new page is hash-visible before being linked into the LRU).
+That is impossible under topology-X, which excludes every other topology
+user for its entire hold, so this check only ever matters for the topology-S
+callers introduced in this step. lru_group is checked rather than the
+debug-only in_LRU_list flag because this must be a real, release-build
+check; it is trustworthy here because this caller always holds topology-S,
+and every writer of lru_group either holds topology-X (which excludes this
+caller's topology-S entirely, so it cannot be running concurrently with such
+a writer) or, for the one writer that runs under topology-S
+(buf_LRU_try_append_fresh_S()), also holds this page's block_mutex -- the
+same mutex this caller holds (see buf_page_t::lru_group's own comment).
+@param[in]  bpage   control block; caller holds its block/zip mutex
+@return true if bpage is still a live, LRU-linked page */
+static inline bool buf_flush_lru_still_linked(const buf_page_t *bpage) {
+  return buf_page_in_file(bpage) && bpage->lru_group != nullptr;
+}
+
 /** Check if the block is modified and ready for flushing.
 If ready to flush then flush the page and try o flush its neighbors. The caller
 must hold the buffer pool list mutex corresponding to the type of flush.
@@ -1622,9 +1646,7 @@ not guarantee that some pages were written as well. */
 static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
                                              buf_flush_t flush_type,
                                              ulint n_to_flush, ulint *count) {
-#ifdef UNIV_DEBUG
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-#endif /* UNIV_DEBUG */
 
   bool flushed;
   BPageMutex *block_mutex = nullptr;
@@ -1658,12 +1680,16 @@ static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
 #endif /* UNIV_DEBUG */
 
   /* This is just a heuristic check, perhaps without block mutex latch, so we
-  will repeat the check with block mutexes in buf_flush_try_neighbors. */
-  if (buf_flush_was_ready_for_flush(bpage, flush_type)) {
-    buf_pool_t *buf_pool;
-
-    buf_pool = buf_pool_from_bpage(bpage);
-
+  will repeat the check with block mutexes in buf_flush_try_neighbors.
+  PS-11141 Requirement 9: for BUF_FLUSH_LRU, the caller
+  (buf_flush_LRU_list_batch()) released block_mutex before dispatching here
+  under topology-S, so a concurrent topology-S eviction elsewhere may have
+  fully recycled this exact slot for an unrelated fresh read in that gap --
+  the same class of gap buf_flush_lru_still_linked() guards everywhere else
+  in that scan. Gate on it here too rather than dispatch a flush for
+  whatever page now occupies the slot. */
+  if ((flush_type != BUF_FLUSH_LRU || buf_flush_lru_still_linked(bpage)) &&
+      buf_flush_was_ready_for_flush(bpage, flush_type)) {
     if (flush_type == BUF_FLUSH_LRU) {
       if (held_s) {
         buf_pool->LRU_topology_latch.s_unlock();
@@ -1768,26 +1794,6 @@ to this function there will be 'max' blocks in the free list.
 @param[in]      buf_pool        buffer pool instance
 @param[in]      max             desired number for blocks in the free_list
 @return batch result */
-/** True if bpage still looks like a legitimate, LRU-linked candidate worth
-handing to buf_flush_ready_for_replace()/buf_flush_ready_for_flush() (PS-11141
-Requirement 8/9). Callers reached this point via a topology-S snapshot taken
-without holding this page's group mutex the whole time (buf_flush_LRU_list_
-batch()'s pages_snapshot), or after a block_mutex gap during a topology mode
-switch -- in either case, a concurrent topology-S eviction elsewhere can have
-fully recycled this exact block descriptor for an unrelated fresh read in the
-meantime (the new page is hash-visible before being linked into the LRU).
-That is impossible under topology-X, which excludes every other topology
-user for its entire hold, so this check only ever matters for the topology-S
-callers introduced in this step. lru_group is checked rather than the
-debug-only in_LRU_list flag because this must be a real, release-build
-check; it is trustworthy here because, like in_LRU_list, it is only ever
-written while this page's block_mutex (held by the caller) is also held.
-@param[in]  bpage   control block; caller holds its block/zip mutex
-@return true if bpage is still a live, LRU-linked page */
-static inline bool buf_flush_lru_still_linked(const buf_page_t *bpage) {
-  return buf_page_in_file(bpage) && bpage->lru_group != nullptr;
-}
-
 /** Re-acquires topology-S after a call that may have left topology-X held
 (PS-11141 Requirement 9): buf_page_free_stale()/buf_LRU_free_page() release
 whichever mode they were entered under on success, but leave it held on
