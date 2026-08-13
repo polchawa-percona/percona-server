@@ -1886,77 +1886,96 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       grouped LRU list: another eviction, or a make-young drain's deferred
       pass) can empty and reclaim -- free -- `group`, so `group` must not
       be dereferenced again afterwards. */
-      if (bpage->was_stale()) {
+      auto acquired = mutex_enter_nowait(block_mutex) == 0;
+      if (acquired && !buf_flush_lru_still_linked(bpage)) {
+        /* See buf_flush_lru_still_linked()'s comment: this snapshot slot
+        was recycled for an unrelated fresh read since it was taken.
+        Nothing to do with the current occupant. */
+        mutex_exit(block_mutex);
+        acquired = false;
+      }
+
+      /* PS-11141 Requirement 8/9: was_stale() itself dereferences
+      bpage->get_space() and asserts it is non-null -- safe to call only
+      once block_mutex is held and buf_flush_lru_still_linked() has
+      confirmed this snapshot slot has not been recycled for an unrelated
+      fresh read (see the crash this fixed: calling was_stale() on a
+      stale, fully-freed snapshot pointer with neither check first).
+      Under topology-X this was always implicitly safe (X excludes every
+      other topology user for the whole scan), which is why the
+      pre-Step-9 code never needed to guard this read. */
+      if (acquired && bpage->was_stale()) {
         /* Stale-page eviction stays topology-X only: buf_page_free_stale()
-        (the 2-arg overload) asserts owns_x() unconditionally. */
+        (the 2-arg overload) asserts owns_x() unconditionally, and itself
+        re-reads was_stale() before taking block_mutex, which is only safe
+        once topology-X is actually held (excluding every other topology
+        user) -- so release block_mutex before switching mode, and
+        re-validate under a fresh block_mutex entry after acquiring X,
+        since a concurrent topology-S thread could have fully recycled
+        this exact page during the mode-switch gap when neither S nor X
+        was held. Only then is it safe to hand off to buf_page_free_stale(),
+        which re-takes block_mutex itself. */
+        mutex_exit(block_mutex);
         buf_pool->LRU_topology_latch.s_unlock();
         buf_pool->LRU_topology_latch.x_lock();
-        if (buf_page_free_stale(buf_pool, bpage)) {
+        mutex_enter(block_mutex);
+        const bool still_stale =
+            buf_flush_lru_still_linked(bpage) && bpage->was_stale();
+        mutex_exit(block_mutex);
+        if (still_stale && buf_page_free_stale(buf_pool, bpage)) {
           ++evict_count;
           group_maybe_freed = true;
         }
         buf_flush_lru_relock_s(buf_pool);
-      } else {
-        auto acquired = mutex_enter_nowait(block_mutex) == 0;
-        if (acquired && !buf_flush_lru_still_linked(bpage)) {
-          /* See buf_flush_lru_still_linked()'s comment: this snapshot slot
-          was recycled for an unrelated fresh read since it was taken.
-          Nothing to do with the current occupant. */
-          mutex_exit(block_mutex);
-          acquired = false;
-        }
-
-        if (acquired && buf_flush_ready_for_replace(bpage)) {
-          /* block is ready for eviction i.e., it is
-          clean and is not IO-fixed or buffer fixed. */
-          const bool s_eligible =
-              bpage->zip.data == nullptr &&
-              !buf_page_belongs_to_unzip_LRU(bpage) &&
-              buf_pool->LRU_n_pages.load(std::memory_order_relaxed) >
-                  BUF_LRU_OLD_MIN_LEN;
-          if (s_eligible) {
-            if (buf_LRU_free_page(bpage, true)) {
-              ++evict_count;
-              group_maybe_freed = true;
-              buf_pool->LRU_topology_latch.s_lock();
-            } else {
-              mutex_exit(block_mutex);
-            }
+      } else if (acquired && buf_flush_ready_for_replace(bpage)) {
+        /* block is ready for eviction i.e., it is
+        clean and is not IO-fixed or buffer fixed. */
+        const bool s_eligible =
+            bpage->zip.data == nullptr &&
+            !buf_page_belongs_to_unzip_LRU(bpage) &&
+            buf_pool->LRU_n_pages.load(std::memory_order_relaxed) >
+                BUF_LRU_OLD_MIN_LEN;
+        if (s_eligible) {
+          if (buf_LRU_free_page(bpage, true)) {
+            ++evict_count;
+            group_maybe_freed = true;
+            buf_pool->LRU_topology_latch.s_lock();
           } else {
-            /* Compressed page, unzip_LRU member, or warm-up (Step 5/7's
-            carve-outs): fall back to topology-X. block_mutex must be
-            released before switching topology mode -- waiting for a
-            higher-level latch while holding a lower-level one is
-            forbidden (Requirement 2), and the topology latch sits above
-            block/zip mutexes in the ordering. Re-acquire block_mutex
-            under X and re-check readiness, since bpage's state may have
-            changed in the gap; buf_LRU_free_page() also re-validates
-            internally regardless. */
             mutex_exit(block_mutex);
-            buf_pool->LRU_topology_latch.s_unlock();
-            buf_pool->LRU_topology_latch.x_lock();
-            mutex_enter(block_mutex);
-            if (buf_flush_lru_still_linked(bpage) &&
-                buf_flush_ready_for_replace(bpage) &&
-                buf_LRU_free_page(bpage, true)) {
-              ++evict_count;
-              group_maybe_freed = true;
-            } else {
-              mutex_exit(block_mutex);
-            }
-            buf_flush_lru_relock_s(buf_pool);
           }
-        } else if (acquired &&
-                   buf_flush_ready_for_flush(bpage, BUF_FLUSH_LRU)) {
-          /* Block is ready for flush. Dispatch an IO request. The IO helper
-          thread will put it on the free list in the IO completion routine. */
+        } else {
+          /* Compressed page, unzip_LRU member, or warm-up (Step 5/7's
+          carve-outs): fall back to topology-X. block_mutex must be
+          released before switching topology mode -- waiting for a
+          higher-level latch while holding a lower-level one is
+          forbidden (Requirement 2), and the topology latch sits above
+          block/zip mutexes in the ordering. Re-acquire block_mutex
+          under X and re-check readiness, since bpage's state may have
+          changed in the gap; buf_LRU_free_page() also re-validates
+          internally regardless. */
           mutex_exit(block_mutex);
-          buf_flush_page_and_try_neighbors(bpage, BUF_FLUSH_LRU, max, &count);
-          group_maybe_freed = true;
-        } else if (acquired) {
-          /* Can't evict or dispatch this block. Go to the next one. */
-          mutex_exit(block_mutex);
+          buf_pool->LRU_topology_latch.s_unlock();
+          buf_pool->LRU_topology_latch.x_lock();
+          mutex_enter(block_mutex);
+          if (buf_flush_lru_still_linked(bpage) &&
+              buf_flush_ready_for_replace(bpage) &&
+              buf_LRU_free_page(bpage, true)) {
+            ++evict_count;
+            group_maybe_freed = true;
+          } else {
+            mutex_exit(block_mutex);
+          }
+          buf_flush_lru_relock_s(buf_pool);
         }
+      } else if (acquired && buf_flush_ready_for_flush(bpage, BUF_FLUSH_LRU)) {
+        /* Block is ready for flush. Dispatch an IO request. The IO helper
+        thread will put it on the free list in the IO completion routine. */
+        mutex_exit(block_mutex);
+        buf_flush_page_and_try_neighbors(bpage, BUF_FLUSH_LRU, max, &count);
+        group_maybe_freed = true;
+      } else if (acquired) {
+        /* Can't evict or dispatch this block. Go to the next one. */
+        mutex_exit(block_mutex);
       }
 
       ut_ad(!mutex_own(block_mutex));
