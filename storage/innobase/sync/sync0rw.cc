@@ -321,14 +321,14 @@ funnels into a sync array reservation.
 
 Currently there is one such rule, for the buffer block frame locks
 (buf_block_t::lock): a thread must not wait for a frame lock while
-holding any buffer pool LRU list mutex. buf_page_init_for_read() acquires
-buf_pool_t::LRU_list_mutex while holding the X-latch on the frame of the
+holding any buffer pool topology latch. buf_page_init_for_read() acquires
+buf_pool_t::LRU_topology_latch while holding the X-latch on the frame of the
 page being read in, so such a wait would form a deadlock cycle with that
 path. The rule cannot use latch levels because buf_block_t::lock is
 registered with SYNC_LEVEL_VARYING (B-tree page latching order genuinely
 varies), and LatchDebug ignores such latches entirely - both when they
 are acquired and when they are held. The code paths which do latch a
-frame under the LRU list mutex (flushing, and buf_page_create() on a
+frame under the topology latch (flushing, and buf_page_create() on a
 block freshly taken from the free list) use the nowait variants, so they
 are exempt by construction.
 

@@ -10,7 +10,7 @@ Copyright (c) 2026, Percona and/or its affiliates.
  Introduced additively per
  .requirements/20260807T154100Z_lru_two_level_locking/REQUIREMENTS.md,
  Implementation Plan step 1: this type is not yet wired into any real
- critical section. buf_pool_t::LRU_list_mutex remains the live protection
+ critical section. buf_pool_t::LRU_topology_latch remains the live protection
  for group topology, slots, occupancy, and lifetime until step 2 migrates
  its call sites onto this latch. */
 
@@ -25,7 +25,7 @@ Copyright (c) 2026, Percona and/or its affiliates.
 /** Topology S/X latch for the two-level grouped LRU list (PS-11141).
 
 Wraps an InnoDB rw_lock_t at latch level SYNC_BUF_LRU_LIST (the same level
-buf_pool_t::LRU_list_mutex occupies today) and enforces the non-recursive
+buf_pool_t::LRU_topology_latch occupies today) and enforces the non-recursive
 acquisition rules from the two-level locking REQUIREMENTS.md, Requirement
 1: every acquisition of either mode must start from "this thread owns
 neither S nor X". S->S, X->X, X->S, S->X upgrade, and any hidden recursive

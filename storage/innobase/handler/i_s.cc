@@ -5053,7 +5053,7 @@ static int i_s_innodb_fill_buffer_lru(THD *thd, Table_ref *tables,
 
   DBUG_TRACE;
 
-  /* Obtain LRU_list_mutex before allocating info_buffer because LRU_n_pages
+  /* Obtain topology-X before allocating info_buffer because LRU_n_pages
   can change. This administrative query also waits out background promotion
   and compaction for the complete scan. */
   mutex_enter(&buf_pool->LRU_drain_mutex);

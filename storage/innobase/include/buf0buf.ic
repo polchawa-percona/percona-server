@@ -174,7 +174,7 @@ static inline bool buf_page_peek_if_young(const buf_page_t *bpage) {
 
 /** Recommends a move of a block to the start of the LRU list if there is
 danger of dropping from the buffer pool.
-NOTE: does not reserve the LRU list mutex.
+NOTE: does not reserve the topology latch.
 @param[in]      bpage   block to make younger
 @return true if should be made younger */
 static inline bool buf_page_peek_if_too_old(const buf_page_t *bpage) {
@@ -241,7 +241,7 @@ static inline enum buf_page_state buf_block_get_state(
 /** Assert that a given buffer pool page is private to the caller: no pointers
 to it exist in any buffer pool list or hash table. Accessing pages by iterating
 over buffer pool chunks is not considered here. Furthermore, assert that no
-buffer pool locks except for LRU list mutex and page hash are held.
+buffer pool locks except for topology latch and page hash are held.
 @param[in]      bpage                   pointer to a buffer pool page
 @param[in]      hold_block_mutex        flag whether holding block mutex
 @param[in]      hold_zip_free_mutex     flag whether holding zip free mutex */
@@ -480,7 +480,7 @@ static inline void buf_block_set_io_fix(
 }
 
 /** Makes a block sticky. A sticky block implies that even after we release
-the buf_pool->LRU_list_mutex and the block->mutex:
+the buf_pool->LRU_topology_latch and the block->mutex:
 * it cannot be removed from the flush_list
 * the block descriptor cannot be relocated
 * it cannot be removed from the LRU list
@@ -597,7 +597,7 @@ static inline void buf_page_set_accessed(
 
 /** Gets the buf_block_t handle of a buffered file block if an uncompressed
 page frame exists, or NULL. page frame exists, or NULL. The caller must hold
-either the appropriate hash lock in any mode, either the LRU list mutex. Note:
+either the appropriate hash lock in any mode, either the topology latch. Note:
 even though bpage is not declared a const we don't update its value. It is safe
 to make this pure.
 @param[in]      bpage   control block, or NULL
@@ -936,12 +936,12 @@ static inline buf_page_t *buf_page_hash_get_locked(buf_pool_t *buf_pool,
   if (mode == RW_LOCK_S) {
     rw_lock_s_lock(hash_lock, UT_LOCATION_HERE);
 
-    /* If not own LRU_list_mutex, page_hash can be changed. */
+    /* If not own topology-X, page_hash can be changed. */
     hash_lock =
         hash_lock_s_confirm(hash_lock, buf_pool->page_hash, page_id.hash());
   } else {
     rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
-    /* If not own LRU_list_mutex, page_hash can be changed. */
+    /* If not own topology-X, page_hash can be changed. */
     hash_lock =
         hash_lock_x_confirm(hash_lock, buf_pool->page_hash, page_id.hash());
   }

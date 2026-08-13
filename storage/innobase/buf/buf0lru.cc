@@ -81,10 +81,9 @@ static_assert(BUF_LRU_NON_OLD_MIN_LEN < BUF_LRU_OLD_MIN_LEN,
 /** When dropping the search hash index entries before deleting an ibd
 file, we build a local array of pages belonging to that tablespace
 in the buffer pool. Following is the size of that array.
-We also release buf_pool->LRU_list_mutex after scanning this many pages of the
-flush_list when dropping a table. This is to ensure that other threads
-are not blocked for extended period of time when using very large
-buffer pools. */
+We also release buf_pool->LRU_topology_latch after scanning this many pages of
+the flush_list when dropping a table. This is to ensure that other threads are
+not blocked for extended period of time when using very large buffer pools. */
 static const ulint BUF_LRU_DROP_SEARCH_SIZE = 1024;
 
 /** We scan these many blocks when looking for a clean page to evict
@@ -189,8 +188,8 @@ void buf_LRU_enqueue_promote(buf_page_t *bpage) {
 If the block is compressed-only (BUF_BLOCK_ZIP_PAGE),
 the object will be freed.
 
-The caller must hold buf_pool->LRU_list_mutex, the buf_page_get_mutex() mutex
-and the appropriate hash_lock. This function will release the
+The caller must hold buf_pool->LRU_topology_latch, the buf_page_get_mutex()
+mutex and the appropriate hash_lock. This function will release the
 buf_page_get_mutex() and the hash_lock.
 
 If a compressed page is freed other compressed pages may be relocated.
@@ -380,7 +379,7 @@ scan_again:
         continue;
       }
 
-      /* Array full. We release the LRU list mutex to obey
+      /* Array full. We release the topology latch to obey
       the latching order. */
       buf_pool->LRU_topology_latch.x_unlock();
 
@@ -426,7 +425,7 @@ static bool buf_page_try_pin(buf_pool_t *buf_pool, buf_page_t *bpage) {
 
   buf_flush_list_mutex_exit(buf_pool);
 
-  /* The LRU list mutex ensures that the page descriptor cannot be freed
+  /* The topology latch ensures that the page descriptor cannot be freed
   for both compressed and uncompressed page. */
   BPageMutex *block_mutex = buf_page_get_mutex(bpage);
   mutex_enter(block_mutex);
@@ -498,7 +497,7 @@ could be set, we skip yielding. The caller should restart the scan.
   restart = false;
 
   /* Every BUF_LRU_DROP_SEARCH_SIZE iterations in the loop we release
-  buf_pool->LRU_list_mutex to let other threads do their job but only if the
+  buf_pool->LRU_topology_latch to let other threads do their job but only if the
   block is not IO fixed. This ensures that the block stays in its position in
   the flush_list. We read io_fix without block_mutex, because we will recheck
   with block_mutex.*/
@@ -512,7 +511,7 @@ could be set, we skip yielding. The caller should restart the scan.
     ut_ad(bpage->in_flush_list);
     ut_d(auto oldest_lsn = bpage->get_oldest_lsn());
 
-    /* Now it is safe to release the LRU list mutex. */
+    /* Now it is safe to release the topology latch. */
     buf_flush_list_mutex_exit(buf_pool);
     buf_pool->LRU_topology_latch.x_unlock();
 
@@ -563,7 +562,7 @@ static bool remove_page_flush_list(buf_pool_t *buf_pool, buf_page_t *bpage) {
   ut_ad(buf_flush_list_mutex_own(buf_pool));
 
   /* It is safe to check bpage->space and bpage->io_fix while holding
-  buf_pool->LRU_list_mutex only. We will repeat the check of io_fix
+  buf_pool->LRU_topology_latch only. We will repeat the check of io_fix
   under block_mutex later, this is just an optimization to avoid the
   mutex acquisition if its likely io_fix is not NONE. */
   if (bpage->was_io_fixed()) {
@@ -874,7 +873,7 @@ scan_again:
   group's pages. As with buf_LRU_drop_page_hash_for_tablespace() above,
   the AHI-drop path below restarts the whole scan (goto scan_again)
   rather than trying to resume a specific position across groups after
-  releasing LRU_list_mutex. Additionally: a successful removal below can
+  releasing topology-X. Additionally: a successful removal below can
   empty and free `group` (if it was its last live page), so the next
   group to visit is captured into `next_group` *before* the inner loop
   touches group's pages, and the inner loop breaks immediately after any
@@ -900,7 +899,7 @@ scan_again:
       ut_ad(bpage->in_LRU_list);
 
       /* It is safe to check bpage->id.space() and bpage->io_fix
-      while holding buf_pool->LRU_list_mutex only and later recheck
+      while holding buf_pool->LRU_topology_latch only and later recheck
       while holding the buf_page_get_mutex() mutex.  */
 
       if (bpage->id.space() != id) {
@@ -1096,7 +1095,7 @@ zip_clean successor). Pages no longer link into buf_pool->LRU directly --
 they belong to a buf_lru_group_t, which does not track relative order among
 its own member pages -- so that position can no longer be determined; the
 list's only consumers (buf_pool_validate_instance(), buf_all_freed())
-iterate it in full regardless of order, so plain LRU_list_mutex-ordered
+iterate it in full regardless of order, so plain topology-X-ordered
 insertion at the head is sufficient.
 @param[in]      bpage   pointer to the block in question */
 void buf_LRU_insert_zip_clean(buf_page_t *bpage) {
@@ -1168,7 +1167,7 @@ static bool buf_LRU_free_from_unzip_LRU_list(buf_pool_t *buf_pool,
 @return true if freed */
 /** Scans buf_pool->LRU tail-to-head with identity-based optimistic eviction
 (PS-11141): snapshot one group's (page_id, residency_generation) values under
-a short LRU_list_mutex section, release it for provisional inspection, then
+a short topology-X section, release it for provisional inspection, then
 commit through the existing free paths after full revalidation. The group
 hazard pointer (lru_scan_itr) protects the next position across that window. */
 static bool buf_LRU_provisionally_replaceable(const buf_page_t *bpage) {
@@ -1178,14 +1177,14 @@ static bool buf_LRU_provisionally_replaceable(const buf_page_t *bpage) {
   }
   /* Deliberately not buf_page_can_relocate(): its
   ut_ad(bpage->in_LRU_list || io_fix == BUF_IO_READ) assumes the caller
-  holds LRU_list_mutex, which this provisional (lock-dropped) check does
+  holds topology-X, which this provisional (lock-dropped) check does
   not. A concurrent make-young/promotion reposition
   (buf_LRU_remove_block() + buf_LRU_add_block_low(), via
-  buf_LRU_detach_from_group()) protects in_LRU_list under LRU_list_mutex
+  buf_LRU_detach_from_group()) protects in_LRU_list under topology-X
   alone, not this page's block mutex, so it can transiently clear
   in_LRU_list on this exact page without evicting it at all -- observing
   that here is expected, not a bug. The verdict below is re-verified
-  under LRU_list_mutex before anything commits (see
+  under topology-X before anything commits (see
   buf_LRU_try_evict_tail_identity()), so a stale answer either way is
   harmless. */
   if (buf_page_get_io_fix(bpage) != BUF_IO_NONE || bpage->buf_fix_count != 0) {
@@ -1210,9 +1209,9 @@ static inline void buf_lru_topology_unlock(buf_pool_t *buf_pool) {
   }
 }
 
-/** Try to evict one snapshotted tail identity after the list mutex was dropped.
-On success, LRU_list_mutex is released by the free path. On failure, neither
-LRU_list_mutex nor the block mutex is held.
+/** Try to evict one snapshotted tail identity after the topology latch was
+dropped. On success, topology-X is released by the free path. On failure,
+neither topology-X nor the block mutex is held.
 @param[in,out] buf_pool buffer pool instance
 @param[in] identity page identity from the snapshot
 @param[in] exhaustive whether this is a quiesced invalidation scan
@@ -1896,7 +1895,7 @@ The boundary now moves in whole-GROUP steps (up to BUF_LRU_GROUP_SIZE pages
 at a time), so naively porting the page-level fixed-point loop -- move one
 step, stop once within +/-BUF_LRU_OLD_TOLERANCE -- can hang: a single group
 move can overshoot the (page-sized) tolerance band, flipping the loop's
-direction on the very next iteration, forever, inside this LRU_list_mutex-
+direction on the very next iteration, forever, inside this topology-X-
 held call. Instead, a group is only moved across the boundary when doing so
 strictly reduces the absolute imbalance |old_len - new_len|; if neither
 direction would improve on it, the loop stops even outside the tolerance
@@ -2148,7 +2147,7 @@ static buf_lru_group_t *buf_lru_group_alloc(buf_pool_t *buf_pool) {
   return group;
 }
 
-/** Destroy one empty, unlinked group. Must not hold LRU_list_mutex.
+/** Destroy one empty, unlinked group. Must not hold topology-X.
 STAGING is included because a drain's private staging group
 (buf_LRU_drain_promote_queue(), PS-11141 Requirement 5) is destroyed this
 same way when a chunk stages nothing: it is never put through
@@ -2167,7 +2166,7 @@ static void buf_lru_group_destroy(buf_lru_group_t *group) {
 }
 
 /** Releases an empty LRU group into the bounded reserve, or retires it for
-later destruction outside LRU_list_mutex when the reserve is full. Performs
+later destruction outside topology-X when the reserve is full. Performs
 the LINKED -> RESERVE/RETIRED state transition; the caller must not have
 already changed group->state.
 @param[in,out]  buf_pool        buffer pool instance
@@ -2197,7 +2196,7 @@ static void buf_lru_group_release(buf_pool_t *buf_pool,
   buf_pool->LRU_group_retired_len++;
 }
 
-/** Steal the retired list under LRU_list_mutex.
+/** Steal the retired list under topology-X.
 @param[in,out]  buf_pool buffer pool instance
 @return stolen retired list head */
 static buf_lru_group_t *buf_lru_group_steal_retired(buf_pool_t *buf_pool) {
@@ -2208,7 +2207,7 @@ static buf_lru_group_t *buf_lru_group_steal_retired(buf_pool_t *buf_pool) {
   return head;
 }
 
-/** Steal at most budget retired groups under LRU_list_mutex.
+/** Steal at most budget retired groups under topology-X.
 @param[in,out] buf_pool buffer pool instance
 @param[in] budget maximum groups to steal
 @return stolen retired-list prefix */
@@ -2234,7 +2233,7 @@ static buf_lru_group_t *buf_lru_group_steal_retired(buf_pool_t *buf_pool,
   return head;
 }
 
-/** Destroy a stolen retired list outside LRU_list_mutex.
+/** Destroy a stolen retired list outside topology-X.
 @param[in,out]  head stolen list head */
 static void buf_lru_group_destroy_list(buf_lru_group_t *head) {
   while (head != nullptr) {
@@ -2244,7 +2243,7 @@ static void buf_lru_group_destroy_list(buf_lru_group_t *head) {
   }
 }
 
-/** Steal reserved and retired lists under LRU_list_mutex.
+/** Steal reserved and retired lists under topology-X.
 @param[in,out] buf_pool buffer pool instance
 @param[out] reserved stolen reserve list
 @param[out] retired stolen retired list */
@@ -2259,8 +2258,8 @@ static void buf_lru_group_steal_cache_lists(buf_pool_t *buf_pool,
 }
 
 /** Frees every reserved and retired group. Called only at buffer pool
-teardown after LRU_list_mutex has already been destroyed, so the instance
-is quiescent.
+teardown after the topology latch has already been destroyed, so the
+instance is quiescent.
 @param[in,out]  buf_pool        buffer pool instance */
 void buf_LRU_free_group_cache(buf_pool_t *buf_pool) {
   buf_lru_group_t *reserved = buf_pool->LRU_group_cache;
@@ -2275,9 +2274,9 @@ void buf_LRU_free_group_cache(buf_pool_t *buf_pool) {
   buf_lru_group_destroy_list(retired);
 }
 
-/** Steal and destroy every reserved and retired group while LRU_list_mutex
-is still live. Used by invalidation; concurrent stealers serialize on that
-mutex so each group is destroyed at most once.
+/** Steal and destroy every reserved and retired group while the topology
+latch is still live. Used by invalidation; concurrent stealers serialize on
+topology-X so each group is destroyed at most once.
 @param[in,out]  buf_pool        buffer pool instance */
 void buf_LRU_empty_group_cache(buf_pool_t *buf_pool) {
   ut_ad(!buf_pool->LRU_topology_latch.owns_x());
@@ -2292,7 +2291,7 @@ void buf_LRU_empty_group_cache(buf_pool_t *buf_pool) {
   buf_lru_group_destroy_list(retired);
 }
 
-/** Reclaim retired groups and replenish the reserve outside LRU_list_mutex.
+/** Reclaim retired groups and replenish the reserve outside topology-X.
 The target and maximum form low/high watermarks: background work refills only
 after the reserve falls below the target, while hot-path releases may retain
 up to the higher maximum before retiring overflow. */
@@ -2360,7 +2359,7 @@ bool buf_LRU_maintain_group_cache(buf_pool_t *buf_pool, bool exhaustive) {
   return pending;
 }
 
-/** Result of detaching a page while holding LRU_list_mutex. */
+/** Result of detaching a page while holding topology-X. */
 struct Detach_from_group_result {
   /** True if the page's group is not LINKED (it is mid-promotion in a
   drain's private staging group, PS-11141 Requirement 16): nothing was
@@ -2497,7 +2496,7 @@ buf_pool->LRU_fill_group/LRU_young_fill_group if either pointed at this
 group, adjusts the group hazard pointers, then unlinks and frees it.
 @param[in,out]  buf_pool  buffer pool instance
 @param[in,out]  group     empty group (caller observes group->n_pages == 0
-                          under LRU_list_mutex); must not
+                          under topology-X); must not
                           be referenced again by the caller after this call */
 static void buf_LRU_reclaim_empty_group(buf_pool_t *buf_pool,
                                         buf_lru_group_t *group) {
@@ -2783,7 +2782,7 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
   ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(adjust_old ? buf_pool->LRU_topology_latch.owns_x() : true);
 
-  /* Cleared under LRU_list_mutex after the slot and back-pointer update. */
+  /* Cleared under topology-X after the slot and back-pointer update. */
   ut_d(bpage->in_LRU_list = false);
 
   buf_pool->stat.LRU_bytes -= bpage->size.physical();
@@ -2925,7 +2924,7 @@ void buf_unzip_LRU_add_block(buf_block_t *block, bool old) {
 }
 
 /** Finds an empty slot in constant time. The group must not already be full.
-@param[in]      group   group protected by LRU_list_mutex
+@param[in]      group   group protected by topology-X
 @return index of an empty (null) slot */
 static inline uint32_t buf_lru_group_find_free_slot(
     const buf_lru_group_t *group) {
@@ -2937,7 +2936,7 @@ static inline uint32_t buf_lru_group_find_free_slot(
 }
 
 /** Appends a page to a non-full group.
-@param[in,out] group group protected by LRU_list_mutex
+@param[in,out] group group protected by topology-X
 @param[in,out] bpage page not currently belonging to a group */
 static inline void buf_lru_group_append_page(buf_lru_group_t *group,
                                              buf_page_t *bpage) {
@@ -2957,7 +2956,7 @@ current one is null or full (PS-11141 grouped LRU list). Used both by the
 immediate buf_LRU_make_block_young() path and, once per drained page, by
 buf_LRU_drain_promote_queue(), so the drain naturally produces
 ceil(N/BUF_LRU_GROUP_SIZE) groups without special-casing.
-Requires buf_pool->LRU_list_mutex. Does not set bpage->old or
+Requires buf_pool->LRU_topology_latch. Does not set bpage->old or
 freed_page_clock; the caller does.
 @param[in,out]  buf_pool  buffer pool instance
 @param[in,out]  bpage     page to append; must not already belong to a group */
@@ -2989,7 +2988,7 @@ static void buf_LRU_append_to_young_fill_group(buf_pool_t *buf_pool,
 creating and linking a new group as LRU_old's immediate group-successor
 first if the current one is null or full (PS-11141 grouped LRU list). Used
 both by fresh page-read insertion (via buf_LRU_add_block_low()) and by
-buf_LRU_make_block_old(). Requires buf_pool->LRU_list_mutex and, by
+buf_LRU_make_block_old(). Requires buf_pool->LRU_topology_latch and, by
 contract, that buf_pool->LRU_old is already defined (callers only reach
 this once the LRU is long enough -- see buf_LRU_add_block_low()); the
 LRU_old == nullptr fallback below is defensive only. Increments
@@ -3749,7 +3748,7 @@ static bool buf_lru_group_has_live_hazard(const buf_pool_t *buf_pool,
 }
 
 /** Merge pages from right into left, preserving flattened page order, then
-reclaim right. Caller holds LRU_list_mutex; both groups are eligible.
+reclaim right. Caller holds topology-X; both groups are eligible.
 @return true if a merge was performed */
 static bool buf_lru_group_try_merge(buf_pool_t *buf_pool, buf_lru_group_t *left,
                                     buf_lru_group_t *right) {
@@ -4057,7 +4056,7 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   compressed-only descriptor is re-inserted below: the page id is never
   observably absent from the page hash. Otherwise a concurrent
   buf_page_init_for_read() (which inserts into the page hash without
-  holding the LRU list mutex) could insert a second descriptor for this
+  holding the topology latch) could insert a second descriptor for this
   page id in the meantime.
 
   Protect: buf_buddy_free must not be invoked in buf_LRU_block_remove_hashed,
@@ -4284,8 +4283,8 @@ void buf_LRU_block_free_non_file_page(buf_block_t *block) {
 If the block is compressed-only (BUF_BLOCK_ZIP_PAGE),
 the object will be freed.
 
-The caller must hold buf_pool->LRU_list_mutex, the buf_page_get_mutex() mutex
-and the appropriate hash_lock. This function will release the
+The caller must hold buf_pool->LRU_topology_latch, the buf_page_get_mutex()
+mutex and the appropriate hash_lock. This function will release the
 buf_page_get_mutex() and the hash_lock (the latter is kept if keep_hash_lock
 is passed).
 
@@ -4528,9 +4527,9 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
       caller, so the page id is never observably absent from the
       page hash: a concurrent buf_page_init_for_read() blocks on
       the hash cell latch and then finds the compressed-only
-      descriptor. (It cannot be the LRU list mutex which protects
+      descriptor. (It cannot be the topology latch which protects
       this transition: buf_page_init_for_read() inserts into the
-      page hash without holding the LRU list mutex.) The keep-zip
+      page hash without holding the topology latch.) The keep-zip
       path itself remains topology-X only (see the assertion at this
       function's entry), so keep_hash_lock == true is never observed
       here under topology-S.
@@ -4717,7 +4716,7 @@ func_exit:
 @param[in]      buf_pool        buffer pool instance */
 void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   /* Exclude background promotion and compaction for the complete validator,
-  including checks performed across separate LRU_list_mutex sections. */
+  including checks performed across separate topology-X sections. */
   mutex_enter(&buf_pool->LRU_drain_mutex);
 
   buf_pool->LRU_topology_latch.x_lock();

@@ -1269,7 +1269,7 @@ static void buf_flush_write_block_low(buf_page_t *bpage, buf_flush_t flush_type,
 /** Writes a flushable page asynchronously from the buffer pool to a file.
 NOTE: 1. in simulated aio we must call os_aio_simulated_wake_handler_threads
 after we have posted a batch of writes! 2. buf_page_get_mutex(bpage) must be
-held upon entering this function. The LRU list mutex must be held if flush_type
+held upon entering this function. The topology latch must be held if flush_type
 == BUF_FLUSH_SINGLE_PAGE. Both mutexes will be released by this function if it
 returns true.
 @param[in]      buf_pool        buffer pool instance
@@ -1282,9 +1282,9 @@ bool buf_flush_page(buf_pool_t *buf_pool, buf_page_t *bpage,
   BPageMutex *block_mutex;
 
   ut_ad(flush_type < BUF_FLUSH_N_TYPES);
-  /* Hold the LRU list mutex iff called for a single page LRU
+  /* Hold the topology latch iff called for a single page LRU
   flush. A single page LRU flush is already non-performant, and holding
-  the LRU list mutex allows us to avoid having to store the previous LRU
+  the topology latch allows us to avoid having to store the previous LRU
   list page or to restart the LRU scan in
   buf_flush_single_page_from_LRU(). */
   ut_ad(flush_type == BUF_FLUSH_SINGLE_PAGE ||
@@ -1397,7 +1397,7 @@ bool buf_flush_page(buf_pool_t *buf_pool, buf_page_t *bpage,
 
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
 /** Writes a flushable page asynchronously from the buffer pool to a file.
-NOTE: block and LRU list mutexes must be held upon entering this function, and
+NOTE: block and topology latches must be held upon entering this function, and
 they will be released by this function after flushing. This is loosely based on
 buf_flush_batch() and buf_flush_page().
 @param[in,out]  buf_pool        buffer pool instance
@@ -1717,7 +1717,7 @@ just detaches the uncompressed frames from the compressed pages at the
 tail of the unzip_LRU and puts those freed frames in the free list.
 Note that it is a best effort attempt and it is not guaranteed that
 after a call to this function there will be 'max' blocks in the free
-list. The caller must hold the LRU list mutex.
+list. The caller must hold the topology latch.
 @param[in]      buf_pool        buffer pool instance
 @param[in]      max             desired number of blocks in the free_list
 @return batch result. This path never flushes, so n_flushed is always 0. */
@@ -2316,10 +2316,10 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
   buf_pool->LRU_topology_latch.x_lock();
 
   /* PS-11141 grouped LRU list: scan groups tail-to-head and snapshot each
-  group's pages under LRU_list_mutex. This must be a while-loop rather than
+  group's pages under topology-X. This must be a while-loop rather than
   a for-loop with
   `.get()` as the increment
-  clause (that would call .get() -- asserting LRU_list_mutex ownership --
+  clause (that would call .get() -- asserting topology-X ownership --
   even on the iteration where a successful free just released it). */
   buf_lru_group_t *group = buf_pool->single_scan_itr.start();
 
@@ -2329,7 +2329,7 @@ bool buf_flush_single_page_from_LRU(buf_pool_t *buf_pool) {
     auto prev_group = UT_LIST_GET_PREV(LRU, group);
     buf_pool->single_scan_itr.set(prev_group);
 
-    /* Snapshot under LRU_list_mutex. The loop breaks immediately on any
+    /* Snapshot under topology-X. The loop breaks immediately on any
     successful free, so a stale later entry is never dereferenced. */
     std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages_snapshot;
     pages_snapshot = group->pages;

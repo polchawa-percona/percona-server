@@ -68,7 +68,7 @@ static bool buf_load_should_start = false;
 static bool buf_load_abort_flag = false;
 
 /* Used to temporary store dump info in order to avoid IO while holding
-buffer pool LRU list mutex during dump and also to sort the contents of the
+buffer pool topology latch during dump and also to sort the contents of the
 dump before reading the pages from disk during load.
 We store the space id in the high 32 bits and page no in low 32 bits. */
 typedef uint64_t buf_dump_t;
@@ -261,7 +261,7 @@ static void buf_dump(bool obey_shutdown) {
 
     buf_pool = buf_pool_from_array(i);
 
-    /* Obtain LRU_list_mutex before allocating because LRU_n_pages can
+    /* Obtain topology-X before allocating because LRU_n_pages can
     change. This administrative scan also waits out background promotion
     and compaction. */
     mutex_enter(&buf_pool->LRU_drain_mutex);

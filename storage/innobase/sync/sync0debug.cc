@@ -1231,9 +1231,6 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 #endif /* PFS_SKIP_BUFFER_MUTEX_RWLOCK */
   LATCH_ADD_MUTEX(BUF_POOL_CHUNKS, SYNC_BUF_CHUNKS, buf_pool_chunks_mutex_key);
 
-  LATCH_ADD_MUTEX(BUF_POOL_LRU_LIST, SYNC_BUF_LRU_LIST,
-                  buf_pool_LRU_list_mutex_key);
-
   LATCH_ADD_MUTEX(BUF_POOL_LRU_GROUP, SYNC_BUF_LRU_GROUP,
                   buf_pool_lru_group_mutex_key);
 

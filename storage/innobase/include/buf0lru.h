@@ -83,7 +83,7 @@ page, the descriptor object will be freed as well.
 NOTE: this function may temporarily release and relock the
 buf_page_get_mutex(). Furthermore, the page frame will no longer be
 accessible via bpage. If this function returns true, it will also release
-the LRU list mutex.
+the topology latch.
 The caller must hold the LRU list and buf_page_get_mutex() mutexes.
 @param[in]      bpage   block to be freed
 @param[in]      zip     true if should remove also the compressed page of
@@ -217,7 +217,7 @@ void buf_LRU_adjust_group_hp(buf_pool_t *buf_pool,
 group itself (PS-11141 grouped LRU list). Used when a page descriptor is
 replaced in place (e.g. compressed<->uncompressed swap, buffer chunk
 relocation) while keeping the same logical LRU position. Requires
-buf_pool->LRU_list_mutex; on return, bpage no longer belongs to any group
+buf_pool->LRU_topology_latch; on return, bpage no longer belongs to any group
 and dpage occupies its former slot.
 @param[in]      bpage   old page descriptor, currently linked into a group
 @param[in,out]  dpage   new page descriptor, taking over bpage's slot */
@@ -225,17 +225,17 @@ void buf_LRU_relocate_in_group(buf_page_t *bpage, buf_page_t *dpage);
 
 /** Frees every group cached in buf_pool->LRU_group_cache and
 LRU_group_retired (PS-11141 grouped LRU list). Called once per instance at
-buffer pool teardown after LRU_list_mutex has been destroyed.
+buffer pool teardown after the topology latch has been destroyed.
 @param[in,out]  buf_pool        buffer pool instance */
 void buf_LRU_free_group_cache(buf_pool_t *buf_pool);
 
 /** Steal and destroy every reserved and retired group while
-LRU_list_mutex is still live. Used after invalidation empties the LRU.
+the topology latch is still live. Used after invalidation empties the LRU.
 @param[in,out]  buf_pool        buffer pool instance */
 void buf_LRU_empty_group_cache(buf_pool_t *buf_pool);
 
 /** Reclaim retired groups and replenish the reusable reserve to its target.
-Allocation and destruction occur outside LRU_list_mutex.
+Allocation and destruction occur outside topology-X.
 @param[in,out]  buf_pool        buffer pool instance
 @param[in]      exhaustive      true for quiescent lifecycle maintenance
 @return true if bounded background work remains */

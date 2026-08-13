@@ -707,7 +707,6 @@ static PSI_mutex_info all_innodb_mutexes[] = {
 #endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
     PSI_MUTEX_KEY(buf_pool_chunks_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_flush_state_mutex, 0, 0, PSI_DOCUMENT_ME),
-    PSI_MUTEX_KEY(buf_pool_LRU_list_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_free_list_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_lru_group_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(buf_pool_lru_drain_mutex, 0, 0, PSI_DOCUMENT_ME),
@@ -22251,7 +22250,7 @@ Keep the compressed pages in the buffer pool.
         mutex_exit(&block->mutex);
         all_evicted = false;
       } else {
-        /* buf_LRU_free_page() released LRU_list_mutex.
+        /* buf_LRU_free_page() released topology-X.
         have to restart the unzip_LRU scan. */
         buf_pool->LRU_topology_latch.x_lock();
         block = UT_LIST_GET_LAST(buf_pool->unzip_LRU);
@@ -24021,7 +24020,7 @@ static MYSQL_SYSVAR_UINT(
     PLUGIN_VAR_OPCMDARG,
     "If non-zero, moving a page to the head of the buffer pool LRU list "
     "on access is deferred: the page identity is pushed onto a per-buffer-pool "
-    "bounded MPSC queue instead of taking the LRU list mutex on the hot "
+    "bounded MPSC queue instead of taking the topology latch on the hot "
     "read path. This value is a background-wakeup threshold capped at the "
     "fixed queue capacity; the page-cleaner coordinator drains in bounded "
     "chunks. Set to 0 to disable the deferred queue and move pages "

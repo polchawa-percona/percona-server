@@ -39,7 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** Allocate a block. This function should only be used for allocating
 compressed page frames. The thread calling this function must hold
-buf_pool->LRU_list_mutex and must not hold buf_pool->zip_mutex or any
+buf_pool->LRU_topology_latch and must not hold buf_pool->zip_mutex or any
 block->mutex.
 @param[in,out]  buf_pool        buffer pool in which the page resides
 @param[in]      size            compressed page size, between

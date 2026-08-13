@@ -239,12 +239,13 @@ enum latch_level_t {
 
   SYNC_BUF_PAGE_HASH,
 
-  /** Latch level of buf_pool_t::LRU_list_mutex today, and of the topology
-  S/X latch that is planned to replace it in place (PS-11141 two-level
-  grouped LRU locking; see Buf_LRU_topology_latch). Unchanged by that
-  migration: it stabilizes group topology/lifetime, and a holder may
-  acquire a group mutex (SYNC_BUF_LRU_GROUP) or block/zip mutex
-  (SYNC_BUF_BLOCK), never the reverse. */
+  /** Latch level of buf_pool_t::LRU_topology_latch, the topology S/X latch
+  for the two-level grouped LRU list (PS-11141; see Buf_LRU_topology_latch).
+  It stabilizes group topology/lifetime, and a holder may acquire a group
+  mutex (SYNC_BUF_LRU_GROUP) or block/zip mutex (SYNC_BUF_BLOCK), never the
+  reverse. This level previously also belonged to a plain LRU_list_mutex
+  that predated the S/X split; that mutex was removed once nothing
+  referenced it any longer (PS-11141 Step 10). */
   SYNC_BUF_LRU_LIST,
 
   /** Latch level of buf_pool_t::LRU_drain_mutex (PS-11141 grouped LRU
@@ -377,7 +378,6 @@ enum latch_id_t {
   LATCH_ID_BUF_BLOCK_MUTEX,
   LATCH_ID_BUF_POOL_CHUNKS,
   LATCH_ID_BUF_POOL_ZIP,
-  LATCH_ID_BUF_POOL_LRU_LIST,
   LATCH_ID_BUF_POOL_LRU_GROUP,
   LATCH_ID_BUF_POOL_LRU_TOPOLOGY,
   LATCH_ID_BUF_POOL_LRU_DRAIN,

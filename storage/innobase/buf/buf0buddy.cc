@@ -552,13 +552,13 @@ static bool buf_buddy_relocate(buf_pool_t *buf_pool, void *src, void *dst,
     We should search from LRU list also. */
 
     /* force is true only when buffer pool resizing,
-    in which we hold LRU_list_mutex already, see
+    in which we hold topology-X already, see
     buf_pool_withdraw_blocks(). */
     ut_ad(force);
     ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
     /* PS-11141 grouped LRU list: walk groups, then each group's pages.
-    LRU_list_mutex is already held by buf_pool_withdraw_blocks(). */
+    Topology-X is already held by buf_pool_withdraw_blocks(). */
     bpage = nullptr;
     for (auto *group : buf_pool->LRU) {
       for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {

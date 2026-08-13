@@ -165,7 +165,7 @@ buf_pool->chunks_mutex protects the chunks, n_chunks during resize;
   it is useful to think that it also protects the status of madvice() flags set
   for chunks in this pool, even though these flags are handled by OS, as we only
   modify them why holding this latch;
-buf_pool->LRU_list_mutex protects the LRU_list;
+buf_pool->LRU_topology_latch protects the LRU_list;
 buf_pool->free_list_mutex protects the free_list and withdraw list;
 buf_pool->flush_state_mutex protects the flush state related data structures;
 buf_pool->zip_free mutex protects the zip_free arrays;
@@ -1424,7 +1424,6 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   buf_pool->next_residency_generation.store(1, std::memory_order_relaxed);
   buf_pool->LRU_group_next_reuse_generation = 1;
   mutex_create(LATCH_ID_BUF_POOL_CHUNKS, &buf_pool->chunks_mutex);
-  mutex_create(LATCH_ID_BUF_POOL_LRU_LIST, &buf_pool->LRU_list_mutex);
   buf_pool->LRU_topology_latch.create();
   mutex_create(LATCH_ID_BUF_POOL_LRU_DRAIN, &buf_pool->LRU_drain_mutex);
   mutex_create(LATCH_ID_BUF_POOL_FREE_LIST, &buf_pool->free_list_mutex);
@@ -1576,7 +1575,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   LRU list) */
   new (&buf_pool->lru_hp) LRUGroupHp(buf_pool, &buf_pool->LRU_topology_latch);
 
-  /* Initialize ownership for optimistic scans that drop LRU_list_mutex. */
+  /* Initialize ownership for optimistic scans that drop topology-X. */
   new (&buf_pool->LRU_scan_owner) ut::Exclusive_scan();
 
   /* Initialize the iterator for LRU group scan search */
@@ -1627,7 +1626,6 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   ut::delete_(buf_pool->LRU_empty_candidates);
   buf_pool->LRU_empty_candidates = nullptr;
 
-  mutex_free(&buf_pool->LRU_list_mutex);
   buf_pool->LRU_topology_latch.free();
   mutex_free(&buf_pool->LRU_drain_mutex);
   mutex_free(&buf_pool->free_list_mutex);
@@ -1645,7 +1643,7 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   buf_lru_group_destroy() (which also frees the mutex, for groups that go
   through the reserve/retired cache instead), so the mutex_free() below
   is mandatory here, not merely mirroring that function. No concurrency
-  concerns: buf_pool->LRU_list_mutex was already destroyed above, and this
+  concerns: buf_pool->LRU_topology_latch was already destroyed above, and this
   whole instance is being torn down. */
   for (buf_lru_group_t *group = UT_LIST_GET_LAST(buf_pool->LRU);
        group != nullptr;) {
@@ -2183,7 +2181,7 @@ static bool buf_pool_withdraw_blocks(buf_pool_t *buf_pool) {
     place (via buf_LRU_relocate_in_group(), same as buf_relocate()) without
     ever removing it from its group, so a plain nested walk is safe here --
     unlike a real eviction, no group can become empty/freed mid-loop.
-    LRU_list_mutex protects every slot throughout this loop. */
+    topology-X protects every slot throughout this loop. */
     bool stop = false;
     for (auto *group : buf_pool->LRU) {
       if (stop) {
@@ -3471,7 +3469,7 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
 
   if (buf_page_peek_if_too_old(bpage) || force_enqueue_for_test) {
     /* With a non-zero drain threshold, push onto a lock-free per-pool queue
-    instead of taking the LRU list mutex here. A threshold-crossing push
+    instead of taking the topology latch here. A threshold-crossing push
     or the page cleaner coordinator drains the queue. */
     if (buf_LRU_make_young_drain_threshold != 0) {
       buf_LRU_enqueue_promote(bpage);
@@ -3542,9 +3540,9 @@ static void buf_block_try_discard_uncompressed(const page_id_t &page_id) {
   buf_page_t *bpage;
   buf_pool_t *buf_pool = buf_pool_get(page_id);
 
-  /* Since we need to acquire buf_pool->LRU_list_mutex to discard
+  /* Since we need to acquire buf_pool->LRU_topology_latch to discard
   the uncompressed frame and because page_hash mutex resides below
-  buf_pool->LRU_list_mutex in sync ordering therefore we must first
+  buf_pool->LRU_topology_latch in sync ordering therefore we must first
   release the page_hash mutex. This means that the block in question
   can move out of page_hash. Therefore we need to check again if the
   block is still in page_hash. */
@@ -4230,7 +4228,7 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
 
   m_buf_pool->LRU_topology_latch.x_lock();
 
-  /* We hold the LRU list mutex, which blocks a concurrent buffer pool
+  /* We hold the topology latch, which blocks a concurrent buffer pool
   resize (buf_pool_resize() takes it), so page_hash cannot be rehashed
   here: the shard latch for this page id is stable and no _confirm is
   needed. */
@@ -4519,10 +4517,10 @@ dberr_t Buf_fetch<T>::debug_check(buf_block_t *fix_block) {
 
     buf_block_unfix(fix_block);
 
-    /* Now we are only holding the buf_pool->LRU_list_mutex,
+    /* Now we are only holding the buf_pool->LRU_topology_latch,
     not block->mutex or m_hash_lock. Blocks cannot be
     relocated or enter or exit the buf_pool while we
-    are holding the buf_pool->LRU_list_mutex. */
+    are holding the buf_pool->LRU_topology_latch. */
 
     auto fix_mutex = buf_page_get_mutex(&fix_block->page);
 
@@ -5353,10 +5351,10 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     IMPORTANT: we strongly depend here on the fact that there is no
     other thread that can try to acquire that frame's S-lock while
-    holding already the LRU list mutex (it would be deadlock cycle).
+    holding already the topology latch (it would be deadlock cycle).
     For existing use cases, for that thread to exist, the page would
     need to be in the LRU list already. This latching rule is documented
-    at the LRU_list_mutex declaration in buf0buf.h and enforced in debug
+    at the LRU_topology_latch declaration in buf0buf.h and enforced in debug
     builds by rw_lock_assert_wait_allowed() at the rw-lock wait entry
     points in sync0rw.cc (it cannot be expressed via latch_level_t
     ordering: block->lock is SYNC_LEVEL_VARYING, which LatchDebug
@@ -5393,7 +5391,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     uncompressed frame (and thus no frame rw-lock). It is initialized and
     made hash-visible while the page hash X-latch and zip_mutex (this
     descriptor's "block mutex") are held, and is linked into the LRU list
-    afterwards under a brief LRU_list_mutex hold - the same narrowed
+    afterwards under a brief topology-X hold - the same narrowed
     latching order as for the block-backed pages above.
 
     Setting io_fix = BUF_IO_READ before the descriptor becomes reachable
@@ -5475,7 +5473,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     buf_pool->LRU_topology_latch.x_lock();
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     /* buf_LRU_insert_zip_clean() requires the zip_mutex; re-acquired
-    here under the LRU list mutex, which follows the registered
+    here under the topology latch, which follows the registered
     latch_level_t order (SYNC_BUF_LRU_LIST > SYNC_BUF_BLOCK). */
     mutex_enter(&buf_pool->zip_mutex);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
@@ -5587,9 +5585,9 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   The nowait variants must be used and cannot fail: the frame comes from
   the free list, so its latch is unlocked, and the block is unreachable by
   other threads until the page hash X-latch is released below. This keeps
-  the LRU_list_mutex latching rule (no waiting for a frame latch under the
-  LRU list mutex, see the LRU_list_mutex declaration) free of blocking
-  acquisitions - we hold the LRU list mutex here. */
+  the topology latch's latching rule (no waiting for a frame latch under it,
+  see the LRU_topology_latch declaration) free of blocking
+  acquisitions - we hold the topology latch here. */
   mtr_memo_type_t mtr_latch_type;
   bool latched [[maybe_unused]];
 
@@ -5936,7 +5934,7 @@ bool buf_page_free_stale(buf_pool_t *buf_pool, buf_page_t *bpage,
     return false;
   }
 
-  /* Hash lock is lower in order than the LRU list mutex, we have to release
+  /* Hash lock is lower in order than the topology latch, we have to release
   it in order to acquire the LRU mutex. To prevent other threads from freeing
   the stale block we increase the fix count so that the page can't be freed
   by other threads.
@@ -6729,7 +6727,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
             /* buf_page_init_for_read() makes the page hash-visible before
             linking it into the LRU list. Such a page is still io-fixed for
             read. Reading in_LRU_list is stable here: it is only modified
-            under LRU_list_mutex, which we hold. */
+            under topology-X, which we hold. */
             ut_a(block->page.was_io_fix_read());
             n_lru_add_pending++;
           } else {
@@ -7053,7 +7051,7 @@ static ulint buf_get_latched_pages_number_instance(buf_pool_t *buf_pool) {
         /* uncompressed page */
         break;
       case BUF_BLOCK_REMOVE_HASH:
-        /* We hold flush list but not LRU list mutex here.
+        /* We hold flush list but not topology latch here.
         Thus encountering BUF_BLOCK_REMOVE_HASH pages is
         possible.  */
         break;
