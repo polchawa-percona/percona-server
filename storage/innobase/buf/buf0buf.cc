@@ -3179,7 +3179,8 @@ void LRUGroupHp::adjust(const buf_lru_group_t *group) {
 
   /* We only support reverse traversal for now. */
   if (is_hp(group)) {
-    m_hp = UT_LIST_GET_PREV(LRU, m_hp);
+    m_hp.store(UT_LIST_GET_PREV(LRU, m_hp.load(std::memory_order_relaxed)),
+               std::memory_order_relaxed);
   }
 }
 
@@ -3190,11 +3191,13 @@ list (PS-11141 grouped LRU list).
 buf_lru_group_t *LRUGroupItr::start() {
   ut_ad(m_latch->owns_x());
 
-  if (!m_hp || !m_hp->old) {
-    m_hp = UT_LIST_GET_LAST(m_buf_pool->LRU);
+  auto *hp = m_hp.load(std::memory_order_relaxed);
+  if (hp == nullptr || !hp->old) {
+    hp = UT_LIST_GET_LAST(m_buf_pool->LRU);
+    m_hp.store(hp, std::memory_order_relaxed);
   }
 
-  return (m_hp);
+  return hp;
 }
 
 bool buf_pool_watch_is_sentinel(const buf_pool_t *buf_pool,

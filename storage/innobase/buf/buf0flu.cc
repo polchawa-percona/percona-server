@@ -1631,9 +1631,16 @@ static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
 
   ut_ad(flush_type != BUF_FLUSH_SINGLE_PAGE);
 
-  ut_ad(
-      (flush_type == BUF_FLUSH_LRU && buf_pool->LRU_topology_latch.owns_x()) ||
-      (flush_type == BUF_FLUSH_LIST && buf_flush_list_mutex_own(buf_pool)));
+  ut_ad((flush_type == BUF_FLUSH_LRU &&
+         buf_pool->LRU_topology_latch.owns_s_or_x()) ||
+        (flush_type == BUF_FLUSH_LIST && buf_flush_list_mutex_own(buf_pool)));
+  /* PS-11141 Requirement 9: whichever topology mode the caller holds for
+  BUF_FLUSH_LRU (buf_flush_LRU_list_batch()'s topology-S fast path, or
+  topology-X for its compressed/warm-up fallback), this function releases
+  and re-acquires that same mode around the neighbor-flush call below --
+  never a different one, since no S<->X upgrade path exists. */
+  const bool held_s =
+      flush_type == BUF_FLUSH_LRU && buf_pool->LRU_topology_latch.owns_s();
 
   if (flush_type == BUF_FLUSH_LRU) {
     block_mutex = buf_page_get_mutex(bpage);
@@ -1658,7 +1665,11 @@ static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
     buf_pool = buf_pool_from_bpage(bpage);
 
     if (flush_type == BUF_FLUSH_LRU) {
-      buf_pool->LRU_topology_latch.x_unlock();
+      if (held_s) {
+        buf_pool->LRU_topology_latch.s_unlock();
+      } else {
+        buf_pool->LRU_topology_latch.x_unlock();
+      }
     }
 
     const page_id_t page_id = bpage->id;
@@ -1673,7 +1684,11 @@ static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
     *count += buf_flush_try_neighbors(page_id, flush_type, *count, n_to_flush);
 
     if (flush_type == BUF_FLUSH_LRU) {
-      buf_pool->LRU_topology_latch.x_lock();
+      if (held_s) {
+        buf_pool->LRU_topology_latch.s_lock();
+      } else {
+        buf_pool->LRU_topology_latch.x_lock();
+      }
     } else {
       buf_flush_list_mutex_enter(buf_pool);
     }
@@ -1687,9 +1702,11 @@ static bool buf_flush_page_and_try_neighbors(buf_page_t *bpage,
     flushed = false;
   }
 
-  ut_ad(
-      (flush_type == BUF_FLUSH_LRU && buf_pool->LRU_topology_latch.owns_x()) ||
-      (flush_type == BUF_FLUSH_LIST && buf_flush_list_mutex_own(buf_pool)));
+  ut_ad((flush_type == BUF_FLUSH_LRU &&
+         buf_pool->LRU_topology_latch.owns_s_or_x()) ||
+        (flush_type == BUF_FLUSH_LIST && buf_flush_list_mutex_own(buf_pool)));
+  ut_ad(flush_type != BUF_FLUSH_LRU ||
+        held_s == buf_pool->LRU_topology_latch.owns_s());
 
   return (flushed);
 }
@@ -1751,13 +1768,56 @@ to this function there will be 'max' blocks in the free list.
 @param[in]      buf_pool        buffer pool instance
 @param[in]      max             desired number for blocks in the free_list
 @return batch result */
+/** True if bpage still looks like a legitimate, LRU-linked candidate worth
+handing to buf_flush_ready_for_replace()/buf_flush_ready_for_flush() (PS-11141
+Requirement 8/9). Callers reached this point via a topology-S snapshot taken
+without holding this page's group mutex the whole time (buf_flush_LRU_list_
+batch()'s pages_snapshot), or after a block_mutex gap during a topology mode
+switch -- in either case, a concurrent topology-S eviction elsewhere can have
+fully recycled this exact block descriptor for an unrelated fresh read in the
+meantime (the new page is hash-visible before being linked into the LRU).
+That is impossible under topology-X, which excludes every other topology
+user for its entire hold, so this check only ever matters for the topology-S
+callers introduced in this step. lru_group is checked rather than the
+debug-only in_LRU_list flag because this must be a real, release-build
+check; it is trustworthy here because, like in_LRU_list, it is only ever
+written while this page's block_mutex (held by the caller) is also held.
+@param[in]  bpage   control block; caller holds its block/zip mutex
+@return true if bpage is still a live, LRU-linked page */
+static inline bool buf_flush_lru_still_linked(const buf_page_t *bpage) {
+  return buf_page_in_file(bpage) && bpage->lru_group != nullptr;
+}
+
+/** Re-acquires topology-S after a call that may have left topology-X held
+(PS-11141 Requirement 9): buf_page_free_stale()/buf_LRU_free_page() release
+whichever mode they were entered under on success, but leave it held on
+failure, and the topology-X fallback branches below always enter under X.
+Either way, this restores the "topology-S held" invariant the rest of
+buf_flush_LRU_list_batch()'s scan relies on between candidates.
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_flush_lru_relock_s(buf_pool_t *buf_pool) {
+  if (buf_pool->LRU_topology_latch.owns_x()) {
+    buf_pool->LRU_topology_latch.x_unlock();
+  }
+  buf_pool->LRU_topology_latch.s_lock();
+}
+
 /** Evicts/flushes from buf_pool->LRU tail groups toward the head, up to
 `max` pages or until the free-list/LRU-length conditions no longer hold
 (PS-11141 grouped LRU list): a group is a batching unit, not an atomicity
 unit, so a candidate group's pages are each tried best-effort (ready-for-
 replace pages evicted, ready-for-flush pages dispatched, others skipped),
 exactly as the pre-grouping code tried each page in flat LRU order. Each
-group's pages[] array is snapshotted while LRU_list_mutex is held. */
+group's pages[] array is snapshotted under topology-S plus that group's own
+mutex (PS-11141 Requirement 9/Step 9); flush dispatch
+(buf_flush_page_and_try_neighbors()) and the eviction fast path
+(buf_LRU_free_page()) both operate under topology-S. Compressed pages
+(zip.data != nullptr), pages on unzip_LRU, stale pages, and warm-up (a
+short LRU) fall back to topology-X for their commit, one page at a time,
+mirroring the same carve-outs established for eviction in Step 8 -- no
+upgrade path exists between S and X, so each fallback drops S, takes X,
+redoes its own readiness check (state may have changed), and returns to S
+before the next candidate. */
 static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
                                                          ulint max) {
   ulint scanned = 0;
@@ -1773,10 +1833,11 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
            lru_len > BUF_LRU_MIN_LEN;
   };
 
+  buf_pool->LRU_topology_latch.s_lock();
   buf_lru_group_t *group = UT_LIST_GET_LAST(buf_pool->LRU);
 
   while (group != nullptr && should_continue()) {
-    ut_ad(buf_pool->LRU_topology_latch.owns_x());
+    ut_ad(buf_pool->LRU_topology_latch.owns_s());
     /* Hazard the PREDECESSOR up front, before touching this group's slots,
     so the scan unconditionally advances past this group next iteration --
     regardless of whether any work happened in it. Dispatching a flush (not
@@ -1790,11 +1851,17 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
     buf_LRU_adjust_group_hp() redirects the hazard (already pointing at
     the predecessor, not at `group`) to whatever remains valid; `group`
     itself is never dereferenced again after this point, only the
-    snapshot taken below. */
+    snapshot taken below. Reclaim can now run concurrently on a different
+    group while this scan holds only topology-S, but never on `group`
+    itself while its hazard is live (Requirement 8/9's deferred-reclaim
+    queue), and the reclaim thread's own topology-X excludes this thread's
+    topology-S for the instant it actually unlinks a group. */
     buf_lru_group_t *const prev_group = UT_LIST_GET_PREV(LRU, group);
     buf_pool->lru_hp.set(prev_group);
     std::array<buf_page_t *, BUF_LRU_GROUP_SIZE> pages_snapshot;
+    mutex_enter(&group->mutex);
     pages_snapshot = group->pages;
+    mutex_exit(&group->mutex);
     bool group_maybe_freed = false;
 
     for (uint32_t slot = 0; slot < BUF_LRU_GROUP_SIZE; ++slot) {
@@ -1809,35 +1876,75 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       ++scanned;
 
       auto block_mutex = buf_page_get_mutex(bpage);
-      /* Set whenever buf_pool->LRU_list_mutex was released and
-      re-acquired while handling this slot -- not just on a successful
-      evict, but also after dispatching a flush, since
-      buf_flush_page_and_try_neighbors() releases and re-acquires it
-      internally (around its call to buf_flush_try_neighbors()) whenever
-      the page was ready for flush, regardless of whether that call
-      itself evicts anything. Either kind of release opens a window in
-      which a concurrent thread (PS-11141 grouped LRU list: another
-      eviction, or a make-young drain's deferred pass) can empty and
-      reclaim -- free -- `group`, so `group` must not be dereferenced
-      again afterwards. */
+      /* Set whenever the topology latch was released and re-acquired while
+      handling this slot -- not just on a successful evict, but also after
+      dispatching a flush, since buf_flush_page_and_try_neighbors()
+      releases and re-acquires it internally (around its call to
+      buf_flush_try_neighbors()) whenever the page was ready for flush,
+      regardless of whether that call itself evicts anything. Either kind
+      of release opens a window in which a concurrent thread (PS-11141
+      grouped LRU list: another eviction, or a make-young drain's deferred
+      pass) can empty and reclaim -- free -- `group`, so `group` must not
+      be dereferenced again afterwards. */
       if (bpage->was_stale()) {
+        /* Stale-page eviction stays topology-X only: buf_page_free_stale()
+        (the 2-arg overload) asserts owns_x() unconditionally. */
+        buf_pool->LRU_topology_latch.s_unlock();
+        buf_pool->LRU_topology_latch.x_lock();
         if (buf_page_free_stale(buf_pool, bpage)) {
           ++evict_count;
           group_maybe_freed = true;
-          buf_pool->LRU_topology_latch.x_lock();
         }
+        buf_flush_lru_relock_s(buf_pool);
       } else {
         auto acquired = mutex_enter_nowait(block_mutex) == 0;
+        if (acquired && !buf_flush_lru_still_linked(bpage)) {
+          /* See buf_flush_lru_still_linked()'s comment: this snapshot slot
+          was recycled for an unrelated fresh read since it was taken.
+          Nothing to do with the current occupant. */
+          mutex_exit(block_mutex);
+          acquired = false;
+        }
 
         if (acquired && buf_flush_ready_for_replace(bpage)) {
           /* block is ready for eviction i.e., it is
           clean and is not IO-fixed or buffer fixed. */
-          if (buf_LRU_free_page(bpage, true)) {
-            ++evict_count;
-            group_maybe_freed = true;
-            buf_pool->LRU_topology_latch.x_lock();
+          const bool s_eligible =
+              bpage->zip.data == nullptr &&
+              !buf_page_belongs_to_unzip_LRU(bpage) &&
+              buf_pool->LRU_n_pages.load(std::memory_order_relaxed) >
+                  BUF_LRU_OLD_MIN_LEN;
+          if (s_eligible) {
+            if (buf_LRU_free_page(bpage, true)) {
+              ++evict_count;
+              group_maybe_freed = true;
+              buf_pool->LRU_topology_latch.s_lock();
+            } else {
+              mutex_exit(block_mutex);
+            }
           } else {
+            /* Compressed page, unzip_LRU member, or warm-up (Step 5/7's
+            carve-outs): fall back to topology-X. block_mutex must be
+            released before switching topology mode -- waiting for a
+            higher-level latch while holding a lower-level one is
+            forbidden (Requirement 2), and the topology latch sits above
+            block/zip mutexes in the ordering. Re-acquire block_mutex
+            under X and re-check readiness, since bpage's state may have
+            changed in the gap; buf_LRU_free_page() also re-validates
+            internally regardless. */
             mutex_exit(block_mutex);
+            buf_pool->LRU_topology_latch.s_unlock();
+            buf_pool->LRU_topology_latch.x_lock();
+            mutex_enter(block_mutex);
+            if (buf_flush_lru_still_linked(bpage) &&
+                buf_flush_ready_for_replace(bpage) &&
+                buf_LRU_free_page(bpage, true)) {
+              ++evict_count;
+              group_maybe_freed = true;
+            } else {
+              mutex_exit(block_mutex);
+            }
+            buf_flush_lru_relock_s(buf_pool);
           }
         } else if (acquired &&
                    buf_flush_ready_for_flush(bpage, BUF_FLUSH_LRU)) {
@@ -1853,7 +1960,7 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
       }
 
       ut_ad(!mutex_own(block_mutex));
-      ut_ad(buf_pool->LRU_topology_latch.owns_x());
+      ut_ad(buf_pool->LRU_topology_latch.owns_s());
 
       free_len = UT_LIST_GET_LEN(buf_pool->free);
       lru_len = buf_pool->LRU_n_pages;
@@ -1871,13 +1978,14 @@ static buf_flush_batch_result_t buf_flush_LRU_list_batch(buf_pool_t *buf_pool,
   }
 
   buf_pool->lru_hp.set(nullptr);
+  buf_pool->LRU_topology_latch.s_unlock();
 
   /* We keep track of all flushes happening as part of LRU
   flush. When estimating the desired rate at which flush_list
   should be flushed, we factor in this value. */
   buf_lru_flush_page_count += count;
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
 
   return {count, evict_count, scanned};
 }
@@ -1891,14 +1999,23 @@ static buf_flush_batch_result_t buf_do_LRU_batch(buf_pool_t *buf_pool,
                                                  ulint max) {
   buf_flush_batch_result_t result{};
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
 
-  if (buf_LRU_evict_from_unzip_LRU(buf_pool)) {
+  /* PS-11141 Requirement 9: unzip_LRU eviction stays topology-X only --
+  Requirement 11's dedicated unzip_LRU latch is not yet implemented
+  (deferred, see Step 5/11), so both the eligibility check and the batch
+  itself still need it. buf_flush_LRU_list_batch() below manages its own
+  topology-S acquisition independently; the two sub-batches no longer share
+  one continuous topology hold, since nothing between them depends on that. */
+  buf_pool->LRU_topology_latch.x_lock();
+  const bool evict_unzip = buf_LRU_evict_from_unzip_LRU(buf_pool);
+  if (evict_unzip) {
     const auto unzip_result = buf_free_from_unzip_LRU_list_batch(buf_pool, max);
     result.n_flushed += unzip_result.n_flushed;
     result.n_evicted += unzip_result.n_evicted;
     result.n_scanned += unzip_result.n_scanned;
   }
+  buf_pool->LRU_topology_latch.x_unlock();
 
   const ulint done = result.n_flushed + result.n_evicted;
   if (max > done) {
@@ -2007,12 +2124,12 @@ static buf_flush_batch_result_t buf_flush_batch(buf_pool_t *buf_pool,
   buf_flush_batch_result_t result{};
 
   /* Note: The buffer pool mutexes is released and reacquired within
-  the flush functions. */
+  the flush functions. buf_do_LRU_batch() manages its own topology
+  acquisition (PS-11141 Requirement 9): topology-X for unzip_LRU eviction,
+  topology-S for buf_flush_LRU_list_batch()'s fast path. */
   switch (flush_type) {
     case BUF_FLUSH_LRU:
-      buf_pool->LRU_topology_latch.x_lock();
       result = buf_do_LRU_batch(buf_pool, min_n);
-      buf_pool->LRU_topology_latch.x_unlock();
       break;
     case BUF_FLUSH_LIST:
       /* The flush list path only flushes; nothing is evicted here. */

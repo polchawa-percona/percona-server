@@ -2211,33 +2211,47 @@ from being unlinked (and its memory freed) by a concurrent thread while the
 scanning thread has (transiently) released buf_pool->LRU_list_mutex -- e.g.
 inside buf_LRU_free_page()/buf_page_free_stale(), which release it only as
 their very last step. Only forward declares are needed here; buf_lru_group_t
-is defined later in this file. */
+is defined later in this file.
+
+Backs five buf_pool_t fields. As of PS-11141 Step 9, buf_pool->lru_hp (the
+LRU flush batch's hazard) is read/written under topology-S plus the
+per-group snapshot pattern established in Steps 6-8; the other four
+(lru_scan_itr, single_scan_itr, lru_compact_hp, LRU_empty_scan_cursor)
+remain topology-X only for now (deferred scans/compaction). The assert
+below is therefore the weaker owns_s_or_x() for every instance -- see each
+field's own declaration for which mode its scan actually uses. m_hp is
+atomic because buf_LRU_adjust_group_hp() (the topology-X reclaim path)
+writes it via adjust() concurrently with a topology-S reader's own
+non-mutating get()/is_hp() calls; relaxed ordering suffices because S and X
+mutual exclusion is what actually orders the two kinds of access -- the
+same argument used throughout this effort for buf_pool->LRU_fill_group and
+buf_lru_group_t::n_maintenance_refs. */
 class LRUGroupHp {
  public:
   LRUGroupHp(const buf_pool_t *buf_pool, const Buf_LRU_topology_latch *latch)
-      : m_buf_pool(buf_pool), m_latch(latch), m_hp() {}
+      : m_buf_pool(buf_pool), m_latch(latch), m_hp(nullptr) {}
 
   virtual ~LRUGroupHp() = default;
 
   /** Get current value */
   buf_lru_group_t *get() const {
-    ut_ad(m_latch->owns_x());
-    return m_hp;
+    ut_ad(m_latch->owns_s_or_x());
+    return m_hp.load(std::memory_order_relaxed);
   }
 
   /** Set current value
   @param group  group to be set as hp */
   void set(buf_lru_group_t *group) {
-    ut_ad(m_latch->owns_x());
-    m_hp = group;
+    ut_ad(m_latch->owns_s_or_x());
+    m_hp.store(group, std::memory_order_relaxed);
   }
 
   /** Checks if a group is the hp
   @param group  group to be compared
   @return true if it is hp */
   bool is_hp(const buf_lru_group_t *group) {
-    ut_ad(m_latch->owns_x());
-    return group == m_hp;
+    ut_ad(m_latch->owns_s_or_x());
+    return group == m_hp.load(std::memory_order_relaxed);
   }
 
   /** Adjust the value of hp. This happens when some other thread working
@@ -2260,7 +2274,7 @@ class LRUGroupHp {
   const Buf_LRU_topology_latch *m_latch;
 
   /** hazard pointer. */
-  buf_lru_group_t *m_hp;
+  std::atomic<buf_lru_group_t *> m_hp;
 };
 
 /** Special purpose iterator over buf_pool->LRU groups, mirroring LRUItr but

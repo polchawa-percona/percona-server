@@ -2800,7 +2800,19 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
   }
 
   if (!adjust_old) {
-    ut_ad(buf_pool->LRU_n_pages >= BUF_LRU_OLD_MIN_LEN);
+    /* PS-11141 Requirement 8/9: no assertion on LRU_n_pages here. The
+    topology-S eligibility check that led to adjust_old == false
+    (buf_LRU_n_pages > BUF_LRU_OLD_MIN_LEN, checked by the caller before
+    ever reaching this function) is a heuristic snapshot, not a reserved
+    budget: multiple concurrent topology-S evictors can each pass it and
+    then decrement concurrently, collectively taking the count below the
+    threshold even though no single one observed a violation. That is
+    harmless here -- boundary convergence is already deferred whenever
+    adjust_old is false, exactly like the topology-S insertion fast path
+    (buf_LRU_try_append_fresh_S()), and the same natural convergence points
+    (group reclaim, the next topology-X path, buf_LRU_validate_instance()'s
+    forced adjustment) apply regardless of which side of the threshold the
+    count transiently sits on. */
     return;
   }
 
@@ -3977,12 +3989,36 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   DBUG_PRINT("ib_buf", ("free page " UINT32PF ":" UINT32PF, bpage->id.space(),
                         bpage->id.page_no()));
 
+  /* PS-11141 Requirement 8/9: captured before releasing block_mutex below,
+  so the re-check after reacquiring it can detect whether a concurrent
+  topology-S caller of this same function (another on-demand eviction, or
+  the LRU flush scan) won the race for this exact page in the meantime --
+  fully freeing it back to the free list, or even recycling the
+  descriptor for an unrelated fresh read, before we got block_mutex back.
+  Impossible under topology-X, which excludes every other topology user
+  for this call's entire duration; a real, observed race once multiple
+  concurrent topology-S callers exist. */
+  const page_id_t original_id = bpage->id;
+  const auto original_generation = bpage->residency_generation;
+
   mutex_exit(block_mutex);
   DBUG_EXECUTE_IF("buf_lru_free_page_delay_block_mutex_reacquisition",
                   std::this_thread::sleep_for(std::chrono::microseconds(100)););
 
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
   mutex_enter(block_mutex);
+
+  if (!buf_page_in_file(bpage) || bpage->id != original_id ||
+      bpage->residency_generation != original_generation) {
+    rw_lock_x_unlock(hash_lock);
+
+    if (b != nullptr) {
+      buf_page_free_descriptor(b);
+    }
+
+    return (false);
+  }
+
   is_dirty = bpage->is_dirty();
 
   if (!buf_page_can_relocate(bpage) ||
