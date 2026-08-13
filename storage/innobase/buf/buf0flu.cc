@@ -685,7 +685,10 @@ void buf_flush_insert_sorted_into_flush_list(
 
 bool buf_flush_ready_for_replace(const buf_page_t *bpage) {
   ut_d(auto buf_pool = buf_pool_from_bpage(bpage));
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  /* PS-11141 Requirement 8: buf_LRU_try_evict_tail_identity() may call this
+  under topology-S. The body only reads bpage's own state via block_mutex
+  (asserted below), so either topology mode is equally sufficient. */
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
   ut_ad(bpage->in_LRU_list);
 

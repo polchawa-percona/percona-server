@@ -1555,6 +1555,10 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
       UT_NEW_THIS_FILE_PSI_KEY, BUF_LRU_PROMOTE_QUEUE_CAPACITY);
   buf_pool->LRU_accept_promotions.store(true, std::memory_order_relaxed);
 
+  buf_pool->LRU_empty_candidates =
+      ut::new_withkey<ut::Bounded_mpsc_queue<buf_lru_group_t *>>(
+          UT_NEW_THIS_FILE_PSI_KEY, BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP);
+
   buf_pool->try_LRU_scan = true;
 
   /* Dirty Page Tracking is disabled by default. */
@@ -1596,9 +1600,6 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
   Requirement 9). */
   new (&buf_pool->LRU_empty_scan_cursor)
       LRUGroupHp(buf_pool, &buf_pool->LRU_topology_latch);
-  buf_pool->LRU_empty_candidates.fill(nullptr);
-  buf_pool->LRU_empty_candidates_head = 0;
-  buf_pool->LRU_empty_candidates_len = 0;
   buf_pool->LRU_empty_scan_pending = false;
 
   /* Create the low-water reserve before foreground LRU activity starts. */
@@ -1623,6 +1624,8 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   buf_pool->LRU_promote_dedup = nullptr;
   ut::delete_(buf_pool->LRU_promote_queue);
   buf_pool->LRU_promote_queue = nullptr;
+  ut::delete_(buf_pool->LRU_empty_candidates);
+  buf_pool->LRU_empty_candidates = nullptr;
 
   mutex_free(&buf_pool->LRU_list_mutex);
   buf_pool->LRU_topology_latch.free();

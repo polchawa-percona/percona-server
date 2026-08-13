@@ -1197,6 +1197,19 @@ static bool buf_LRU_provisionally_replaceable(const buf_page_t *bpage) {
   return !bpage->is_dirty();
 }
 
+/** Releases whichever topology mode the caller currently holds (PS-11141
+Requirement 8): buf_LRU_free_page() and buf_LRU_try_evict_tail_identity() may
+be entered under either mode, so their internal unlocks must match instead
+of assuming topology-X.
+@param[in,out]  buf_pool  buffer pool instance */
+static inline void buf_lru_topology_unlock(buf_pool_t *buf_pool) {
+  if (buf_pool->LRU_topology_latch.owns_x()) {
+    buf_pool->LRU_topology_latch.x_unlock();
+  } else {
+    buf_pool->LRU_topology_latch.s_unlock();
+  }
+}
+
 /** Try to evict one snapshotted tail identity after the list mutex was dropped.
 On success, LRU_list_mutex is released by the free path. On failure, neither
 LRU_list_mutex nor the block mutex is held.
@@ -1207,7 +1220,7 @@ LRU_list_mutex nor the block mutex is held.
 static bool buf_LRU_try_evict_tail_identity(buf_pool_t *buf_pool,
                                             const buf_lru_promote_t &identity,
                                             bool exhaustive) {
-  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
 
   rw_lock_t *hash_lock = nullptr;
   buf_page_t *bpage =
@@ -1243,31 +1256,66 @@ static bool buf_LRU_try_evict_tail_identity(buf_pool_t *buf_pool,
     return false;
   }
 
-  /* Re-resolve under LRU_list_mutex. Do not retain the earlier descriptor
-  pointer: the page may have been evicted and the identity reused. */
-  buf_pool->LRU_topology_latch.x_lock();
-  bpage = buf_page_hash_get_s_locked(buf_pool, identity.page_id, &hash_lock);
-  if (bpage == nullptr || buf_pool_watch_is_sentinel(buf_pool, bpage) ||
-      bpage->residency_generation != identity.residency_generation ||
-      !buf_page_in_file(bpage) || bpage->lru_group == nullptr) {
-    if (bpage != nullptr) {
-      rw_lock_s_unlock(hash_lock);
-    }
-    buf_pool->LRU_topology_latch.x_unlock();
-    return false;
-  }
+  /* PS-11141 Requirement 8: try topology-S first for the common case (a
+  plain, uncompressed FILE_PAGE, once the LRU is long enough that
+  buf_LRU_remove_block()'s topology-S path may skip
+  buf_LRU_old_adjust_len() -- see its doc comment). Warm-up is rare and
+  cheap to check without any lock. Every
+  other disqualifying condition (unzip_LRU membership, a still-attached
+  zip.data, a stale page needing buf_page_free_stale()'s topology-X-only
+  path) can only be observed once the page is re-resolved and its block
+  mutex held below, so on that discovery this retries once under
+  topology-X instead of trying to upgrade -- no upgrade path exists between
+  S and X. */
+  bool try_s = buf_pool->LRU_n_pages.load(std::memory_order_relaxed) >
+               BUF_LRU_OLD_MIN_LEN;
 
-  /* Keep-zip eviction can replace the descriptor while preserving
-  residency_generation; rebind the page mutex to the current object. */
-  block_mutex = buf_page_get_mutex(bpage);
-  if (exhaustive) {
-    mutex_enter(block_mutex);
-  } else if (mutex_enter_nowait(block_mutex) != 0) {
+  for (;;) {
+    /* Re-resolve under the topology latch. Do not retain the earlier
+    descriptor pointer: the page may have been evicted and the identity
+    reused. */
+    if (try_s) {
+      buf_pool->LRU_topology_latch.s_lock();
+    } else {
+      buf_pool->LRU_topology_latch.x_lock();
+    }
+    bpage = buf_page_hash_get_s_locked(buf_pool, identity.page_id, &hash_lock);
+    if (bpage == nullptr || buf_pool_watch_is_sentinel(buf_pool, bpage) ||
+        bpage->residency_generation != identity.residency_generation ||
+        !buf_page_in_file(bpage) || bpage->lru_group == nullptr) {
+      if (bpage != nullptr) {
+        rw_lock_s_unlock(hash_lock);
+      }
+      buf_lru_topology_unlock(buf_pool);
+      return false;
+    }
+
+    /* Keep-zip eviction can replace the descriptor while preserving
+    residency_generation; rebind the page mutex to the current object. */
+    block_mutex = buf_page_get_mutex(bpage);
+    if (exhaustive) {
+      mutex_enter(block_mutex);
+    } else if (mutex_enter_nowait(block_mutex) != 0) {
+      rw_lock_s_unlock(hash_lock);
+      buf_lru_topology_unlock(buf_pool);
+      return false;
+    }
     rw_lock_s_unlock(hash_lock);
-    buf_pool->LRU_topology_latch.x_unlock();
-    return false;
+
+    if (try_s && (bpage->was_stale() || bpage->zip.data != nullptr ||
+                  buf_page_belongs_to_unzip_LRU(bpage))) {
+      /* Compressed-page and stale-page eviction stay topology-X only
+      (Step 5 deferral; buf_page_free_stale() itself asserts owns_x()).
+      Release everything and retry from scratch under topology-X: no
+      upgrade path exists between S and X. */
+      mutex_exit(block_mutex);
+      buf_pool->LRU_topology_latch.s_unlock();
+      try_s = false;
+      continue;
+    }
+
+    break;
   }
-  rw_lock_s_unlock(hash_lock);
 
   bool freed = false;
   if (bpage->id == identity.page_id &&
@@ -1293,11 +1341,11 @@ static bool buf_LRU_try_evict_tail_identity(buf_pool_t *buf_pool,
   }
 
   if (!freed) {
-    buf_pool->LRU_topology_latch.x_unlock();
+    buf_lru_topology_unlock(buf_pool);
   }
 
   ut_ad(!mutex_own(block_mutex));
-  ut_ad(!buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(!buf_pool->LRU_topology_latch.owns_s_or_x());
   return freed;
 }
 
@@ -1991,7 +2039,18 @@ static void buf_unzip_LRU_remove_block_if_needed(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
   ut_ad(buf_page_in_file(bpage));
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  /* PS-11141 Requirement 8: buf_LRU_remove_block_finish() may now be
+  reached under topology-S (via buf_LRU_remove_block()'s topology-S fast
+  path). unzip_LRU itself remains topology-X-only territory (Requirement
+  11's dedicated latch is not yet implemented; deferred throughout this
+  effort, see Step 5), so the topology-S caller must have already ruled
+  out buf_page_belongs_to_unzip_LRU(bpage) -- this call is then a
+  structural no-op, and the relaxed assertion below only documents that
+  either mode is safe to enter with, not that unzip_LRU mutation itself
+  runs under S. */
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_x() ||
+        !buf_page_belongs_to_unzip_LRU(bpage));
 
   if (buf_page_belongs_to_unzip_LRU(bpage)) {
     buf_block_t *block = reinterpret_cast<buf_block_t *>(bpage);
@@ -2317,14 +2376,25 @@ struct Detach_from_group_result {
 
 /** Vacate a page's slot in its current LRU group.
 
-The caller holds LRU_list_mutex, which keeps the slot and page back-pointer
-changes atomic for all grouped-LRU readers.
+Under topology-X the topology latch alone excludes every other mutator, so
+no group mutex is needed here. As of PS-11141 Requirement 8, the caller may
+instead hold topology-S plus this page's block/zip mutex; in that case the
+caller (buf_LRU_remove_block()) must also hold this specific group's mutex
+across this call AND across its own subsequent handling of a newly-emptied
+group (buf_LRU_group_became_empty()'s fill-pointer clearing and publish) --
+releasing it any earlier would let a concurrent topology-S appender
+(buf_LRU_try_append_fresh_S()) revalidate and append into the group in the
+gap, silently un-emptying it while it is being published as a reclaim
+candidate. This function itself neither takes nor releases that mutex; it
+only relies on the caller already holding it when required.
 @param[in,out]  bpage   control block, still linked into its group
 @return see Detach_from_group_result */
 static inline Detach_from_group_result buf_LRU_detach_from_group(
     buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_x() ||
+        mutex_own(&bpage->lru_group->mutex));
   buf_lru_group_t *group = bpage->lru_group;
   ut_a(group);
 
@@ -2361,8 +2431,8 @@ static inline Detach_from_group_result buf_LRU_detach_from_group(
 
   /* A sparse survivor may merge directly, while removing an empty group can
   make its former neighbors newly adjacent and mergeable. */
-  buf_pool->LRU_compaction_pending = true;
-  ++buf_pool->LRU_compaction_epoch;
+  buf_pool->LRU_compaction_pending.store(true, std::memory_order_relaxed);
+  buf_pool->LRU_compaction_epoch.fetch_add(1, std::memory_order_relaxed);
 
   return {false, now_empty, was_old, group};
 }
@@ -2479,32 +2549,35 @@ buf_pool->LRU_empty_candidates, taking the maintenance reference that keeps
 it alive until buf_LRU_process_empty_candidates() consumes it. On overflow,
 falls back to the persistent fallback scan instead (PS-11141 Requirement 9):
 does not block or allocate.
+
+Callable under topology-X (no group mutex needed -- X already excludes every
+other mutator) or, as of PS-11141 Requirement 8, under topology-S plus the
+group's own mutex (via buf_LRU_group_became_empty()): either way, the caller
+is the only thread that can be publishing this specific group (only one
+thread ever observes a given group's transition to empty), so
+n_maintenance_refs stays a plain, non-atomic counter -- see its declaration.
 @param[in,out]  buf_pool  buffer pool instance
 @param[in,out]  group     empty, LINKED group with empty_candidate_pending
                           already set by the caller */
 static void buf_LRU_enqueue_empty_candidate(buf_pool_t *buf_pool,
                                             buf_lru_group_t *group) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(group->n_pages == 0);
   ut_ad(group->state == buf_lru_group_state_t::LINKED);
   ut_ad(group->empty_candidate_pending.load(std::memory_order_relaxed));
 
-  if (buf_pool->LRU_empty_candidates_len >= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP) {
+  if (buf_pool->LRU_empty_candidates->try_push(group) ==
+      ut::Bounded_mpsc_push_result::full) {
     /* Overflow: this group stays pending and LINKED, but untracked by the
     queue. The fallback scan below will find it via n_pages == 0 &&
     empty_candidate_pending, so no reference is needed for this path --
     there is no raw pointer sitting outside the natural buf_pool->LRU
     traversal that could go stale. */
-    buf_pool->LRU_empty_scan_pending = true;
+    buf_pool->LRU_empty_scan_pending.store(true, std::memory_order_relaxed);
     return;
   }
 
   group->n_maintenance_refs++;
-  const size_t tail = (buf_pool->LRU_empty_candidates_head +
-                       buf_pool->LRU_empty_candidates_len) %
-                      BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
-  buf_pool->LRU_empty_candidates[tail] = group;
-  buf_pool->LRU_empty_candidates_len++;
 }
 
 /** Publishes a newly-emptied, still-LINKED group as a reclaim candidate
@@ -2514,7 +2587,7 @@ group already marked pending is not published twice.
 @param[in,out]  group     empty, LINKED group */
 static void buf_LRU_publish_empty_candidate(buf_pool_t *buf_pool,
                                             buf_lru_group_t *group) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(group->n_pages == 0);
   ut_ad(group->state == buf_lru_group_state_t::LINKED);
 
@@ -2561,7 +2634,7 @@ resuming from LRU_empty_scan_cursor across bounded passes.
 static void buf_LRU_scan_for_empty_groups(buf_pool_t *buf_pool, size_t budget) {
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
-  if (!buf_pool->LRU_empty_scan_pending) {
+  if (!buf_pool->LRU_empty_scan_pending.load(std::memory_order_relaxed)) {
     return;
   }
 
@@ -2590,7 +2663,7 @@ static void buf_LRU_scan_for_empty_groups(buf_pool_t *buf_pool, size_t budget) {
 
   if (group == nullptr) {
     /* Reached the head: one full pass complete. */
-    buf_pool->LRU_empty_scan_pending = false;
+    buf_pool->LRU_empty_scan_pending.store(false, std::memory_order_relaxed);
   }
 }
 
@@ -2606,15 +2679,12 @@ bool buf_LRU_process_empty_candidates(buf_pool_t *buf_pool, size_t budget) {
   ut_ad(buf_pool->LRU_topology_latch.owns_x());
 
   size_t processed = 0;
-  while (processed < budget && buf_pool->LRU_empty_candidates_len > 0) {
-    buf_lru_group_t *group =
-        buf_pool->LRU_empty_candidates[buf_pool->LRU_empty_candidates_head];
-    buf_pool->LRU_empty_candidates[buf_pool->LRU_empty_candidates_head] =
-        nullptr;
-    buf_pool->LRU_empty_candidates_head =
-        (buf_pool->LRU_empty_candidates_head + 1) %
-        BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
-    buf_pool->LRU_empty_candidates_len--;
+  while (processed < budget) {
+    auto popped = buf_pool->LRU_empty_candidates->try_pop();
+    if (!popped.has_value()) {
+      break;
+    }
+    buf_lru_group_t *group = *popped;
     ++processed;
 
     ut_a(group->n_maintenance_refs > 0);
@@ -2624,27 +2694,36 @@ bool buf_LRU_process_empty_candidates(buf_pool_t *buf_pool, size_t budget) {
 
   buf_LRU_scan_for_empty_groups(buf_pool, budget);
 
-  return buf_pool->LRU_empty_candidates_len > 0 ||
-         buf_pool->LRU_empty_scan_pending;
+  return !buf_pool->LRU_empty_candidates->empty() ||
+         buf_pool->LRU_empty_scan_pending.load(std::memory_order_relaxed);
 }
 
 /** Decides whether a newly-emptied, still-LINKED group can be reclaimed
 inline or must be deferred to buf_pool->LRU_empty_candidates (PS-11141
-Requirement 8/9). Today this always takes the inline path in production:
-every current caller holds topology-X for the group's entire empty-to-gone
-transition, so buf_lru_group_has_live_hazard() is always false here (a
-live hazard only ever targets a group's *neighbor*, precisely so the
-group under examination stays freely reclaimable -- see
-buf_flush_LRU_list_batch()). The deferred path exists so it has a real,
-testable consumer before Step 6+ gives it a genuine topology-S producer;
-buf_lru_group_force_deferred_reclaim forces it for that purpose.
+Requirement 8/9).
+
+Under topology-X, this takes the inline path whenever
+buf_lru_group_has_live_hazard() is false for the group (a live hazard only
+ever targets a group's *neighbor*, precisely so the group under examination
+stays freely reclaimable -- see buf_flush_LRU_list_batch()).
+buf_lru_group_force_deferred_reclaim forces the deferred path for testing.
+
+Under topology-S (PS-11141 Requirement 8, via buf_LRU_remove_block()'s
+topology-S fast path), inline reclaim is never attempted: unlinking a group
+from buf_pool->LRU mutates the topology itself, which requires topology-X.
+Every group observed empty under topology-S is therefore unconditionally
+published for a later topology-X maintenance batch to revalidate and
+reclaim -- the hazard check that lets the topology-X path skip the queue
+would be wasted work here, since that path is unreachable anyway.
 @param[in,out]  buf_pool  buffer pool instance
-@param[in,out]  group     empty group (caller observes group->n_pages == 0
-                          under LRU_list_mutex); must not be referenced
-                          again by the caller after this call */
+@param[in,out]  group     empty group; caller holds this group's mutex when
+                          holding topology-S (see buf_LRU_remove_block()),
+                          or topology-X alone otherwise; must not be
+                          referenced again by the caller after this call */
 static void buf_LRU_group_became_empty(buf_pool_t *buf_pool,
                                        buf_lru_group_t *group) {
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_x() || mutex_own(&group->mutex));
   ut_ad(group->n_pages == 0);
 
   /* An empty group must never remain a fill target, whether it is
@@ -2662,8 +2741,11 @@ static void buf_LRU_group_became_empty(buf_pool_t *buf_pool,
     buf_pool->LRU_young_fill_group = nullptr;
   }
 
-  bool defer = buf_lru_group_has_live_hazard(buf_pool, group);
-  DBUG_EXECUTE_IF("buf_lru_group_force_deferred_reclaim", defer = true;);
+  bool defer = true;
+  if (buf_pool->LRU_topology_latch.owns_x()) {
+    defer = buf_lru_group_has_live_hazard(buf_pool, group);
+    DBUG_EXECUTE_IF("buf_lru_group_force_deferred_reclaim", defer = true;);
+  }
 
   if (defer) {
     buf_LRU_publish_empty_candidate(buf_pool, group);
@@ -2674,20 +2756,32 @@ static void buf_LRU_group_became_empty(buf_pool_t *buf_pool,
 }
 
 /** Complete block removal after its group slot was vacated.
+
+Callable under topology-X alone, or (PS-11141 Requirement 8) under
+topology-S plus this group's mutex, held by the caller across this entire
+call (buf_LRU_remove_block()) -- required so buf_LRU_group_became_empty()'s
+fill-pointer clearing and publish, below, cannot race a concurrent
+topology-S appender revalidating the same group. adjust_old must be false
+under topology-S: see buf_LRU_remove_block()'s comment for why boundary
+convergence is deliberately deferred there.
 @param[in]      bpage           the same page passed to the preceding
                                 buf_LRU_detach_from_group() call
 @param[in]      group           bpage->lru_group as observed before that
                                 call (bpage->lru_group is nullptr by now)
 @param[in]      was_old         buf_page_is_old(bpage) as observed before
                                 that call
-@param[in]      group_now_empty return value of that call */
+@param[in]      group_now_empty return value of that call
+@param[in]      adjust_old      whether to run the LRU_old boundary
+                                maintenance below; must be false whenever
+                                the caller holds topology-S */
 static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
                                                buf_lru_group_t *group,
                                                bool was_old,
                                                bool group_now_empty,
                                                bool adjust_old) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
+  ut_ad(adjust_old ? buf_pool->LRU_topology_latch.owns_x() : true);
 
   /* Cleared under LRU_list_mutex after the slot and back-pointer update. */
   ut_d(bpage->in_LRU_list = false);
@@ -2738,8 +2832,27 @@ static inline void buf_LRU_remove_block_finish(buf_page_t *bpage,
 
 /** Removes a block from the LRU list (PS-11141 grouped LRU list): vacates
 its slot in its group, and if that empties the group, unlinks and frees the
-group. buf_pool->LRU_list_mutex is held throughout by every current caller,
-so detach and list bookkeeping run back-to-back with no deferral.
+group under topology-X.
+
+As of PS-11141 Requirement 8, the caller may instead hold topology-S plus
+this page's block/zip mutex -- buf_LRU_try_evict_tail_identity() does so
+for the common case (a plain, uncompressed FILE_PAGE, once the LRU is long
+enough that boundary maintenance may be deferred). This function then takes
+and holds the page's group mutex across both the detach and, if the group
+empties, buf_LRU_group_became_empty()'s fill-pointer clearing and publish
+-- releasing it any earlier would let a concurrent topology-S appender
+(buf_LRU_try_append_fresh_S()) revalidate and append into the group in the
+gap, silently un-emptying it while it is being published as a reclaim
+candidate. adjust_old is passed as false in that case: deliberately does
+not call buf_LRU_old_adjust_len(), for the same reason
+buf_LRU_try_append_fresh_S() does not on the insertion side -- letting every
+topology-S eviction also probe/adjust the old/young boundary would
+reintroduce the pool-wide serialization this step exists to remove.
+Convergence instead happens where it already does on the topology-X-only
+paths: buf_LRU_reclaim_empty_group() shifts the boundary by one group
+whenever the reclaimed group is the boundary group, and
+buf_LRU_validate_instance() forces one bounded adjustment before its
+ratio-tolerance assertion.
 @param[in]      bpage   control block
 @return false if the page is mid-promotion in a drain's private staging
         group and nothing was mutated (PS-11141 Requirement 16); true if
@@ -2747,7 +2860,7 @@ so detach and list bookkeeping run back-to-back with no deferral.
 static inline bool buf_LRU_remove_block(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
 
   ut_a(buf_page_in_file(bpage));
 
@@ -2756,13 +2869,25 @@ static inline bool buf_LRU_remove_block(buf_page_t *bpage) {
   buf_lru_group_t *group = bpage->lru_group;
   ut_a(group);
 
+  const bool under_s = buf_pool->LRU_topology_latch.owns_s();
+  if (under_s) {
+    mutex_enter(&group->mutex);
+  }
+
   const auto detached = buf_LRU_detach_from_group(bpage);
   if (detached.skipped_staging) {
+    if (under_s) {
+      mutex_exit(&group->mutex);
+    }
     return false;
   }
 
   buf_LRU_remove_block_finish(bpage, group, detached.was_old,
-                              detached.group_now_empty, true);
+                              detached.group_now_empty, !under_s);
+
+  if (under_s) {
+    mutex_exit(&group->mutex);
+  }
   return true;
 }
 
@@ -3550,8 +3675,8 @@ bool buf_LRU_drain_promote_queue(buf_pool_t *buf_pool) {
     once per page, matching Requirement 6's "at most a fixed number of
     ... steps" batching -- this field is a hint for the background
     compactor, not a correctness-critical exact count. */
-    buf_pool->LRU_compaction_pending = true;
-    ++buf_pool->LRU_compaction_epoch;
+    buf_pool->LRU_compaction_pending.store(true, std::memory_order_relaxed);
+    buf_pool->LRU_compaction_epoch.fetch_add(1, std::memory_order_relaxed);
 
     /* buf_lru_group_create() deliberately assigns no reuse_generation --
     that counter is protected by topology-X (see buf_lru_group_alloc()),
@@ -3679,7 +3804,7 @@ bool buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool) {
 
   buf_pool->LRU_topology_latch.x_lock();
 
-  if (!buf_pool->LRU_compaction_pending) {
+  if (!buf_pool->LRU_compaction_pending.load(std::memory_order_relaxed)) {
     buf_pool->LRU_topology_latch.x_unlock();
     const bool maintenance_pending =
         buf_LRU_maintain_group_cache(buf_pool, false);
@@ -3692,15 +3817,18 @@ bool buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool) {
   buf_lru_group_t *right = buf_pool->lru_compact_hp.get();
   if (right == nullptr) {
     right = UT_LIST_GET_LAST(buf_pool->LRU);
-    buf_pool->LRU_compaction_sweep_epoch = buf_pool->LRU_compaction_epoch;
+    buf_pool->LRU_compaction_sweep_epoch =
+        buf_pool->LRU_compaction_epoch.load(std::memory_order_relaxed);
     buf_pool->LRU_compaction_retry = false;
   }
 
   const auto finish_sweep = [buf_pool]() {
     buf_pool->lru_compact_hp.set(nullptr);
-    buf_pool->LRU_compaction_pending =
-        buf_pool->LRU_compaction_epoch != buf_pool->LRU_compaction_sweep_epoch;
-    buf_pool->LRU_compaction_pending |= buf_pool->LRU_compaction_retry;
+    bool pending =
+        buf_pool->LRU_compaction_epoch.load(std::memory_order_relaxed) !=
+        buf_pool->LRU_compaction_sweep_epoch;
+    pending |= buf_pool->LRU_compaction_retry;
+    buf_pool->LRU_compaction_pending.store(pending, std::memory_order_relaxed);
   };
 
   while (right != nullptr && examined < BUF_LRU_COMPACT_SCAN_BUDGET &&
@@ -3741,12 +3869,14 @@ bool buf_LRU_compact_sparse_groups(buf_pool_t *buf_pool) {
   runnable work now. An epoch change or a persistent cursor still represents
   immediately runnable compaction. */
   const bool hazard_only_retry =
-      buf_pool->LRU_compaction_pending &&
+      buf_pool->LRU_compaction_pending.load(std::memory_order_relaxed) &&
       buf_pool->lru_compact_hp.get() == nullptr &&
       buf_pool->LRU_compaction_retry &&
-      buf_pool->LRU_compaction_epoch == buf_pool->LRU_compaction_sweep_epoch;
+      buf_pool->LRU_compaction_epoch.load(std::memory_order_relaxed) ==
+          buf_pool->LRU_compaction_sweep_epoch;
   const bool compaction_runnable =
-      buf_pool->LRU_compaction_pending && !hazard_only_retry;
+      buf_pool->LRU_compaction_pending.load(std::memory_order_relaxed) &&
+      !hazard_only_retry;
   buf_pool->LRU_topology_latch.x_unlock();
   const bool maintenance_pending =
       buf_LRU_maintain_group_cache(buf_pool, false);
@@ -3787,7 +3917,13 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   auto block_mutex = buf_page_get_mutex(bpage);
   auto hash_lock = buf_page_hash_lock_get(buf_pool, bpage->id);
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  /* PS-11141 Requirement 8: the caller may hold either topology mode.
+  buf_LRU_try_evict_tail_identity() holds topology-S for the common,
+  uncompressed FILE_PAGE case; every other caller (the keep-zip path via
+  zip == false, admin/error paths) still holds topology-X. Whichever mode
+  is held on entry is the mode this function unlocks internally on its
+  success paths below -- see buf_lru_topology_unlock(). */
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(mutex_own(block_mutex));
 
   if (!buf_page_can_relocate(bpage)) {
@@ -3893,7 +4029,7 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   ut_ad(b == nullptr || (!zip && bpage->zip.data != nullptr));
 
   if (!buf_LRU_block_remove_hashed(bpage, zip, false, b != nullptr)) {
-    buf_pool->LRU_topology_latch.x_unlock();
+    buf_lru_topology_unlock(buf_pool);
 
     if (b != nullptr) {
       buf_page_free_descriptor(b);
@@ -4000,7 +4136,7 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
     mutex_exit(block_mutex);
   }
 
-  buf_pool->LRU_topology_latch.x_unlock();
+  buf_lru_topology_unlock(buf_pool);
 
   /* Remove possible adaptive hash index on the page.
   The page was declared uninitialized by
@@ -4144,7 +4280,7 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
   rw_lock_t *hash_lock;
 
-  ut_ad(buf_pool->LRU_topology_latch.owns_x());
+  ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
   ut_ad(mutex_own(buf_page_get_mutex(bpage)));
 
   /* keep_hash_lock is only supported for the keep-zip path of
@@ -4152,10 +4288,14 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
   compressed page is kept and will be re-inserted into the page hash.
   In particular the buddy allocator must not be invoked while the hash
   cell X-latch is kept (buf_buddy_free() may take page hash latches via
-  buf_buddy_relocate()), which is guaranteed by zip == false. */
+  buf_buddy_relocate()), which is guaranteed by zip == false. Compressed-page
+  territory is deliberately deferred throughout this effort (Step 5), so
+  this path stays topology-X only -- buf_LRU_try_evict_tail_identity()
+  never attempts topology-S for a page with zip.data set. */
   ut_ad(!keep_hash_lock ||
         (!zip && buf_page_get_state(bpage) == BUF_BLOCK_FILE_PAGE &&
          bpage->zip.data != nullptr));
+  ut_ad(!keep_hash_lock || buf_pool->LRU_topology_latch.owns_x());
 
   hash_lock = buf_page_hash_lock_get(buf_pool, bpage->id);
 
@@ -4166,7 +4306,9 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
 
   /* buf_fix_count == 0 above already rules out the staging-skip case
   (PS-11141 Requirement 16): every page in a drain's private staging
-  group stays fixed until publication, so this can never be false here. */
+  group stays fixed until publication, so this can never be false here.
+  buf_LRU_remove_block() itself is dual-mode as of PS-11141 Requirement 8
+  and dispatches internally on whichever topology mode this caller holds. */
   ut_a(buf_LRU_remove_block(bpage));
 
   buf_pool->freed_page_clock += 1;
@@ -4334,8 +4476,14 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
       1) Cannot happen because the page is no longer in the
       page_hash. Only possibility is when while invalidating
       a tablespace we buffer fix the prev_page in LRU to
-      avoid relocation during the scan. But that is not
-      possible because we are holding LRU list mutex.
+      avoid relocation during the scan -- that scan
+      (buf_LRU_drop_page_hash_for_tablespace(),
+      buf_LRU_remove_all_pages()) always holds topology-X, and
+      topology-X and topology-S are mutually exclusive, so holding
+      either mode here is equally sufficient to exclude it (PS-11141
+      Requirement 8: this path can now also be reached under
+      topology-S plus the source group's mutex, via
+      buf_LRU_remove_block()'s topology-S path).
 
       2) When a compressed-only descriptor will be re-inserted
       for this page id (the keep-zip path of buf_LRU_free_page(),
@@ -4346,12 +4494,15 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
       the hash cell latch and then finds the compressed-only
       descriptor. (It cannot be the LRU list mutex which protects
       this transition: buf_page_init_for_read() inserts into the
-      page hash without holding the LRU list mutex.)
+      page hash without holding the LRU list mutex.) The keep-zip
+      path itself remains topology-X only (see the assertion at this
+      function's entry), so keep_hash_lock == true is never observed
+      here under topology-S.
       When nothing will be re-inserted (keep_hash_lock == false),
       the page is leaving the buffer pool for good and a concurrent
       thread reading it from the disk afresh is the normal cache
       miss path. */
-      ut_ad(buf_pool->LRU_topology_latch.owns_x());
+      ut_ad(buf_pool->LRU_topology_latch.owns_s_or_x());
       if (!keep_hash_lock) {
         rw_lock_x_unlock(hash_lock);
       }
@@ -4567,6 +4718,7 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   ulint old_len = 0;
   ulint page_count = 0;
   bool seen_old = false;
+  size_t queued_len = 0;
 
   for (auto *group : buf_pool->LRU) {
     ut_a(group->state == buf_lru_group_state_t::LINKED);
@@ -4579,6 +4731,9 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
       empty_candidate_pending). Either way it must be flagged pending;
       nothing empties a group without also publishing it as a candidate. */
       ut_a(group->empty_candidate_pending.load(std::memory_order_relaxed));
+      if (group->n_maintenance_refs > 0) {
+        ++queued_len;
+      }
     } else {
       ut_a(group->n_maintenance_refs == 0);
       ut_a(!group->empty_candidate_pending.load(std::memory_order_relaxed));
@@ -4655,17 +4810,17 @@ void buf_LRU_validate_instance(buf_pool_t *buf_pool) {
   }
   ut_a(retired_len == buf_pool->LRU_group_retired_len);
 
-  ut_a(buf_pool->LRU_empty_candidates_len <= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP);
-  for (size_t i = 0; i < buf_pool->LRU_empty_candidates_len; ++i) {
-    const size_t idx = (buf_pool->LRU_empty_candidates_head + i) %
-                       BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP;
-    const buf_lru_group_t *group = buf_pool->LRU_empty_candidates[idx];
-    ut_a(group != nullptr);
-    ut_a(group->state == buf_lru_group_state_t::LINKED);
-    ut_a(group->n_pages == 0);
-    ut_a(group->n_maintenance_refs > 0);
-    ut_a(group->empty_candidate_pending.load(std::memory_order_relaxed));
-  }
+  /* PS-11141 Requirement 8: LRU_empty_candidates is now a
+  Bounded_mpsc_queue, which does not support peeking its FIFO contents
+  without popping them (that would perturb draining, still exclusively
+  owned by the topology-X consumer even here). Cross-check the aggregate
+  count instead: every LINKED empty group with a live maintenance
+  reference is queued exactly once (buf_LRU_enqueue_empty_candidate() takes
+  the one reference this queue implies, and nothing else does), so the two
+  counts must agree. */
+  ut_a(buf_pool->LRU_empty_candidates->size() <=
+       BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP);
+  ut_a(queued_len == buf_pool->LRU_empty_candidates->size());
 
   buf_pool->LRU_topology_latch.x_unlock();
 

@@ -326,7 +326,11 @@ static inline void buf_page_set_state(buf_page_t *bpage,
         ut_a(!bpage->in_LRU_list);
         ut_a(!bpage->in_free_list);
         ut_a(mutex_own(buf_page_get_mutex(bpage)));
-        ut_a(buf_pool->LRU_topology_latch.owns_x());
+        /* PS-11141 Requirement 8: buf_LRU_block_remove_hashed() may reach
+        this FILE_PAGE -> REMOVE_HASH transition under topology-S plus the
+        page's source group mutex (buf_LRU_remove_block()'s topology-S
+        path), not just topology-X. */
+        ut_a(buf_pool->LRU_topology_latch.owns_s_or_x());
         ut_a(buf_page_hash_lock_held_x(buf_pool, bpage));
       }
       break;

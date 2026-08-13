@@ -2366,9 +2366,13 @@ struct buf_lru_group_t {
   alive and stable beyond a single topology-X critical section (PS-11141
   Requirement 8/9): one is held per outstanding entry on
   buf_pool->LRU_empty_candidates. While this is nonzero the group must not
-  be reclaimed, reused, or destroyed. Protected by buf_pool->LRU_list_mutex;
-  nothing increments this outside topology-X yet, since no topology-S
-  mutator exists before Step 6. */
+  be reclaimed, reused, or destroyed. A plain (non-atomic) counter remains
+  correct as of PS-11141 Step 8's topology-S producer
+  (buf_LRU_remove_block()'s topology-S path) because every writer -- that
+  S-mode path and the topology-X consumer/publisher alike -- either holds
+  this specific group's mutex or holds topology-X (which excludes every
+  S-mode holder of any group's mutex); the two kinds of access are never
+  concurrent on the same group. */
   uint32_t n_maintenance_refs{0};
 
   /** True while this group is known to be empty and awaiting reclaim by a
@@ -2376,9 +2380,12 @@ struct buf_lru_group_t {
   by an entry on buf_pool->LRU_empty_candidates or, if that queue
   overflowed, only by the persistent fallback scan
   (buf_pool->LRU_empty_scan_cursor). Prevents publishing the same group
-  twice. Atomic in type only -- like buf_page_t::old, every current writer
-  already holds topology-X, so the atomic exists for a future topology-S
-  producer (Step 6+), not for correctness today. */
+  twice. Atomic so that the topology-S producer added in PS-11141 Step 8
+  (buf_LRU_remove_block()'s topology-S path, via
+  buf_LRU_group_became_empty()) can publish without a C++ data race;
+  relaxed ordering suffices for the same reason given for n_maintenance_refs
+  above -- the group's own mutex (or topology-X) is what actually orders
+  each group's transition. */
   std::atomic<bool> empty_candidate_pending{false};
 };
 
@@ -2811,18 +2818,29 @@ struct buf_pool_t {
   LRUGroupHp lru_compact_hp;
 
   /** True after a page detach creates a non-empty sparse group, until
-  compaction completes one bounded tail-to-head sweep. Protected by
-  LRU_list_mutex. */
-  bool LRU_compaction_pending{false};
+  compaction completes one bounded tail-to-head sweep. Written under
+  topology-X (the compaction sweep, unaffected) and, as of PS-11141
+  Requirement 8, also under topology-S plus the detaching page's source
+  group mutex (buf_LRU_remove_block()'s topology-S path): concurrent S-mode
+  evictors detaching from different groups need a data-race-free store, even
+  though the exact interleaving of "true" writes is a don't-care -- this field
+  is a hint for the background compactor, not a correctness-critical exact
+  value. Atomic in type only for that reason; relaxed ordering suffices. */
+  std::atomic<bool> LRU_compaction_pending{false};
 
   /** True if the current compaction sweep encountered a live hazard and
   therefore requires another sweep after that hazard may have cleared.
-  Protected by LRU_list_mutex. */
+  Protected by LRU_list_mutex; only the (topology-X-only) compaction sweep
+  itself ever touches this, so it stays a plain bool. */
   bool LRU_compaction_retry{false};
 
-  /** Incremented for each detach that can create fragmentation. Protected by
-  LRU_list_mutex. */
-  uint64_t LRU_compaction_epoch{0};
+  /** Incremented for each detach that can create fragmentation. See
+  LRU_compaction_pending above for why this became atomic in PS-11141 Step
+  8: concurrent topology-S evictors (different source groups) may bump this
+  at the same time, and a plain ++ would be a lost-update data race. Relaxed
+  fetch_add is sufficient -- the compaction sweep only ever compares this
+  for inequality against a snapshot, never depends on an exact count. */
+  std::atomic<uint64_t> LRU_compaction_epoch{0};
 
   /** Fragmentation epoch covered by the active bounded compaction sweep.
   Protected by LRU_list_mutex. */
@@ -2891,32 +2909,34 @@ struct buf_pool_t {
   LRU_list_mutex. */
   uint64_t LRU_group_next_reuse_generation{1};
 
-  /** Bounded queue of LINKED-but-empty groups awaiting reclaim by a
-  topology-X maintenance batch (PS-11141 Requirement 8/9): see
+  /** Bounded multi-producer/single-consumer queue of LINKED-but-empty
+  groups awaiting reclaim by a topology-X maintenance batch (PS-11141
+  Requirement 8/9): see
   buf_LRU_publish_empty_candidate()/buf_LRU_process_empty_candidates() in
   buf0lru.cc. Each entry holds one buf_lru_group_t::n_maintenance_refs
   reference, so the raw pointer cannot be retired or reused before
-  consumption. Protected by LRU_list_mutex. No topology-S producer exists
-  yet (Step 6+); today only the buf_lru_group_force_deferred_reclaim
-  DBUG_EXECUTE_IF hook ever populates this. */
-  std::array<buf_lru_group_t *, BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP>
-      LRU_empty_candidates{};
-
-  /** Index of the oldest entry in LRU_empty_candidates. Protected by
-  LRU_list_mutex. */
-  size_t LRU_empty_candidates_head{0};
-
-  /** Number of live entries in LRU_empty_candidates. Protected by
-  LRU_list_mutex. Must remain <= BUF_LRU_EMPTY_CANDIDATE_QUEUE_CAP. */
-  size_t LRU_empty_candidates_len{0};
+  consumption. As of PS-11141 Step 8, producers include both the
+  topology-X drain-publish path and topology-S evictors
+  (buf_LRU_remove_block()'s topology-S path) detaching the last page of a
+  group at the same time as other threads detach the last page of a
+  different group;
+  buf_LRU_process_empty_candidates() remains the sole (topology-X) consumer,
+  matching Bounded_mpsc_queue's single-consumer contract. Mirrors
+  LRU_promote_queue's shape for the same reason: many concurrent, mutually
+  distinct-group producers, one draining consumer. Allocated/freed alongside
+  the buffer pool instance, like LRU_promote_queue. */
+  ut::Bounded_mpsc_queue<buf_lru_group_t *> *LRU_empty_candidates{nullptr};
 
   /** Set when buf_LRU_publish_empty_candidate() overflows
   LRU_empty_candidates: at least one empty group exists that the queue does
   not track. buf_LRU_process_empty_candidates() then sweeps buf_pool->LRU
   for untracked empty groups (resuming via LRU_empty_scan_cursor across
-  bounded passes) until none remain, then clears this. Protected by
-  LRU_list_mutex. */
-  bool LRU_empty_scan_pending{false};
+  bounded passes) until none remain, then clears this. Atomic as of
+  PS-11141 Step 8: buf_LRU_enqueue_empty_candidate()'s overflow branch can
+  now run from topology-S producers on distinct groups concurrently with
+  each other and is always read back under topology-X alone; relaxed
+  ordering suffices since this is a coalescing hint, not an exact count. */
+  std::atomic<bool> LRU_empty_scan_pending{false};
 
   /** Persistent resume position for the overflow fallback scan above, so a
   single scan session can span multiple bounded maintenance passes without
