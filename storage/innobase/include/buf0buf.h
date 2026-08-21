@@ -1208,6 +1208,7 @@ class buf_page_t {
         freed_page_clock(other.freed_page_clock),
         m_version(other.m_version),
         access_time(other.access_time),
+        fix_epoch(other.fix_epoch),
         m_dblwr_id(other.m_dblwr_id),
         old(other.old),
         is_corrupt(other.is_corrupt)
@@ -1711,6 +1712,20 @@ class buf_page_t {
   buffer pool. Modified under protection of buf_page_get_mutex(this); may be
   read without any latch (see buf_page_is_accessed()). */
   buf_access_time_atomic_t access_time;
+
+  /** PoC: seqlock-style epoch bumped odd->even by the evictor bracketing
+  the buf_fix_count==0 check and state transition in buf_LRU_free_page()
+  and buf_LRU_remove_all_pages(). Lets buf_page_optimistic_get()'s
+  lock-free fast path detect "an eviction attempt on this block overlapped
+  my fix" and back off to the slow path instead of trusting a fix that
+  might have raced a concurrent free. See
+  buf_page_optimistic_get_lockfree_design.md for the correctness argument.
+
+  REQUIRED INVARIANT: buf_fix_count's atomic ops (see buf_block_fix()/
+  buf_block_unfix() in buf0buf.ic) must remain sequentially consistent
+  (the default -- do not add memory_order_relaxed/acquire/release to
+  them). The proof's Case B depends on this. */
+  copyable_atomic_t<uint64_t> fix_epoch;
 
  private:
   /** Double write instance ordinal value during writes. This is used

@@ -909,6 +909,12 @@ static void buf_block_init_without_latches(buf_pool_t *buf_pool,
   block->page.reset_flush_observer();
   block->page.m_space = nullptr;
   block->page.m_version = 0;
+  /* PoC: initialized once here, like modify_clock below -- not reset on
+  each reuse. Only the *relative* change across a pair of evictor-side
+  fetch_add calls matters (see buf_page_optimistic_get_lockfree_design.md
+  section 4), not its absolute value, so it persists for the block's
+  whole lifetime in the chunk array. */
+  block->page.fix_epoch.store(0, std::memory_order_relaxed);
 
   block->modify_clock = 0;
 
@@ -4744,22 +4750,40 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
   ut_ad(rw_latch == RW_S_LATCH || rw_latch == RW_X_LATCH ||
         rw_latch == RW_NO_LATCH);
 
-  buf_page_mutex_enter(block);
+  /* PoC: lock-free fast path, replacing the buf_page_mutex_enter/exit
+  bracket this function used to take here on every call. See
+  buf_page_optimistic_get_lockfree_design.md for the full design and the
+  correctness proof (sections 4-5) that this comment summarizes.
 
-  if (UNIV_UNLIKELY(block->modify_clock != modify_clock ||
+  e1/e2 bracket the state check + buffer-fix: if a concurrent evictor's
+  fix_epoch bracket (buf_LRU_free_page() / buf_LRU_remove_all_pages())
+  overlaps this window at all, e2 will differ from e1 (or e1 will already
+  be odd), and we distrust the fix and fall back to the slow path -- which
+  is always correct, just slower. We only need zero false positives here;
+  false negatives (spurious fallback) are free. */
+  uint64_t e1 = block->page.fix_epoch.load(std::memory_order_acquire);
+
+  if (UNIV_UNLIKELY((e1 & 1) != 0 || block->modify_clock != modify_clock ||
                     (buf_block_get_state(block) != BUF_BLOCK_FILE_PAGE))) {
-    buf_page_mutex_exit(block);
-
     return (false);
   }
 
   buf_block_buf_fix_inc(block, ut::Location{file, line});
 
-  /* Grab the access time while we have the mutex to potentially
-  avoid the need to acquire the mutex the second time (below). */
-  auto access_time = buf_page_is_accessed(&block->page);
+  uint64_t e2 = block->page.fix_epoch.load(std::memory_order_acquire);
 
-  buf_page_mutex_exit(block);
+  if (UNIV_UNLIKELY(e2 != e1)) {
+    /* An evictor's bracket overlapped our fix: we cannot trust it. Back
+    out and let the slow path re-validate everything under real latches. */
+    buf_block_buf_fix_dec(block);
+
+    return (false);
+  }
+
+  /* Grab the access time now; this used to be done while holding the
+  mutex, but access_time is atomic and this read needs no synchronization
+  beyond what we already established above. */
+  auto access_time = buf_page_is_accessed(&block->page);
 
   ut_ad(!ibuf_inside(mtr) ||
         ibuf_page(block->page.id, block->page.size, UT_LOCATION_HERE, nullptr));

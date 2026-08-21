@@ -858,8 +858,17 @@ scan_again:
 
       mutex_enter(block_mutex);
 
+      /* PoC: bracket the authoritative buf_fix_count==0 check and the
+      state transition below / inside buf_LRU_block_remove_hashed() with
+      an odd fix_epoch value -- same protocol as buf_LRU_free_page(). See
+      buf_page_optimistic_get_lockfree_design.md section 6 ("Site 1
+      detail"). Every path out of this odd window below must close it. */
+      bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
       if (bpage->id.space() != id || bpage->buf_fix_count > 0 ||
           (buf_page_get_io_fix(bpage) != BUF_IO_NONE)) {
+        bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
         mutex_exit(block_mutex);
 
         rw_lock_x_unlock(hash_lock);
@@ -887,6 +896,13 @@ scan_again:
       /* Do nothing, because the adaptive hash index
       covers uncompressed pages only. */
     } else if (((buf_block_t *)bpage)->ahi.index) {
+      /* PoC: this abandons eviction of bpage for this scan iteration
+      (restarts the whole scan via scan_again below) -- close the
+      fix_epoch bracket opened above before leaving, or the fast path
+      would be permanently disabled for this block until some other,
+      unrelated eviction attempt happens to touch it again. */
+      bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
       mutex_exit(&buf_pool->LRU_list_mutex);
 
       rw_lock_x_unlock(hash_lock);
@@ -914,10 +930,20 @@ scan_again:
 
     /* Remove from the LRU list. */
 
-    if (buf_LRU_block_remove_hashed(bpage, true, false)) {
-      buf_LRU_block_free_hashed_page((buf_block_t *)bpage);
-    } else {
-      ut_ad(block_mutex == &buf_pool->zip_mutex);
+    {
+      const bool file_page_removed =
+          buf_LRU_block_remove_hashed(bpage, true, false);
+
+      /* PoC: close the fix_epoch bracket opened above. The internal
+      ut_a(bpage->buf_fix_count == 0) inside buf_LRU_block_remove_hashed()
+      has already run by this point. */
+      bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
+      if (file_page_removed) {
+        buf_LRU_block_free_hashed_page((buf_block_t *)bpage);
+      } else {
+        ut_ad(block_mutex == &buf_pool->zip_mutex);
+      }
     }
 
     ut_ad(!mutex_own(block_mutex));
@@ -1980,8 +2006,18 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   mutex_enter(block_mutex);
   is_dirty = bpage->is_dirty();
 
+  /* PoC: bracket the authoritative buf_fix_count==0 check (inside
+  buf_page_can_relocate()) and the state transition performed below /
+  inside buf_LRU_block_remove_hashed() with an odd fix_epoch value, so
+  that buf_page_optimistic_get()'s lock-free fast path can detect this
+  eviction attempt overlapped its fix and back off. See
+  buf_page_optimistic_get_lockfree_design.md section 6 ("Site 2 detail"). */
+  bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
   if (!buf_page_can_relocate(bpage) ||
       ((zip || bpage->zip.data == nullptr) && is_dirty)) {
+    bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
     rw_lock_x_unlock(hash_lock);
 
     if (b != nullptr) {
@@ -1993,6 +2029,8 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
 
   if (is_dirty && buf_page_get_state(bpage) != BUF_BLOCK_FILE_PAGE) {
     ut_ad(buf_page_get_state(bpage) == BUF_BLOCK_ZIP_DIRTY);
+
+    bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
 
     rw_lock_x_unlock(hash_lock);
 
@@ -2023,7 +2061,16 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   when passing keep_hash_lock = true (b != nullptr). */
   ut_ad(b == nullptr || (!zip && bpage->zip.data != nullptr));
 
-  if (!buf_LRU_block_remove_hashed(bpage, zip, false, b != nullptr)) {
+  const bool file_page_removed =
+      buf_LRU_block_remove_hashed(bpage, zip, false, b != nullptr);
+
+  /* PoC: close the fix_epoch bracket opened above. The internal
+  ut_a(bpage->buf_fix_count == 0) inside buf_LRU_block_remove_hashed() has
+  already run by this point, so it is now safe to let the lock-free fast
+  path in buf_page_optimistic_get() trust fixes again. */
+  bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
+
+  if (!file_page_removed) {
     mutex_exit(&buf_pool->LRU_list_mutex);
 
     if (b != nullptr) {
