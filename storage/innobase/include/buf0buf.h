@@ -1170,6 +1170,17 @@ class copyable_atomic_t : public std::atomic<T> {
 };
 
 using buf_fix_count_atomic_t = copyable_atomic_t<uint32_t>;
+
+/** Atomic type used for buf_page_t::state. Lets the state be peeked at
+without acquiring buf_page_get_mutex(), e.g. by LRU/read-ahead heuristics
+and I_S table population, which already did so unsynchronized. Writers
+still serialize with other block-mutex-protected fields as before. */
+using buf_page_state_atomic_t = copyable_atomic_t<buf_page_state>;
+
+/** Atomic type used for buf_page_t::access_time, for the same reason as
+buf_page_state_atomic_t above. */
+using buf_access_time_atomic_t =
+    copyable_atomic_t<std::chrono::steady_clock::time_point>;
 class buf_page_t {
  public:
   /** Copy constructor.
@@ -1226,7 +1237,7 @@ class buf_page_t {
   /** Check if the state of this page is BUF_BLOCK_MEMORY.
   @return true if the state is BUF_BLOCK_MEMORY, or false. */
   [[nodiscard]] bool is_memory() const noexcept {
-    return state == BUF_BLOCK_MEMORY;
+    return state.load(std::memory_order_relaxed) == BUF_BLOCK_MEMORY;
   }
 
 #ifndef UNIV_HOTBACKUP
@@ -1295,7 +1306,7 @@ class buf_page_t {
   block with BUF_BLOCK_MEMORY state.
   @param[in]  page_id  the new value of the page id. */
   void set_page_id(const page_id_t page_id) {
-    ut_ad(state == BUF_BLOCK_MEMORY);
+    ut_ad(state.load(std::memory_order_relaxed) == BUF_BLOCK_MEMORY);
     id = page_id;
   }
 
@@ -1303,7 +1314,7 @@ class buf_page_t {
   of a newly allocated buffer page.
   @param[in]  page_size  the new value of the page size. */
   void set_page_size(const page_size_t &page_size) {
-    ut_ad(state == BUF_BLOCK_MEMORY);
+    ut_ad(state.load(std::memory_order_relaxed) == BUF_BLOCK_MEMORY);
     size = page_size;
   }
 
@@ -1609,7 +1620,7 @@ class buf_page_t {
   bool was_io_fix_none() const { return get_io_fix_snapshot() == BUF_IO_NONE; }
 
   /** Block state. @see buf_page_in_file */
-  buf_page_state state;
+  buf_page_state_atomic_t state;
 
   /** If this block is currently being flushed to disk, this tells
   the flush_type.  @see buf_flush_t */
@@ -1697,8 +1708,9 @@ class buf_page_t {
   uint32_t m_version{};
 
   /** Time of first access, or 0 if the block was never accessed in the
-  buffer pool. Protected by block mutex */
-  std::chrono::steady_clock::time_point access_time;
+  buffer pool. Modified under protection of buf_page_get_mutex(this); may be
+  read without any latch (see buf_page_is_accessed()). */
+  buf_access_time_atomic_t access_time;
 
  private:
   /** Double write instance ordinal value during writes. This is used

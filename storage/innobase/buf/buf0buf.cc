@@ -903,7 +903,7 @@ static void buf_block_init_without_latches(buf_pool_t *buf_pool,
   block->frame = frame;
 
   block->page.buf_pool_index = buf_pool_index(buf_pool);
-  block->page.state = BUF_BLOCK_NOT_USED;
+  block->page.state.store(BUF_BLOCK_NOT_USED, std::memory_order_relaxed);
   block->page.buf_fix_count.store(0);
   block->page.init_io_fix();
   block->page.reset_flush_observer();
@@ -3222,18 +3222,19 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
   for (i = 0; i < BUF_POOL_WATCH_SIZE; i++) {
     bpage = &buf_pool->watch[i];
 
-    ut_ad(bpage->access_time == std::chrono::steady_clock::time_point{});
+    ut_ad(bpage->access_time.load(std::memory_order_relaxed) ==
+          std::chrono::steady_clock::time_point{});
     ut_ad(bpage->get_newest_lsn() == 0);
     ut_ad(!bpage->is_dirty());
     ut_ad(bpage->zip.data == nullptr);
     ut_ad(!bpage->in_zip_hash);
 
-    switch (bpage->state) {
+    switch (bpage->state.load(std::memory_order_relaxed)) {
       case BUF_BLOCK_POOL_WATCH:
         ut_ad(!bpage->in_page_hash);
         ut_ad(bpage->buf_fix_count == 0);
 
-        bpage->state = BUF_BLOCK_ZIP_PAGE;
+        bpage->state.store(BUF_BLOCK_ZIP_PAGE, std::memory_order_relaxed);
         bpage->reset_page_id(page_id);
         bpage->buf_fix_count.store(1);
         bpage->buf_pool_index = buf_pool_index(buf_pool);
@@ -3282,7 +3283,7 @@ static void buf_pool_watch_remove(buf_pool_t *buf_pool, buf_page_t *watch) {
   HASH_DELETE(buf_page_t, hash, buf_pool->page_hash, watch->id.hash(), watch);
   ut_d(watch->in_page_hash = false);
   watch->buf_fix_count.store(0);
-  watch->state = BUF_BLOCK_POOL_WATCH;
+  watch->state.store(BUF_BLOCK_POOL_WATCH, std::memory_order_relaxed);
   watch->reset_page_id();
 }
 
@@ -4215,7 +4216,7 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
 
   /* Buffer-fix, I/O-fix, and X-latch the block for the duration of the
   decompression.  Also add the block to the unzip_LRU list. */
-  block->page.state = BUF_BLOCK_FILE_PAGE;
+  block->page.state.store(BUF_BLOCK_FILE_PAGE, std::memory_order_relaxed);
 
   /* Insert at the front of unzip_LRU list. */
   buf_unzip_LRU_add_block(block, false);
@@ -5059,7 +5060,7 @@ static void buf_page_init_low(buf_page_t *bpage) noexcept {
   ut_a(bpage->buf_fix_count == 0);
   bpage->buf_fix_count.store(0);
   bpage->freed_page_clock = 0;
-  bpage->access_time = {};
+  bpage->access_time.store({}, std::memory_order_relaxed);
   bpage->set_newest_lsn(0);
   bpage->set_clean_low();
 
@@ -5331,12 +5332,12 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     /* So that we can attach the fil_space_t instance. */
     bpage->reset_page_id(page_id);
     bpage->reset_flush_observer();
-    bpage->state = BUF_BLOCK_ZIP_PAGE;
+    bpage->state.store(BUF_BLOCK_ZIP_PAGE, std::memory_order_relaxed);
     bpage->init_io_fix();
 
     buf_page_init_low(bpage);
 
-    ut_ad(bpage->state == BUF_BLOCK_ZIP_PAGE);
+    ut_ad(bpage->state.load(std::memory_order_relaxed) == BUF_BLOCK_ZIP_PAGE);
     ut_ad(bpage->id == page_id);
 
     ut_d(bpage->in_page_hash = false);
@@ -7391,7 +7392,7 @@ void buf_pool_wait_for_no_pending_io() {
 @param[in,out]  block           block to init */
 void meb_page_init(const page_id_t &page_id, const page_size_t &page_size,
                    buf_block_t *block) {
-  block->page.state = BUF_BLOCK_FILE_PAGE;
+  block->page.state.store(BUF_BLOCK_FILE_PAGE, std::memory_order_relaxed);
   block->page.id = page_id;
   block->page.size.copy_from(page_size);
 
@@ -7521,8 +7522,8 @@ std::ostream &operator<<(std::ostream &outs, const buf_page_t &page) {
               << ",\"is_dirty\":" << page.is_dirty() << ",\"flush_type\":\""
               << page.flush_type
               << "\",\"dblwr_batch_id\":" << page.get_dblwr_batch_id()
-              << ",\"old\":" << page.old
-              << ",\"first_accessed\":" << time_elapsed(page.access_time)
+              << ",\"old\":" << page.old << ",\"first_accessed\":"
+              << time_elapsed(page.access_time.load(std::memory_order_relaxed))
 #ifdef UNIV_DEBUG
               << ",\"file_page_was_freed\":" << page.file_page_was_freed
               << ",\"someone_has_io_responsibility\":"

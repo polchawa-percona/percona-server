@@ -692,7 +692,8 @@ bool buf_flush_ready_for_replace(const buf_page_t *bpage) {
   if (!buf_page_in_file(bpage)) {
     ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_123)
         << "Buffer block " << bpage << " state "
-        << static_cast<unsigned>(bpage->state) << " in the LRU list!";
+        << static_cast<unsigned>(bpage->state.load(std::memory_order_relaxed))
+        << " in the LRU list!";
   }
 
   /* We can't replace a page that is fixed in any way.*/

@@ -8352,7 +8352,7 @@ static void fil_buf_block_init(buf_block_t *block, byte *frame) {
   block->page.init_io_fix();
   /* There are assertions that check for this. */
   block->page.buf_fix_count.store(1);
-  block->page.state = BUF_BLOCK_READY_FOR_USE;
+  block->page.state.store(BUF_BLOCK_READY_FOR_USE, std::memory_order_relaxed);
 
   page_zip_des_init(&block->page.zip);
 }

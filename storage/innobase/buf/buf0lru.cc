@@ -877,9 +877,11 @@ scan_again:
 
     ut_ad(mutex_own(block_mutex));
 
-    DBUG_PRINT("ib_buf", ("evict page " UINT32PF ":" UINT32PF " state %u",
-                          bpage->id.space(), bpage->id.page_no(),
-                          static_cast<unsigned>(bpage->state)));
+    DBUG_PRINT(
+        "ib_buf",
+        ("evict page " UINT32PF ":" UINT32PF " state %u", bpage->id.space(),
+         bpage->id.page_no(),
+         static_cast<unsigned>(bpage->state.load(std::memory_order_relaxed))));
 
     if (buf_page_get_state(bpage) != BUF_BLOCK_FILE_PAGE) {
       /* Do nothing, because the adaptive hash index
@@ -2067,7 +2069,8 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
 
     ut_a(!buf_page_hash_get_low(buf_pool, b->id));
 
-    b->state = b->is_dirty() ? BUF_BLOCK_ZIP_DIRTY : BUF_BLOCK_ZIP_PAGE;
+    b->state.store(b->is_dirty() ? BUF_BLOCK_ZIP_DIRTY : BUF_BLOCK_ZIP_PAGE,
+                   std::memory_order_relaxed);
 
     ut_ad(b->size.is_compressed());
 
@@ -2134,7 +2137,7 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
 
     mutex_enter(&buf_pool->zip_mutex);
     rw_lock_x_unlock(hash_lock);
-    if (b->state == BUF_BLOCK_ZIP_PAGE) {
+    if (b->state.load(std::memory_order_relaxed) == BUF_BLOCK_ZIP_PAGE) {
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
       buf_LRU_insert_zip_clean(b);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
@@ -2783,7 +2786,7 @@ Space_References buf_LRU_count_space_references() {
     for (size_t j = 0; j < BUF_POOL_WATCH_SIZE; j++) {
       const auto &bpage = &buf_pool->watch[j];
 
-      switch (bpage->state) {
+      switch (bpage->state.load(std::memory_order_relaxed)) {
         case BUF_BLOCK_ZIP_PAGE:
           result[bpage->get_space()]++;
           break;

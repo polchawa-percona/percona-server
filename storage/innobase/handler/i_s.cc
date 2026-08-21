@@ -4527,7 +4527,8 @@ static void i_s_innodb_buffer_page_get_info(
     32bits. */
     page_info->access_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            bpage->access_time - std::chrono::steady_clock::time_point{})
+            bpage->access_time.load(std::memory_order_relaxed) -
+            std::chrono::steady_clock::time_point{})
             .count();
 
     page_info->zip_ssize = bpage->zip.ssize;

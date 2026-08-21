@@ -208,7 +208,7 @@ static inline bool buf_page_peek_if_too_old(const buf_page_t *bpage) {
 static inline enum buf_page_state buf_page_get_state(
     const buf_page_t *bpage) /*!< in: pointer to the control block */
 {
-  enum buf_page_state state = bpage->state;
+  enum buf_page_state state = bpage->state.load(std::memory_order_relaxed);
 
 #ifdef UNIV_DEBUG
   switch (state) {
@@ -336,7 +336,7 @@ static inline void buf_page_set_state(buf_page_t *bpage,
   }
 #endif /* UNIV_DEBUG */
 #endif /* !UNIV_HOTBACKUP */
-  bpage->state = state;
+  bpage->state.store(state, std::memory_order_relaxed);
   ut_ad(buf_page_get_state(bpage) == state);
 }
 
@@ -575,21 +575,26 @@ static inline std::chrono::steady_clock::time_point buf_page_is_accessed(
     const buf_page_t *bpage) {
   ut_ad(buf_page_in_file(bpage));
 
-  return (bpage->access_time);
+  return (bpage->access_time.load(std::memory_order_relaxed));
 }
 
-/** Flag a block accessed. */
+/** Flag a block accessed. access_time is set at most once (the time of
+first access), so this is safe to call without buf_page_get_mutex(): a CAS
+from the zero time_point is used instead of a plain load-then-store to
+avoid two concurrent racing callers observing zero and lengthening the
+window in which readers may see a torn/inconsistent value. */
 static inline void buf_page_set_accessed(
     buf_page_t *bpage) /*!< in/out: control block */
 {
-  ut_ad(mutex_own(buf_page_get_mutex(bpage)));
-
   ut_a(buf_page_in_file(bpage));
 
-  if (bpage->access_time == std::chrono::steady_clock::time_point{}) {
-    /* Make this the time of the first access. */
-    bpage->access_time = std::chrono::steady_clock::now();
-  }
+  /* Make this the time of the first access, unless access_time is already
+  non-zero. Ignore CAS failure: it just means some other thread already
+  set (or is concurrently setting) it, which is an equally valid outcome. */
+  std::chrono::steady_clock::time_point expected{};
+  bpage->access_time.compare_exchange_strong(
+      expected, std::chrono::steady_clock::now(), std::memory_order_relaxed,
+      std::memory_order_relaxed);
 }
 #endif /* !UNIV_HOTBACKUP */
 
