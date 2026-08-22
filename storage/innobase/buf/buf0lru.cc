@@ -858,14 +858,22 @@ scan_again:
 
       mutex_enter(block_mutex);
 
-      /* PoC: this DISCARD TABLESPACE scan reaches BUF_BLOCK_FILE_PAGE
-      blocks that buf_page_optimistic_get()'s lock-free fast path could
-      hold a guessed pointer to (nothing here proves an MDL-based
-      argument rules that out, so don't rely on one) -- bracket the
-      authoritative buf_fix_count==0 check and the state transition below
-      / inside buf_LRU_block_remove_hashed() with an odd fix_epoch value,
-      same protocol as buf_LRU_free_page() below. Full correctness proof
-      on buf_page_t::fix_epoch in buf0buf.h; background in
+      /* PoC: CORRECTION vs. an earlier version of this comment -- this
+      function is NOT reached by SQL DISCARD TABLESPACE. That command's
+      implementation (fil_discard_tablespace() -> fil_delete_tablespace()
+      with BUF_REMOVE_NONE, fil0fil.cc) never calls
+      buf_LRU_flush_or_remove_pages()/buf_LRU_remove_all_pages() at all;
+      DISCARD instead relies on the fil_space_t version/"stale" mechanism
+      (buf_page_t::is_stale(), buf_page_free_stale() -> buf_LRU_free_page(),
+      i.e. this bracket's sibling below) to reclaim pages lazily. The only
+      caller of BUF_REMOVE_ALL_NO_WRITE (and hence of this function) found
+      by grepping the tree is the undo-tablespace cleanup at server
+      startup (srv0start.cc:1026), before normal query traffic exists.
+      This bracket is added anyway, defensively, since nothing here proves
+      that will always remain the only caller and there's no cost to
+      covering it -- but do not cite "DISCARD TABLESPACE" as the reason
+      this site matters; that claim was checked and is false. See the
+      correctness proof on buf_page_t::fix_epoch in buf0buf.h; background in
       buf_page_optimistic_get_lockfree_design.md section 6 ("Site 1
       detail"). Every path out of this odd window below must close it. */
       bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
