@@ -1713,18 +1713,90 @@ class buf_page_t {
   read without any latch (see buf_page_is_accessed()). */
   buf_access_time_atomic_t access_time;
 
-  /** PoC: seqlock-style epoch bumped odd->even by the evictor bracketing
-  the buf_fix_count==0 check and state transition in buf_LRU_free_page()
-  and buf_LRU_remove_all_pages(). Lets buf_page_optimistic_get()'s
-  lock-free fast path detect "an eviction attempt on this block overlapped
-  my fix" and back off to the slow path instead of trusting a fix that
-  might have raced a concurrent free. See
-  buf_page_optimistic_get_lockfree_design.md for the correctness argument.
+  /** PoC: seqlock-style epoch bumped odd->even by the evictor, bracketing
+  the buf_fix_count==0 check and the state transition away from
+  BUF_BLOCK_FILE_PAGE, in buf_LRU_free_page() and
+  buf_LRU_remove_all_pages() (background in
+  buf_page_optimistic_get_lockfree_design.md; this comment is the
+  self-contained, authoritative version of the argument -- keep it in
+  sync with that file rather than deferring to it).
+
+  Problem this solves: buf_page_optimistic_get() wants to check
+  `state == BUF_BLOCK_FILE_PAGE` and bump `buf_fix_count` on a guessed
+  block pointer WITHOUT taking buf_page_get_mutex(). But an evictor
+  (buf_LRU_block_remove_hashed(), buf0lru.cc) frees/reuses a block based
+  on a single, unguarded snapshot of `buf_fix_count == 0`. If the fixer's
+  increment isn't visible to that snapshot, the evictor can free a block
+  the fixer believes it holds: use-after-free. `state` and `access_time`
+  being atomic (see their comments above) does not by itself solve this --
+  it only makes reading them well-defined, it does not order a fixer's
+  increment against an evictor's check.
+
+  Design: a monotonically increasing counter, not a boolean "busy" flag.
+  Every eviction *attempt* on a block (successful or aborted) increments
+  it exactly twice: once to become odd ("deciding"), once to return to
+  even ("done"), bracketing the buf_fix_count==0 check. A fast-path fixer
+  reads it once (e1) before checking `state`, fixes the block, then reads
+  it again (e2). Using a counter rather than a flag means "e1 == e2" is
+  sufficient to prove zero eviction attempts ran in between -- with a
+  2-valued flag a fixer could straddle an odd->even->odd->even round trip
+  and see the same value twice despite two full attempts having occurred.
+
+  ---- Correctness proof ----
+  For any one evictor bracket [odd-store .. buf_fix_count check .. even-
+  store] and any one fixer window [e1-load, buf_fix_inc, e2-load] on the
+  same block, exactly one of three cases holds:
+
+  Case A -- evictor bracket entirely precedes e1-load. The evictor's
+  final store (seq_cst, hence release-or-stronger) synchronizes-with the
+  fixer's acquire load that observes it. Everything the evictor wrote
+  before that store -- including the (relaxed) state transition away from
+  BUF_BLOCK_FILE_PAGE -- is therefore visible to the fixer transitively,
+  exactly as in a textbook seqlock. The fixer's state check fails and it
+  falls back to the slow path *before* ever calling buf_fix_inc.
+
+  Case B -- evictor bracket entirely follows e2-load, i.e. the fixer's
+  buf_fix_inc completed before the evictor's bracket began. Because
+  buf_fix_count's ops are seq_cst on *both* sides (see the REQUIRED
+  INVARIANT below), the evictor's buf_fix_count==0 check, whenever it
+  runs inside its own bracket, is guaranteed to observe the fixer's
+  increment via the single total order seq_cst provides, and correctly
+  bails out instead of freeing a fixed block.
+
+  Case C -- any temporal overlap between the two windows. The bracket
+  changes this counter by at least 2 (one odd transition, one even
+  transition) somewhere inside that overlap. Per-object coherence on a
+  single atomic variable guarantees the fixer cannot observe e2 == e1 if
+  any increment happened in between -- this holds at any memory order,
+  even relaxed; acquire is needed only for Case A's cross-field
+  happens-before, not for this equality check. So e2 != e1 (or e1 was
+  already odd, caught before buf_fix_inc is even called), and the fixer
+  backs off.
+
+  There is no fourth case: e1 == e2 even (the only condition under which
+  the fixer proceeds and trusts its fix) is reachable only in the "no
+  overlap" configurations of A/B, both proven safe above. A fixer that
+  backs off never reads page content or reports success to its caller --
+  it discards the speculative fix and falls through to the slow path,
+  which re-validates everything under real latches (this is also why
+  false negatives here are free: buf_page_optimistic_get always has a
+  correct fallback, so this mechanism only needs zero false positives).
+
+  Callers: only buf_LRU_free_page() and buf_LRU_remove_all_pages() bracket
+  this field -- see the "PoC:" comments at their buf_fix_epoch.fetch_add()
+  call sites in buf0lru.cc, and buf_LRU_block_remove_hashed()'s callers in
+  general, for why the third caller (buf_LRU_free_one_page(), used only by
+  buf_read_page_handle_error()) needs no bracket.
 
   REQUIRED INVARIANT: buf_fix_count's atomic ops (see buf_block_fix()/
   buf_block_unfix() in buf0buf.ic) must remain sequentially consistent
   (the default -- do not add memory_order_relaxed/acquire/release to
-  them). The proof's Case B depends on this. */
+  them). Case B's "the evictor's check observes the fixer's increment"
+  claim depends on there being no synchronizing edge between those two
+  specific operations other than seq_cst's single total order -- unlike
+  fix_epoch, there is no separate acquire/release pairing backing this up.
+  Relaxing buf_fix_count as a future "perf cleanup" would silently reopen
+  the use-after-free this field exists to close. */
   copyable_atomic_t<uint64_t> fix_epoch;
 
  private:

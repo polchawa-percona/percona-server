@@ -2971,6 +2971,13 @@ void buf_pool_clear_hash_index(void) {
   }
 }
 
+/* PoC: this function is out of scope for the fix_epoch protocol proved
+correct on buf_page_t::fix_epoch (buf0buf.h) -- it only ever runs for
+BUF_BLOCK_ZIP_DIRTY/BUF_BLOCK_ZIP_PAGE (asserted below), which use
+zip_mutex, not the per-block buf_block_t::mutex that
+buf_page_optimistic_get()'s lock-free fast path targets. Its
+placement-new copy of bpage's fix_epoch (via the buf_page_t copy
+constructor) is therefore inert for this protocol's purposes. */
 /** Relocate a buffer control block.  Relocates the block on the LRU list
 and in buf_pool->page_hash.  Does not relocate bpage->list.
 The caller must take care of relocating bpage->list.
@@ -4751,16 +4758,19 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
         rw_latch == RW_NO_LATCH);
 
   /* PoC: lock-free fast path, replacing the buf_page_mutex_enter/exit
-  bracket this function used to take here on every call. See
-  buf_page_optimistic_get_lockfree_design.md for the full design and the
-  correctness proof (sections 4-5) that this comment summarizes.
+  bracket this function used to take here on every call. This is the
+  "fixer" side of the protocol proved correct in the comment on
+  buf_page_t::fix_epoch (buf0buf.h) -- see that comment for the full
+  argument (Cases A/B/C); background in
+  buf_page_optimistic_get_lockfree_design.md.
 
   e1/e2 bracket the state check + buffer-fix: if a concurrent evictor's
   fix_epoch bracket (buf_LRU_free_page() / buf_LRU_remove_all_pages())
   overlaps this window at all, e2 will differ from e1 (or e1 will already
-  be odd), and we distrust the fix and fall back to the slow path -- which
-  is always correct, just slower. We only need zero false positives here;
-  false negatives (spurious fallback) are free. */
+  be odd -- Case C of the proof), and we distrust the fix and fall back to
+  the slow path -- which is always correct, just slower. We only need
+  zero false positives here; false negatives (spurious fallback) are
+  free. */
   uint64_t e1 = block->page.fix_epoch.load(std::memory_order_acquire);
 
   if (UNIV_UNLIKELY((e1 & 1) != 0 || block->modify_clock != modify_clock ||

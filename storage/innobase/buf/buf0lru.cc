@@ -858,9 +858,14 @@ scan_again:
 
       mutex_enter(block_mutex);
 
-      /* PoC: bracket the authoritative buf_fix_count==0 check and the
-      state transition below / inside buf_LRU_block_remove_hashed() with
-      an odd fix_epoch value -- same protocol as buf_LRU_free_page(). See
+      /* PoC: this DISCARD TABLESPACE scan reaches BUF_BLOCK_FILE_PAGE
+      blocks that buf_page_optimistic_get()'s lock-free fast path could
+      hold a guessed pointer to (nothing here proves an MDL-based
+      argument rules that out, so don't rely on one) -- bracket the
+      authoritative buf_fix_count==0 check and the state transition below
+      / inside buf_LRU_block_remove_hashed() with an odd fix_epoch value,
+      same protocol as buf_LRU_free_page() below. Full correctness proof
+      on buf_page_t::fix_epoch in buf0buf.h; background in
       buf_page_optimistic_get_lockfree_design.md section 6 ("Site 1
       detail"). Every path out of this odd window below must close it. */
       bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
@@ -2010,8 +2015,19 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip) {
   buf_page_can_relocate()) and the state transition performed below /
   inside buf_LRU_block_remove_hashed() with an odd fix_epoch value, so
   that buf_page_optimistic_get()'s lock-free fast path can detect this
-  eviction attempt overlapped its fix and back off. See
-  buf_page_optimistic_get_lockfree_design.md section 6 ("Site 2 detail"). */
+  eviction attempt overlapped its fix and back off. Full correctness
+  proof on buf_page_t::fix_epoch in buf0buf.h.
+
+  This is the SECOND buf_page_can_relocate() call in this function (the
+  first was above, before block_mutex was dropped to acquire hash_lock);
+  only this one needs the bracket. Everything between the two calls --
+  buf_page_alloc_descriptor(), later `new (b) buf_page_t(*bpage)` below --
+  is reversible bookkeeping with no effect on the page's reachability by
+  pointer; nothing irreversible happens until after this second check
+  passes, which is exactly why the code already treats the first check as
+  a cheap, non-authoritative pre-filter. See
+  buf_page_optimistic_get_lockfree_design.md section 6 ("Site 2 detail")
+  for background. */
   bpage->fix_epoch.fetch_add(1, std::memory_order_seq_cst);
 
   if (!buf_page_can_relocate(bpage) ||
@@ -2601,6 +2617,17 @@ static void buf_LRU_block_free_hashed_page(buf_block_t *block) noexcept {
   buf_LRU_block_free_non_file_page(block);
 }
 
+/* PoC: this is the third and last caller of buf_LRU_block_remove_hashed()
+(alongside buf_LRU_free_page() and buf_LRU_remove_all_pages(), both of
+which bracket their call with fix_epoch -- see the correctness proof on
+buf_page_t::fix_epoch in buf0buf.h). This one deliberately does NOT: its
+only caller, buf_read_page_handle_error() (buf0buf.cc), calls it on a
+block that was *just* claimed for the read attempt that is now failing
+(io_fix == BUF_IO_READ, asserted buf_fix_count == 0 there). No fast-path
+caller can hold a guessed pointer into *this* incarnation of the block
+yet -- any fixer racing against the *previous* occupant of this same
+buf_block_t object was already resolved when that previous occupant was
+evicted via one of the two bracketed callers. */
 void buf_LRU_free_one_page(buf_page_t *bpage, bool ignore_content) {
 #ifdef UNIV_DEBUG
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
