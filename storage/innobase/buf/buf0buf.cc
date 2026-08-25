@@ -4777,6 +4777,25 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
   free. */
   uint64_t e1 = block->page.fix_epoch.load(std::memory_order_acquire);
 
+  /* The block->modify_clock read here is deliberately NOT covered by the
+  fix_epoch bracket, and that's correct, not an oversight: modify_clock
+  was never protected by block_mutex in the first place, before or after
+  this fast path existed. Its documented invariant (buf0buf.h) is that it
+  may only change under the LRU list mutex with buf_fix_count == 0 (the
+  eviction-driven bump, buf_LRU_block_remove_hashed(), buf0lru.cc -- the
+  case fix_epoch guards), or under the block's own rw-latch (every other
+  bump: page split/merge/insert/delete, e.g. btr0btr.cc, page0page.cc) --
+  never under block_mutex. So this read was already an unsynchronized
+  heuristic relative to its real writers even when this whole block was
+  wrapped in buf_page_mutex_enter()/exit(); the mutex just happened to
+  also be held here for the (block_mutex-protected) state/fix_count/
+  access_time fields. The actual, correctly-synchronized check is further
+  below (`if (modify_clock != block->modify_clock)`, after this thread
+  has acquired the real rw-latch that every writer is required to hold --
+  unchanged by this patch. This first comparison is only ever a cheap
+  early-out to skip the latch-acquisition attempt when it's obviously
+  going to fail anyway; a stale or torn-looking value here can only cause
+  a spurious fallback to the slow path, never a false positive. */
   if (UNIV_UNLIKELY((e1 & 1) != 0 || block->modify_clock != modify_clock ||
                     (buf_block_get_state(block) != BUF_BLOCK_FILE_PAGE))) {
     return (false);
