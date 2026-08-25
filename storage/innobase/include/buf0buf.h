@@ -1796,7 +1796,42 @@ class buf_page_t {
   specific operations other than seq_cst's single total order -- unlike
   fix_epoch, there is no separate acquire/release pairing backing this up.
   Relaxing buf_fix_count as a future "perf cleanup" would silently reopen
-  the use-after-free this field exists to close. */
+  the use-after-free this field exists to close.
+
+  REQUIRED INVARIANT: fix_epoch must NEVER be reset/cleared once a block
+  has been handed out for use, only ever incremented. This matters because
+  the whole proof above rests on "e1 == e2 implies zero eviction attempts
+  occurred in between" -- if the counter could be reset back to a value a
+  fixer might plausibly have already observed as e1 (e.g. by a well-meaning
+  future "clear stale state when a block is freed" cleanup step), a fixer
+  straddling that reset could see e2 == e1 despite the block having been
+  freed and reused for a *different* page in between: the exact ABA
+  scenario this field exists to rule out, reopened by the reset itself.
+
+  This is why fix_epoch is deliberately initialized only once, in
+  buf_block_init_without_latches() (buf0buf.cc), which itself is only ever
+  invoked for a block's very first initialization: from buf_chunk_init()
+  at initial pool creation, and from buf_chunk_init() in buf_pool_resize()
+  restricted to the newly-added chunk range (guarded by
+  `n_chunks_new > n_chunks`, iterating only `chunks[n_chunks..n_chunks_new)`,
+  buf0buf.cc). Both cases are memory that has never before been handed out
+  as a block, so no fixer could hold a stale e1 for it. The shrink/withdraw
+  path does not reset it either: a withdrawn block is evicted through the
+  ordinary buf_LRU_free_page() bracket first (same as any other eviction),
+  and it is the memory of *removed* chunks that goes away, not a reset
+  applied to kept/surviving blocks. (Also checked for a stray memset that
+  might zero fix_epoch on free: buf_LRU_block_free_non_file_page()'s debug
+  wipe touches block->frame, a separate allocation from the block
+  descriptor array fix_epoch lives in -- it doesn't reach this field.)
+
+  Given that, the field is a true lifetime-monotonic counter per block
+  object: for e2 to equal e1 despite K real eviction attempts on that
+  block in between, 2*K (one odd + one even transition each) would have to
+  be ≡ 0 (mod 2^64), i.e. K a multiple of 2^63 -- roughly 10^18 eviction
+  attempts on that one exact block, not "the page got reused once". Not a
+  practical concern at 64 bits; would become one if this field were ever
+  narrowed (e.g. to reserve bits for something else) without re-deriving
+  this bound for the new width. */
   copyable_atomic_t<uint64_t> fix_epoch;
 
  private:

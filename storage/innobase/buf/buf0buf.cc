@@ -909,11 +909,15 @@ static void buf_block_init_without_latches(buf_pool_t *buf_pool,
   block->page.reset_flush_observer();
   block->page.m_space = nullptr;
   block->page.m_version = 0;
-  /* PoC: initialized once here, like modify_clock below -- not reset on
-  each reuse. Only the *relative* change across a pair of evictor-side
-  fetch_add calls matters (see buf_page_optimistic_get_lockfree_design.md
-  section 4), not its absolute value, so it persists for the block's
-  whole lifetime in the chunk array. */
+  /* PoC: initialized once here, like modify_clock below -- MUST NOT be
+  reset anywhere else. See the REQUIRED INVARIANT on buf_page_t::fix_epoch
+  (buf0buf.h) for why: this is the one and only place fix_epoch is ever
+  set to a value a live fixer could not already have observed, because
+  this function only ever runs on a block's first-ever initialization
+  (verified by tracing every caller of buf_chunk_init(), see that
+  comment). Resetting it anywhere a block could already have live
+  fast-path fixers -- e.g. on ordinary eviction/reuse -- would reopen an
+  ABA hole this field exists to close. */
   block->page.fix_epoch.store(0, std::memory_order_relaxed);
 
   block->modify_clock = 0;
