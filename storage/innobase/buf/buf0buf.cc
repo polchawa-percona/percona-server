@@ -1722,15 +1722,15 @@ static bool buf_page_realloc(buf_pool_t *buf_pool, buf_block_t *block) {
     new_block->ahi.recommended_prefix_info = {0, 1, true};
 
     rw_lock_x_unlock(hash_lock);
-    mutex_exit(&block->mutex);
-    mutex_exit(&new_block->mutex);
+    BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
+    BUF_MUTEX_EXIT_INSTRUMENTED(&new_block->mutex);
 
     /* Free block */
     buf_block_set_state(block, BUF_BLOCK_MEMORY);
     buf_LRU_block_free_non_file_page(block);
   } else {
     rw_lock_x_unlock(hash_lock);
-    mutex_exit(&block->mutex);
+    BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
 
     /* Free new_block */
     buf_LRU_block_free_non_file_page(new_block);
@@ -2768,8 +2768,8 @@ void buf_pool_clear_hash_index(void) {
         BUF_BLOCK_REMOVE_HASH state by some concurrently executed
         buf_LRU_free_page(). */
         BUF_MUTEX_ENTER_INSTRUMENTED(&block->mutex);
-        auto block_mutex_guard =
-            create_scope_guard([block]() { mutex_exit(&block->mutex); });
+        auto block_mutex_guard = create_scope_guard(
+            [block]() { BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex); });
 
         block->ahi.validate();
 
@@ -5166,7 +5166,7 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
 
   buf_page_set_accessed(&block->page);
 
-  mutex_exit(&block->mutex);
+  BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
 
   /* Latch the page before releasing hash lock so that concurrent request for
   this page doesn't see half initialized page. ALTER tablespace for encryption
@@ -5381,6 +5381,10 @@ void buf_read_page_handle_error(buf_page_t *bpage) {
 
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
 
+  /* The hash lock and block mutex will be released during the "free" below
+  (buf_LRU_free_one_page(), via buf_LRU_block_remove_hashed()), not here;
+  the hold-time entry pushed by BUF_MUTEX_ENTER_INSTRUMENTED is closed out
+  there, not by a matching exit in this function. */
   BUF_MUTEX_ENTER_INSTRUMENTED(buf_page_get_mutex(bpage));
 
   ut_ad(buf_page_get_io_fix(bpage) == BUF_IO_READ);
@@ -5471,10 +5475,13 @@ void buf_page_force_evict(const page_id_t &page_id,
       BUF_MUTEX_ENTER_INSTRUMENTED(&block->mutex);
       bool success = buf_LRU_free_page(bpage, true);
       if (success) {
+        /* On success, buf_LRU_free_page() already released block->mutex
+        internally (via buf_LRU_block_remove_hashed(), which closes out the
+        hold-time entry pushed above); nothing to release here. */
         break;
       }
       mutex_exit(&buf_pool->LRU_list_mutex);
-      mutex_exit(&block->mutex);
+      BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
     } else {
       ut_a(dirty_is_ok);
       /* The buffer page is not stale and it is dirty. */
@@ -5485,11 +5492,14 @@ void buf_page_force_evict(const page_id_t &page_id,
       bool success = false;
       if (buf_flush_ready_for_flush(bpage, BUF_FLUSH_SINGLE_PAGE)) {
         const bool sync = true;
+        /* On success, buf_flush_page() releases block->mutex internally,
+        closing out the hold-time entry pushed above. On failure it leaves
+        block->mutex held, released below. */
         success = buf_flush_page(buf_pool, bpage, BUF_FLUSH_SINGLE_PAGE, sync);
       }
       if (!success) {
         mutex_exit(&buf_pool->LRU_list_mutex);
-        mutex_exit(&block->mutex);
+        BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));

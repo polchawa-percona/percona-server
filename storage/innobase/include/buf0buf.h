@@ -2614,10 +2614,7 @@ Use these instead of accessing buffer pool mutexes directly. */
 #define buf_page_mutex_enter(b) BUF_MUTEX_ENTER_INSTRUMENTED(&(b)->mutex)
 
 /** Release the block->mutex. */
-#define buf_page_mutex_exit(b) \
-  do {                         \
-    (b)->mutex.exit();         \
-  } while (0)
+#define buf_page_mutex_exit(b) BUF_MUTEX_EXIT_INSTRUMENTED(&(b)->mutex)
 
 /** Get appropriate page_hash_lock. */
 inline rw_lock_t *buf_page_hash_lock_get(const buf_pool_t *buf_pool,

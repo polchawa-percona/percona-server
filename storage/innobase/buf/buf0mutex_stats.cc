@@ -55,6 +55,68 @@ void buf_mutex_stats_record(size_t site_idx, uint64_t cycles) {
 
 namespace {
 
+/** One outstanding (acquired, not yet released) mutex hold, tracked per
+thread so BUF_MUTEX_EXIT_INSTRUMENTED can compute how long it was held. */
+struct Held_entry {
+  const void *mutex_ptr;
+  size_t site_idx;
+  uint64_t entered_cycles;
+};
+
+/** Bound on nested buf-page-mutex acquisitions by one thread at once. The
+deepest observed nesting in the source is 2 (e.g. relocating a page holds
+both the old and new block's mutex); this leaves generous headroom. If ever
+exceeded, the excess enter simply isn't tracked for hold time (its
+count/wait stats are unaffected). */
+constexpr size_t MAX_NESTING = 16;
+
+thread_local Held_entry t_held_stack[MAX_NESTING];
+thread_local size_t t_held_depth = 0;
+
+}  // namespace
+
+void buf_mutex_stats_on_enter(size_t site_idx, const void *mutex_ptr) {
+  if (t_held_depth < MAX_NESTING) {
+    t_held_stack[t_held_depth] = {mutex_ptr, site_idx, my_timer_cycles()};
+    ++t_held_depth;
+  }
+}
+
+void buf_mutex_stats_on_exit(const void *mutex_ptr) {
+  const uint64_t now = my_timer_cycles();
+
+  /* Search from the most recently pushed entry: correctly nested
+  acquire/release pairs are usually found immediately at the top, but a
+  search (rather than a blind pop) also handles the release order not
+  exactly mirroring the acquire order (e.g. buf_page_realloc() acquires
+  block then new_block, but releases them in the same order, not
+  reversed). */
+  for (size_t i = t_held_depth; i-- > 0;) {
+    if (t_held_stack[i].mutex_ptr == mutex_ptr) {
+      const uint64_t held = now - t_held_stack[i].entered_cycles;
+      Buf_mutex_site_stats &s = buf_mutex_stats.site(t_held_stack[i].site_idx);
+
+      s.held_cycles.fetch_add(held, std::memory_order_relaxed);
+
+      uint64_t cur_max = s.held_max_cycles.load(std::memory_order_relaxed);
+      while (held > cur_max && !s.held_max_cycles.compare_exchange_weak(
+                                   cur_max, held, std::memory_order_relaxed)) {
+      }
+
+      for (size_t j = i; j + 1 < t_held_depth; ++j) {
+        t_held_stack[j] = t_held_stack[j + 1];
+      }
+      --t_held_depth;
+      return;
+    }
+  }
+  /* Not found: either the stack was full when this was entered, or this
+  mutex was released via a path other than BUF_MUTEX_EXIT_INSTRUMENTED
+  (documented at each such call site). Nothing to record. */
+}
+
+namespace {
+
 /** How often the registry is snapshotted to the CSV file. Deliberately
 short: the hot-page repro from PS-11120 completes in 1.5-3s wall time. */
 constexpr std::chrono::milliseconds DUMP_INTERVAL{150};
@@ -124,10 +186,15 @@ void dump_snapshot(FILE *f, double ns_per_cycle) {
     const uint64_t total_cycles =
         s.total_cycles.load(std::memory_order_relaxed);
     const uint64_t max_cycles = s.max_cycles.load(std::memory_order_relaxed);
+    const uint64_t held_cycles = s.held_cycles.load(std::memory_order_relaxed);
+    const uint64_t held_max_cycles =
+        s.held_max_cycles.load(std::memory_order_relaxed);
 
-    fprintf(f, "%lld,%s,%" PRIu64 ",%.0f,%.0f", (long long)now_us, label, count,
-            static_cast<double>(total_cycles) * ns_per_cycle,
-            static_cast<double>(max_cycles) * ns_per_cycle);
+    fprintf(f, "%lld,%s,%" PRIu64 ",%.0f,%.0f,%.0f,%.0f", (long long)now_us,
+            label, count, static_cast<double>(total_cycles) * ns_per_cycle,
+            static_cast<double>(max_cycles) * ns_per_cycle,
+            static_cast<double>(held_cycles) * ns_per_cycle,
+            static_cast<double>(held_max_cycles) * ns_per_cycle);
 
     for (size_t b = 0; b < Buf_mutex_site_stats::N_BUCKETS; ++b) {
       fprintf(f, ",%" PRIu64, s.buckets[b].load(std::memory_order_relaxed));
@@ -152,7 +219,9 @@ void buf_mutex_stats_thread() {
     return;
   }
 
-  fprintf(f, "ts_us,site,count,total_wait_ns,max_wait_ns");
+  fprintf(f,
+          "ts_us,site,count,total_wait_ns,max_wait_ns,total_held_ns,"
+          "max_held_ns");
   for (size_t b = 0; b < Buf_mutex_site_stats::N_BUCKETS; ++b) {
     fprintf(f, ",bucket_ge_2p%zu_cycles", b);
   }

@@ -1350,7 +1350,13 @@ bool buf_flush_page(buf_pool_t *buf_pool, buf_page_t *bpage,
       }
     });
 
-    mutex_exit(block_mutex);
+    /* This is the canonical release point for buf_page_force_evict()'s
+    dirty-page branch, which hands its already-held block mutex off to be
+    released here as part of flushing (see that call site); instrumenting
+    it closes out that pushed hold-time entry. Other callers of this
+    function acquire block_mutex without routing through
+    BUF_MUTEX_ENTER_INSTRUMENTED, so this is a harmless no-op for them. */
+    BUF_MUTEX_EXIT_INSTRUMENTED(block_mutex);
 
     if (flush_type == BUF_FLUSH_SINGLE_PAGE) {
       mutex_exit(&buf_pool->LRU_list_mutex);

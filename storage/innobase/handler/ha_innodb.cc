@@ -21481,7 +21481,7 @@ Keep the compressed pages in the buffer pool.
       BUF_MUTEX_ENTER_INSTRUMENTED(&block->mutex);
 
       if (!buf_LRU_free_page(&block->page, false)) {
-        mutex_exit(&block->mutex);
+        BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
         all_evicted = false;
       } else {
         /* buf_LRU_free_page() released LRU_list_mutex.

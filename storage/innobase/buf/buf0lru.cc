@@ -292,7 +292,7 @@ scan_again:
 
     bool skip = bpage->buf_fix_count > 0 || !block->ahi.index;
 
-    mutex_exit(&block->mutex);
+    BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
 
     if (skip) {
       /* Skip this block, because there are
@@ -1067,10 +1067,13 @@ static bool buf_LRU_free_from_unzip_LRU_list(buf_pool_t *buf_pool,
     ut_ad(block->in_unzip_LRU_list);
     ut_ad(block->page.in_LRU_list);
 
+    /* On success, buf_LRU_free_page() releases block->mutex internally
+    (via buf_LRU_block_remove_hashed(), which closes out the hold-time
+    entry pushed above). */
     freed = buf_LRU_free_page(&block->page, false);
 
     if (!freed) {
-      mutex_exit(&block->mutex);
+      BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
     }
 
     block = prev_block;
@@ -2204,7 +2207,7 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
           << hashed_bpage->id << " which is not " << bpage;
     }
 
-    ut_d(mutex_exit(buf_page_get_mutex(bpage)));
+    ut_d(BUF_MUTEX_EXIT_INSTRUMENTED(buf_page_get_mutex(bpage)));
     ut_d(rw_lock_x_unlock(hash_lock));
     ut_d(mutex_exit(&buf_pool->LRU_list_mutex));
     ut_d(buf_print());
@@ -2232,7 +2235,7 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
       UT_LIST_REMOVE(buf_pool->zip_clean, bpage);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
 
-      mutex_exit(&buf_pool->zip_mutex);
+      BUF_MUTEX_EXIT_INSTRUMENTED(&buf_pool->zip_mutex);
       rw_lock_x_unlock(hash_lock);
 
       buf_buddy_free(buf_pool, bpage->zip.data, bpage->size.physical());
@@ -2268,7 +2271,11 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, bool zip,
       page_hash. */
       ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
       rw_lock_x_unlock(hash_lock);
-      mutex_exit(&((buf_block_t *)bpage)->mutex);
+      /* This is the canonical release point for every call site that hands
+      its page/block mutex off to buf_LRU_free_page()/buf_LRU_free_one_page()
+      to be released "as part of freeing the page" (see those call sites);
+      instrumenting it here closes out their pushed hold-time entries. */
+      BUF_MUTEX_EXIT_INSTRUMENTED(&((buf_block_t *)bpage)->mutex);
 
       if (zip && bpage->zip.data) {
         /* Free the compressed page. */
@@ -2606,7 +2613,7 @@ static void buf_LRU_print_instance(buf_pool_t *buf_pool) {
         break;
     }
 
-    mutex_exit(buf_page_get_mutex(bpage));
+    BUF_MUTEX_EXIT_INSTRUMENTED(buf_page_get_mutex(bpage));
   }
 
   mutex_exit(&buf_pool->LRU_list_mutex);

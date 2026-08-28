@@ -2015,7 +2015,7 @@ static bool btr_search_hash_table_validate(ulint part_id) {
         ut_d(ut_error);
       }
 
-      mutex_exit(&block->mutex);
+      BUF_MUTEX_EXIT_INSTRUMENTED(&block->mutex);
     }
   }
 

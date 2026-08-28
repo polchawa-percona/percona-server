@@ -5,9 +5,25 @@
  Every place that acquires a page/block mutex is auto-registered, by its
  file:line, the first time it runs. Each registered site keeps an atomic
  call count, total wait time and max wait time (in CPU cycles, converted to
- nanoseconds when dumped), plus a small log2 histogram of wait times. A
- background thread (buf_mutex_stats_thread) periodically appends a snapshot
- of all sites to a CSV file.
+ nanoseconds when dumped), plus a small log2 histogram of wait times, and
+ total/max hold time (time actually spent inside the critical section,
+ between a successful acquire and the matching release). A background
+ thread (buf_mutex_stats_thread) periodically appends a snapshot of all
+ sites to a CSV file.
+
+ Hold time is tracked via a small thread-local stack: BUF_MUTEX_ENTER_
+ INSTRUMENTED pushes {mutex address, site, acquire time} after acquiring,
+ and BUF_MUTEX_EXIT_INSTRUMENTED looks the address up (by value, so it is
+ immune to variable aliasing) and pops it before releasing. A handful of
+ call sites hand the mutex off to be released deep inside shared code
+ instead of releasing it themselves (e.g. buf_LRU_free_page() releasing it,
+ on success, as part of freeing the page); the actual release in that
+ shared code is instrumented too (see buf_LRU_block_remove_hashed() and
+ buf_flush_page() in the .cc files), so the entry still gets matched and
+ correctly attributed to the site that originally pushed it. The only
+ entries that go permanently unmatched are ones dropped for stack overflow
+ (MAX_NESTING) or released via some path genuinely outside this scheme -
+ both harmless, silently-ignored cases (see buf_mutex_stats_on_exit()).
 
  This is a diagnostic-only facility, gated by UNIV_BUF_MUTEX_STATS so it can
  be compiled out entirely (e.g. for UNIV_LIBRARY/UNIV_HOTBACKUP builds, or a
@@ -54,6 +70,15 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) Buf_mutex_site_stats {
   static constexpr size_t N_BUCKETS = 48;
   std::atomic<uint64_t> buckets[N_BUCKETS] = {};
 
+  /** Sum of hold times (TSC cycles) spent between acquiring and releasing
+  the mutex at this site. Only counts acquisitions whose release was also
+  routed through BUF_MUTEX_EXIT_INSTRUMENTED (see file header). */
+  std::atomic<uint64_t> held_cycles{0};
+
+  /** Longest single hold time (TSC cycles) observed at this site. Same
+  relaxed-CAS-loop tolerance as max_cycles above. */
+  std::atomic<uint64_t> held_max_cycles{0};
+
   /** "file:line" label; nullptr until the site is registered. Published
   with release semantics by register_site(); read with acquire before
   use, so a reader either sees the fully-registered site or skips it. */
@@ -96,9 +121,28 @@ extern Buf_mutex_stats_registry buf_mutex_stats;
 @param[in]  cycles    TSC cycles spent inside mutex_enter() */
 void buf_mutex_stats_record(size_t site_idx, uint64_t cycles);
 
+/** Pushes a "this thread now holds this mutex, acquired at this site and
+time" entry onto a small thread-local stack, for hold-time tracking.
+@param[in]  site_idx   index returned by register_site()
+@param[in]  mutex_ptr  address of the mutex just acquired (identifies the
+                       entry to buf_mutex_stats_on_exit(), regardless of
+                       which variable/alias is used to release it) */
+void buf_mutex_stats_on_enter(size_t site_idx, const void *mutex_ptr);
+
+/** Looks up the thread-local entry pushed by buf_mutex_stats_on_enter() for
+this exact mutex address, and if found, records the elapsed hold time
+against that entry's site and removes it from the stack. A miss (e.g. the
+matching enter's push was dropped because the thread-local stack was full,
+or this mutex was released via a path other than BUF_MUTEX_EXIT_INSTRUMENTED)
+is silently ignored - this is a best-effort diagnostic, not a correctness
+mechanism.
+@param[in]  mutex_ptr  address of the mutex about to be released */
+void buf_mutex_stats_on_exit(const void *mutex_ptr);
+
 /** Acquires the given mutex, timing the wait and recording it under a
 call site that is auto-registered (by file:line) the first time this
-expands at a given point in the source.
+expands at a given point in the source. Also pushes a hold-time-tracking
+entry (see buf_mutex_stats_on_enter()).
 @param[in]  mutex_ptr  pointer to the block/page mutex to enter */
 #define BUF_MUTEX_ENTER_INSTRUMENTED(mutex_ptr)                              \
   do {                                                                       \
@@ -108,6 +152,17 @@ expands at a given point in the source.
     mutex_enter(mutex_ptr);                                                  \
     buf_mutex_stats_record(buf_mutex_stats_site_,                            \
                            my_timer_cycles() - buf_mutex_stats_t0_);         \
+    buf_mutex_stats_on_enter(buf_mutex_stats_site_,                          \
+                             static_cast<const void *>(mutex_ptr));          \
+  } while (0)
+
+/** Releases the given mutex, first recording the hold time since the
+matching BUF_MUTEX_ENTER_INSTRUMENTED (see buf_mutex_stats_on_exit()).
+@param[in]  mutex_ptr  pointer to the block/page mutex to exit */
+#define BUF_MUTEX_EXIT_INSTRUMENTED(mutex_ptr)                     \
+  do {                                                             \
+    buf_mutex_stats_on_exit(static_cast<const void *>(mutex_ptr)); \
+    mutex_exit(mutex_ptr);                                         \
   } while (0)
 
 /** Event used to wake up (or force an early tick of) the CSV-dumping
@@ -121,13 +176,19 @@ void buf_mutex_stats_thread();
 
 #else /* UNIV_BUF_MUTEX_STATS */
 
-/** Uninstrumented fallback: plain mutex_enter(), for builds where
-UNIV_BUF_MUTEX_STATS is off (UNIV_LIBRARY/UNIV_HOTBACKUP, or a baseline
-build for comparison). Callers use this macro unconditionally either way.
-@param[in]  mutex_ptr  pointer to the block/page mutex to enter */
+/** Uninstrumented fallback: plain mutex_enter()/mutex_exit(), for builds
+where UNIV_BUF_MUTEX_STATS is off (UNIV_LIBRARY/UNIV_HOTBACKUP, or a
+baseline build for comparison). Callers use these macros unconditionally
+either way.
+@param[in]  mutex_ptr  pointer to the block/page mutex to enter/exit */
 #define BUF_MUTEX_ENTER_INSTRUMENTED(mutex_ptr) \
   do {                                          \
     mutex_enter(mutex_ptr);                     \
+  } while (0)
+
+#define BUF_MUTEX_EXIT_INSTRUMENTED(mutex_ptr) \
+  do {                                         \
+    mutex_exit(mutex_ptr);                     \
   } while (0)
 
 #endif /* UNIV_BUF_MUTEX_STATS */
