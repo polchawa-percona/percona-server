@@ -47,12 +47,20 @@ class Block_hint {
   */
   template <typename F>
   auto run_with_hint(F &&f) {
-    buffer_fix_block_if_still_valid();
-    /* m_block could be changed during f() call, so we use local variable to
-    remember which block we need to unfix */
-    buf_block_t *buffer_fixed_block = m_block;
-    auto res = f(buffer_fixed_block);
-    buffer_unfix_block_if_needed(buffer_fixed_block);
+    /* EXPERIMENTAL (branch seqlock-hint-nofix): buffer_fix_block_if_still_
+    valid()/buffer_unfix_block_if_needed() removed to measure how much of
+    the hot-path SELECT cost is this fix/unfix pair (and the page-hash
+    shard latch + state/page-id validation it does under that latch), now
+    that fix_epoch exists in buf_page_optimistic_get()'s fast path.
+
+    UNSAFE as-is: m_block is used with no buffer-fix and no validation
+    that it still points at a live BUF_BLOCK_FILE_PAGE with the expected
+    page id -- it may be nullptr, stale, or (worse) a dangling pointer
+    into a freed/reused block, since nothing here excludes concurrent
+    eviction any more. Do not ship this. If perf testing shows this path
+    is worth pursuing, replace this comment and the removed calls with an
+    epoch-based validity check instead of reinstating the fix. */
+    auto res = f(m_block);
     return res;
   }
 
