@@ -18,22 +18,24 @@
 # was actually asked about is the GROUP BY key list, not the ORDER
 # BY distance expression.
 #
-# In a debug build the function's own assert() -- which checks that
-# the list it was called on is itself a single ascending DISTANCE(...)
-# expression under a finite LIMIT -- fails immediately, since a
-# GROUP BY key is never a distance expression: the server aborts.
-# In a release build (assert compiled out) the function returns true
-# anyway, so create_intermediate_table() (sql_executor.cc), called
-# from make_tmp_tables_info() (sql_select.cc), skips the pre-group
-# sort, and streaming aggregation then runs over rows in *distance*
-# order instead of *group-key* order: the same group key produces a
-# separate output row every time it stops being adjacent in distance
-# order.
+# Before the "if (grouped) return false;" guard in
+# optimize_vector_query(), that assumption held even when the list
+# was the GROUP BY key list: in a debug build the function's own
+# assert() -- which checks that the list it was called on is itself
+# a single ascending DISTANCE(...) expression under a finite LIMIT --
+# failed immediately, since a GROUP BY key is never a distance
+# expression, and the server aborted. In a release build (assert
+# compiled out) the function returned true anyway, so
+# create_intermediate_table() (sql_executor.cc), called from
+# make_tmp_tables_info() (sql_select.cc), skipped the pre-group
+# sort, and streaming aggregation ran over rows in *distance* order
+# instead of *group-key* order: the same group key produced a
+# separate output row every time it stopped being adjacent in
+# distance order.
 #
-# This test currently CRASHES the server in a debug build (and would
-# silently return fragmented groups in a release build). Making
-# optimize_vector_query() bail out when JOIN::grouped is set -- the
-# same guard fts_index_access() already has -- fixes it.
+# optimize_vector_query() now bails out when JOIN::grouped is set --
+# the same guard fts_index_access() already has -- so this shape
+# falls back to the exact path: one row per group, correct count.
 #
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 g INT,
@@ -52,10 +54,7 @@ INSERT INTO t1 VALUES (1, 1, STRING_TO_VECTOR('[0,0]')),
 # (1) No sql_mode change needed: GROUP BY the full primary key makes
 # every other column of t1 -- including v -- functionally
 # dependent, so ONLY_FULL_GROUP_BY (the default) already permits
-# referencing v in ORDER BY. optimize_vector_query() still activates
-# JT_VECTOR (it never looks at GROUP BY), and the group-list assert
-# described above still crashes, since `id` is not a DISTANCE(...)
-# call. This is not a bug reachable only under an unusual sql_mode.
+# referencing v in ORDER BY.
 #
 SELECT id, COUNT(*) FROM t1 GROUP BY id
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 10;
@@ -65,10 +64,10 @@ id	COUNT(*)
 3	1
 4	1
 #
-# (2) The same hole with a GROUP BY that actually collapses rows,
-# to show the wrong-result shape once (1) no longer aborts the
-# server. v is not functionally dependent on g, so this still needs
-# sql_mode without ONLY_FULL_GROUP_BY.
+# (2) The same shape with a GROUP BY that actually collapses rows,
+# to pin down the correct grouped counts (the release-build symptom
+# was fragmented per-row groups). v is not functionally dependent
+# on g, so this still needs sql_mode without ONLY_FULL_GROUP_BY.
 #
 # Each group has exactly 2 rows; the correct answer is one row per
 # group. The two groups' relative order is not functionally

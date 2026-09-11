@@ -20,22 +20,24 @@
 --echo # was actually asked about is the GROUP BY key list, not the ORDER
 --echo # BY distance expression.
 --echo #
---echo # In a debug build the function's own assert() -- which checks that
---echo # the list it was called on is itself a single ascending DISTANCE(...)
---echo # expression under a finite LIMIT -- fails immediately, since a
---echo # GROUP BY key is never a distance expression: the server aborts.
---echo # In a release build (assert compiled out) the function returns true
---echo # anyway, so create_intermediate_table() (sql_executor.cc), called
---echo # from make_tmp_tables_info() (sql_select.cc), skips the pre-group
---echo # sort, and streaming aggregation then runs over rows in *distance*
---echo # order instead of *group-key* order: the same group key produces a
---echo # separate output row every time it stops being adjacent in distance
---echo # order.
+--echo # Before the "if (grouped) return false;" guard in
+--echo # optimize_vector_query(), that assumption held even when the list
+--echo # was the GROUP BY key list: in a debug build the function's own
+--echo # assert() -- which checks that the list it was called on is itself
+--echo # a single ascending DISTANCE(...) expression under a finite LIMIT --
+--echo # failed immediately, since a GROUP BY key is never a distance
+--echo # expression, and the server aborted. In a release build (assert
+--echo # compiled out) the function returned true anyway, so
+--echo # create_intermediate_table() (sql_executor.cc), called from
+--echo # make_tmp_tables_info() (sql_select.cc), skipped the pre-group
+--echo # sort, and streaming aggregation ran over rows in *distance* order
+--echo # instead of *group-key* order: the same group key produced a
+--echo # separate output row every time it stopped being adjacent in
+--echo # distance order.
 --echo #
---echo # This test currently CRASHES the server in a debug build (and would
---echo # silently return fragmented groups in a release build). Making
---echo # optimize_vector_query() bail out when JOIN::grouped is set -- the
---echo # same guard fts_index_access() already has -- fixes it.
+--echo # optimize_vector_query() now bails out when JOIN::grouped is set --
+--echo # the same guard fts_index_access() already has -- so this shape
+--echo # falls back to the exact path: one row per group, correct count.
 --echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
@@ -57,19 +59,16 @@ INSERT INTO t1 VALUES (1, 1, STRING_TO_VECTOR('[0,0]')),
 --echo # (1) No sql_mode change needed: GROUP BY the full primary key makes
 --echo # every other column of t1 -- including v -- functionally
 --echo # dependent, so ONLY_FULL_GROUP_BY (the default) already permits
---echo # referencing v in ORDER BY. optimize_vector_query() still activates
---echo # JT_VECTOR (it never looks at GROUP BY), and the group-list assert
---echo # described above still crashes, since `id` is not a DISTANCE(...)
---echo # call. This is not a bug reachable only under an unusual sql_mode.
+--echo # referencing v in ORDER BY.
 --echo #
 SELECT id, COUNT(*) FROM t1 GROUP BY id
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 10;
 
 --echo #
---echo # (2) The same hole with a GROUP BY that actually collapses rows,
---echo # to show the wrong-result shape once (1) no longer aborts the
---echo # server. v is not functionally dependent on g, so this still needs
---echo # sql_mode without ONLY_FULL_GROUP_BY.
+--echo # (2) The same shape with a GROUP BY that actually collapses rows,
+--echo # to pin down the correct grouped counts (the release-build symptom
+--echo # was fragmented per-row groups). v is not functionally dependent
+--echo # on g, so this still needs sql_mode without ONLY_FULL_GROUP_BY.
 --echo #
 --echo # Each group has exactly 2 rows; the correct answer is one row per
 --echo # group. The two groups' relative order is not functionally
