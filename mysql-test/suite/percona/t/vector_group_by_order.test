@@ -1,0 +1,85 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: GROUP BY combined with the canonical
+--echo # ORDER BY DISTANCE(...) LIMIT k shape.
+--echo #
+--echo # JOIN::optimize_vector_query() (sql_optimizer.cc) activates
+--echo # JT_VECTOR for any single-table block matching the canonical vector
+--echo # ORDER BY shape without ever checking JOIN::grouped -- unlike its
+--echo # FTS analogue, JOIN::fts_index_access(), which explicitly bails out
+--echo # "if (grouped)". JOIN::grouped is set at JOIN construction time
+--echo # (select->is_explicitly_grouped()), so it already reflects this
+--echo # query's GROUP BY by the time optimize_vector_query() runs.
+--echo #
+--echo # JOIN::test_skip_sort() then asks
+--echo # test_if_skip_sort_order(tab, group_list, ...) whether GROUP BY's
+--echo # own ordering is already satisfied. That function's JT_VECTOR
+--echo # branch unconditionally returns true, claiming the distance-ordered
+--echo # scan also satisfies GROUP BY ordering -- even though the list it
+--echo # was actually asked about is the GROUP BY key list, not the ORDER
+--echo # BY distance expression.
+--echo #
+--echo # In a debug build the function's own assert() -- which checks that
+--echo # the list it was called on is itself a single ascending DISTANCE(...)
+--echo # expression under a finite LIMIT -- fails immediately, since a
+--echo # GROUP BY key is never a distance expression: the server aborts.
+--echo # In a release build (assert compiled out) the function returns true
+--echo # anyway, so create_intermediate_table() (sql_executor.cc), called
+--echo # from make_tmp_tables_info() (sql_select.cc), skips the pre-group
+--echo # sort, and streaming aggregation then runs over rows in *distance*
+--echo # order instead of *group-key* order: the same group key produces a
+--echo # separate output row every time it stops being adjacent in distance
+--echo # order.
+--echo #
+--echo # This test currently CRASHES the server in a debug build (and would
+--echo # silently return fragmented groups in a release build). Making
+--echo # optimize_vector_query() bail out when JOIN::grouped is set -- the
+--echo # same guard fts_index_access() already has -- fixes it.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 g INT,
+                 v VECTOR(2) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+--echo # Ascending distance from the origin: id 1 (dist 0), 2 (dist 1),
+--echo # 3 (dist 2), 4 (dist 3). g interleaves 1,2,1,2 across that order,
+--echo # so a buggy streaming aggregation that trusts distance order for
+--echo # group order would flush a new (g, COUNT(*)=1) row every time g
+--echo # flips, instead of one row per group with COUNT(*)=2.
+INSERT INTO t1 VALUES (1, 1, STRING_TO_VECTOR('[0,0]')),
+                      (2, 2, STRING_TO_VECTOR('[1,0]')),
+                      (3, 1, STRING_TO_VECTOR('[2,0]')),
+                      (4, 2, STRING_TO_VECTOR('[3,0]'));
+
+--echo #
+--echo # (1) No sql_mode change needed: GROUP BY the full primary key makes
+--echo # every other column of t1 -- including v -- functionally
+--echo # dependent, so ONLY_FULL_GROUP_BY (the default) already permits
+--echo # referencing v in ORDER BY. optimize_vector_query() still activates
+--echo # JT_VECTOR (it never looks at GROUP BY), and the group-list assert
+--echo # described above still crashes, since `id` is not a DISTANCE(...)
+--echo # call. This is not a bug reachable only under an unusual sql_mode.
+--echo #
+SELECT id, COUNT(*) FROM t1 GROUP BY id
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 10;
+
+--echo #
+--echo # (2) The same hole with a GROUP BY that actually collapses rows,
+--echo # to show the wrong-result shape once (1) no longer aborts the
+--echo # server. v is not functionally dependent on g, so this still needs
+--echo # sql_mode without ONLY_FULL_GROUP_BY.
+--echo #
+--echo # Each group has exactly 2 rows; the correct answer is one row per
+--echo # group. The two groups' relative order is not functionally
+--echo # dependent on the ORDER BY expression, so the result is sorted for
+--echo # comparison.
+--echo #
+SET SESSION sql_mode = '';
+--sorted_result
+SELECT g, COUNT(*) FROM t1 GROUP BY g
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 10;
+SET SESSION sql_mode = default;
+
+DROP TABLE t1;
