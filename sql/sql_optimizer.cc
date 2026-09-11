@@ -11079,6 +11079,17 @@ bool JOIN::optimize_vector_query() {
   under a finite LIMIT. Any other placement of a distance call (WHERE,
   projection, no LIMIT) stays on the exact path - an approximate index
   inside a filter silently drops qualifying rows. */
+
+  /* A GROUP BY is not this ORDER BY: test_skip_sort() separately asks
+  test_if_skip_sort_order() whether the *group* list's own order is
+  already satisfied, and that function's JT_VECTOR branch always
+  answers yes without looking at what the list actually contains — it
+  assumes it is only ever called on the ORDER BY list this function
+  activated JT_VECTOR for. Mirror the same bail-out fts_index_access()
+  already has for the same reason ("This optimization does not work
+  with filesort nor GROUP BY"). */
+  if (grouped) return false;
+
   if (primary_tables != 1 || const_tables != 0) return false;
   if (m_select_limit == HA_POS_ERROR) return false;
   if (order.order == nullptr || order.order->next != nullptr ||
