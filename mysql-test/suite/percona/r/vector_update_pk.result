@@ -177,14 +177,19 @@ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 id	VECTOR_TO_STRING(v)
 1	[0.00000e+00,0.00000e+00]
 COMMIT;
-# After the snapshot ends, the new key is what a fresh read sees
-# (this session's t2 graph was warmed by the INSERTs above, same
-# as t1's, so this also exercises the corrected aux row via a
-# reader whose snapshot postdates the UPDATE -- it is not itself
-# relying on the in-memory node, which is why it sees the change
-# without a restart: check (2) resolves it via the base table).
+# KNOWN result, same warm-graph window as above: this session's t2
+# graph was warmed by the INSERTs, so its resident node still
+# names base_pk=1, which no longer exists -- the index path skips
+# it and falls through to the next-nearest row, NOT row 101.
 SELECT id, VECTOR_TO_STRING(v) FROM t2
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 id	VECTOR_TO_STRING(v)
 2	[1.00000e+01,0.00000e+00]
+# A fresh graph resolves it: after a reload, row 101 -- the SAME
+# node, re-pointed -- is what the index path returns too.
+# restart
+SELECT id, VECTOR_TO_STRING(v) FROM t2
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
+id	VECTOR_TO_STRING(v)
+101	[0.00000e+00,0.00000e+00]
 DROP TABLE t1, t2;

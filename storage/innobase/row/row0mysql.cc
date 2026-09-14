@@ -2876,6 +2876,17 @@ static dberr_t row_update_for_mysql_using_upd_graph(const byte *mysql_rec,
   generated for the table: MySQL does not know anything about
   the row id used as the clustered index key */
 
+  /* Consume this statement's PK-repoint request right away, before
+  row_upd_step() runs: calc_row_difference() set it (or not) for THIS
+  row only, and it must not survive past this call on any path -
+  including an error below, or a cascaded FK action inside
+  row_upd_step() itself, neither of which passes back through
+  calc_row_difference() to overwrite it. Reading it here, once, makes
+  its lifetime exactly this function call regardless of how that call
+  ends. */
+  const bool pk_repoint_requested = trx->vec_pk_repoint;
+  trx->vec_pk_repoint = false;
+
   savept = trx_savept_take(trx);
 
   thr = que_fork_get_first_thr(prebuilt->upd_graph);
@@ -2997,10 +3008,7 @@ run_again:
   write can retroactively point an old snapshot's lookup at a record
   this UPDATE itself just inserted. */
   {
-    const bool pk_repoint = trx->vec_pk_repoint;
-    trx->vec_pk_repoint = false;
-
-    if (!node->is_delete && pk_repoint) {
+    if (!node->is_delete && pk_repoint_requested) {
       /* Established by calc_row_difference before it set the flag, so
       a miss means the PK changed without ending up in the update
       vector, which cannot happen. */

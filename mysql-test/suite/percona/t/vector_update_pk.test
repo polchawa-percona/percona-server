@@ -152,12 +152,17 @@ SELECT id, VECTOR_TO_STRING(v) FROM t2
 
 COMMIT;
 
---echo # After the snapshot ends, the new key is what a fresh read sees
---echo # (this session's t2 graph was warmed by the INSERTs above, same
---echo # as t1's, so this also exercises the corrected aux row via a
---echo # reader whose snapshot postdates the UPDATE -- it is not itself
---echo # relying on the in-memory node, which is why it sees the change
---echo # without a restart: check (2) resolves it via the base table).
+--echo # KNOWN result, same warm-graph window as above: this session's t2
+--echo # graph was warmed by the INSERTs, so its resident node still
+--echo # names base_pk=1, which no longer exists -- the index path skips
+--echo # it and falls through to the next-nearest row, NOT row 101.
+SELECT id, VECTOR_TO_STRING(v) FROM t2
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # A fresh graph resolves it: after a reload, row 101 -- the SAME
+--echo # node, re-pointed -- is what the index path returns too.
+--source include/restart_mysqld.inc
+
 SELECT id, VECTOR_TO_STRING(v) FROM t2
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 
