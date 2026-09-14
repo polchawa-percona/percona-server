@@ -1197,6 +1197,15 @@ struct trx_t {
   the matching graph node. Cleared by the hook, and reset by
   calc_row_difference on every UPDATE, so it never spans statements. */
   uint64_t vec_next_label;
+
+  /** True if this statement changed a vector-indexed row's PRIMARY KEY
+  without changing its indexed vector.
+
+  Unlike vec_next_label, a PK-only change mints no label and adds no
+  node - the row's CURRENT node just needs its base_pk re-pointed at
+  the new key (design: "UPDATE"). calc_row_difference sets this;
+  row0mysql.cc's post-update hook clears it and does the re-point. */
+  bool vec_pk_repoint;
   /*------------------------------*/
   uint32_t flush_tables; /*!< if "covering" the FLUSH TABLES",
                             count of tables being flushed. */

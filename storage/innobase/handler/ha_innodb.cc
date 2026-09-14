@@ -10191,15 +10191,6 @@ static dberr_t calc_row_difference(
   doc_id_t doc_id = FTS_NULL_DOC_ID;
   ulint comp = 0;
   ulint num_v = 0;
-  /* The indexed vector column's own field, and its raw MySQL-format
-  value in `new_row`, captured on whichever iteration of the main loop
-  below visits it - regardless of whether it changed. Used after the
-  loop to carry the row's CURRENT vector into the update vector when a
-  PK-only UPDATE needs one but this statement did not supply one (see
-  the vec_next_label block). */
-  Field *vec_col_field = nullptr;
-  const byte *vec_col_new_ptr = nullptr;
-  ulint vec_col_pack_len = 0;
 
   ut_ad(!srv_read_only_mode || prebuilt->table->is_intrinsic());
 
@@ -10236,14 +10227,6 @@ static dberr_t calc_row_difference(
 
     o_len = col_pack_len;
     n_len = col_pack_len;
-
-    if (!is_virtual && vec_col_field == nullptr &&
-        DICT_TF2_FLAG_IS_SET(prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL) &&
-        dict_col_get_no(col) == vec_indexed_col_no(prebuilt->table)) {
-      vec_col_field = field;
-      vec_col_new_ptr = new_mysql_row_col;
-      vec_col_pack_len = col_pack_len;
-    }
 
     /* We use o_ptr and n_ptr to dig up the actual data for
     comparison. */
@@ -10541,14 +10524,11 @@ static dberr_t calc_row_difference(
 
       /* Did this UPDATE move the row's PRIMARY KEY? A vector-indexed
       table's aux rows name their base row by that key (design:
-      "base_pk"), so a PK change makes every node describing this row
-      stale in exactly the way a vector change does - the row is now a
-      different "version" as far as the graph is concerned. Treat it
-      the same way: mint a fresh label below and let the row be
-      re-pointed at a fresh node, carrying the (unchanged) vector and
-      the NEW key. Re-pointing the OLD node's base_pk in place instead
-      would break isolation for a read view that predates this UPDATE -
-      see vec-hnsw-aux-sub-trx.md "UPDATE". */
+      "base_pk"). Unlike a vector change, this does NOT touch the
+      graph - the vector has not moved - so no label is minted here;
+      row0mysql.cc re-points the row's CURRENT node's base_pk after
+      the update instead (design: "UPDATE"). See trx->vec_pk_repoint
+      below. */
       if (!changes_pk_column && !is_virtual &&
           DICT_TF2_FLAG_IS_SET(prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
         changes_pk_column = vec_upd_changes_pk_column(prebuilt->table, ufield);
@@ -10644,44 +10624,22 @@ static dberr_t calc_row_difference(
   get_n_cols() + n_v_cols entries, which already counts this hidden
   column. */
   trx->vec_next_label = 0;
-  if (changes_vec_column || changes_pk_column) {
+  if (changes_vec_column) {
     trx->vec_next_label = vec_assign_next_aux_id(prebuilt->table);
     ufield = uvect->fields + n_changed;
     vec_update_aux_id(prebuilt->table, ufield, &trx->vec_next_label);
     ++n_changed;
   }
 
-  /* A PK-only UPDATE mints a label above but never visited the vector
-  column in the main loop (it did not change), so the update vector has
-  no vector value for row0mysql.cc's vec_update_row() to mint the new
-  node with. Append one, carrying the row's CURRENT (unchanged) vector,
-  the same MySQL-to-InnoDB conversion the loop above applies to a
-  column that did change. */
-  if (changes_pk_column && !changes_vec_column) {
-    ut_ad(vec_col_field != nullptr);
-    if (vec_col_field != nullptr) {
-      dict_col_t *vec_col =
-          prebuilt->table->get_col(vec_indexed_col_no(prebuilt->table));
-
-      ufield = uvect->fields + n_changed;
-      UNIV_MEM_INVALID(ufield, sizeof *ufield);
-
-      vec_col->copy_type(dfield_get_type(&dfield));
-      buf = row_mysql_store_col_in_innobase_format(
-          &dfield, (byte *)buf, true, vec_col_new_ptr, vec_col_pack_len, comp,
-          vec_col_field->column_format() == COLUMN_FORMAT_TYPE_COMPRESSED,
-          reinterpret_cast<const byte *>(vec_col_field->zip_dict_data.str),
-          vec_col_field->zip_dict_data.length, &prebuilt->compress_heap);
-      dfield_copy(&ufield->new_val, &dfield);
-
-      ufield->field_no = dict_col_get_clust_pos(vec_col, clust_index);
-      ufield->exp = nullptr;
-      ufield->orig_len = 0;
-      ufield->old_v_val = nullptr;
-      ufield->mysql_field = vec_col_field;
-      ++n_changed;
-    }
-  }
+  /* A PK-only UPDATE (changes_pk_column but not changes_vec_column)
+  does not touch the graph and mints no label - it only needs the
+  row's CURRENT node re-pointed at the new key after the update
+  completes (design: "UPDATE"), which row0mysql.cc does via this
+  flag. The update vector cannot carry that signal itself the way the
+  label does (there is no new column value for row0mysql.cc to read
+  it back from), so it rides trx directly, the same trick
+  vec_next_label uses for the label. */
+  trx->vec_pk_repoint = changes_pk_column && !changes_vec_column;
 
   uvect->n_fields = n_changed;
   uvect->info_bits = 0;

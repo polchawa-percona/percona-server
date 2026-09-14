@@ -323,6 +323,17 @@ const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
 [[nodiscard]] bool vec_upd_row_pk(const dict_table_t *table,
                                   const upd_node_t *node, uint64_t *pk);
 
+/** The hidden percona_vec_aux_id of the row currently stored under `pk`
+in the clustered index - a plain point lookup, not a read-view read.
+Used after a PK-only UPDATE, to find the label of the row's CURRENT
+node so it can be re-pointed at the new key.
+@param[in]   table   the base table
+@param[in]   pk      the row's (post-update) primary key
+@param[out]  aux_id  the label
+@return true if the row was found */
+[[nodiscard]] bool vec_read_current_aux_id(const dict_table_t *table,
+                                           uint64_t pk, uint64_t *aux_id);
+
 /** Does this update field change the row's PRIMARY KEY?
 
 The design restricts a vector-indexed table to a single-column BIGINT

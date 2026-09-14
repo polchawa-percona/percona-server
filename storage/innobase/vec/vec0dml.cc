@@ -352,10 +352,11 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
 
 dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
                            const byte *neighbors, ulint neighbors_len,
-                           const uint64_t *new_base_pk) {
+                           const uint64_t *new_base_pk, bool update_neighbors) {
   ut_ad(trx != nullptr);
   ut_ad(aux != nullptr);
-  ut_ad(neighbors != nullptr || neighbors_len == 0);
+  ut_ad(!update_neighbors || neighbors != nullptr || neighbors_len == 0);
+  ut_ad(update_neighbors || new_base_pk != nullptr);
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   dict_index_t *clust = aux->first_index();
@@ -471,12 +472,13 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
     mem_heap_free(offset_heap);
   }
 
-  /* Single-field (or two-field, with the tombstone) update vector. */
+  /* One field (base_pk only, for a PK-only re-point), or up to two
+  (neighbors, and the tombstone) - see update_neighbors below. */
   upd_t *update = upd_create(2, heap);
   update->table = aux;
   ulint n_fields = 0;
 
-  {
+  if (update_neighbors) {
     upd_field_t *uf = upd_get_nth_field(update, n_fields++);
     const dict_col_t *col = aux->get_col(VEC_AUX_COL_NEIGHBORS);
     upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);

@@ -594,3 +594,20 @@ void vec_build_free(Vec_build *b);
 
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
+
+/** Re-point an existing node's base_pk after a PK-only UPDATE moved the
+base row's primary key without moving its vector (design: "UPDATE").
+
+Unlike vec_update_row, this mints no node and touches no in-memory
+graph - only the aux table's base_pk column for the node named
+`label`, via the same kind of aux sub-transaction vec_add_node uses.
+@param[in,out]  trx      the user's transaction (for the base row, not
+                         the aux)
+@param[in,out]  table    the base table
+@param[in]      label    the row's CURRENT node - unchanged by this
+                         UPDATE, since the vector didn't move
+@param[in]      base_pk  the row's NEW primary key
+@param[in]      thd      session
+@return DB_SUCCESS, or an error */
+dberr_t vec_repoint_row(trx_t *trx, dict_table_t *table, uint64_t label,
+                        uint64_t base_pk, THD *thd);

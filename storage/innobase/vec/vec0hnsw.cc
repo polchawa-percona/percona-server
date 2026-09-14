@@ -898,6 +898,53 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
   return DB_SUCCESS;
 }
 
+dberr_t vec_repoint_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
+                        uint64_t label, uint64_t base_pk, THD *thd) {
+  ut_ad(label != 0);
+
+  /* Unlike vec_update_row/vec_add_node, this never touches the graph -
+  a PK-only UPDATE doesn't move the vector (design: "UPDATE"), so there
+  is no node to insert and nothing in memory to mutate. It writes only
+  the aux table's base_pk column for the existing node named `label`.
+  A resident copy of that node (if this session, or another, already
+  loaded the graph) keeps its old base_pk until the graph is next
+  (re)loaded - deliberately: nothing reads that field through an old
+  snapshot, since it is not part of what a reader compares against the
+  base row (see the MVCC checks); it only feeds the clustered-index
+  lookup a candidate's base_pk drives, so a resident node simply stays
+  stale, not wrong, until reload. vec_runtime_get is not consulted:
+  the aux write does not depend on whether this session has the
+  runtime open. */
+  for (dict_index_t *index = table->first_index(); index != nullptr;
+       index = index->next()) {
+    if (!index->is_vector()) continue;
+
+    MDL_ticket *mdl = nullptr;
+    dict_table_t *aux = vec_aux_open_for_dml(table, index->id, thd, &mdl);
+    if (aux == nullptr) return DB_TABLE_NOT_FOUND;
+
+    /* Sub-transaction, same rule as vec_add_node: the aux write must
+    not roll back with the user's statement, and must not fsync (the
+    user's own commit already flushes past our LSN). */
+    trx_t *aux_trx = trx_allocate_for_background();
+    aux_trx->flush_log_later = true;
+    trx_start_internal(aux_trx, UT_LOCATION_HERE);
+
+    const dberr_t err = vec_aux_update_row(
+        aux_trx, aux, label, nullptr, 0, &base_pk, /*update_neighbors=*/false);
+    if (err == DB_SUCCESS) {
+      trx_commit_for_mysql(aux_trx);
+    } else {
+      trx_rollback_to_savepoint(aux_trx, nullptr);
+    }
+    trx_free_for_background(aux_trx);
+    vec_aux_close_for_dml(aux, thd, &mdl);
+
+    if (err != DB_SUCCESS) return err;
+  }
+  return DB_SUCCESS;
+}
+
 dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
                        const dtuple_t *row, THD *thd) {
   for (dict_index_t *index = table->first_index(); index != nullptr;

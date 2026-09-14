@@ -2934,17 +2934,9 @@ run_again:
     }
   }
 
-  /* A vector-column UPDATE, OR a PRIMARY KEY UPDATE, adds a new node.
-  calc_row_difference already minted the label and put it into the
-  update vector, so the row written above already names the new node -
-  this only has to create it. A PK change is treated the same as a
-  vector change for exactly the reason a node is immutable in the first
-  place: the row's base_pk is baked into every node that names it, so
-  once the key moves the row is, as far as the graph is concerned, a
-  new version - re-pointing the OLD node's base_pk in place instead
-  would hand a stale-snapshot reader a candidate whose clustered record
-  is now this UPDATE's own (invisible-to-them) insert, losing the row
-  entirely (design: "UPDATE" / MVCC checks).
+  /* A vector-column UPDATE adds the new node. calc_row_difference has
+  already minted the label and put it into the update vector, so the row
+  written above already names the new node - this only has to create it.
 
   DELETE deliberately does nothing here: the node has to stay for read
   views still entitled to the row, and the read path filters it by
@@ -2957,22 +2949,17 @@ run_again:
     trx->vec_next_label = 0;
 
     if (!node->is_delete && label != 0) {
-      /* The vector: calc_row_difference makes the update vector
-      self-sufficient for this - when a PK-only UPDATE mints a label
-      without the UPDATE itself touching the vector column, it also
-      appends a synthetic update field carrying the vector's current
-      (unchanged) value, so this always finds one. node->row / upd_row
-      cannot be used here instead: row_upd() (row0upd.cc) nulls them
-      out as its own cleanup before row_upd_step() returns to us, so
-      by this point they are gone regardless of what the statement
-      did. */
+      /* Both of these were established by calc_row_difference before it
+      minted the label, so a miss here means the row now names a node
+      that will never exist. Fail the statement rather than leave the
+      graph behind the table. */
       ulint q_len = 0;
       const char *q = vec_upd_new_vector(table, node->update, &q_len);
 
-      /* The base_pk: prefer the update vector's OWN new value - only
-      present when this UPDATE moved the PK, and then it is the only
-      correct source (vec_upd_row_pk's cursor position is the
-      pre-update row, i.e. the OLD key). Otherwise the PK is
+      /* The base_pk: prefer the update vector's OWN new value - present
+      when this same statement ALSO moved the PK (vec_upd_row_pk's
+      cursor position is the pre-update row, i.e. the OLD key, which is
+      wrong for the fresh node this mints). Otherwise the PK is
       unchanged and vec_upd_row_pk's value (old == current) is
       correct. */
       uint64_t base_pk = 0;
@@ -2981,10 +2968,6 @@ run_again:
         have_pk = vec_upd_row_pk(table, node, &base_pk);
       }
 
-      /* Both of these were established by calc_row_difference before
-      it minted the label, so a miss here means the row now names a
-      node that will never exist. Fail the statement rather than
-      leave the graph behind the table. */
       ut_ad(q != nullptr);
       ut_ad(have_pk);
 
@@ -2995,6 +2978,52 @@ run_again:
 
       err =
           vec_update_row(trx, table, label, q, q_len, base_pk, trx->mysql_thd);
+      if (err != DB_SUCCESS) {
+        goto error;
+      }
+    }
+  }
+
+  /* A PRIMARY-KEY-only UPDATE does not touch the graph - the vector
+  has not moved - but every aux node naming this row bakes its OLD key
+  into base_pk, so the row's CURRENT node needs to be re-pointed at the
+  new one (design: "UPDATE"). This writes ONLY the aux table's base_pk
+  column, not the in-memory graph: a resident node's base_pk stays
+  whatever it was until the graph is next (re)loaded, and that is
+  deliberate, not a gap - a reader with a snapshot older than this
+  UPDATE never consults the rewritten aux row (it is reading its own
+  in-memory copy, or the graph gets reloaded and resolves through
+  check (2) same as any other stale candidate), so nothing about this
+  write can retroactively point an old snapshot's lookup at a record
+  this UPDATE itself just inserted. */
+  {
+    const bool pk_repoint = trx->vec_pk_repoint;
+    trx->vec_pk_repoint = false;
+
+    if (!node->is_delete && pk_repoint) {
+      /* Established by calc_row_difference before it set the flag, so
+      a miss means the PK changed without ending up in the update
+      vector, which cannot happen. */
+      uint64_t new_pk = 0;
+      const bool have_pk = vec_upd_new_pk(table, node->update, &new_pk);
+      ut_ad(have_pk);
+
+      /* The row's CURRENT label. Not in the update vector (this
+      UPDATE never touched percona_vec_aux_id) and not available from
+      node->row/pcur (pre-update state, and by now possibly gone -
+      see row0mysql.cc's other vec block); the label is read back off
+      the row this statement just wrote, by its new key. */
+      uint64_t label = 0;
+      const bool have_label =
+          have_pk && vec_read_current_aux_id(table, new_pk, &label);
+      ut_ad(have_label);
+
+      if (!have_pk || !have_label) {
+        err = DB_ERROR;
+        goto error;
+      }
+
+      err = vec_repoint_row(trx, table, label, new_pk, trx->mysql_thd);
       if (err != DB_SUCCESS) {
         goto error;
       }

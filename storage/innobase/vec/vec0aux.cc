@@ -423,6 +423,50 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   return ok;
 }
 
+bool vec_read_current_aux_id(const dict_table_t *table, uint64_t pk,
+                             uint64_t *aux_id) {
+  /* const_cast: first_index() on a const table returns a const index,
+  but btr_pcur_t::open_no_init() takes a non-const one purely to fill
+  in search-info page hints on it - it does not modify the index
+  definition, the same way a plain SELECT's read does not. */
+  dict_index_t *clust = const_cast<dict_index_t *>(table->first_index());
+  if (dict_index_get_n_unique(clust) != 1) return false;
+
+  /* A plain clustered-index point lookup by the row's own (just
+  written, within this same trx) primary key - no read view needed,
+  the same way vec_aux_update_row positions itself by label. Unlike
+  that self-positioned upd_node, this is read-only: no lock is taken,
+  because the caller already holds whatever lock this statement's own
+  UPDATE took on the row. */
+  mem_heap_t *heap = mem_heap_create(64, UT_LOCATION_HERE);
+  dtuple_t *tuple = dtuple_create(heap, 1);
+  dict_index_copy_types(tuple, clust, 1);
+
+  byte pk_buf[8];
+  mach_write_to_8(pk_buf, pk);
+  dfield_set_data(dtuple_get_nth_field(tuple, 0), pk_buf, sizeof(pk_buf));
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_no_init(clust, tuple, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                    UT_LOCATION_HERE);
+
+  bool ok = false;
+  const rec_t *rec = pcur.get_rec();
+  if (page_rec_is_user_rec(rec) &&
+      pcur.get_low_match() >= dict_index_get_n_unique(clust)) {
+    *aux_id = vec_get_aux_id_from_rec(table, rec, clust);
+    ok = true;
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+  mem_heap_free(heap);
+  return ok;
+}
+
 bool vec_upd_changes_pk_column(const dict_table_t *table,
                                const upd_field_t *ufield) {
   if (ufield->is_virtual()) return false;

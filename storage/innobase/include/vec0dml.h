@@ -128,16 +128,28 @@ Passing new_base_pk re-points the node at a new primary key, which is
 what a base-row primary-key change needs (design: "UPDATE"). DELETE does
 not come through here at all: it writes nothing, because the node has to
 stay for read views still entitled to the row.
-@param[in,out]  trx            transaction to update on
-@param[in,out]  aux            the aux table, already open with MDL held
-@param[in]      id             the node to update
-@param[in]      neighbors      new neighbour blob
-@param[in]      neighbors_len  its length
-@param[in]      new_base_pk    new base primary key, or nullptr to leave it
+
+update_neighbors=false writes ONLY base_pk (new_base_pk must then be
+non-null) - the base-row-PK-only-UPDATE case, where the node's vector
+and neighbours have not changed and must not be touched. Passing the
+node's real neighbours as literal bytes to get the same effect would
+work too, but this avoids the caller having to read them back first
+just to write them out unchanged.
+@param[in,out]  trx              transaction to update on
+@param[in,out]  aux              the aux table, already open with MDL held
+@param[in]      id               the node to update
+@param[in]      neighbors        new neighbour blob, ignored unless
+                                 update_neighbors
+@param[in]      neighbors_len    its length, ignored unless
+                                 update_neighbors
+@param[in]      new_base_pk      new base primary key, or nullptr to
+                                 leave it
+@param[in]      update_neighbors whether to write the neighbours field
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND, or an error */
 dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
                            const byte *neighbors, ulint neighbors_len,
-                           const uint64_t *new_base_pk = nullptr);
+                           const uint64_t *new_base_pk = nullptr,
+                           bool update_neighbors = true);
 
 /** One node read back from the aux table. Pointers are into a caller
 supplied heap and live as long as it does. */
