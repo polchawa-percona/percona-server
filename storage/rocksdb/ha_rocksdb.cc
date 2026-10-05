@@ -3454,6 +3454,16 @@ class Rdb_transaction {
 
   virtual void rollback() = 0;
 
+  /**
+    Detach a prepared XA transaction from this object without rolling it
+    back. The prepared rocksdb::Transaction stays registered in the
+    TransactionDB under its XID name and is finished later by
+    rocksdb_commit_by_xid() / rocksdb_rollback_by_xid().
+
+    @return true if a prepared transaction was detached
+  */
+  virtual bool detach_prepared_tx() { return false; }
+
   [[nodiscard]] bool can_acquire_snapshot_without_conflicts() const {
     return my_core::thd_tx_isolation(m_thd) <= ISO_READ_COMMITTED;
   }
@@ -4577,6 +4587,25 @@ class Rdb_transaction_impl : public Rdb_transaction {
     }
   }
 
+  bool detach_prepared_tx() override {
+    if (m_rocksdb_tx == nullptr ||
+        m_rocksdb_tx->GetState() != rocksdb::Transaction::PREPARED) {
+      return false;
+    }
+    release_snapshot();
+    // The prepared transaction is now owned by the TransactionDB and is
+    // deleted by rocksdb_commit_by_xid() / rocksdb_rollback_by_xid().
+    m_rocksdb_tx = nullptr;
+    on_rollback();
+    m_write_count = 0;
+    m_row_lock_count = 0;
+    m_auto_incr_map.clear();
+    reset_ddl_transaction();
+    set_tx_read_only(false);
+    m_rollback_only = false;
+    return true;
+  }
+
   void acquire_snapshot(bool acquire_now) override {
     if (m_read_opts.snapshot == nullptr) {
       if (is_tx_read_only()) {
@@ -5238,6 +5267,9 @@ static int rocksdb_close_connection(handlerton *const hton, THD *const thd) {
                       rc);
     }
 
+    // A prepared XA transaction survives the disconnect and can be finished
+    // later with XA COMMIT/ROLLBACK from another connection.
+    tx->detach_prepared_tx();
     delete tx;
     set_tx_on_thd(thd, nullptr);
   }
@@ -5450,6 +5482,33 @@ static xa_status_code rocksdb_rollback_by_xid(
   delete trx;
 
   DBUG_RETURN(XA_OK);
+}
+
+/**
+  Replace the MyRocks transaction associated with THD with new_trx_arg.
+
+  If ptr_trx_arg is not nullptr, the current transaction is saved there
+  (XA START on a replication applier). Otherwise the current transaction is
+  disconnected from THD: a prepared XA transaction is detached and kept in
+  the TransactionDB for a later XA COMMIT/ROLLBACK by XID (XA PREPARE with
+  xa_detach_on_prepare=ON, or disconnect with a prepared XA transaction),
+  anything else is rolled back.
+*/
+static void rocksdb_replace_native_transaction_in_thd(THD *thd,
+                                                      void *new_trx_arg,
+                                                      void **ptr_trx_arg) {
+  DBUG_ENTER_FUNC();
+
+  Rdb_transaction *const tx = get_tx_from_thd(thd);
+  if (ptr_trx_arg != nullptr) {
+    *ptr_trx_arg = tx;
+  } else if (tx != nullptr) {
+    tx->detach_prepared_tx();
+    delete tx;
+  }
+  set_tx_on_thd(thd, static_cast<Rdb_transaction *>(new_trx_arg));
+
+  DBUG_VOID_RETURN;
 }
 
 /**
@@ -6533,6 +6592,8 @@ static int rocksdb_init_internal(void *const p) {
   rocksdb_hton->prepare = rocksdb_prepare;
   rocksdb_hton->commit_by_xid = rocksdb_commit_by_xid;
   rocksdb_hton->rollback_by_xid = rocksdb_rollback_by_xid;
+  rocksdb_hton->replace_native_transaction_in_thd =
+      rocksdb_replace_native_transaction_in_thd;
   rocksdb_hton->recover = rocksdb_recover;
   rocksdb_hton->commit = rocksdb_commit;
   rocksdb_hton->rollback = rocksdb_rollback;
