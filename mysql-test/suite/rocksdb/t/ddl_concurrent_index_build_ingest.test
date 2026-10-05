@@ -1,0 +1,125 @@
+#
+# Placement of the SST files of an INPLACE index build when other indexes of the
+# same column family change meanwhile. Index ids grow monotonically and are never
+# reused, so a new index's key range [id, id+1) never overlaps existing keys, and
+# MyRocks ingests with allow_global_seqno=false and allow_blocking_flush=false.
+# What can still happen is that the build of index N is paused before ingest while
+# the build of index N+1 completes and writes to index N+1 and to an older index
+# (< N) are flushed into one SST file whose key range spans N. That file blocks the
+# bottom level for N's file:
+#   round 1  the spanning file is in L0: N's file is placed above it;
+#   round 2  the spanning file is compacted to the bottom level first: N's file is
+#            placed in a level above;
+#   round 3  rocksdb_bulk_load_fail_if_not_bottommost_level=ON, spanning file in
+#            L0: the build succeeds;
+#   round 4  rocksdb_bulk_load_fail_if_not_bottommost_level=ON, spanning file in
+#            the bottom level: the build fails ("Files cannot be ingested to Lmax")
+#            and the table is unchanged. This is the documented effect of the
+#            option, but it makes an ALTER fail because of DML on other tables.
+# The same with rocksdb_bulk_load_use_sst_partitioner=ON is not tested here: on
+# debug builds it hits an assertion (see rocksdb.sst_partitioner_multi_version).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+
+# Interleaved index ids: build A gets index id N and waits before ingest; build B
+# gets N+1 and finishes; writes to B's new index and to an older index (< N) are
+# flushed into one SST file whose key range spans N. A's file must then be placed
+# above that file.
+
+SET SESSION cte_max_recursion_depth = 100000;
+--let $i = 1
+while ($i <= 3)
+{
+  eval CREATE TABLE t$i (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+  eval INSERT INTO t$i WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+    SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+  --inc $i
+}
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+call mtr.add_suppression("Failed to bulk load. status code = 13");
+call mtr.add_suppression("Error finishing bulk load");
+
+connect (c1,localhost,root,,);
+connect (c2,localhost,root,,);
+
+--let $round = 1
+while ($round <= 4)
+{
+  --echo # round $round
+  if ($round == 2)
+  {
+    --echo # the spanning file is compacted to the bottom level before A ingests
+  }
+  if ($round == 3)
+  {
+    --echo # rocksdb_bulk_load_fail_if_not_bottommost_level = ON for build A
+  }
+  if ($round == 4)
+  {
+    --echo # bottom level + fail_if_not_bottommost_level = ON
+  }
+  connection c1;
+  if ($round >= 3)
+  {
+    SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+  }
+  SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+  --send ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE
+  connection c2;
+  SET DEBUG_SYNC = 'now WAIT_FOR p1';
+  ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+  UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+  UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  if ($round == 2)
+  {
+    SET GLOBAL rocksdb_compact_cf = 'default';
+  }
+  if ($round >= 4)
+  {
+    SET GLOBAL rocksdb_compact_cf = 'default';
+  }
+  SET DEBUG_SYNC = 'now SIGNAL g1';
+  connection c1;
+  if ($round < 4)
+  {
+    --reap
+  }
+  if ($round == 4)
+  {
+    --replace_regex /\(null\)/<sst file>/
+    --error ER_UNKNOWN_ERROR
+    --reap
+  }
+  SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = DEFAULT;
+  connection default;
+  SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME IN ('t1','t2') AND INDEX_NAME='ka' ORDER BY INDEX_NUMBER;
+  --let $ccic_col = a
+  --let $ccic_key = ka
+  --let $ccic_table = t2
+  --source suite/rocksdb/include/ddl_concurrent_index_check.inc
+  if (`SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t1' AND INDEX_NAME='ka'`)
+  {
+    --let $ccic_table = t1
+    --source suite/rocksdb/include/ddl_concurrent_index_check.inc
+    ALTER TABLE t1 DROP INDEX ka;
+  }
+  ALTER TABLE t2 DROP INDEX ka;
+  --inc $round
+}
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1, t2, t3;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--let $wait_timeout = 180
+--source include/wait_condition.inc
+--echo # data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+  WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+disconnect c1;
+disconnect c2;
+DROP TABLE t1, t2, t3;
