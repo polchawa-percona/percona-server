@@ -1,0 +1,22 @@
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+CREATE TABLE s (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO s VALUES (1, 1), (2, 2);
+# Rows bulk-loaded after a snapshot are not visible to it.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM s;
+COUNT(*)
+2
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM s;
+COUNT(*)
+2
+SELECT COUNT(*) FROM s WHERE id >= 1000;
+COUNT(*)
+0
+COMMIT;
+# A new snapshot sees them.
+SELECT COUNT(*) FROM s;
+COUNT(*)
+52
+DROP TABLE s;

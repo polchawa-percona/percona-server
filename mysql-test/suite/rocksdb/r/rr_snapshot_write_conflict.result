@@ -1,0 +1,482 @@
+call mtr.add_suppression("Got error 522 when reading table");
+
+########################################################################
+# Engine: ROCKSDB
+########################################################################
+CREATE TABLE t (id INT PRIMARY KEY, k INT, u INT, v INT,
+KEY kk (k), UNIQUE KEY uu (u)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+CREATE TABLE o (id INT PRIMARY KEY, w INT) ENGINE=InnoDB;
+INSERT INTO o VALUES (1,1);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+
+# Row changed after the snapshot, then locked by con1.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 2;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+DELETE FROM t WHERE id = 2;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+REPLACE INTO t VALUES (2, 20, 2, 22);
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+INSERT INTO t VALUES (2, 20, 2, 22) ON DUPLICATE KEY UPDATE v = 222;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+SELECT v FROM t WHERE id = 2 FOR UPDATE;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+SELECT v FROM t WHERE id = 2 FOR SHARE;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t, o SET t.v = t.v + o.w WHERE t.id = 2 AND o.id = 1;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# Only a secondary key column changed after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET k = k + 1 WHERE id = 3;
+UPDATE t SET k = 99 WHERE id = 3;
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# A row of another, unchanged primary key is not affected.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 4;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# INSERT of a primary key inserted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+INSERT INTO t VALUES (6, 60, 6, 6);
+INSERT INTO t VALUES (6, 61, 61, 61);
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# INSERT of a primary key deleted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+DELETE FROM t WHERE id = 5;
+INSERT INTO t VALUES (5, 51, 51, 51);
+# Outcome: ER_LOCK_DEADLOCK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# INSERT of a unique secondary key value inserted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+INSERT INTO t VALUES (6, 60, 7, 6);
+INSERT INTO t VALUES (8, 80, 7, 8);
+# Outcome: ER_DUP_ENTRY
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# INSERT of a unique secondary key value freed after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET u = 55 WHERE id = 5;
+INSERT INTO t VALUES (9, 90, 5, 9);
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# Autocommit range UPDATE; the conflicting row is the first row read.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 1;
+UPDATE t SET v = v + 1 WHERE k >= 10;
+COMMIT;
+# Outcome: OK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	1002
+2	3
+3	4
+4	5
+5	6
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# Autocommit range UPDATE; the conflicting row is not the first row read.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 4;
+UPDATE t SET v = v + 1 WHERE k >= 10;
+COMMIT;
+# Outcome: ER_LOCK_DEADLOCK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	1
+2	2
+3	3
+4	1004
+5	5
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# Autocommit UPDATE by a primary key IN list; the second key conflicts.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 3;
+UPDATE t SET v = v + 1 WHERE id IN (2, 3);
+COMMIT;
+# Outcome: ER_LOCK_DEADLOCK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	1
+2	2
+3	1003
+4	4
+5	5
+
+# UPDATE through a nullable secondary key of rows another transaction
+# changed and inserted after the snapshot (innodb.innodb_bug14007649).
+# The range lock on a non-unique key inside a multi-statement
+# transaction is refused by the MyRocks gap-lock rule; InnoDB updates
+# the newest committed rows.
+CREATE TABLE t3 (rowid INT, f1 INT, f2 INT, KEY i1 (f1, f2), KEY i2 (f2))
+ENGINE=ROCKSDB;
+INSERT INTO t3 (rowid, f1, f2) VALUES (1, 1, 10), (2, 1, NULL);
+# (BEGIN and a read: a MyRocks transaction started WITH CONSISTENT
+# SNAPSHOT is read-only, see cons_snapshot_repeatable_read.)
+BEGIN;
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+2
+UPDATE t3 SET f2 = 4 WHERE f1 = 1 AND f2 IS NULL;
+INSERT INTO t3 VALUES (3, 1, NULL);
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	NULL
+UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+# Outcome: refused by the gap-lock rule
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	NULL
+COMMIT;
+# As an autocommit statement it runs on a new snapshot.
+UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	4
+3	1	6
+DROP TABLE t3;
+DROP TABLE t, o;
+
+########################################################################
+# Engine: InnoDB
+########################################################################
+CREATE TABLE t (id INT PRIMARY KEY, k INT, u INT, v INT,
+KEY kk (k), UNIQUE KEY uu (u)) ENGINE=InnoDB;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+CREATE TABLE o (id INT PRIMARY KEY, w INT) ENGINE=InnoDB;
+INSERT INTO o VALUES (1,1);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+
+# Row changed after the snapshot, then locked by con1.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 2;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+DELETE FROM t WHERE id = 2;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+REPLACE INTO t VALUES (2, 20, 2, 22);
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+INSERT INTO t VALUES (2, 20, 2, 22) ON DUPLICATE KEY UPDATE v = 222;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+SELECT v FROM t WHERE id = 2 FOR UPDATE;
+v
+102
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+SELECT v FROM t WHERE id = 2 FOR SHARE;
+v
+102
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t, o SET t.v = t.v + o.w WHERE t.id = 2 AND o.id = 1;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# Only a secondary key column changed after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET k = k + 1 WHERE id = 3;
+UPDATE t SET k = 99 WHERE id = 3;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# A row of another, unchanged primary key is not affected.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET v = v + 100 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 4;
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# INSERT of a primary key inserted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+INSERT INTO t VALUES (6, 60, 6, 6);
+INSERT INTO t VALUES (6, 61, 61, 61);
+# Outcome: ER_DUP_ENTRY
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# INSERT of a primary key deleted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+DELETE FROM t WHERE id = 5;
+INSERT INTO t VALUES (5, 51, 51, 51);
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# INSERT of a unique secondary key value inserted after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+INSERT INTO t VALUES (6, 60, 7, 6);
+INSERT INTO t VALUES (8, 80, 7, 8);
+# Outcome: ER_DUP_ENTRY
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# INSERT of a unique secondary key value freed after the snapshot.
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+UPDATE t SET u = 55 WHERE id = 5;
+INSERT INTO t VALUES (9, 90, 5, 9);
+# Outcome: OK
+ROLLBACK;
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+# Autocommit range UPDATE; the conflicting row is the first row read.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 1;
+UPDATE t SET v = v + 1 WHERE k >= 10;
+COMMIT;
+# Outcome: OK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	1002
+2	3
+3	4
+4	5
+5	6
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# Autocommit range UPDATE; the conflicting row is not the first row read.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 4;
+UPDATE t SET v = v + 1 WHERE k >= 10;
+COMMIT;
+# Outcome: OK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	2
+2	3
+3	4
+4	1005
+5	6
+DELETE FROM t;
+INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+# Autocommit UPDATE by a primary key IN list; the second key conflicts.
+BEGIN;
+UPDATE t SET v = v + 1000 WHERE id = 3;
+UPDATE t SET v = v + 1 WHERE id IN (2, 3);
+COMMIT;
+# Outcome: OK
+SELECT id, v FROM t ORDER BY id;
+id	v
+1	1
+2	3
+3	1004
+4	4
+5	5
+
+# UPDATE through a nullable secondary key of rows another transaction
+# changed and inserted after the snapshot (innodb.innodb_bug14007649).
+# The range lock on a non-unique key inside a multi-statement
+# transaction is refused by the MyRocks gap-lock rule; InnoDB updates
+# the newest committed rows.
+CREATE TABLE t3 (rowid INT, f1 INT, f2 INT, KEY i1 (f1, f2), KEY i2 (f2))
+ENGINE=InnoDB;
+INSERT INTO t3 (rowid, f1, f2) VALUES (1, 1, 10), (2, 1, NULL);
+# (BEGIN and a read: a MyRocks transaction started WITH CONSISTENT
+# SNAPSHOT is read-only, see cons_snapshot_repeatable_read.)
+BEGIN;
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+2
+UPDATE t3 SET f2 = 4 WHERE f1 = 1 AND f2 IS NULL;
+INSERT INTO t3 VALUES (3, 1, NULL);
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	NULL
+UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+# Outcome: OK
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	NULL
+3	1	6
+COMMIT;
+# As an autocommit statement it runs on a new snapshot.
+UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+rowid	f1	f2
+1	1	10
+2	1	4
+3	1	6
+DROP TABLE t3;
+DROP TABLE t, o;
