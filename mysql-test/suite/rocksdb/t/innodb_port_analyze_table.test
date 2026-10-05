@@ -1,0 +1,70 @@
+#
+# Port of innodb.analyze_table (mysql-test/suite/innodb/t/analyze_table.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every CREATE TABLE
+#   - The InnoDB-only innodb_stats_persistent_sample_pages setting is removed; the
+#     table row estimate after ANALYZE TABLE is checked instead (MyRocks statistics come
+#     from SST properties, so the memtable is flushed first)
+#   - The 1M-row single transaction is just below the default rocksdb_max_row_locks
+#     (1048576); a second part checks that one row more than the limit fails cleanly
+#     and leaves the table unchanged
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/not_valgrind.inc
+
+DELIMITER |;
+CREATE PROCEDURE populate_t1(IN n INT)
+BEGIN
+        DECLARE i int DEFAULT 1;
+
+        START TRANSACTION;
+        WHILE (i <= n) DO
+                INSERT INTO t1 VALUES (i, i, CONCAT('a', i));
+                SET i = i + 1;
+        END WHILE;
+        COMMIT;
+END|
+DELIMITER ;|
+
+CREATE TABLE t1(
+        class   INT,
+        id      INT,
+        title   VARCHAR(100)
+) ENGINE=ROCKSDB;
+
+SELECT @@global.rocksdb_max_row_locks;
+
+-- disable_query_log
+CALL populate_t1(1000000);
+-- enable_query_log
+
+SELECT COUNT(*) FROM t1;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t1;
+--echo # The row estimate is within 10% of the real row count.
+SELECT TABLE_ROWS BETWEEN 900000 AND 1100000 AS estimate_ok
+  FROM INFORMATION_SCHEMA.TABLES
+ WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+DROP TABLE t1;
+
+--echo #
+--echo # One row lock more than rocksdb_max_row_locks: the transaction fails and
+--echo # leaves the table unchanged.
+--echo #
+CREATE TABLE t1(
+        class   INT,
+        id      INT,
+        title   VARCHAR(100)
+) ENGINE=ROCKSDB;
+SET SESSION rocksdb_max_row_locks = 1000;
+--error ER_GET_ERRMSG
+CALL populate_t1(1001);
+ROLLBACK;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+SELECT COUNT(*) FROM t1;
+DROP TABLE t1;
+
+DROP PROCEDURE populate_t1;
