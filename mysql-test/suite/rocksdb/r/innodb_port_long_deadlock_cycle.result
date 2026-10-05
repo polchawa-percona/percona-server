@@ -1,0 +1,545 @@
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @saved_max_latest_deadlocks = @@global.rocksdb_max_latest_deadlocks;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_max_latest_deadlocks = 10;
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1),(2),(3),(4),(5);
+CREATE TABLE t2 (id INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 (id) VALUES (1),(2),(3),(4),(5);
+#
+# Scenario 1: a cycle of four transactions. con1 closes the cycle and is
+# the victim (InnoDB chooses the same transaction here).
+#
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+# The deadlock rolled back con1's whole transaction: con2 got row 1.
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+# The last deadlock lists the four waits of the cycle, and con1's
+# request as the rolled-back one.
+SELECT COUNT(*) AS waits_in_cycle, SUM(rolled_back) AS victims
+FROM information_schema.rocksdb_deadlock
+WHERE deadlock_id = (SELECT MAX(deadlock_id) FROM information_schema.rocksdb_deadlock);
+waits_in_cycle	victims
+4	1
+victim_is_con1
+1
+#
+# Scenario 2: con1 has locked many rows and closes the cycle. InnoDB
+# aborts the lighter con2 (the transaction con1 waits for); MyRocks
+# still aborts con1, the transaction that closes the cycle.
+#
+BEGIN;
+SELECT * FROM t2 WHERE id = 1 FOR UPDATE;
+id
+1
+SELECT * FROM t2 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t2 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t2 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t2 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+#
+# Scenario 3: rocksdb_deadlock_detect_depth with a true cycle of four.
+# The cycle is reported as a deadlock at every depth: when the search
+# reaches the depth limit before it finds the cycle, the RocksDB lock
+# manager assumes a deadlock. The minimum depth is 2.
+#
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+SET SESSION rocksdb_lock_wait_timeout = 2;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+# depth 2, cycle of four:
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+SET SESSION rocksdb_lock_wait_timeout = 2;
+SET SESSION rocksdb_deadlock_detect_depth = 3;
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+# depth 3, cycle of four:
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+SET SESSION rocksdb_lock_wait_timeout = 2;
+SET SESSION rocksdb_deadlock_detect_depth = 4;
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+# depth 4, cycle of four:
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+SET SESSION rocksdb_lock_wait_timeout = 2;
+SET SESSION rocksdb_deadlock_detect_depth = 5;
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+# depth 5, cycle of four:
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+#
+# Scenario 4: a wait chain without a cycle (con5 -> con4 -> con3 -> con2
+# -> con1), where con5 itself is waited on by con6. Deadlock detection
+# runs only for a request whose transaction others wait on. When the
+# chain behind the request is longer than rocksdb_deadlock_detect_depth,
+# the request fails with ER_LOCK_DEADLOCK although there is no cycle (the
+# variable is documented as the number of transactions traversed "before
+# assuming deadlock"). With a large enough depth it waits and times out.
+#
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+Got one of the listed errors
+# depth 2: ER_LOCK_DEADLOCK although there is no cycle
+ROLLBACK;
+id
+5
+ROLLBACK;
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION rocksdb_deadlock_detect_depth = 3;
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+Got one of the listed errors
+# depth 3: ER_LOCK_DEADLOCK although there is no cycle
+ROLLBACK;
+id
+5
+ROLLBACK;
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION rocksdb_deadlock_detect_depth = 4;
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+Got one of the listed errors
+# depth 4: ER_LOCK_DEADLOCK although there is no cycle
+ROLLBACK;
+id
+5
+ROLLBACK;
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+1
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION rocksdb_deadlock_detect_depth = 5;
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+Got one of the listed errors
+# depth 5: lock wait timeout
+ROLLBACK;
+id
+5
+ROLLBACK;
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+0
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id
+2
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id
+3
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+id
+4
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION rocksdb_deadlock_detect_depth = 6;
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+id
+5
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+Got one of the listed errors
+# depth 6: lock wait timeout
+ROLLBACK;
+id
+5
+ROLLBACK;
+ROLLBACK;
+id
+1
+ROLLBACK;
+id
+2
+ROLLBACK;
+id
+3
+ROLLBACK;
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+deadlocks_counted
+0
+DROP TABLE t2;
+DROP TABLE t1;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_max_latest_deadlocks = @saved_max_latest_deadlocks;

@@ -1,0 +1,326 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Port of innodb.long_deadlock_cycle to MyRocks, extended with the MyRocks
+# deadlock detection depth (rocksdb_deadlock_detect_depth) and the deadlock
+# counter and history (rocksdb_row_lock_deadlocks, ROCKSDB_DEADLOCK).
+#
+# Changes from the InnoDB original:
+#   - ENGINE=ROCKSDB, and rocksdb_deadlock_detect=ON (it is OFF by default).
+#   - InnoDB's "lock_wait_will_wait" debug sync point does not exist in
+#     MyRocks; a session is known to wait when ROCKSDB_TRX shows a non-empty
+#     WAITING_KEY for it.
+#   - Victim choice differs. InnoDB weighs the transactions in the cycle and
+#     may abort a lighter one; MyRocks always aborts the transaction whose
+#     lock request closes the cycle, however much it has locked (scenario 2).
+#   - The point locking reads use the full primary key, so the gap-lock rule
+#     does not refuse them at REPEATABLE READ.
+#
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @saved_max_latest_deadlocks = @@global.rocksdb_max_latest_deadlocks;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_max_latest_deadlocks = 10;
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1),(2),(3),(4),(5);
+CREATE TABLE t2 (id INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 (id) VALUES (1),(2),(3),(4),(5);
+
+# rocksdb_lock_wait_timeout is read when the transaction object of a
+# connection is created, so the connections are opened after SET GLOBAL.
+--connect (con1, localhost, root,,)
+--let $con1 = `SELECT CONNECTION_ID()`
+--connect (con2, localhost, root,,)
+--let $con2 = `SELECT CONNECTION_ID()`
+--connect (con3, localhost, root,,)
+--let $con3 = `SELECT CONNECTION_ID()`
+--connect (con4, localhost, root,,)
+--let $con4 = `SELECT CONNECTION_ID()`
+
+--echo #
+--echo # Scenario 1: a cycle of four transactions. con1 closes the cycle and is
+--echo # the victim (InnoDB chooses the same transaction here).
+--echo #
+--connection default
+SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+  WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+--connection con2
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 1 FOR UPDATE
+
+--connection con3
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 2 FOR UPDATE
+
+--connection con4
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 3 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con4 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --let $con1_trx = `SELECT transaction_id FROM information_schema.rocksdb_trx WHERE thread_id = $con1`
+  --error ER_LOCK_DEADLOCK
+  SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+  --echo # The deadlock rolled back con1's whole transaction: con2 got row 1.
+
+--connection con2
+  --reap
+  ROLLBACK;
+--connection con3
+  --reap
+  ROLLBACK;
+--connection con4
+  --reap
+  ROLLBACK;
+
+--connection default
+SELECT variable_value - @deadlocks_before AS deadlocks_counted
+  FROM performance_schema.global_status
+  WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+--echo # The last deadlock lists the four waits of the cycle, and con1's
+--echo # request as the rolled-back one.
+SELECT COUNT(*) AS waits_in_cycle, SUM(rolled_back) AS victims
+  FROM information_schema.rocksdb_deadlock
+  WHERE deadlock_id = (SELECT MAX(deadlock_id) FROM information_schema.rocksdb_deadlock);
+--disable_query_log
+--eval SELECT (SELECT transaction_id FROM information_schema.rocksdb_deadlock WHERE rolled_back = 1 AND deadlock_id = (SELECT MAX(deadlock_id) FROM information_schema.rocksdb_deadlock)) = $con1_trx AS victim_is_con1
+--enable_query_log
+
+--echo #
+--echo # Scenario 2: con1 has locked many rows and closes the cycle. InnoDB
+--echo # aborts the lighter con2 (the transaction con1 waits for); MyRocks
+--echo # still aborts con1, the transaction that closes the cycle.
+--echo #
+--connection con1
+  BEGIN;
+  # Point reads on the full primary key: a full-table FOR UPDATE would be
+  # refused by the gap-lock rule at REPEATABLE READ.
+  SELECT * FROM t2 WHERE id = 1 FOR UPDATE;
+  SELECT * FROM t2 WHERE id = 2 FOR UPDATE;
+  SELECT * FROM t2 WHERE id = 3 FOR UPDATE;
+  SELECT * FROM t2 WHERE id = 4 FOR UPDATE;
+  SELECT * FROM t2 WHERE id = 5 FOR UPDATE;
+  SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+--connection con2
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 1 FOR UPDATE
+
+--connection con3
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 2 FOR UPDATE
+
+--connection con4
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+  --send SELECT * FROM t1 WHERE id = 3 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con4 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --error ER_LOCK_DEADLOCK
+  SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+
+--connection con2
+  --reap
+  ROLLBACK;
+--connection con3
+  --reap
+  ROLLBACK;
+--connection con4
+  --reap
+  ROLLBACK;
+
+--echo #
+--echo # Scenario 3: rocksdb_deadlock_detect_depth with a true cycle of four.
+--echo # The cycle is reported as a deadlock at every depth: when the search
+--echo # reaches the depth limit before it finds the cycle, the RocksDB lock
+--echo # manager assumes a deadlock. The minimum depth is 2.
+--echo #
+--let $depth = 2
+while ($depth <= 5)
+{
+  --connection default
+  SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+    WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+
+  --connection con1
+    SET SESSION rocksdb_lock_wait_timeout = 2;
+    --eval SET SESSION rocksdb_deadlock_detect_depth = $depth
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+  --connection con2
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 1 FOR UPDATE
+
+  --connection con3
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+    --source include/wait_condition.inc
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 2 FOR UPDATE
+
+  --connection con4
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+    --source include/wait_condition.inc
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 3 FOR UPDATE
+
+  --connection con1
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con4 AND waiting_key != ''
+    --source include/wait_condition.inc
+    --echo # depth $depth, cycle of four:
+    --error ER_LOCK_DEADLOCK
+    SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+    ROLLBACK;
+
+  --connection con2
+    --reap
+    ROLLBACK;
+  --connection con3
+    --reap
+    ROLLBACK;
+  --connection con4
+    --reap
+    ROLLBACK;
+
+  --connection default
+  SELECT variable_value - @deadlocks_before AS deadlocks_counted
+    FROM performance_schema.global_status
+    WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+  --inc $depth
+}
+
+--echo #
+--echo # Scenario 4: a wait chain without a cycle (con5 -> con4 -> con3 -> con2
+--echo # -> con1), where con5 itself is waited on by con6. Deadlock detection
+--echo # runs only for a request whose transaction others wait on. When the
+--echo # chain behind the request is longer than rocksdb_deadlock_detect_depth,
+--echo # the request fails with ER_LOCK_DEADLOCK although there is no cycle (the
+--echo # variable is documented as the number of transactions traversed "before
+--echo # assuming deadlock"). With a large enough depth it waits and times out.
+--echo #
+--connect (con5, localhost, root,,)
+--let $con5 = `SELECT CONNECTION_ID()`
+--connect (con6, localhost, root,,)
+--let $con6 = `SELECT CONNECTION_ID()`
+--let $depth = 2
+while ($depth <= 6)
+{
+  --connection default
+  SELECT variable_value INTO @deadlocks_before FROM performance_schema.global_status
+    WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+
+  --connection con1
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+  --connection con2
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 1 FOR UPDATE
+
+  --connection con3
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+    --source include/wait_condition.inc
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 2 FOR UPDATE
+
+  --connection con4
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+    --source include/wait_condition.inc
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id = 3 FOR UPDATE
+
+  --connection con5
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con4 AND waiting_key != ''
+    --source include/wait_condition.inc
+    SET SESSION rocksdb_lock_wait_timeout = 1;
+    --eval SET SESSION rocksdb_deadlock_detect_depth = $depth
+    BEGIN;
+    SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+
+  --connection con6
+    --send SELECT * FROM t1 WHERE id = 5 FOR UPDATE
+
+  --connection con5
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con6 AND waiting_key != ''
+    --source include/wait_condition.inc
+    --error ER_LOCK_DEADLOCK, ER_LOCK_WAIT_TIMEOUT
+    SELECT * FROM t1 WHERE id = 4 FOR UPDATE;
+    --let $err = $mysql_errno
+    if ($err == 1213)
+    {
+      --echo # depth $depth: ER_LOCK_DEADLOCK although there is no cycle
+    }
+    if ($err == 1205)
+    {
+      --echo # depth $depth: lock wait timeout
+    }
+    ROLLBACK;
+
+  --connection con6
+    --reap
+    ROLLBACK;
+
+  --connection con1
+    ROLLBACK;
+  --connection con2
+    --reap
+    ROLLBACK;
+  --connection con3
+    --reap
+    ROLLBACK;
+  --connection con4
+    --reap
+    ROLLBACK;
+
+  --connection default
+  SELECT variable_value - @deadlocks_before AS deadlocks_counted
+    FROM performance_schema.global_status
+    WHERE variable_name = 'rocksdb_row_lock_deadlocks';
+  --inc $depth
+}
+--disconnect con5
+--disconnect con6
+
+--connection default
+--disconnect con1
+--disconnect con2
+--disconnect con3
+--disconnect con4
+
+DROP TABLE t2;
+DROP TABLE t1;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_max_latest_deadlocks = @saved_max_latest_deadlocks;
+--source include/wait_until_count_sessions.inc

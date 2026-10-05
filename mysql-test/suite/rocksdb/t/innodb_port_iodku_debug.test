@@ -1,0 +1,161 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# Port of innodb.iodku_debug to MyRocks.
+#
+# Changes from the InnoDB original:
+#   - ENGINE=ROCKSDB, with the suite's lock wait timeout raised to 30 s
+#     where a session has to wait for another one to commit.
+#   - InnoDB's pause points (ib_after_row_insert_step,
+#     ib_undo_mod_before_remove_clust) are replaced by MyRocks'
+#     rocksdb.after_unique_pk_check, reached after the primary key of the new
+#     row is locked and checked, before the unique secondary keys are checked.
+#     MyRocks checks all unique keys before it writes anything, so there is no
+#     partial rollback of an insert; the tests check that the locks behave the
+#     same way.
+#   - Bug#25966845 runs at REPEATABLE READ and READ COMMITTED.
+#   - InnoDB's purge controls are not needed: MyRocks has no delete-marked
+#     records; a deleted key is a tombstone.
+#   - The TEMPORARY TABLE case (Bug#29718243) is not ported: MyRocks temporary
+#     tables are out of scope.
+#
+
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+
+--echo #
+--echo # Bug#25966845 INSERT ON DUPLICATE KEY GENERATE A DEADLOCK
+--echo #
+--let $iso = 0
+while ($iso < 2)
+{
+  --let $level = REPEATABLE READ
+  if ($iso == 1)
+  {
+    --let $level = READ COMMITTED
+  }
+  --echo # Isolation level: $level
+  CREATE TABLE t1(f1 int primary key,
+                  f2 int, f3 int, unique key(f2)) engine=rocksdb;
+  INSERT INTO t1(f1, f2, f3) VALUES(1, 10, 100);
+
+  --echo # Connection default
+  --eval SET SESSION TRANSACTION ISOLATION LEVEL $level
+  BEGIN;
+  INSERT INTO t1 VALUES(2, 20, 300) ON DUPLICATE KEY UPDATE f3 = 500;
+
+  --echo # Connection other:
+  --connect (other,localhost,root,,test,,)
+  --eval SET SESSION TRANSACTION ISOLATION LEVEL $level
+  --let $other = `SELECT CONNECTION_ID()`
+  BEGIN;
+  --send INSERT INTO t1 VALUES(2, 10, 200) ON DUPLICATE KEY UPDATE f3 = 120
+
+  --echo # Connection default
+  connection default;
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $other AND waiting_key != ''
+  --source include/wait_condition.inc
+  COMMIT;
+
+  --echo # Connection other
+  connection other;
+  --reap
+  COMMIT;
+
+  connection default;
+  disconnect other;
+
+  --echo # Verify Results:
+  SELECT * FROM t1;
+  DROP TABLE t1;
+  --inc $iso
+}
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+--source include/wait_until_count_sessions.inc
+
+--echo #
+--echo # Bug #29195848 ASSERTION "!OTHER_LOCK" IN LOCK_REC_ADD_TO_QUEUE
+--echo #
+--echo # Test 1: an INSERT whose primary key is free (a deleted row) but whose
+--echo # unique secondary key is taken by another row fails with a duplicate
+--echo # error, while another session inserts the same secondary key.
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, b INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(2, 300);
+DELETE FROM t1;
+INSERT INTO t1 VALUES(3, 300);
+SELECT * FROM t1;
+
+connect (conn1,localhost,root,,);
+connect (conn2,localhost,root,,);
+
+connection conn1;
+--let $conn1 = `SELECT CONNECTION_ID()`
+SET DEBUG_SYNC='rocksdb.after_unique_pk_check SIGNAL after_insert WAIT_FOR rollback';
+--send INSERT INTO t1 VALUES(2, 300);
+
+connection conn2;
+SET DEBUG_SYNC='now WAIT_FOR after_insert';
+START TRANSACTION;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES(1, 300);
+
+connection default;
+SET DEBUG_SYNC='now SIGNAL rollback';
+--echo # conn2's failed INSERT keeps an exclusive lock on the secondary key 300
+--echo # (InnoDB: a shared lock), so conn1's unique check waits for conn2.
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $conn1 AND waiting_key != ''
+--source include/wait_condition.inc
+
+connection conn2;
+COMMIT;
+
+connection conn1;
+--error ER_DUP_ENTRY
+--reap
+
+disconnect conn1;
+disconnect conn2;
+connection default;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo # Test 2: while an INSERT whose unique secondary key is a duplicate is
+--echo # paused after locking its (free) primary key, another session's
+--echo # shared lock on that primary key waits and times out.
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1,10);
+DELETE FROM t1;
+INSERT INTO t1 VALUES(2,10);
+
+connect (conn1,localhost,root,,);
+connect (conn2,localhost,root,,);
+
+connection conn1;
+SET DEBUG_SYNC='rocksdb.after_unique_pk_check SIGNAL during_rollback WAIT_FOR rollback';
+--send INSERT INTO t1 VALUES(1, 10) ;
+
+connection conn2;
+SET DEBUG_SYNC='now WAIT_FOR during_rollback';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 WHERE a = 1 LOCK IN SHARE MODE;
+
+connection default;
+SET DEBUG_SYNC='now SIGNAL rollback';
+
+connection conn1;
+--error ER_DUP_ENTRY
+--reap
+
+disconnect conn1;
+disconnect conn2;
+connection default;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+SET DEBUG_SYNC ='RESET';
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc

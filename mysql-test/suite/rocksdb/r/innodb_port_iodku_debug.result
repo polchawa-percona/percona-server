@@ -1,0 +1,100 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+#
+# Bug#25966845 INSERT ON DUPLICATE KEY GENERATE A DEADLOCK
+#
+# Isolation level: REPEATABLE READ
+CREATE TABLE t1(f1 int primary key,
+f2 int, f3 int, unique key(f2)) engine=rocksdb;
+INSERT INTO t1(f1, f2, f3) VALUES(1, 10, 100);
+# Connection default
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+INSERT INTO t1 VALUES(2, 20, 300) ON DUPLICATE KEY UPDATE f3 = 500;
+# Connection other:
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+INSERT INTO t1 VALUES(2, 10, 200) ON DUPLICATE KEY UPDATE f3 = 120;
+# Connection default
+COMMIT;
+# Connection other
+COMMIT;
+# Verify Results:
+SELECT * FROM t1;
+f1	f2	f3
+1	10	100
+2	20	120
+DROP TABLE t1;
+# Isolation level: READ COMMITTED
+CREATE TABLE t1(f1 int primary key,
+f2 int, f3 int, unique key(f2)) engine=rocksdb;
+INSERT INTO t1(f1, f2, f3) VALUES(1, 10, 100);
+# Connection default
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO t1 VALUES(2, 20, 300) ON DUPLICATE KEY UPDATE f3 = 500;
+# Connection other:
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO t1 VALUES(2, 10, 200) ON DUPLICATE KEY UPDATE f3 = 120;
+# Connection default
+COMMIT;
+# Connection other
+COMMIT;
+# Verify Results:
+SELECT * FROM t1;
+f1	f2	f3
+1	10	100
+2	20	120
+DROP TABLE t1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+#
+# Bug #29195848 ASSERTION "!OTHER_LOCK" IN LOCK_REC_ADD_TO_QUEUE
+#
+# Test 1: an INSERT whose primary key is free (a deleted row) but whose
+# unique secondary key is taken by another row fails with a duplicate
+# error, while another session inserts the same secondary key.
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, b INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(2, 300);
+DELETE FROM t1;
+INSERT INTO t1 VALUES(3, 300);
+SELECT * FROM t1;
+id	b
+3	300
+SET DEBUG_SYNC='rocksdb.after_unique_pk_check SIGNAL after_insert WAIT_FOR rollback';
+INSERT INTO t1 VALUES(2, 300);;
+SET DEBUG_SYNC='now WAIT_FOR after_insert';
+START TRANSACTION;
+INSERT INTO t1 VALUES(1, 300);
+ERROR 23000: Duplicate entry '300' for key 't1.b'
+SET DEBUG_SYNC='now SIGNAL rollback';
+# conn2's failed INSERT keeps an exclusive lock on the secondary key 300
+# (InnoDB: a shared lock), so conn1's unique check waits for conn2.
+COMMIT;
+ERROR 23000: Duplicate entry '300' for key 't1.b'
+SELECT * FROM t1;
+id	b
+3	300
+DROP TABLE t1;
+# Test 2: while an INSERT whose unique secondary key is a duplicate is
+# paused after locking its (free) primary key, another session's
+# shared lock on that primary key waits and times out.
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1,10);
+DELETE FROM t1;
+INSERT INTO t1 VALUES(2,10);
+SET DEBUG_SYNC='rocksdb.after_unique_pk_check SIGNAL during_rollback WAIT_FOR rollback';
+INSERT INTO t1 VALUES(1, 10) ;;
+SET DEBUG_SYNC='now WAIT_FOR during_rollback';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SELECT * FROM t1 WHERE a = 1 LOCK IN SHARE MODE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC='now SIGNAL rollback';
+ERROR 23000: Duplicate entry '10' for key 't1.b'
+SELECT * FROM t1;
+a	b
+2	10
+DROP TABLE t1;
+SET DEBUG_SYNC ='RESET';
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
