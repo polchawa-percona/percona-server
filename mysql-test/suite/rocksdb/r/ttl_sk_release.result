@@ -1,0 +1,295 @@
+SET @orig_read_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+#
+# 1. Secondary indexes, one variant per column type
+#
+CREATE TABLE t1 (
+a INT NOT NULL,
+b INT NOT NULL,
+c VARCHAR(16) NOT NULL,
+u INT NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (a),
+KEY kb (b),
+KEY kcb (c, b),
+UNIQUE KEY ku (u),
+KEY kts (ts)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, 10, 'x1', 100, UNIX_TIMESTAMP() - 7200), (2, 20, 'x2', 200, UNIX_TIMESTAMP() - 7200),
+(3, 30, 'x3', 300, UNIX_TIMESTAMP() - 7200), (4, 40, 'x4', 400, UNIX_TIMESTAMP() - 7200),
+(5, 50, 'x5', 500, UNIX_TIMESTAMP() - 7200);
+INSERT INTO t1 VALUES (6, 60, 'x6', 600, UNIX_TIMESTAMP()), (7, 70, 'x7', 700, UNIX_TIMESTAMP()),
+(8, 80, 'x8', 800, UNIX_TIMESTAMP()), (9, 90, 'x9', 900, UNIX_TIMESTAMP()),
+(10, 100, 'x10', 1000, UNIX_TIMESTAMP());
+# Every index hides the expired rows, including index-only reads
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kcb);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+5
+SELECT b FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 10 AND 70 ORDER BY b;
+b
+60
+70
+SELECT c, b FROM t1 FORCE INDEX (kcb) WHERE c >= 'x' ORDER BY c, b;
+c	b
+x10	100
+x6	60
+x7	70
+x8	80
+x9	90
+SELECT b FROM t1 FORCE INDEX (kb) WHERE b = 30;
+b
+SELECT a, u FROM t1 FORCE INDEX (ku) WHERE u = 300;
+a	u
+SELECT a, b FROM t1 FORCE INDEX (kb) WHERE b IN (20, 60) ORDER BY b;
+a	b
+6	60
+# A new row may reuse a unique value held by an expired, not yet compacted row
+INSERT INTO t1 VALUES (11, 110, 'x11', 300, UNIX_TIMESTAMP());
+SELECT a, u FROM t1 FORCE INDEX (ku) WHERE u = 300;
+a	u
+11	300
+# Without read filtering, every index still stores the expired rows
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kcb);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+11
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# Compaction removes the expired rows from every index at once
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t1 FORCE INDEX (PRIMARY) ORDER BY a;
+a
+6
+7
+8
+9
+10
+11
+SELECT b FROM t1 FORCE INDEX (kb) ORDER BY b;
+b
+60
+70
+80
+90
+100
+110
+SELECT c, b FROM t1 FORCE INDEX (kcb) ORDER BY c, b;
+c	b
+x10	100
+x11	110
+x6	60
+x7	70
+x8	80
+x9	90
+SELECT u FROM t1 FORCE INDEX (ku) ORDER BY u;
+u
+300
+600
+700
+800
+900
+1000
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+6
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+CREATE TABLE t1 (
+a INT NOT NULL,
+b INT NOT NULL,
+c VARCHAR(16) NOT NULL,
+u INT NOT NULL,
+ts TIMESTAMP(6) NOT NULL,
+PRIMARY KEY (a),
+KEY kb (b),
+KEY kcb (c, b),
+UNIQUE KEY ku (u),
+KEY kts (ts)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, 10, 'x1', 100, NOW(6) - INTERVAL 7200 SECOND), (2, 20, 'x2', 200, NOW(6) - INTERVAL 7200 SECOND),
+(3, 30, 'x3', 300, NOW(6) - INTERVAL 7200 SECOND), (4, 40, 'x4', 400, NOW(6) - INTERVAL 7200 SECOND),
+(5, 50, 'x5', 500, NOW(6) - INTERVAL 7200 SECOND);
+INSERT INTO t1 VALUES (6, 60, 'x6', 600, NOW(6)), (7, 70, 'x7', 700, NOW(6)),
+(8, 80, 'x8', 800, NOW(6)), (9, 90, 'x9', 900, NOW(6)),
+(10, 100, 'x10', 1000, NOW(6));
+# Every index hides the expired rows, including index-only reads
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kcb);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+5
+SELECT b FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 10 AND 70 ORDER BY b;
+b
+60
+70
+SELECT c, b FROM t1 FORCE INDEX (kcb) WHERE c >= 'x' ORDER BY c, b;
+c	b
+x10	100
+x6	60
+x7	70
+x8	80
+x9	90
+SELECT b FROM t1 FORCE INDEX (kb) WHERE b = 30;
+b
+SELECT a, u FROM t1 FORCE INDEX (ku) WHERE u = 300;
+a	u
+SELECT a, b FROM t1 FORCE INDEX (kb) WHERE b IN (20, 60) ORDER BY b;
+a	b
+6	60
+# A new row may reuse a unique value held by an expired, not yet compacted row
+INSERT INTO t1 VALUES (11, 110, 'x11', 300, NOW(6));
+SELECT a, u FROM t1 FORCE INDEX (ku) WHERE u = 300;
+a	u
+11	300
+# Without read filtering, every index still stores the expired rows
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kcb);
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+11
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# Compaction removes the expired rows from every index at once
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t1 FORCE INDEX (PRIMARY) ORDER BY a;
+a
+6
+7
+8
+9
+10
+11
+SELECT b FROM t1 FORCE INDEX (kb) ORDER BY b;
+b
+60
+70
+80
+90
+100
+110
+SELECT c, b FROM t1 FORCE INDEX (kcb) ORDER BY c, b;
+c	b
+x10	100
+x11	110
+x6	60
+x7	70
+x8	80
+x9	90
+SELECT u FROM t1 FORCE INDEX (ku) ORDER BY u;
+u
+300
+600
+700
+800
+900
+1000
+SELECT COUNT(*) FROM t1 FORCE INDEX (kts);
+COUNT(*)
+6
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# 2. Secondary index on a partitioned table with per-partition TTL
+#
+CREATE TABLE t2 (
+a INT NOT NULL,
+b INT NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (a),
+KEY kb (b)
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p1_ttl_duration=86400;custom_p1_ttl_col=ts;'
+PARTITION BY LIST (a) (
+PARTITION custom_p0 VALUES IN (1, 4, 7),
+PARTITION custom_p1 VALUES IN (2, 5, 8),
+PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t2 SELECT seq, seq * 10, UNIX_TIMESTAMP() - 7200
+FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+# Only p0 has expired, on the primary key and on the secondary index
+SELECT a FROM t2 FORCE INDEX (PRIMARY) ORDER BY a;
+a
+2
+3
+5
+6
+8
+9
+SELECT b FROM t2 FORCE INDEX (kb) ORDER BY b;
+b
+20
+30
+50
+60
+80
+90
+SELECT b FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 10 AND 50 ORDER BY b;
+b
+20
+30
+50
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT b FROM t2 FORCE INDEX (kb) ORDER BY b;
+b
+20
+30
+50
+60
+80
+90
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t2;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @orig_read_filtering;

@@ -10,9 +10,11 @@ SET @@GLOBAL.rocksdb_alter_table_comment_inplace=ON;
 # Test inplace ALTER when changing TABLE comment --- implicit TTL
 
 CREATE TABLE t0(a int primary key, b char(100), ts BIGINT UNSIGNED default 0 NOT NULL) engine=rocksdb COMMENT "ttl_duration=1000;";
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -300;
 INSERT into t0 values(1, 'aaa', 1);
 INSERT into t0 values(2, 'bbb', 2);
 INSERT into t0 values(3, 'ccc', 3);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
 SELECT * from t0;
 a	b	ts
 1	aaa	1
@@ -44,6 +46,10 @@ ALTER TABLE t0 comment = 'ttl_duration=20', ALGORITHM=INPLACE;
 SELECT TABLE_NAME,TTL_DURATION,INDEX_FLAGS from INFORMATION_SCHEMA.ROCKSDB_DDL where TABLE_NAME = 't0';
 TABLE_NAME	TTL_DURATION	INDEX_FLAGS
 t0	20	1
+SET GLOBAL rocksdb_force_flush_memtable_now=1;
+SET GLOBAL rocksdb_compact_cf='default';
+SELECT * from t0;
+a	b	ts
 ALTER TABLE t0 comment = 'abadfas;dfikajps;ttl_duration=30;aspipwrqp3948r', ALGORITHM=INPLACE;
 DROP TABLE t0;
 include/rpl/sync_to_replica.inc
@@ -85,6 +91,12 @@ SELECT TABLE_NAME,TTL_DURATION,INDEX_FLAGS from INFORMATION_SCHEMA.ROCKSDB_DDL w
 TABLE_NAME	TTL_DURATION	INDEX_FLAGS
 t1	200	1
 t1	200	1
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 300;
+SET GLOBAL rocksdb_force_flush_memtable_now=1;
+SET GLOBAL rocksdb_compact_cf='default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT a,b,c from t1;
+a	b	c
 ALTER TABLE t1 comment = 'abadfas;dfikajps;ttl_duration=1000;ttl_col=ts;aspipwrqp3948r', ALGORITHM=INPLACE;
 DROP TABLE t1;
 include/rpl/sync_to_replica.inc
@@ -102,6 +114,7 @@ PARTITION custom_p0 VALUES IN (1, 4, 7),
 PARTITION custom_p1 VALUES IN (2, 5, 8),
 PARTITION custom_p2 VALUES IN (3, 6, 9)
 );
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -300;
 INSERT INTO t2 values (1);
 INSERT INTO t2 values (2);
 INSERT INTO t2 values (3);
@@ -111,6 +124,7 @@ INSERT INTO t2 values (6);
 INSERT INTO t2 values (7);
 INSERT INTO t2 values (8);
 INSERT INTO t2 values (9);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
 SET @@GLOBAL.rocksdb_alter_table_comment_inplace = OFF;
 ALTER TABLE t2 comment = ';custom_p0_ttl_duration=200', ALGORITHM=INPLACE;
 ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
@@ -138,13 +152,20 @@ t2	0	0
 t2	200	1
 SELECT * FROM t2;
 c1
-1
 2
 3
-4
 5
 6
-7
+8
+9
+SET GLOBAL rocksdb_force_flush_memtable_now=1;
+SET GLOBAL rocksdb_compact_cf='default';
+SELECT * FROM t2;
+c1
+2
+3
+5
+6
 8
 9
 DROP TABLE t2;
@@ -166,9 +187,11 @@ PARTITION custom_p0 VALUES IN (1, 2, 3),
 PARTITION custom_p1 VALUES IN (4, 5, 6),
 PARTITION custom_p2 VALUES IN (7, 8, 9)
 );
+set global rocksdb_debug_ttl_rec_ts = -300;
 INSERT INTO t3 VALUES (1, UNIX_TIMESTAMP(), "one", null);
 INSERT INTO t3 VALUES (2, UNIX_TIMESTAMP(), "two", null);
 INSERT INTO t3 VALUES (3, UNIX_TIMESTAMP(), "three", null);
+set global rocksdb_debug_ttl_rec_ts = 0;
 INSERT INTO t3 VALUES (4, UNIX_TIMESTAMP(), "four", null);
 INSERT INTO t3 VALUES (5, UNIX_TIMESTAMP(), "five", null);
 INSERT INTO t3 VALUES (6, UNIX_TIMESTAMP(), "six", null);
@@ -202,14 +225,14 @@ TABLE_NAME	TTL_DURATION	INDEX_FLAGS
 t3	1000	1
 t3	100	1
 t3	5	1
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 300;
+set global rocksdb_force_flush_memtable_now=1;
+set @@global.rocksdb_compact_cf = 'foo';
+set @@global.rocksdb_compact_cf = 'baz';
+set @@global.rocksdb_compact_cf = 'bar';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
 SELECT c1 FROM t3;
 c1
-1
-2
-3
-4
-5
-6
 7
 8
 9

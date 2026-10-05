@@ -1,8 +1,10 @@
-# R10: release-capable variant of rocksdb_read_free_rpl_debug. It runs every
-# read-free replication scenario and keeps all data and replication checks
-# (diff_tables, row contents, no row-not-found errors with PK_SK). The check that
-# the replica did not read rows needs the debug-only counter
-# rocksdb_num_get_for_update_calls, so it stays in rocksdb_read_free_rpl_debug.
+--source include/have_debug.inc
+# R10: debug-only part of rocksdb_read_free_rpl. It checks that the replica
+# applies row events read-free, using rocksdb_num_get_for_update_calls, a
+# counter that only exists on debug builds. No counter on release builds gives
+# the same verdicts (rocksdb_rows_read plus perf_context Get counts disagreed at
+# 6 of 10 checks). rocksdb_read_free_rpl runs the same scenarios on all builds
+# without the counter checks.
 --source include/have_rocksdb.inc
 --source include/rpl/init_source_replica.inc
 
@@ -19,12 +21,14 @@ insert into t1 values (1,1), (2,2), (3,3), (4,4);
 --echo # regular update/delete. With rocks_read_free_rpl=PK_SK, rocksdb_rows_read does not increase on slaves
 --echo
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 update t1 set value=value+1 where id=1;
 delete from t1 where id=4;
 select * from t1;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 select * from t1;
 
 
@@ -35,6 +39,7 @@ select * from t1;
 --source include/rpl/stop_replica.inc
 delete from t1 where id in (2, 3);
 --source include/rpl/start_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 
 --source include/rpl/connection_source.inc
 update t1 set value=value+1 where id=3;
@@ -42,6 +47,7 @@ delete from t1 where id=2;
 select * from t1;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 select * from t1;
 
 
@@ -57,11 +63,13 @@ create table t1 (c1 int, c2 int) Engine=RocksDB;
 insert into t1 values (1,1), (2,2),(3,3),(4,4),(5,5);
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 update t1 set c2=100 where c1=3;
 delete from t1 where c1 <= 2;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 select * from t1;
 
 --echo
@@ -73,11 +81,13 @@ create table t1 (c1 int, c2 int, index i(c1)) Engine=RocksDB;
 insert into t1 values (1,1), (2,2),(3,3),(4,4),(5,5);
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 update t1 set c2=100 where c1=3;
 delete from t1 where c1 <= 2;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 select * from t1;
 
 
@@ -101,6 +111,7 @@ while ($i<=10000)
 
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 
 --echo
@@ -116,6 +127,7 @@ while ($i<=10000)
 --enable_query_log
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --source include/diff_tables.inc
 
@@ -123,6 +135,7 @@ while ($i<=10000)
 --echo #updating all primary keys by 2
 --echo
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --disable_query_log
 let $i=1;
@@ -134,6 +147,7 @@ while ($i<=10000)
 --enable_query_log
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --source include/diff_tables.inc
 
@@ -142,10 +156,12 @@ while ($i<=10000)
 --echo
 --source include/rpl/connection_replica.inc
 truncate table t1;
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 update t1 set c2=c2+10;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --source include/diff_tables.inc
 
@@ -154,10 +170,12 @@ update t1 set c2=c2+10;
 --echo
 --source include/rpl/connection_replica.inc
 truncate table t1;
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 update t1 set id2=id2+10;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --source include/diff_tables.inc
 
@@ -165,10 +183,12 @@ update t1 set id2=id2+10;
 --echo #deleting half rows
 --echo
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 delete from t1 where id1 <= 5000;
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 --source include/diff_tables.inc
 
@@ -378,6 +398,7 @@ drop table if exists t3;
 create table t2 (id int primary key, i1 int, i2 int) Engine=RocksDB;
 create table t3 (id int primary key, i1 int, i2 int, key(i1)) Engine=RocksDB;
 --source include/rpl/connection_replica.inc
+select variable_value into @up from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 --source include/rpl/connection_source.inc
 insert into t2 values(1, 1, 1);
 insert into t2 values(2, 2, 2);
@@ -385,6 +406,7 @@ insert into t3 values(1, 1, 1);
 insert into t3 values(2, 2, 2);
 --source include/rpl/sync_to_replica.inc
 --source include/rpl/connection_replica.inc
+select case when variable_value-@up > 0 then 'false' else 'true' end as read_free from performance_schema.global_status where variable_name='rocksdb_num_get_for_update_calls';
 select * from t2;
 select * from t3;
 

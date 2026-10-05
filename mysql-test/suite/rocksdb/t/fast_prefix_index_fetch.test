@@ -1,4 +1,5 @@
---source include/have_debug.inc
+# R10: have_debug removed; nothing here needs a debug build, so the test also
+# runs on release builds (RelWithDebInfo).
 
 --source include/have_rocksdb.inc
 

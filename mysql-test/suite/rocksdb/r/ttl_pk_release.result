@@ -1,0 +1,398 @@
+SET @orig_read_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+#
+# 1. Explicit ttl_col, one variant per column type
+#
+CREATE TABLE t1 (
+a INT NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+v VARCHAR(32) NOT NULL,
+PRIMARY KEY (a)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, UNIX_TIMESTAMP() - 7200, 'old'), (2, UNIX_TIMESTAMP() - 7200, 'old'), (3, UNIX_TIMESTAMP() - 7200, 'old'),
+(4, UNIX_TIMESTAMP() - 7200, 'old'), (5, UNIX_TIMESTAMP() - 7200, 'old');
+INSERT INTO t1 VALUES (6, UNIX_TIMESTAMP(), 'new'), (7, UNIX_TIMESTAMP(), 'new'), (8, UNIX_TIMESTAMP(), 'new'),
+(9, UNIX_TIMESTAMP(), 'new'), (10, UNIX_TIMESTAMP(), 'new');
+# Expired rows are hidden from scans, point lookups and DML
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+6	new
+7	new
+8	new
+9	new
+10	new
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+5
+SELECT a FROM t1 WHERE a = 1;
+a
+SELECT a FROM t1 WHERE a BETWEEN 1 AND 7 ORDER BY a;
+a
+6
+7
+UPDATE t1 SET v = 'touched' WHERE a = 2;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+DELETE FROM t1 WHERE a = 4;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+# A new row may reuse the primary key of an expired, not yet compacted row
+INSERT INTO t1 VALUES (3, UNIX_TIMESTAMP(), 'reused');
+SELECT a, v FROM t1 WHERE a = 3;
+a	v
+3	reused
+# Without read filtering the expired rows are still stored
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+1	old
+2	old
+3	reused
+4	old
+5	old
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# Compaction removes exactly the expired rows and keeps the reused key
+SELECT variable_value INTO @expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT variable_value - @expired AS rows_expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+rows_expired
+4
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+CREATE TABLE t1 (
+a INT NOT NULL,
+ts TIMESTAMP NOT NULL,
+v VARCHAR(32) NOT NULL,
+PRIMARY KEY (a)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, NOW() - INTERVAL 7200 SECOND, 'old'), (2, NOW() - INTERVAL 7200 SECOND, 'old'), (3, NOW() - INTERVAL 7200 SECOND, 'old'),
+(4, NOW() - INTERVAL 7200 SECOND, 'old'), (5, NOW() - INTERVAL 7200 SECOND, 'old');
+INSERT INTO t1 VALUES (6, NOW(), 'new'), (7, NOW(), 'new'), (8, NOW(), 'new'),
+(9, NOW(), 'new'), (10, NOW(), 'new');
+# Expired rows are hidden from scans, point lookups and DML
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+6	new
+7	new
+8	new
+9	new
+10	new
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+5
+SELECT a FROM t1 WHERE a = 1;
+a
+SELECT a FROM t1 WHERE a BETWEEN 1 AND 7 ORDER BY a;
+a
+6
+7
+UPDATE t1 SET v = 'touched' WHERE a = 2;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+DELETE FROM t1 WHERE a = 4;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+# A new row may reuse the primary key of an expired, not yet compacted row
+INSERT INTO t1 VALUES (3, NOW(), 'reused');
+SELECT a, v FROM t1 WHERE a = 3;
+a	v
+3	reused
+# Without read filtering the expired rows are still stored
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+1	old
+2	old
+3	reused
+4	old
+5	old
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# Compaction removes exactly the expired rows and keeps the reused key
+SELECT variable_value INTO @expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT variable_value - @expired AS rows_expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+rows_expired
+4
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+CREATE TABLE t1 (
+a INT NOT NULL,
+ts TIMESTAMP(6) NOT NULL,
+v VARCHAR(32) NOT NULL,
+PRIMARY KEY (a)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, NOW(6) - INTERVAL 7200 SECOND, 'old'), (2, NOW(6) - INTERVAL 7200 SECOND, 'old'), (3, NOW(6) - INTERVAL 7200 SECOND, 'old'),
+(4, NOW(6) - INTERVAL 7200 SECOND, 'old'), (5, NOW(6) - INTERVAL 7200 SECOND, 'old');
+INSERT INTO t1 VALUES (6, NOW(6), 'new'), (7, NOW(6), 'new'), (8, NOW(6), 'new'),
+(9, NOW(6), 'new'), (10, NOW(6), 'new');
+# Expired rows are hidden from scans, point lookups and DML
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+6	new
+7	new
+8	new
+9	new
+10	new
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+5
+SELECT a FROM t1 WHERE a = 1;
+a
+SELECT a FROM t1 WHERE a BETWEEN 1 AND 7 ORDER BY a;
+a
+6
+7
+UPDATE t1 SET v = 'touched' WHERE a = 2;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+DELETE FROM t1 WHERE a = 4;
+SELECT ROW_COUNT();
+ROW_COUNT()
+0
+# A new row may reuse the primary key of an expired, not yet compacted row
+INSERT INTO t1 VALUES (3, NOW(6), 'reused');
+SELECT a, v FROM t1 WHERE a = 3;
+a	v
+3	reused
+# Without read filtering the expired rows are still stored
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+1	old
+2	old
+3	reused
+4	old
+5	old
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# Compaction removes exactly the expired rows and keeps the reused key
+SELECT variable_value INTO @expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT variable_value - @expired AS rows_expired FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_expired';
+rows_expired
+4
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+SELECT a, v FROM t1 ORDER BY a;
+a	v
+3	reused
+6	new
+7	new
+8	new
+9	new
+10	new
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# 2. No ttl_col: the row timestamp is the write time (real clock)
+#
+CREATE TABLE t2 (a INT PRIMARY KEY, v INT) ENGINE=ROCKSDB COMMENT='ttl_duration=10;';
+CREATE TABLE t3 (a INT PRIMARY KEY, v INT) ENGINE=ROCKSDB COMMENT='ttl_duration=86400;';
+SET @t0 = UNIX_TIMESTAMP();
+INSERT INTO t2 VALUES (1, 0), (2, 0), (3, 0), (4, 0);
+INSERT INTO t3 VALUES (1, 0), (2, 0);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+4
+# Wait until 5 s after the insert, then update row 1. Without ttl_col the update keeps
+# the original TTL timestamp, so row 1 still expires 10 s after the insert.
+UPDATE t2 SET v = 1 WHERE a = 1;
+SELECT ROW_COUNT();
+ROW_COUNT()
+1
+# Wait until 12 s after the insert: all rows have expired, including the updated one
+SELECT a, v FROM t2 ORDER BY a;
+a	v
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+2
+# The older snapshot still sees all four rows, as they were when it was taken
+SELECT a, v FROM t2 ORDER BY a;
+a	v
+1	0
+2	0
+3	0
+4	0
+# Compaction must not remove rows that the open snapshot can still see
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT a, v FROM t2 ORDER BY a;
+a	v
+1	0
+2	0
+3	0
+4	0
+COMMIT;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+4
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+# With the snapshot gone, compaction removes the expired rows
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t2 ORDER BY a;
+a	v
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+2
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t2, t3;
+#
+# 3. Per-partition TTL, with and without per-partition column families
+#
+CREATE TABLE t4 (
+a INT NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (a)
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p2_ttl_duration=86400;custom_p2_ttl_col=ts;'
+PARTITION BY LIST (a) (
+PARTITION custom_p0 VALUES IN (1, 4, 7),
+PARTITION custom_p1 VALUES IN (2, 5, 8),
+PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t4 SELECT seq, UNIX_TIMESTAMP() - 7200
+FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+# Only p0 (duration 1 h) has expired; p1 has no TTL, p2 lasts a day
+SELECT a FROM t4 ORDER BY a;
+a
+2
+3
+5
+6
+8
+9
+SELECT a FROM t4 PARTITION (custom_p0) ORDER BY a;
+a
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t4 ORDER BY a;
+a
+2
+3
+5
+6
+8
+9
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t4;
+CREATE TABLE t5 (
+a INT NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (a) COMMENT 'custom_p0_cfname=ttl_rel_p0;custom_p1_cfname=ttl_rel_p1;custom_p2_cfname=ttl_rel_p2'
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p1_ttl_duration=86400;custom_p1_ttl_col=ts;'
+PARTITION BY LIST (a) (
+PARTITION custom_p0 VALUES IN (1, 4, 7),
+PARTITION custom_p1 VALUES IN (2, 5, 8),
+PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t5 SELECT seq, UNIX_TIMESTAMP() - 7200
+FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+SELECT a FROM t5 ORDER BY a;
+a
+2
+3
+5
+6
+8
+9
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p0';
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p1';
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p2';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t5 ORDER BY a;
+a
+2
+3
+5
+6
+8
+9
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t5;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @orig_read_filtering;

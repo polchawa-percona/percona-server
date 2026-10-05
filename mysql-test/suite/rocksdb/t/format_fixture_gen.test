@@ -1,0 +1,58 @@
+#
+# Generator for std_data/data84_rocks_legacy_formats.zip, the datadir fixture
+# read by rocksdb.format_fixture_release. It is NOT a regular test: it is
+# skipped unless the environment variable MYROCKS_FORMAT_FIXTURE_GEN is set to
+# an existing output directory (outside the MTR vardir, which MTR checks for
+# leftover files).
+#
+# To regenerate the fixture (debug build required):
+#
+#   MYROCKS_FORMAT_FIXTURE_GEN=/some/dir ./mtr --debug-server rocksdb.format_fixture_gen
+#   cp /some/dir/data84_rocks_legacy_formats.zip mysql-test/std_data/
+#
+# then re-record rocksdb.format_fixture_release if the table contents changed.
+# The tables are defined in suite/rocksdb/include/format_fixture_tables.inc.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/have_util_unzip.inc
+--source include/not_windows.inc
+
+if (!$MYROCKS_FORMAT_FIXTURE_GEN)
+{
+  --skip Fixture generator; set MYROCKS_FORMAT_FIXTURE_GEN=<output dir> to regenerate the zip
+}
+
+--let $fixture = data84_rocks_legacy_formats
+
+--disable_query_log
+--source suite/rocksdb/include/format_fixture_tables.inc
+--enable_query_log
+
+--echo # The indexes must carry the forced legacy format versions.
+SELECT table_name, index_name, kv_format_version
+  FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+
+--echo # Move the rows from the memtable to SST files.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--let $datadir = `SELECT @@datadir`
+--source include/shutdown_mysqld.inc
+
+--echo # Copy the datadir and zip it.
+--let $copy = $MYSQL_TMP_DIR/$fixture
+--exec rm -rf $copy
+--exec cp -a $datadir $copy
+# Files the server recreates, or that only matter to this MTR instance.
+--exec cd $copy && rm -rf binlog.* '#innodb_temp' ibtmp1 mysqld.1.err *.pid
+--let $out = $MYROCKS_FORMAT_FIXTURE_GEN/$fixture.zip
+--exec rm -f $out
+--exec cd $MYSQL_TMP_DIR && zip -q -r -9 $out $fixture
+--force-rmdir $copy
+--file_exists $out
+--echo # Fixture written to MYROCKS_FORMAT_FIXTURE_GEN/$fixture.zip
+
+--source include/start_mysqld.inc
+DROP DATABASE fmt;

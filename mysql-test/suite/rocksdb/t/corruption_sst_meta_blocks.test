@@ -1,0 +1,153 @@
+#
+# Real on-disk corruption of the non-data blocks of a MyRocks SST file:
+# the index block, the bloom filter block and the footer (release item R8 in
+# myrocks-notes/release-variants.md).
+#
+# Release-capable: no debug build is needed. Bytes are flipped in the block
+# located with sst_dump (see suite/rocksdb/include/corrupt_sst_block.inc).
+# The server runs with rocksdb_allow_to_start_after_corruption=1 and
+# rocksdb_io_error_action=IGNORE_ERROR so that each case can be observed
+# without the deliberate abort; corruption_sst_data_block covers the abort.
+#
+# Expected, per damaged block:
+# - index:  reads of the primary key fail with the corruption error; the
+#           secondary index (another SST file) still answers covering reads.
+# - filter: the bloom filter is only an optimization; damaged filter data
+#           must not hide existing rows.
+# - footer: RocksDB cannot open the database, so the MyRocks plugin fails to
+#           initialize. Without --rocksdb=FORCE the server still starts, and
+#           MyRocks tables report an unknown storage engine instead of
+#           returning wrong rows.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+--let $sst_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE t1 (
+  pk INT NOT NULL,
+  a INT NOT NULL,
+  b VARCHAR(200),
+  PRIMARY KEY (pk) COMMENT 'cfname=cf_corrupt_pk',
+  KEY ka (a) COMMENT 'cfname=cf_corrupt_sk'
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000)
+  SELECT n, n, REPEAT('x', 100) FROM s;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_sk';
+
+--let $pk_sst = `SELECT f.SST_NAME FROM information_schema.rocksdb_index_file_map f JOIN information_schema.rocksdb_ddl d ON f.COLUMN_FAMILY = d.COLUMN_FAMILY AND f.INDEX_NUMBER = d.INDEX_NUMBER WHERE d.TABLE_NAME = 't1' AND d.INDEX_NAME = 'PRIMARY'`
+--let $sst = $sst_dir/$pk_sst
+
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+
+call mtr.add_suppression("data corruption detected");
+call mtr.add_suppression("block checksum mismatch");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Status: Corruption");
+call mtr.add_suppression("There was corruption detected in the RocksDB data files");
+call mtr.add_suppression("to mark rocksdb as corrupted");
+call mtr.add_suppression("Got error .* from storage engine");
+call mtr.add_suppression("Got error 511 when reading table");
+call mtr.add_suppression("Bad table magic number");
+call mtr.add_suppression("Error opening instance");
+call mtr.add_suppression("Couldn't stop the .* thread");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin 'ROCKSDB_.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB_.*' registration as a INFORMATION SCHEMA failed");
+call mtr.add_suppression("Plugin rocksdb reported");
+
+--source include/shutdown_mysqld.inc
+--copy_file $sst $MYSQLTEST_VARDIR/tmp/corruption_sst_meta_blocks.bak
+
+--let $restart_parameters = restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+
+--echo #
+--echo # 1. Damaged index block.
+--echo #
+--let $corrupt_sst = $sst
+--let $corrupt_where = index
+--source suite/rocksdb/include/corrupt_sst_block.inc
+--source include/start_mysqld.inc
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, typ?' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, typ?' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+--echo # The secondary index is in another SST file: a covering read is exact.
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (ka);
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, typ?' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk, a, LENGTH(b) FROM t1 FORCE INDEX (ka) WHERE a = 2500;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, typ?' from/' from/
+--error ER_GET_ERRMSG
+UPDATE t1 SET b = 'y' WHERE pk = 2500;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, typ?' from/' from/
+CHECK TABLE t1;
+--source include/shutdown_mysqld.inc
+--remove_file $sst
+--copy_file $MYSQLTEST_VARDIR/tmp/corruption_sst_meta_blocks.bak $sst
+--error 0,1
+--remove_file $sst_dir/ROCKSDB_CORRUPTED
+
+--echo #
+--echo # 2. Damaged bloom filter block.
+--echo #
+--let $corrupt_where = filter
+--source suite/rocksdb/include/corrupt_sst_block.inc
+--source include/start_mysqld.inc
+--echo # The filter is only an optimization: all rows are still found and
+--echo # absent keys are still absent. CHECK TABLE does not read filter blocks,
+--echo # so it reports OK.
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 2500;
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+SELECT pk FROM t1 WHERE pk = 6000;
+SELECT COUNT(*) FROM t1 WHERE pk IN (1, 777, 2500, 4999, 6000, 7000);
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+CHECK TABLE t1;
+--source include/shutdown_mysqld.inc
+--remove_file $sst
+--copy_file $MYSQLTEST_VARDIR/tmp/corruption_sst_meta_blocks.bak $sst
+--error 0,1
+--remove_file $sst_dir/ROCKSDB_CORRUPTED
+
+--echo #
+--echo # 3. Damaged footer.
+--echo #
+--let $corrupt_where = footer
+--source suite/rocksdb/include/corrupt_sst_block.inc
+--source include/start_mysqld.inc
+--echo # RocksDB could not open the database, so MyRocks is not loaded.
+SELECT ENGINE, SUPPORT FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+--let SEARCH_FILE=$MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN=Bad table magic number
+--source include/search_pattern.inc
+--error ER_UNKNOWN_STORAGE_ENGINE
+SELECT pk FROM t1 WHERE pk = 1;
+--error ER_UNKNOWN_STORAGE_ENGINE
+INSERT INTO t1 VALUES (6000, 6000, 'z');
+
+--echo #
+--echo # Repair: restore the SST file.
+--echo #
+--let $restart_parameters =
+--source include/shutdown_mysqld.inc
+--remove_file $sst
+--move_file $MYSQLTEST_VARDIR/tmp/corruption_sst_meta_blocks.bak $sst
+--error 0,1
+--remove_file $sst_dir/ROCKSDB_CORRUPTED
+--source include/start_mysqld.inc
+
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+CHECK TABLE t1;
+
+DROP TABLE t1;

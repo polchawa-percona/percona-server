@@ -4,7 +4,8 @@
 
 --source include/have_rocksdb.inc
 
---source include/have_debug.inc
+# R10: have_debug removed; nothing here needs a debug build, so the test also
+# runs on release builds (RelWithDebInfo).
 
 # create the actual table
 CREATE TABLE t1 (a INT) ENGINE=rocksdb;
