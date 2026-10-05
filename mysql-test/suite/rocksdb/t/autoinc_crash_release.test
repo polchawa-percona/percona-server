@@ -1,0 +1,148 @@
+# Release-capable AUTO_INCREMENT crash test.
+#
+# Release variant R5 (myrocks-notes/release-variants.md) of autoinc_debug.
+# It uses no debug points, no debug_sync and no have_debug, so it runs on
+# debug and release builds alike.
+#
+# Why a release variant: when a table is first opened after a restart,
+# ha_rocksdb::load_auto_incr_value() takes the counter from the data
+# dictionary. Debug builds then also read the last value of the auto-increment
+# index and assert that the dictionary value is not smaller. Release builds
+# trust the dictionary value without that cross-check, so if the persisted
+# counter ever fell behind the data, a release server would hand out ids that
+# already exist. This test checks that invariant explicitly, on both builds.
+#
+# Several client processes insert into MyRocks tables with AUTO_INCREMENT
+# columns while the server is killed with SIGKILL at a point the test does not
+# control. After each restart the test checks:
+#   - every acknowledged row survived with the id it was given
+#   - no id appears twice (also for an auto-increment column that is only in a
+#     non-unique secondary key, where nothing else would catch a duplicate)
+#   - the counter shown by the server is above every stored id
+#   - new rows get ids above every stored id, and keep the session's
+#     auto_increment_increment / auto_increment_offset pattern
+# A second round repeats this after ALTER TABLE ... AUTO_INCREMENT and
+# OPTIMIZE TABLE, which rewrite the persisted counter. Deterministic checks
+# then cover a counter raised by ALTER right before a kill, and a TINYINT
+# column that reaches its maximum before a kill.
+#
+# Related, not repeated here: finding #9 (offset larger than increment,
+# innodb_port_innodb_alter_autoinc_offset) and the observation that ids of
+# rolled-back inserts are handed out again after a kill (port-autoinc.md).
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+
+# Auto-increment primary key with a secondary index.
+CREATE TABLE a_int (id INT AUTO_INCREMENT PRIMARY KEY, tag BIGINT NOT NULL,
+                    c INT, KEY kc (c)) ENGINE=ROCKSDB;
+# Partitioned table: the counter is shared by all partitions.
+CREATE TABLE a_part (id BIGINT AUTO_INCREMENT PRIMARY KEY, tag BIGINT NOT NULL)
+  ENGINE=ROCKSDB PARTITION BY HASH(id) PARTITIONS 4;
+# Auto-increment column only in a non-unique secondary key.
+CREATE TABLE a_sk (pk BIGINT PRIMARY KEY, id BIGINT NOT NULL AUTO_INCREMENT,
+                   tag BIGINT NOT NULL, KEY kid (id)) ENGINE=ROCKSDB;
+# Rows inserted with auto_increment_increment = 3, auto_increment_offset = 2.
+CREATE TABLE a_ofs (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    tag BIGINT NOT NULL) ENGINE=ROCKSDB;
+
+--let $load_script = $MYSQLTEST_VARDIR/tmp/autoinc_crash_release_load.sh
+--write_file $load_script
+#!/bin/bash
+# Load generator for autoinc_crash_release.
+# Usage: load.sh "<mysql command>" <conn> <ack file> <done file>
+# Inserts rows until the server goes away. For every acknowledged statement it
+# appends "<table> <tag> <id>" to <ack file> (id "-" for multi-row inserts,
+# whose ids are not recorded).
+MYSQL_CMD=$1; CONN=$2; ACK=$3; DONE=$4
+i=0
+q() { eval "$MYSQL_CMD -N test -e \"\$1\"" 2>/dev/null; }
+alive() { eval "$MYSQL_CMD -e 'SELECT 1'" >/dev/null 2>&1; }
+while [ $i -lt 100000 ]; do
+  i=$((i + 1))
+  tag=$((CONN * 1000000 + i))
+  case $((i % 7)) in
+    0|1)
+      out=$(q "INSERT INTO a_int (tag, c) VALUES ($tag, $i); SELECT LAST_INSERT_ID();")
+      [ -n "$out" ] && echo "a_int $tag $out" >> "$ACK" ;;
+    2)
+      out=$(q "INSERT INTO a_part (tag) VALUES ($tag); SELECT LAST_INSERT_ID();")
+      [ -n "$out" ] && echo "a_part $tag $out" >> "$ACK" ;;
+    3)
+      out=$(q "INSERT INTO a_sk (pk, tag) VALUES ($tag, $tag); SELECT LAST_INSERT_ID();")
+      [ -n "$out" ] && echo "a_sk $tag $out" >> "$ACK" ;;
+    4)
+      out=$(q "SET SESSION auto_increment_increment = 3, auto_increment_offset = 2; INSERT INTO a_ofs (tag) VALUES ($tag); SELECT LAST_INSERT_ID();")
+      [ -n "$out" ] && echo "a_ofs $tag $out" >> "$ACK" ;;
+    5)
+      # Multi-row insert, and a rolled-back insert that must leave no row.
+      t2=$((tag + 500000))
+      if q "INSERT INTO a_int (tag, c) VALUES ($tag, 1), ($t2, 2); SELECT 1;" | grep -q 1; then
+        echo "a_int $tag -" >> "$ACK"; echo "a_int $t2 -" >> "$ACK"
+      fi
+      q "BEGIN; INSERT INTO a_part (tag) VALUES (-$tag); ROLLBACK;" > /dev/null ;;
+    6)
+      # Explicit id above the counter, which must push the counter up.
+      if [ $CONN -eq 1 ]; then
+        m=$(q "SELECT IFNULL(MAX(id), 0) FROM a_int")
+        if [ -n "$m" ]; then
+          e=$((m + 1000))
+          if q "INSERT INTO a_int (id, tag, c) VALUES ($e, $tag, 0); SELECT 1;" | grep -q 1; then
+            echo "a_int $tag $e" >> "$ACK"
+          fi
+        fi
+      fi ;;
+  esac
+  # A failed statement only matters if the server is gone.
+  if [ -z "$out" ] && ! alive; then break; fi
+  out=x
+done
+echo done > "$DONE"
+EOF
+
+--let $round = 1
+--source suite/rocksdb/include/autoinc_crash_release_round.inc
+
+--echo # Rewrite the persisted counters, then run a second round.
+ALTER TABLE a_int AUTO_INCREMENT = 1;
+ALTER TABLE a_sk AUTO_INCREMENT = 5;
+OPTIMIZE TABLE a_part;
+SELECT (SELECT AUTO_INCREMENT FROM information_schema.TABLES
+          WHERE table_schema = 'test' AND table_name = 'a_int') >
+       (SELECT MAX(id) FROM a_int) AS a_int_counter_above_max_after_alter;
+SELECT (SELECT AUTO_INCREMENT FROM information_schema.TABLES
+          WHERE table_schema = 'test' AND table_name = 'a_sk') >
+       (SELECT MAX(id) FROM a_sk) AS a_sk_counter_above_max_after_alter;
+--let $round = 2
+--source suite/rocksdb/include/autoinc_crash_release_round.inc
+
+--echo # A counter raised by ALTER right before a kill is not lost.
+--let $m = `SELECT MAX(id) + 5000 FROM a_int`
+--disable_query_log
+--eval ALTER TABLE a_int AUTO_INCREMENT = $m
+--enable_query_log
+--source include/kill_mysqld.inc
+--source include/start_mysqld.inc
+INSERT INTO a_int (tag, c) VALUES (-1, 0);
+--disable_query_log
+--eval SELECT LAST_INSERT_ID() = $m AS raised_counter_survived_kill
+--enable_query_log
+
+--echo # A TINYINT counter that reached its maximum before a kill.
+CREATE TABLE a_tiny (id TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, v INT)
+  ENGINE=ROCKSDB;
+INSERT INTO a_tiny VALUES (250, 0);
+INSERT INTO a_tiny (v) VALUES (1), (2), (3), (4), (5);
+SELECT MAX(id) FROM a_tiny;
+--source include/kill_mysqld.inc
+--source include/start_mysqld.inc
+# The insert must fail: no wrap-around to a small id, no duplicate.
+--error ER_AUTOINC_READ_FAILED,ER_DUP_ENTRY,ER_WARN_DATA_OUT_OF_RANGE
+INSERT INTO a_tiny (v) VALUES (6);
+SELECT COUNT(*), MAX(id) FROM a_tiny;
+
+--remove_file $load_script
+DROP TABLE a_int, a_part, a_sk, a_ofs, a_tiny;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;

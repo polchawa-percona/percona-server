@@ -1,0 +1,190 @@
+# Non-partitioned table with 300000 rows
+CREATE TABLE t1 (
+id INT NOT NULL PRIMARY KEY,
+a INT NOT NULL,
+b INT NOT NULL,
+pad VARCHAR(100) NOT NULL,
+KEY ka (a)
+) ENGINE=ROCKSDB;
+
+# Round: COPY ALTER ADD COLUMN, killed while copying rows
+DROP TABLE t_ref;
+ALTER TABLE t1 ADD COLUMN c INT NOT NULL DEFAULT 7, ALGORITHM=COPY;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+
+# Round: COPY ALTER changing a column type, killed while the copy commits
+DROP TABLE t_ref;
+ALTER TABLE t1 MODIFY a BIGINT NOT NULL, ALGORITHM=COPY;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+
+# Round: inplace ADD INDEX on two columns, killed while building the indexes
+DROP TABLE t_ref;
+ALTER TABLE t1 ADD INDEX kb (b), ADD INDEX kp (pad), ALGORITHM=INPLACE;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+
+# Round: inplace ADD UNIQUE INDEX, killed while building the index
+DROP TABLE t_ref;
+ALTER TABLE t1 ADD UNIQUE INDEX ub (b, id), ALGORITHM=INPLACE;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+
+# Round: inplace DROP INDEX, killed as soon as it runs
+DROP TABLE t_ref;
+ALTER TABLE t1 DROP INDEX kb, DROP INDEX kp, ALGORITHM=INPLACE;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+DROP TABLE t1;
+
+# Partitioned table (4 hash partitions) with 300000 rows
+CREATE TABLE t1 (
+id INT NOT NULL PRIMARY KEY,
+a INT NOT NULL,
+b INT NOT NULL,
+pad VARCHAR(100) NOT NULL,
+KEY ka (a)
+) ENGINE=ROCKSDB PARTITION BY HASH (id) PARTITIONS 4;
+
+# Round: partitioned COPY ALTER ADD COLUMN, killed while copying rows
+DROP TABLE t_ref;
+ALTER TABLE t1 ADD COLUMN c INT NOT NULL DEFAULT 7, ALGORITHM=COPY;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+
+# Round: partitioned inplace ADD INDEX, killed while building the index
+DROP TABLE t_ref;
+ALTER TABLE t1 ADD INDEX kb (b), ALGORITHM=INPLACE;
+# Kill the server
+# restart
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+# Table definition is either the old one or the new one: yes
+include/assert.inc [Data dictionary and MyRocks dictionary list the same indexes]
+include/assert.inc [No #sql table is left in the MyRocks dictionary after dropping orphans by name]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No index drop or index creation left unfinished: yes
+include/assert.inc [Rows and values are the same as before the ALTER]
+include/assert.inc [CHECK TABLE reports OK]
+include/assert.inc [Every secondary index matches the primary key]
+include/assert.inc [After the round the table has the new definition]
+# Round done: the table is consistent and has the new definition
+DROP TABLE t1;
+
+include/assert.inc [At least one ALTER was interrupted and came back with the old definition]
+include/assert.inc [No MyRocks dictionary entries are left for test tables]

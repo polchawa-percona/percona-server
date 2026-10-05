@@ -1,0 +1,43 @@
+# Release variant R7, write_unprepared part: under
+# rocksdb_write_policy = write_unprepared, commit-in-the-middle and the
+# bulk-load internal commits are disabled by design (ha_rocksdb.cc,
+# commit_in_the_middle() returns false), so a SIGKILL in the middle of a
+# large statement must leave nothing of it behind: the engine holds exactly
+# the rows the binary log committed. Runs with
+# rocksdb_write_batch_flush_threshold = 1, so the interrupted statement has
+# already written unprepared batches to the database when it is killed.
+# No debug points, so the test runs on debug and release builds.
+#
+# Contrast: under the other policies the same kill leaves rows behind
+# (PS-11697, rocksdb.crash_commit_in_the_middle_release, disabled).
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+SELECT @@rocksdb_write_policy, @@rocksdb_write_batch_flush_threshold;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+
+--echo # Kill during an INSERT ... SELECT with commit_in_the_middle = ON
+--let $kml_setup = SET SESSION rocksdb_commit_in_the_middle = ON, SESSION rocksdb_bulk_load_size = 1000
+--let $kml_rows = 2000
+--let $kml_stmt = INSERT INTO t1 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t1
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+SELECT @@rocksdb_write_policy AS policy_after_restart;
+
+--echo # Kill during a bulk load (internal commits also disabled)
+--let $kml_setup = SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load = 1
+--let $kml_rows = 2000
+--let $kml_stmt = INSERT INTO t2 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq ORDER BY n
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t2
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+
+DROP TABLE t1, t2;

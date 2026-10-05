@@ -1,0 +1,48 @@
+# Release variant R7, PS-11696:
+# SIGKILL in the middle of a bulk load into a table with a secondary index
+# and the default rocksdb_bulk_load_allow_sk = OFF. No debug points, so the
+# test runs on debug and release builds. Debug counterpart with an exact
+# crash point: rocksdb.crash_bulk_load_sk_consistency.
+#
+# Primary key rows go to a temporary SST file that is ingested only when the
+# bulk load finishes, while secondary key entries go through the normal
+# write batch, committed every rocksdb_bulk_load_size writes. A kill after
+# such an internal commit leaves secondary index entries for rows the
+# primary key never got.
+#
+# Expected (correct) behaviour: after recovery the engine holds exactly the
+# rows the binary log committed, the secondary index agrees with the primary
+# key, CHECK TABLE is OK and no temporary SST files are left.
+# Disabled in collections/disabled.def until PS-11696 is fixed.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+call mtr.add_suppression("CHECKTABLE t_sk");
+--enable_query_log
+
+--let $load_rows = 2000000
+
+CREATE TABLE t_sk (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t_sk_unsorted (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+
+--echo # Kill during a sorted bulk load with allow_sk = OFF
+--let $kml_setup = SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load_allow_sk = 0, SESSION rocksdb_bulk_load = 1
+--let $kml_stmt = INSERT INTO t_sk WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < $load_rows) SELECT n, n FROM seq ORDER BY n
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t_sk
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+
+--echo # Kill during an unsorted bulk load with allow_sk = OFF
+--let $kml_setup = SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load_allow_sk = 0, SESSION rocksdb_bulk_load_allow_unsorted = 1, SESSION rocksdb_bulk_load = 1
+--let $kml_stmt = INSERT INTO t_sk_unsorted WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < $load_rows) SELECT $load_rows - n + 1, n FROM seq
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t_sk_unsorted
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+
+DROP TABLE t_sk, t_sk_unsorted;

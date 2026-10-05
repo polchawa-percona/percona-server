@@ -1,0 +1,113 @@
+CREATE TABLE t_pk_sorted (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+CREATE TABLE t_pk_unsorted (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+CREATE TABLE t_sk_sorted (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t_sk_unsorted (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t_committed (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+# A committed bulk-load statement before the kills
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_committed
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5000)
+SELECT n, n FROM seq;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = 0;
+# Kill during a sorted bulk load into a primary-key-only table
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_pk_sorted WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq ORDER BY n;
+# Kill and restart
+# t_pk_sorted after recovery
+engine_matches_binlog
+1
+CHECK TABLE t_pk_sorted;
+Table	Op	Msg_type	Msg_text
+test.t_pk_sorted	check	status	OK
+leftover_tmp_sst_files: 0
+# t_committed after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t_committed;
+Table	Op	Msg_type	Msg_text
+test.t_committed	check	status	OK
+leftover_tmp_sst_files: 0
+# Kill during an unsorted bulk load into a primary-key-only table
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load_allow_unsorted = 1, SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_pk_unsorted WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT 2000000 - n + 1, n FROM seq;
+# Kill and restart
+# t_pk_unsorted after recovery
+engine_matches_binlog
+1
+CHECK TABLE t_pk_unsorted;
+Table	Op	Msg_type	Msg_text
+test.t_pk_unsorted	check	status	OK
+leftover_tmp_sst_files: 0
+# Kill during a sorted bulk load with allow_sk = ON
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load_allow_sk = 1, SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sk_sorted WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq ORDER BY n;
+# Kill and restart
+# t_sk_sorted after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t_sk_sorted;
+Table	Op	Msg_type	Msg_text
+test.t_sk_sorted	check	status	OK
+leftover_tmp_sst_files: 0
+# Kill during an unsorted bulk load with allow_sk = ON
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load_allow_sk = 1, SESSION rocksdb_bulk_load_allow_unsorted = 1, SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sk_unsorted WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT 2000000 - n + 1, n FROM seq;
+# Kill and restart
+# t_sk_unsorted after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t_sk_unsorted;
+Table	Op	Msg_type	Msg_text
+test.t_sk_unsorted	check	status	OK
+leftover_tmp_sst_files: 0
+# t_committed after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t_committed;
+Table	Op	Msg_type	Msg_text
+test.t_committed	check	status	OK
+leftover_tmp_sst_files: 0
+# A new bulk load works after the crashes
+TRUNCATE TABLE t_sk_sorted;
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sk_sorted
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+SELECT n, n FROM seq;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = 0;
+SELECT COUNT(*), MIN(id), MAX(id) FROM t_sk_sorted;
+COUNT(*)	MIN(id)	MAX(id)
+20000	1	20000
+SELECT COUNT(*) FROM t_sk_sorted FORCE INDEX (k) WHERE k > 0;
+COUNT(*)
+20000
+CHECK TABLE t_sk_sorted;
+Table	Op	Msg_type	Msg_text
+test.t_sk_sorted	check	status	OK
+DROP TABLE t_pk_sorted, t_pk_unsorted, t_sk_sorted, t_sk_unsorted, t_committed;

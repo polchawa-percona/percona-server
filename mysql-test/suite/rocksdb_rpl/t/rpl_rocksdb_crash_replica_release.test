@@ -1,0 +1,135 @@
+# Release-capable crash-safety test for a multi-threaded MyRocks replica.
+#
+# Release variant R4 (myrocks-notes/release-variants.md) of the debug-only
+# rpl_rocksdb_row_crash_safe test, which forces a single applier worker and
+# crashes the replica at DBUG points. This test uses no debug points, no
+# debug_sync and no have_debug, so it runs on debug and release builds.
+#
+# Several client processes run transactions on the source: money transfers
+# between MyRocks accounts, every second one also on InnoDB tables (mixed
+# two-engine transactions), plus inserts and deletes on a MyRocks table with a
+# secondary index. The replica applies them with several parallel workers
+# (replica_parallel_workers 4, then 8), GTID auto-positioning and
+# relay_log_recovery. It is killed with SIGKILL while it applies a backlog,
+# restarted, and once it has caught up these invariants are checked:
+#   - the replica data equals the source data (diff_tables)
+#   - no transaction is applied twice or lost: transfers are zero-sum, move
+#     counters match the logged transactions, and the GTID sets are equal
+#   - MyRocks secondary indexes agree with the primary key, CHECK TABLE is OK
+#   - the applier reports no error and runs with the configured workers
+#
+# The test-level .combinations file runs it under all three
+# rocksdb_write_policy values, with row binary logging.
+
+--source include/not_group_replication_plugin.inc
+--source include/have_rocksdb.inc
+--source include/have_binlog_format_row.inc
+--source include/not_valgrind.inc
+--let $rpl_skip_start_slave = 1
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_replica.inc
+call mtr.add_suppression("Recovery from source pos .* and file .*");
+call mtr.add_suppression("Relay log recovery on channel with GTID_ONLY=1");
+call mtr.add_suppression("Replica SQL for channel '': .* Error_code");
+call mtr.add_suppression("Replica I/O for channel '': .* Error_code");
+call mtr.add_suppression("Error reading relay log event for channel");
+call mtr.add_suppression("Error looking for file after");
+SELECT @@global.rocksdb_flush_log_at_trx_commit, @@global.sync_binlog,
+       @@global.relay_log_recovery, @@global.replica_preserve_commit_order;
+--source include/rpl/start_replica.inc
+
+--source include/rpl/connection_source.inc
+call mtr.add_suppression("Timeout waiting for reply of binlog");
+
+CREATE TABLE r_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL,
+                    KEY kbal (bal)) ENGINE=ROCKSDB;
+CREATE TABLE r_log (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE r_ev (id INT PRIMARY KEY, k INT NOT NULL, pad VARCHAR(64) NOT NULL,
+                   KEY kk (k)) ENGINE=ROCKSDB;
+CREATE TABLE i_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL)
+  ENGINE=InnoDB;
+CREATE TABLE i_log (id INT PRIMARY KEY) ENGINE=InnoDB;
+--disable_query_log
+--let $_a = 1
+while ($_a <= 20)
+{
+  --eval INSERT INTO r_acc VALUES ($_a, 0, 0)
+  --eval INSERT INTO i_acc VALUES ($_a, 0, 0)
+  --inc $_a
+}
+--enable_query_log
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/connection_source.inc
+
+--let $load_script = $MYSQLTEST_VARDIR/tmp/crash_replica_release_load.sh
+--write_file $load_script
+#!/bin/bash
+# Load generator for rpl_rocksdb_crash_replica_release.
+# Usage: load.sh "<mysql command>" <round> <conn> <seed> <txns> <done file>
+# Runs <txns> transactions against the source, then writes <done file>.
+# A failed transaction (lock wait timeout) is simply not logged.
+MYSQL_CMD=$1; ROUND=$2; CONN=$3; SEED=$4; NTX=$5; DONE=$6
+RANDOM=$SEED
+NACC=20
+base=$((ROUND * 10000000 + CONN * 1000000))
+i=0
+while [ $i -lt $NTX ]; do
+  i=$((i + 1))
+  id=$((base + i))
+  a=$((RANDOM % NACC + 1))
+  b=$((RANDOM % NACC + 1))
+  if [ $a -eq $b ]; then b=$((a % NACC + 1)); fi
+  # Always lock the lower id first, so that the clients never deadlock.
+  if [ $a -lt $b ]; then lo=$a; hi=$b; dlo=-1; dhi=1; else lo=$b; hi=$a; dlo=1; dhi=-1; fi
+  k=$((RANDOM % 50))
+  sql="BEGIN;"
+  sql="$sql UPDATE r_acc SET bal = bal + ($dlo), moves = moves + 1 WHERE id = $lo;"
+  sql="$sql UPDATE r_acc SET bal = bal + ($dhi), moves = moves + 1 WHERE id = $hi;"
+  sql="$sql INSERT INTO r_log VALUES ($id);"
+  sql="$sql INSERT INTO r_ev VALUES ($id, $k, REPEAT('x', $k));"
+  if [ $((i % 3)) -eq 0 ]; then
+    # Delete an older event of this client and move another one in the index.
+    sql="$sql DELETE FROM r_ev WHERE id = $((id - 2));"
+    sql="$sql UPDATE r_ev SET k = k + 1 WHERE id = $((id - 1));"
+  fi
+  if [ $((id % 2)) -eq 0 ]; then
+    sql="$sql UPDATE i_acc SET bal = bal + ($dlo), moves = moves + 1 WHERE id = $lo;"
+    sql="$sql UPDATE i_acc SET bal = bal + ($dhi), moves = moves + 1 WHERE id = $hi;"
+    sql="$sql INSERT INTO i_log VALUES ($id);"
+  fi
+  sql="$sql COMMIT;"
+  eval "$MYSQL_CMD test -e \"\$sql\"" >/dev/null 2>&1
+done
+echo done > "$DONE"
+EOF
+
+# Rounds 1 and 2 kill a replica running 4 workers, rounds 3 and 4 one running
+# 8 workers. $kill_at is how many of the round's transactions the replica must
+# have applied before it is killed: small means early in the backlog.
+--let $workers = 4
+--let $round = 1
+--let $kill_at = 150
+--let $next_workers = 4
+--source suite/rocksdb_rpl/include/rpl_rocksdb_crash_replica_release_round.inc
+
+--let $round = 2
+--let $kill_at = 5
+--let $next_workers = 8
+--source suite/rocksdb_rpl/include/rpl_rocksdb_crash_replica_release_round.inc
+
+--let $workers = 8
+--let $round = 3
+--let $kill_at = 300
+--let $next_workers = 8
+--source suite/rocksdb_rpl/include/rpl_rocksdb_crash_replica_release_round.inc
+
+--let $round = 4
+--let $kill_at = 50
+--let $next_workers = 4
+--source suite/rocksdb_rpl/include/rpl_rocksdb_crash_replica_release_round.inc
+
+--source include/rpl/connection_source.inc
+--remove_file $load_script
+DROP TABLE r_acc, r_log, r_ev, i_acc, i_log;
+--source include/rpl/deinit.inc

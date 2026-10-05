@@ -1,0 +1,49 @@
+# Release variant R7, PS-11697:
+# SIGKILL in the middle of a large statement with
+# rocksdb_commit_in_the_middle = ON, without debug points, so the test runs
+# on debug and release builds. Debug counterparts with an exact crash point:
+# rocksdb.crash_commit_in_the_middle, rocksdb.crash_commit_in_the_middle_binlog.
+#
+# Every rocksdb_bulk_load_size rows the transaction is committed directly in
+# the engine (commit_no_binlog()); the binary log is written only when the
+# statement completes. A kill after an internal commit leaves rows in the
+# engine that never reach the binary log.
+#
+# Expected (correct) behaviour: after recovery the engine holds exactly the
+# rows the binary log committed (none of the interrupted statement's rows),
+# and the secondary index agrees with the primary key.
+# Disabled in collections/disabled.def until PS-11697 is fixed.
+# The write_unprepared policy, where commit-in-the-middle is disabled by
+# design, is covered by rocksdb.crash_commit_in_the_middle_wup_release.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+
+--echo # Kill during an autocommit INSERT ... SELECT
+--let $kml_setup = SET SESSION rocksdb_commit_in_the_middle = ON, SESSION rocksdb_bulk_load_size = 1000
+--let $kml_stmt = INSERT INTO t1 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t1
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+
+--echo # Kill during a large UPDATE of committed rows
+SET SESSION cte_max_recursion_depth = 400000;
+INSERT INTO t2 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 300000) SELECT n, n FROM seq;
+--let $kml_setup = SET SESSION rocksdb_commit_in_the_middle = ON, SESSION rocksdb_bulk_load_size = 1000
+--let $kml_stmt = UPDATE t2 SET k = k + 1000000
+--let $kml_rows = 20000
+--let $kml_counter = rocksdb_rows_updated
+--source suite/rocksdb/include/crash_release_kill_mid_load.inc
+--let $crt_table = t2
+--let $crt_sk = 1
+--source suite/rocksdb/include/crash_release_check_table.inc
+--echo # No row of the interrupted UPDATE may stay updated
+SELECT COUNT(*) = 0 AS no_rows_updated_by_interrupted_update FROM t2 WHERE k > 1000000;
+
+DROP TABLE t1, t2;
