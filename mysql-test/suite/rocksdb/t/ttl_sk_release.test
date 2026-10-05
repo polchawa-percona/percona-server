@@ -1,0 +1,63 @@
+#
+# Release-build variant of the TTL secondary-index tests (ttl_secondary,
+# ttl_secondary_read_filtering, ttl_secondary_read_filtering_multiple_index,
+# ttl_secondary_with_partitions). Those fake the clock with the debug-only
+# rocksdb_debug_ttl_* variables. This test uses real time only, so it runs on debug and
+# release builds alike. Invariants checked:
+#   - every secondary index hides the same expired rows as the primary key, including
+#     index-only (covering) reads, point lookups, ranges and IN lists,
+#   - an expired row does not block a new row with the same unique value,
+#   - until compaction the rows stay stored in every index,
+#   - compaction removes them from every index, and CHECK TABLE still passes,
+#   - the same holds for partitioned tables with per-partition TTL.
+#
+--source include/have_rocksdb.inc
+
+SET @orig_read_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+
+--echo #
+--echo # 1. Secondary indexes, one variant per column type
+--echo #
+--let $coltype = BIGINT UNSIGNED
+--let $past = UNIX_TIMESTAMP() - 7200
+--let $now = UNIX_TIMESTAMP()
+--source suite/rocksdb/include/ttl_release_sk.inc
+
+--let $coltype = TIMESTAMP(6)
+--let $past = NOW(6) - INTERVAL 7200 SECOND
+--let $now = NOW(6)
+--source suite/rocksdb/include/ttl_release_sk.inc
+
+--echo #
+--echo # 2. Secondary index on a partitioned table with per-partition TTL
+--echo #
+CREATE TABLE t2 (
+  a INT NOT NULL,
+  b INT NOT NULL,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (a),
+  KEY kb (b)
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p1_ttl_duration=86400;custom_p1_ttl_col=ts;'
+PARTITION BY LIST (a) (
+  PARTITION custom_p0 VALUES IN (1, 4, 7),
+  PARTITION custom_p1 VALUES IN (2, 5, 8),
+  PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t2 SELECT seq, seq * 10, UNIX_TIMESTAMP() - 7200
+  FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+        UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+--echo # Only p0 has expired, on the primary key and on the secondary index
+SELECT a FROM t2 FORCE INDEX (PRIMARY) ORDER BY a;
+SELECT b FROM t2 FORCE INDEX (kb) ORDER BY b;
+SELECT b FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 10 AND 50 ORDER BY b;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT b FROM t2 FORCE INDEX (kb) ORDER BY b;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+CHECK TABLE t2;
+DROP TABLE t2;
+
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @orig_read_filtering;

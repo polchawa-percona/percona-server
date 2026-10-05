@@ -1,0 +1,664 @@
+#########
+# Begin upgrade testing with mysql_upgrade
+###
+# Copy the remote tablespace & DB zip files from suite location to working location.
+# Check that the file exists in the working folder.
+# Stop DB server which was created by MTR default
+# Unzip the zip file.
+# Remove copied files
+# restart
+#########
+# Performing test specific validation
+###
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+USE fmt;
+#
+# The fixture indexes still carry the legacy format versions.
+#
+SELECT COUNT(*) FROM v11_vb;
+SELECT COUNT(*) FROM v11_vb_sk;
+SELECT COUNT(*) FROM v11_vc_bin;
+SELECT COUNT(*) FROM v11_mixed;
+SELECT COUNT(*) FROM v12_cov;
+SELECT COUNT(*) FROM v13_pk_latin1_bin;
+SELECT COUNT(*) FROM v13_pk_composite;
+SELECT COUNT(*) FROM v13_sk;
+SELECT COUNT(*) FROM v13_pk_utf8mb4_bin;
+SELECT COUNT(*) FROM v13_ci;
+SELECT COUNT(*) FROM v13_ttl;
+SELECT table_name, index_name, kv_format_version
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+table_name	index_name	kv_format_version
+v11_mixed	k_d	11
+v11_mixed	k_t	11
+v11_mixed	k_vb	11
+v11_mixed	k_vc	11
+v11_mixed	PRIMARY	11
+v11_vb	k_n	11
+v11_vb	PRIMARY	11
+v11_vb_sk	k_vb	11
+v11_vb_sk	PRIMARY	11
+v11_vc_bin	PRIMARY	11
+v12_cov	bf	12
+v12_cov	fid	12
+v12_cov	PRIMARY	15
+v13_ci	k_vc	13
+v13_ci	PRIMARY	13
+v13_ci	uk_c	13
+v13_pk_composite	PRIMARY	13
+v13_pk_latin1_bin	PRIMARY	13
+v13_pk_utf8mb4_bin	PRIMARY	13
+v13_sk	k_vc	13
+v13_sk	PRIMARY	13
+v13_ttl	k_vc	13
+v13_ttl	PRIMARY	13
+#
+# v11: old binary variable-length encoding
+#
+SELECT HEX(vb), n FROM v11_vb ORDER BY vb;
+HEX(vb)	n
+00	1
+0000	2
+000000	3
+00000000	4
+0000000000	5
+000000000000	6
+00000000000000	7
+0000000000000000	8
+000000000000000000	9
+00000000000000000000	10
+00000000000000000000000000000000000000000000000000000000000000	31
+0000000000000000000000000000000000000000000000000000000000000000	32
+000000000000000000000000000000000000000000000000000000000000000000	33
+41	101
+4142434445464748	108
+414243444546474849	109
+FF	255
+SELECT n FROM v11_vb FORCE INDEX (k_n) ORDER BY n;
+n
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+31
+32
+33
+101
+108
+109
+255
+SELECT HEX(vb) FROM v11_vb WHERE vb BETWEEN 0x000000 AND 0x0000000000000000 ORDER BY vb;
+HEX(vb)
+000000
+00000000
+0000000000
+000000000000
+00000000000000
+0000000000000000
+SELECT n FROM v11_vb WHERE vb = 0x0000000000000000;
+n
+8
+SELECT n FROM v11_vb WHERE vb = 0x000000000000000000;
+n
+9
+SELECT HEX(vb) FROM v11_vb ORDER BY vb DESC LIMIT 3;
+HEX(vb)
+FF
+414243444546474849
+4142434445464748
+# Keys as stored on disk (legacy encoding of the varbinary PK).
+BEGIN;
+SELECT vb FROM v11_vb WHERE vb < 0x01 FOR UPDATE;
+SELECT SUBSTRING(a.key, 9) FROM information_schema.rocksdb_locks AS a ORDER BY a.key;
+SUBSTRING(a.key, 9)
+0000000000000000f8
+0000000000000000f9
+0000000000000000fa
+0000000000000000fb
+0000000000000000fc
+0000000000000000fd
+0000000000000000fe
+0000000000000000ff0000000000000000f7
+0000000000000000ff0000000000000000f8
+0000000000000000ff0000000000000000f9
+0000000000000000ff0000000000000000ff0000000000000000ff0000000000000000fe
+0000000000000000ff0000000000000000ff0000000000000000ff0000000000000000ff0000000000000000f7
+0000000000000000ff0000000000000000ff0000000000000000ff0000000000000000ff0000000000000000f8
+ROLLBACK;
+SELECT id, HEX(vb) FROM v11_vb_sk FORCE INDEX (k_vb) ORDER BY vb, id;
+id	HEX(vb)
+1000	NULL
+1001	
+1	00
+2	0000
+3	000000
+4	00000000
+5	0000000000
+6	000000000000
+7	00000000000000
+8	0000000000000000
+9	000000000000000000
+10	00000000000000000000
+31	00000000000000000000000000000000000000000000000000000000000000
+32	0000000000000000000000000000000000000000000000000000000000000000
+33	000000000000000000000000000000000000000000000000000000000000000000
+101	41
+108	4142434445464748
+109	414243444546474849
+255	FF
+SELECT id FROM v11_vb_sk FORCE INDEX (k_vb) WHERE vb = 0x4142434445464748;
+id
+108
+SELECT id FROM v11_vb_sk FORCE INDEX (k_vb) WHERE vb IS NULL;
+id
+1000
+SELECT vc FROM v11_vc_bin ORDER BY vc;
+vc
+
+a
+aa
+aaa
+aaaa
+aaaaa
+aaaaaa
+aaaaaaa
+aaaaaaaa
+aaaaaaaaa
+aaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+b
+SELECT vc FROM v11_vc_bin WHERE vc > 'aaaaaaaa' AND vc < 'b' ORDER BY vc;
+vc
+aaaaaaaaa
+aaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SELECT id, d, vc, HEX(vb), LEFT(t, 20), LENGTH(t) FROM v11_mixed ORDER BY id;
+id	d	vc	HEX(vb)	LEFT(t, 20)	LENGTH(t)
+1	0.000				0
+2	-1.500	abc	616263	short text	10
+3	12345.678	ABC	41424344454647	text that is longer 	35
+4	-9999999.999	abc   	4142434445464748	TEXT THAT IS LONGER 	35
+5	9999999.999	Åsa	414243444546474849	åäö	3
+6	NULL	NULL	NULL	NULL	NULL
+7	0.001	zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz	7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A	zzzzzzzzzzzzzzzzzzzz	300
+SELECT d FROM v11_mixed FORCE INDEX (k_d) ORDER BY d;
+d
+NULL
+-9999999.999
+-1.500
+0.000
+0.001
+12345.678
+9999999.999
+SELECT id, d FROM v11_mixed FORCE INDEX (k_d) WHERE d BETWEEN -2 AND 12345.678 ORDER BY d;
+id	d
+2	-1.500
+1	0.000
+7	0.001
+3	12345.678
+SELECT id, vc FROM v11_mixed FORCE INDEX (k_vc) ORDER BY vc, id;
+id	vc
+6	NULL
+1	
+2	abc
+3	ABC
+4	abc   
+7	zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+5	Åsa
+SELECT id FROM v11_mixed FORCE INDEX (k_vc) WHERE vc = 'ABC' ORDER BY id;
+id
+2
+3
+4
+SELECT id, HEX(vb) FROM v11_mixed FORCE INDEX (k_vb) ORDER BY vb, id;
+id	HEX(vb)
+6	NULL
+1	
+3	41424344454647
+4	4142434445464748
+5	414243444546474849
+2	616263
+7	7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A
+SELECT id, LEFT(t, 20) FROM v11_mixed FORCE INDEX (k_t) WHERE t LIKE 'text%' ORDER BY id;
+id	LEFT(t, 20)
+3	text that is longer 
+4	TEXT THAT IS LONGER 
+#
+# v12: secondary keys without the covered bitmap
+#
+SELECT id, fake_id, LENGTH(bigfield) FROM v12_cov ORDER BY id;
+id	fake_id	LENGTH(bigfield)
+1	1001	1
+8	1008	8
+24	1024	24
+31	1031	31
+32	1032	32
+33	1033	33
+128	1128	128
+SELECT id, LEFT(bigfield, 40) FROM v12_cov FORCE INDEX (bf) WHERE bigfield LIKE 'c%';
+id	LEFT(bigfield, 40)
+24	cccccccccccccccccccccccc
+# v12 index stores no covered bitmap, so the row is read
+SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1031;
+id	bigfield
+31	ddddddddddddddddddddddddddddddd
+include/assert.inc [v12 index stores no covered bitmap, so the row is read: 0 rocksdb_covered_secondary_key_lookups]
+# Value longer than the prefix, the row is read
+SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1033;
+id	bigfield
+33	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+include/assert.inc [Value longer than the prefix, the row is read: 0 rocksdb_covered_secondary_key_lookups]
+#
+# v13: space-padded VARCHAR without the lead byte
+#
+SELECT HEX(vc) FROM v13_pk_latin1_bin ORDER BY vc;
+HEX(vc)
+000000000000000000
+0000000000000000
+0000
+
+414243
+616263
+616263202078
+7171717171717171
+717171717171717171
+7171717171717171717171717171717171
+71717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171
+SELECT vc FROM v13_pk_latin1_bin WHERE vc = 'abc';
+vc
+abc
+SELECT vc FROM v13_pk_latin1_bin WHERE vc = 'abc   ';
+vc
+abc
+SELECT LENGTH(vc) FROM v13_pk_latin1_bin WHERE vc LIKE 'qqqqqqqq%' ORDER BY vc;
+LENGTH(vc)
+8
+9
+17
+64
+# Keys as stored on disk (legacy space-padded encoding).
+BEGIN;
+SELECT vc FROM v13_pk_latin1_bin WHERE vc < 'B' FOR UPDATE;
+SELECT SUBSTRING(a.key, 9) FROM information_schema.rocksdb_locks AS a ORDER BY a.key;
+SUBSTRING(a.key, 9)
+000000000000000001002020202020202002
+000000000000000002
+000020202020202002
+202020202020202002
+414243202020202002
+ROLLBACK;
+SELECT a, HEX(vc) FROM v13_pk_composite ORDER BY a, vc;
+a	HEX(vc)
+1	
+2	2020
+3	2020202020202020
+4	20202020202020202020
+5	616263
+6	6162632020202020
+7	61626320202020202020
+8	777777777777777777777777777777777777777777777777777777777777777777
+SELECT a FROM v13_pk_composite WHERE a = 6 AND vc = 'abc';
+a
+6
+SELECT a, HEX(vc) FROM v13_sk FORCE INDEX (k_vc) ORDER BY vc, a;
+a	HEX(vc)
+8	NULL
+1	
+2	2020
+3	2020202020202020
+4	20202020202020202020
+5	616263
+6	6162632020202020
+7	61626320202020202020
+9	777777777777777777777777777777777777777777777777777777777777777777
+SELECT a FROM v13_sk FORCE INDEX (k_vc) WHERE vc = '' ORDER BY a;
+a
+1
+2
+3
+4
+SELECT a FROM v13_sk FORCE INDEX (k_vc) WHERE vc = 'abc' ORDER BY a;
+a
+5
+6
+7
+SELECT HEX(vc) FROM v13_pk_utf8mb4_bin ORDER BY vc;
+HEX(vc)
+000000000000000000
+0000000000000000
+0000
+
+414243
+C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499C499
+C5BCC3B3C58277
+F09F9880
+SELECT vc FROM v13_pk_utf8mb4_bin WHERE vc = 'żółw';
+vc
+żółw
+SELECT id, vc, c FROM v13_ci ORDER BY id;
+id	vc	c
+1	abc	abc
+2	ABC	ABD
+3	abc   	aBe
+4	Åsa	åsa
+5		
+6	NULL	NULL
+7	zzz	NULL
+8	mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm	mmmmmmmmmmmmmmmm
+SELECT id, vc FROM v13_ci FORCE INDEX (k_vc) ORDER BY vc, id;
+id	vc
+6	NULL
+5	
+1	abc
+2	ABC
+3	abc   
+8	mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
+7	zzz
+4	Åsa
+SELECT id FROM v13_ci FORCE INDEX (k_vc) WHERE vc = 'abc' ORDER BY id;
+id
+1
+2
+3
+SELECT id, c FROM v13_ci FORCE INDEX (uk_c) ORDER BY c, id;
+id	c
+6	NULL
+7	NULL
+5	
+1	abc
+2	ABD
+3	aBe
+8	mmmmmmmmmmmmmmmm
+4	åsa
+SELECT id FROM v13_ci FORCE INDEX (uk_c) WHERE c = 'ÅSA';
+id
+4
+SELECT id, vc, ts FROM v13_ttl ORDER BY id;
+id	vc	ts
+1	alpha	4000000000
+2	beta  	4000000000
+3		4000000000
+4	gggggggggggggggggggggggggggggggg	4000000000
+SELECT id, vc FROM v13_ttl FORCE INDEX (k_vc) ORDER BY vc;
+id	vc
+3	
+1	alpha
+2	beta  
+4	gggggggggggggggggggggggggggggggg
+#
+# Unique checks on legacy-format keys
+#
+INSERT INTO v11_vb VALUES (0x0000, 999);
+ERROR 23000: Duplicate entry '\x00\x00' for key 'v11_vb.PRIMARY'
+INSERT INTO v11_vc_bin VALUES ('aaaaaaaa');
+ERROR 23000: Duplicate entry 'aaaaaaaa' for key 'v11_vc_bin.PRIMARY'
+INSERT INTO v13_pk_latin1_bin VALUES ('ABC   ');
+ERROR 23000: Duplicate entry 'ABC   ' for key 'v13_pk_latin1_bin.PRIMARY'
+INSERT INTO v13_pk_composite VALUES (5, 'abc  ');
+ERROR 23000: Duplicate entry '5-abc  ' for key 'v13_pk_composite.PRIMARY'
+INSERT INTO v13_pk_utf8mb4_bin VALUES ('     ');
+ERROR 23000: Duplicate entry '     ' for key 'v13_pk_utf8mb4_bin.PRIMARY'
+INSERT INTO v13_ci VALUES (100, 'x', 'ABC');
+ERROR 23000: Duplicate entry 'ABC' for key 'v13_ci.uk_c'
+INSERT INTO v13_ci VALUES (101, 'x', 'Abd  ');
+ERROR 23000: Duplicate entry 'Abd' for key 'v13_ci.uk_c'
+#
+# Writes to legacy-format indexes, then read back
+#
+INSERT INTO v11_vb VALUES (0x000000000000000000000000, 12), (0x42, 102);
+UPDATE v11_vb SET vb = 0x4343434343434343 WHERE n = 108;
+DELETE FROM v11_vb WHERE n = 9;
+UPDATE v11_vb_sk SET vb = 0x00000000000000000000 WHERE id = 1001;
+INSERT INTO v11_mixed VALUES (8, 1.250, 'abc ', 0x00, 'Text 8');
+UPDATE v11_mixed SET d = -0.500, vc = 'Zed' WHERE id = 2;
+DELETE FROM v11_mixed WHERE id = 6;
+INSERT INTO v12_cov VALUES (40, 1040, REPEAT('e', 40));
+UPDATE v12_cov SET bigfield = 'short' WHERE id = 128;
+INSERT INTO v13_pk_latin1_bin VALUES ('abd'), ('zz  '), ('a b');
+UPDATE v13_pk_latin1_bin SET vc = 'ABZ' WHERE vc = 'ABC';
+DELETE FROM v13_pk_latin1_bin WHERE vc = 0x0000;
+INSERT INTO v13_sk VALUES (10, 'abc '), (11, 'zz');
+UPDATE v13_sk SET vc = 'mid' WHERE a = 6;
+UPDATE v13_ci SET c = 'zzz' WHERE id = 7;
+INSERT INTO v13_ttl VALUES (5, 'delta ', 4000000000);
+SELECT HEX(vb), n FROM v11_vb ORDER BY vb;
+HEX(vb)	n
+00	1
+0000	2
+000000	3
+00000000	4
+0000000000	5
+000000000000	6
+00000000000000	7
+0000000000000000	8
+00000000000000000000	10
+000000000000000000000000	12
+00000000000000000000000000000000000000000000000000000000000000	31
+0000000000000000000000000000000000000000000000000000000000000000	32
+000000000000000000000000000000000000000000000000000000000000000000	33
+41	101
+414243444546474849	109
+42	102
+4343434343434343	108
+FF	255
+SELECT n FROM v11_vb FORCE INDEX (k_n) ORDER BY n;
+n
+1
+2
+3
+4
+5
+6
+7
+8
+10
+12
+31
+32
+33
+101
+102
+108
+109
+255
+SELECT id, HEX(vb) FROM v11_vb_sk FORCE INDEX (k_vb) ORDER BY vb, id;
+id	HEX(vb)
+1000	NULL
+1	00
+2	0000
+3	000000
+4	00000000
+5	0000000000
+6	000000000000
+7	00000000000000
+8	0000000000000000
+9	000000000000000000
+10	00000000000000000000
+1001	00000000000000000000
+31	00000000000000000000000000000000000000000000000000000000000000
+32	0000000000000000000000000000000000000000000000000000000000000000
+33	000000000000000000000000000000000000000000000000000000000000000000
+101	41
+108	4142434445464748
+109	414243444546474849
+255	FF
+SELECT id, d, vc, HEX(vb) FROM v11_mixed ORDER BY id;
+id	d	vc	HEX(vb)
+1	0.000		
+2	-0.500	Zed	616263
+3	12345.678	ABC	41424344454647
+4	-9999999.999	abc   	4142434445464748
+5	9999999.999	Åsa	414243444546474849
+7	0.001	zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz	7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A7A
+8	1.250	abc 	00
+SELECT id, d FROM v11_mixed FORCE INDEX (k_d) ORDER BY d, id;
+id	d
+4	-9999999.999
+2	-0.500
+1	0.000
+7	0.001
+8	1.250
+3	12345.678
+5	9999999.999
+SELECT id, vc FROM v11_mixed FORCE INDEX (k_vc) ORDER BY vc, id;
+id	vc
+1	
+3	ABC
+4	abc   
+8	abc 
+2	Zed
+7	zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+5	Åsa
+SELECT id, fake_id, LENGTH(bigfield) FROM v12_cov FORCE INDEX (fid) ORDER BY fake_id;
+id	fake_id	LENGTH(bigfield)
+1	1001	1
+8	1008	8
+24	1024	24
+31	1031	31
+32	1032	32
+33	1033	33
+40	1040	40
+128	1128	5
+SELECT HEX(vc) FROM v13_pk_latin1_bin ORDER BY vc;
+HEX(vc)
+000000000000000000
+0000000000000000
+
+41425A
+612062
+616263
+616263202078
+616264
+7171717171717171
+717171717171717171
+7171717171717171717171717171717171
+71717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171
+7A7A2020
+SELECT a, HEX(vc) FROM v13_sk FORCE INDEX (k_vc) ORDER BY vc, a;
+a	HEX(vc)
+8	NULL
+1	
+2	2020
+3	2020202020202020
+4	20202020202020202020
+5	616263
+7	61626320202020202020
+10	61626320
+6	6D6964
+9	777777777777777777777777777777777777777777777777777777777777777777
+11	7A7A
+SELECT id, c FROM v13_ci FORCE INDEX (uk_c) ORDER BY c, id;
+id	c
+6	NULL
+5	
+1	abc
+2	ABD
+3	aBe
+8	mmmmmmmmmmmmmmmm
+7	zzz
+4	åsa
+SELECT id, vc FROM v13_ttl FORCE INDEX (k_vc) ORDER BY vc;
+id	vc
+3	
+1	alpha
+2	beta  
+5	delta 
+4	gggggggggggggggggggggggggggggggg
+CHECK TABLE v11_vb, v11_vb_sk, v11_vc_bin, v11_mixed, v12_cov,
+v13_pk_latin1_bin, v13_pk_composite, v13_sk, v13_pk_utf8mb4_bin, v13_ci,
+v13_ttl;
+Table	Op	Msg_type	Msg_text
+fmt.v11_vb	check	status	OK
+fmt.v11_vb_sk	check	status	OK
+fmt.v11_vc_bin	check	status	OK
+fmt.v11_mixed	check	status	OK
+fmt.v12_cov	check	status	OK
+fmt.v13_pk_latin1_bin	check	status	OK
+fmt.v13_pk_composite	check	status	OK
+fmt.v13_sk	check	status	OK
+fmt.v13_pk_utf8mb4_bin	check	status	OK
+fmt.v13_ci	check	status	OK
+fmt.v13_ttl	check	status	OK
+#
+# Rebuilding a table writes it in the current format with the same data
+#
+include/assert.inc [v11_vb: same rows and checksum after rebuild]
+include/assert.inc [v11_vb_sk: same rows and checksum after rebuild]
+include/assert.inc [v11_vc_bin: same rows and checksum after rebuild]
+include/assert.inc [v11_mixed: same rows and checksum after rebuild]
+include/assert.inc [v12_cov: same rows and checksum after rebuild]
+include/assert.inc [v13_pk_latin1_bin: same rows and checksum after rebuild]
+include/assert.inc [v13_pk_composite: same rows and checksum after rebuild]
+include/assert.inc [v13_sk: same rows and checksum after rebuild]
+include/assert.inc [v13_pk_utf8mb4_bin: same rows and checksum after rebuild]
+include/assert.inc [v13_ci: same rows and checksum after rebuild]
+include/assert.inc [v13_ttl: same rows and checksum after rebuild]
+SELECT table_name, index_name, kv_format_version
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+table_name	index_name	kv_format_version
+v11_mixed	k_d	16
+v11_mixed	k_t	16
+v11_mixed	k_vb	16
+v11_mixed	k_vc	16
+v11_mixed	PRIMARY	15
+v11_vb	k_n	16
+v11_vb	PRIMARY	15
+v11_vb_sk	k_vb	16
+v11_vb_sk	PRIMARY	15
+v11_vc_bin	PRIMARY	15
+v12_cov	bf	16
+v12_cov	fid	16
+v12_cov	PRIMARY	15
+v13_ci	k_vc	16
+v13_ci	PRIMARY	15
+v13_ci	uk_c	16
+v13_pk_composite	PRIMARY	15
+v13_pk_latin1_bin	PRIMARY	15
+v13_pk_utf8mb4_bin	PRIMARY	15
+v13_sk	k_vc	16
+v13_sk	PRIMARY	15
+v13_ttl	k_vc	16
+v13_ttl	PRIMARY	15
+# After the rebuild the covered bitmap is stored and the row read is avoided
+SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1031;
+id	bigfield
+31	ddddddddddddddddddddddddddddddd
+include/assert.inc [After the rebuild the covered bitmap is stored and the row read is avoided: 1 rocksdb_covered_secondary_key_lookups]
+CHECK TABLE v11_vb, v11_vb_sk, v11_vc_bin, v11_mixed, v12_cov,
+v13_pk_latin1_bin, v13_pk_composite, v13_sk, v13_pk_utf8mb4_bin, v13_ci,
+v13_ttl;
+Table	Op	Msg_type	Msg_text
+fmt.v11_vb	check	status	OK
+fmt.v11_vb_sk	check	status	OK
+fmt.v11_vc_bin	check	status	OK
+fmt.v11_mixed	check	status	OK
+fmt.v12_cov	check	status	OK
+fmt.v13_pk_latin1_bin	check	status	OK
+fmt.v13_pk_composite	check	status	OK
+fmt.v13_sk	check	status	OK
+fmt.v13_pk_utf8mb4_bin	check	status	OK
+fmt.v13_ci	check	status	OK
+fmt.v13_ttl	check	status	OK
+USE test;
+DROP DATABASE fmt;
+#########
+# End upgrade testing with mysql_upgrade
+###
+# Stop the server
+# Remove temp datadir
+# Restart the server with default options.
+# restart

@@ -1,0 +1,1 @@
+--rocksdb_override_cf_options=cf_corrupt_pk={disable_auto_compactions=true};cf_corrupt_sk={disable_auto_compactions=true}

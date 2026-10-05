@@ -1,5 +1,6 @@
 --source include/have_rocksdb.inc
---source include/have_debug.inc
+# R10: have_debug removed; nothing here needs a debug build, so the test also
+# runs on release builds (RelWithDebInfo).
 
 # Test if storing copy of field in sk works.
 create table t (id int not null auto_increment primary key,

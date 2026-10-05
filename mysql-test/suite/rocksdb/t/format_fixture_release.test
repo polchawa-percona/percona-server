@@ -1,0 +1,222 @@
+#
+# Release-capable test of reading MyRocks data written in older on-disk
+# key/value formats (release-variant item R9).
+#
+# The datadir in std_data/data84_rocks_legacy_formats.zip holds tables whose
+# indexes use format versions that a server can no longer create on its own:
+#   PK/SK v11 (old binary variable-length encoding), SK v12 (no covered bitmap)
+#   and PK/SK v13 (space-padded VARCHAR without the lead byte).
+# The fixture was produced on a debug build by rocksdb.format_fixture_gen,
+# which documents how to regenerate it; the tables are defined in
+# suite/rocksdb/include/format_fixture_tables.inc. This test needs no debug
+# features, so it covers the read path of these formats on release builds,
+# where the debug-only tests varchar_format, varbinary_format and
+# covered_unpack_info_format do not run.
+#
+# PK v14 / SK v15 are covered by rocksdb.type_char_index_ver_bump_verify,
+# which reads an 8.0 datadir and also runs on release builds.
+#
+--source include/have_rocksdb.inc
+--source include/have_util_unzip.inc
+--source include/not_windows.inc
+
+--let $ADDITIONAL_OPTS=
+--let $ARCH_DATA=data84_rocks_legacy_formats
+--source include/begin_upgrade_from_prev_ver_mysql_upgrade.inc
+
+# INSERT ... SELECT and the copies below would hit the gap-lock check at
+# REPEATABLE READ.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+USE fmt;
+
+--echo #
+--echo # The fixture indexes still carry the legacy format versions.
+--echo #
+# ROCKSDB_DDL fills in INDEX_NAME only once a table has been opened since the
+# restart (finding #27), so open every table first.
+--disable_result_log
+SELECT COUNT(*) FROM v11_vb; SELECT COUNT(*) FROM v11_vb_sk;
+SELECT COUNT(*) FROM v11_vc_bin; SELECT COUNT(*) FROM v11_mixed;
+SELECT COUNT(*) FROM v12_cov; SELECT COUNT(*) FROM v13_pk_latin1_bin;
+SELECT COUNT(*) FROM v13_pk_composite; SELECT COUNT(*) FROM v13_sk;
+SELECT COUNT(*) FROM v13_pk_utf8mb4_bin; SELECT COUNT(*) FROM v13_ci;
+SELECT COUNT(*) FROM v13_ttl;
+--enable_result_log
+SELECT table_name, index_name, kv_format_version
+  FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+
+--echo #
+--echo # v11: old binary variable-length encoding
+--echo #
+SELECT HEX(vb), n FROM v11_vb ORDER BY vb;
+SELECT n FROM v11_vb FORCE INDEX (k_n) ORDER BY n;
+SELECT HEX(vb) FROM v11_vb WHERE vb BETWEEN 0x000000 AND 0x0000000000000000 ORDER BY vb;
+SELECT n FROM v11_vb WHERE vb = 0x0000000000000000;
+SELECT n FROM v11_vb WHERE vb = 0x000000000000000000;
+SELECT HEX(vb) FROM v11_vb ORDER BY vb DESC LIMIT 3;
+
+--echo # Keys as stored on disk (legacy encoding of the varbinary PK).
+BEGIN;
+--disable_result_log
+SELECT vb FROM v11_vb WHERE vb < 0x01 FOR UPDATE;
+--enable_result_log
+SELECT SUBSTRING(a.key, 9) FROM information_schema.rocksdb_locks AS a ORDER BY a.key;
+ROLLBACK;
+
+SELECT id, HEX(vb) FROM v11_vb_sk FORCE INDEX (k_vb) ORDER BY vb, id;
+SELECT id FROM v11_vb_sk FORCE INDEX (k_vb) WHERE vb = 0x4142434445464748;
+SELECT id FROM v11_vb_sk FORCE INDEX (k_vb) WHERE vb IS NULL;
+SELECT vc FROM v11_vc_bin ORDER BY vc;
+SELECT vc FROM v11_vc_bin WHERE vc > 'aaaaaaaa' AND vc < 'b' ORDER BY vc;
+
+SELECT id, d, vc, HEX(vb), LEFT(t, 20), LENGTH(t) FROM v11_mixed ORDER BY id;
+SELECT d FROM v11_mixed FORCE INDEX (k_d) ORDER BY d;
+SELECT id, d FROM v11_mixed FORCE INDEX (k_d) WHERE d BETWEEN -2 AND 12345.678 ORDER BY d;
+SELECT id, vc FROM v11_mixed FORCE INDEX (k_vc) ORDER BY vc, id;
+SELECT id FROM v11_mixed FORCE INDEX (k_vc) WHERE vc = 'ABC' ORDER BY id;
+SELECT id, HEX(vb) FROM v11_mixed FORCE INDEX (k_vb) ORDER BY vb, id;
+SELECT id, LEFT(t, 20) FROM v11_mixed FORCE INDEX (k_t) WHERE t LIKE 'text%' ORDER BY id;
+
+--echo #
+--echo # v12: secondary keys without the covered bitmap
+--echo #
+SELECT id, fake_id, LENGTH(bigfield) FROM v12_cov ORDER BY id;
+SELECT id, LEFT(bigfield, 40) FROM v12_cov FORCE INDEX (bf) WHERE bigfield LIKE 'c%';
+
+--let $prefix_index_check_title= v12 index stores no covered bitmap, so the row is read
+--let $prefix_index_check_read_avoided_delta= 0
+--let $prefix_index_check_query= SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1031
+--source suite/rocksdb/include/prefix_index_only_query_check.inc
+
+--let $prefix_index_check_title= Value longer than the prefix, the row is read
+--let $prefix_index_check_read_avoided_delta= 0
+--let $prefix_index_check_query= SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1033
+--source suite/rocksdb/include/prefix_index_only_query_check.inc
+
+--echo #
+--echo # v13: space-padded VARCHAR without the lead byte
+--echo #
+SELECT HEX(vc) FROM v13_pk_latin1_bin ORDER BY vc;
+SELECT vc FROM v13_pk_latin1_bin WHERE vc = 'abc';
+SELECT vc FROM v13_pk_latin1_bin WHERE vc = 'abc   ';
+SELECT LENGTH(vc) FROM v13_pk_latin1_bin WHERE vc LIKE 'qqqqqqqq%' ORDER BY vc;
+
+--echo # Keys as stored on disk (legacy space-padded encoding).
+BEGIN;
+--disable_result_log
+SELECT vc FROM v13_pk_latin1_bin WHERE vc < 'B' FOR UPDATE;
+--enable_result_log
+SELECT SUBSTRING(a.key, 9) FROM information_schema.rocksdb_locks AS a ORDER BY a.key;
+ROLLBACK;
+
+SELECT a, HEX(vc) FROM v13_pk_composite ORDER BY a, vc;
+SELECT a FROM v13_pk_composite WHERE a = 6 AND vc = 'abc';
+SELECT a, HEX(vc) FROM v13_sk FORCE INDEX (k_vc) ORDER BY vc, a;
+SELECT a FROM v13_sk FORCE INDEX (k_vc) WHERE vc = '' ORDER BY a;
+SELECT a FROM v13_sk FORCE INDEX (k_vc) WHERE vc = 'abc' ORDER BY a;
+SELECT HEX(vc) FROM v13_pk_utf8mb4_bin ORDER BY vc;
+SELECT vc FROM v13_pk_utf8mb4_bin WHERE vc = 'żółw';
+SELECT id, vc, c FROM v13_ci ORDER BY id;
+SELECT id, vc FROM v13_ci FORCE INDEX (k_vc) ORDER BY vc, id;
+SELECT id FROM v13_ci FORCE INDEX (k_vc) WHERE vc = 'abc' ORDER BY id;
+SELECT id, c FROM v13_ci FORCE INDEX (uk_c) ORDER BY c, id;
+SELECT id FROM v13_ci FORCE INDEX (uk_c) WHERE c = 'ÅSA';
+SELECT id, vc, ts FROM v13_ttl ORDER BY id;
+SELECT id, vc FROM v13_ttl FORCE INDEX (k_vc) ORDER BY vc;
+
+--echo #
+--echo # Unique checks on legacy-format keys
+--echo #
+--error ER_DUP_ENTRY
+INSERT INTO v11_vb VALUES (0x0000, 999);
+--error ER_DUP_ENTRY
+INSERT INTO v11_vc_bin VALUES ('aaaaaaaa');
+--error ER_DUP_ENTRY
+INSERT INTO v13_pk_latin1_bin VALUES ('ABC   ');
+--error ER_DUP_ENTRY
+INSERT INTO v13_pk_composite VALUES (5, 'abc  ');
+--error ER_DUP_ENTRY
+INSERT INTO v13_pk_utf8mb4_bin VALUES ('     ');
+--error ER_DUP_ENTRY
+INSERT INTO v13_ci VALUES (100, 'x', 'ABC');
+--error ER_DUP_ENTRY
+INSERT INTO v13_ci VALUES (101, 'x', 'Abd  ');
+
+--echo #
+--echo # Writes to legacy-format indexes, then read back
+--echo #
+INSERT INTO v11_vb VALUES (0x000000000000000000000000, 12), (0x42, 102);
+UPDATE v11_vb SET vb = 0x4343434343434343 WHERE n = 108;
+DELETE FROM v11_vb WHERE n = 9;
+UPDATE v11_vb_sk SET vb = 0x00000000000000000000 WHERE id = 1001;
+INSERT INTO v11_mixed VALUES (8, 1.250, 'abc ', 0x00, 'Text 8');
+UPDATE v11_mixed SET d = -0.500, vc = 'Zed' WHERE id = 2;
+DELETE FROM v11_mixed WHERE id = 6;
+INSERT INTO v12_cov VALUES (40, 1040, REPEAT('e', 40));
+UPDATE v12_cov SET bigfield = 'short' WHERE id = 128;
+INSERT INTO v13_pk_latin1_bin VALUES ('abd'), ('zz  '), ('a b');
+UPDATE v13_pk_latin1_bin SET vc = 'ABZ' WHERE vc = 'ABC';
+DELETE FROM v13_pk_latin1_bin WHERE vc = 0x0000;
+INSERT INTO v13_sk VALUES (10, 'abc '), (11, 'zz');
+UPDATE v13_sk SET vc = 'mid' WHERE a = 6;
+UPDATE v13_ci SET c = 'zzz' WHERE id = 7;
+INSERT INTO v13_ttl VALUES (5, 'delta ', 4000000000);
+
+SELECT HEX(vb), n FROM v11_vb ORDER BY vb;
+SELECT n FROM v11_vb FORCE INDEX (k_n) ORDER BY n;
+SELECT id, HEX(vb) FROM v11_vb_sk FORCE INDEX (k_vb) ORDER BY vb, id;
+SELECT id, d, vc, HEX(vb) FROM v11_mixed ORDER BY id;
+SELECT id, d FROM v11_mixed FORCE INDEX (k_d) ORDER BY d, id;
+SELECT id, vc FROM v11_mixed FORCE INDEX (k_vc) ORDER BY vc, id;
+SELECT id, fake_id, LENGTH(bigfield) FROM v12_cov FORCE INDEX (fid) ORDER BY fake_id;
+SELECT HEX(vc) FROM v13_pk_latin1_bin ORDER BY vc;
+SELECT a, HEX(vc) FROM v13_sk FORCE INDEX (k_vc) ORDER BY vc, a;
+SELECT id, c FROM v13_ci FORCE INDEX (uk_c) ORDER BY c, id;
+SELECT id, vc FROM v13_ttl FORCE INDEX (k_vc) ORDER BY vc;
+
+CHECK TABLE v11_vb, v11_vb_sk, v11_vc_bin, v11_mixed, v12_cov,
+  v13_pk_latin1_bin, v13_pk_composite, v13_sk, v13_pk_utf8mb4_bin, v13_ci,
+  v13_ttl;
+
+--echo #
+--echo # Rebuilding a table writes it in the current format with the same data
+--echo #
+--let $tables = v11_vb v11_vb_sk v11_vc_bin v11_mixed v12_cov v13_pk_latin1_bin v13_pk_composite v13_sk v13_pk_utf8mb4_bin v13_ci v13_ttl
+--let $i = 1
+--let $t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$tables', ' ', $i), ' ', -1)`
+while ($i <= 11)
+{
+  --let $before = query_get_value(CHECKSUM TABLE $t, Checksum, 1)
+  --let $rows_before = `SELECT COUNT(*) FROM $t`
+  --disable_query_log
+  --eval ALTER TABLE $t FORCE, ALGORITHM=COPY
+  --enable_query_log
+  --let $after = query_get_value(CHECKSUM TABLE $t, Checksum, 1)
+  --let $rows_after = `SELECT COUNT(*) FROM $t`
+  --let $assert_text = $t: same rows and checksum after rebuild
+  --let $assert_cond = "$before" = "$after" AND $rows_before = $rows_after
+  --source include/assert.inc
+  --inc $i
+  --let $t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$tables', ' ', $i), ' ', -1)`
+}
+
+SELECT table_name, index_name, kv_format_version
+  FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+
+--let $prefix_index_check_title= After the rebuild the covered bitmap is stored and the row read is avoided
+--let $prefix_index_check_read_avoided_delta= 1
+--let $prefix_index_check_query= SELECT id, bigfield FROM v12_cov FORCE INDEX(fid) WHERE fake_id = 1031
+--source suite/rocksdb/include/prefix_index_only_query_check.inc
+
+CHECK TABLE v11_vb, v11_vb_sk, v11_vc_bin, v11_mixed, v12_cov,
+  v13_pk_latin1_bin, v13_pk_composite, v13_sk, v13_pk_utf8mb4_bin, v13_ci,
+  v13_ttl;
+
+USE test;
+DROP DATABASE fmt;
+
+--source include/end_upgrade_from_prev_ver_mysql_upgrade.inc

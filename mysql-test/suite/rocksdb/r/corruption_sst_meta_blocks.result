@@ -1,0 +1,103 @@
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t1 (
+pk INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(200),
+PRIMARY KEY (pk) COMMENT 'cfname=cf_corrupt_pk',
+KEY ka (a) COMMENT 'cfname=cf_corrupt_sk'
+) ENGINE=ROCKSDB;
+INSERT INTO t1
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000)
+SELECT n, n, REPEAT('x', 100) FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_sk';
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)	SUM(LENGTH(b))
+5000	12502500	500000
+call mtr.add_suppression("data corruption detected");
+call mtr.add_suppression("block checksum mismatch");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Status: Corruption");
+call mtr.add_suppression("There was corruption detected in the RocksDB data files");
+call mtr.add_suppression("to mark rocksdb as corrupted");
+call mtr.add_suppression("Got error .* from storage engine");
+call mtr.add_suppression("Got error 511 when reading table");
+call mtr.add_suppression("Bad table magic number");
+call mtr.add_suppression("Error opening instance");
+call mtr.add_suppression("Couldn't stop the .* thread");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin 'ROCKSDB_.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB_.*' registration as a INFORMATION SCHEMA failed");
+call mtr.add_suppression("Plugin rocksdb reported");
+#
+# 1. Damaged index block.
+#
+# restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+# The secondary index is in another SST file: a covering read is exact.
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (ka);
+COUNT(*)	SUM(a)
+5000	12502500
+SELECT pk, a, LENGTH(b) FROM t1 FORCE INDEX (ka) WHERE a = 2500;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+UPDATE t1 SET b = 'y' WHERE pk = 2500;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	Error	Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+test.t1	check	error	Corrupt
+#
+# 2. Damaged bloom filter block.
+#
+# restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+# The filter is only an optimization: all rows are still found and
+# absent keys are still absent. CHECK TABLE does not read filter blocks,
+# so it reports OK.
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+pk	a	LENGTH(b)
+1	1	100
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 2500;
+pk	a	LENGTH(b)
+2500	2500	100
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+pk	a	LENGTH(b)
+5000	5000	100
+SELECT pk FROM t1 WHERE pk = 6000;
+pk
+SELECT COUNT(*) FROM t1 WHERE pk IN (1, 777, 2500, 4999, 6000, 7000);
+COUNT(*)
+4
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)	SUM(LENGTH(b))
+5000	12502500	500000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# 3. Damaged footer.
+#
+# restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+# RocksDB could not open the database, so MyRocks is not loaded.
+SELECT ENGINE, SUPPORT FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+ENGINE	SUPPORT
+Pattern "Bad table magic number" found
+SELECT pk FROM t1 WHERE pk = 1;
+ERROR 42000: Unknown storage engine 'ROCKSDB'
+INSERT INTO t1 VALUES (6000, 6000, 'z');
+ERROR 42000: Unknown storage engine 'ROCKSDB'
+#
+# Repair: restore the SST file.
+#
+# restart
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)	SUM(LENGTH(b))
+5000	12502500	500000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
