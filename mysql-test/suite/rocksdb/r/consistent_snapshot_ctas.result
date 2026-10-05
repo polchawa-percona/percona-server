@@ -1,0 +1,44 @@
+# InnoDB, for reference
+CREATE TABLE src (id INT PRIMARY KEY, v INT) ENGINE=InnoDB;
+INSERT INTO src VALUES (1,1),(2,2),(3,3);
+CREATE TABLE other (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO other VALUES (1);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET DEBUG_SYNC = 'create_select_after_write_rows_event SIGNAL ctas_created WAIT_FOR ctas_go';
+CREATE TABLE t2 ENGINE=InnoDB SELECT * FROM src;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_created';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM other;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+3
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE src, other, t2;
+# MyRocks
+CREATE TABLE src (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO src VALUES (1,1),(2,2),(3,3);
+CREATE TABLE other (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO other VALUES (1);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET DEBUG_SYNC = 'create_select_after_write_rows_event SIGNAL ctas_created WAIT_FOR ctas_go';
+CREATE TABLE t2 ENGINE=ROCKSDB SELECT * FROM src;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_created';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM other;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+3
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE src, other, t2;
