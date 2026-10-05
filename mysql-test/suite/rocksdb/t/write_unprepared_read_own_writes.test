@@ -1,0 +1,138 @@
+# write_unprepared with rocksdb_write_batch_flush_threshold > 0: the
+# transaction's rows are already in the database before PREPARE. The
+# transaction itself must read them through every access path, other
+# sessions must not see them until COMMIT, and unique checks must treat them
+# as existing. Write-policy plan, step 3 (write_unprepared).
+
+--source include/have_rocksdb.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) x;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, c CHAR(10),
+                 KEY kv (v), UNIQUE KEY ku (u), KEY kvc (v, c)) ENGINE=ROCKSDB;
+CREATE TABLE r1 (id INT PRIMARY KEY, v INT, KEY kv (v) COMMENT 'rev:cf_rev') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0, 0, 0, 'base');
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+--echo #
+--echo # 1. Own flushed rows through every access path
+--echo #
+connection con1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+BEGIN;
+INSERT INTO t1 SELECT n, n % 100, n, CONCAT('c', n) FROM seq;
+INSERT INTO r1 SELECT n, n FROM seq WHERE n <= 300;
+UPDATE t1 SET v = 1000, c = 'upd' WHERE id = 7;
+DELETE FROM t1 WHERE id = 8;
+--let $wup_check= 1
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+--echo # Primary key: point, range, full scan, both directions
+SELECT * FROM t1 WHERE id = 7;
+SELECT * FROM t1 WHERE id = 8;
+SELECT COUNT(*), SUM(v), MIN(id), MAX(id) FROM t1;
+SELECT id FROM t1 WHERE id BETWEEN 5 AND 10 ORDER BY id;
+SELECT id FROM t1 WHERE id BETWEEN 5 AND 10 ORDER BY id DESC;
+--echo # Secondary index, covering index, unique index
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv) WHERE v = 7;
+SELECT id, c FROM t1 FORCE INDEX (kv) WHERE v = 1000;
+SELECT v, c FROM t1 FORCE INDEX (kvc) WHERE v = 1000;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kvc) WHERE v BETWEEN 10 AND 19;
+SELECT id FROM t1 FORCE INDEX (ku) WHERE u = 500;
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u BETWEEN 100 AND 199;
+--echo # Reverse column family
+SELECT id FROM r1 FORCE INDEX (kv) WHERE v BETWEEN 10 AND 14 ORDER BY v DESC;
+SELECT COUNT(*) FROM r1 FORCE INDEX (kv);
+--echo # Index-only aggregate and MIN/MAX
+SELECT MIN(v), MAX(v) FROM t1;
+SELECT MAX(u) FROM t1;
+
+--echo #
+--echo # 2. Other sessions do not see the flushed rows
+--echo #
+connection con2;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+SELECT * FROM t1 WHERE id = 7;
+SELECT COUNT(*) FROM r1;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # 3. Unique checks against the transaction's own flushed rows
+--echo #
+connection con1;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (500, 1, 1, 'dup pk');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (5000, 1, 500, 'dup u');
+--error ER_DUP_ENTRY
+UPDATE t1 SET u = 600 WHERE id = 601;
+--echo # A deleted own row frees its values
+INSERT INTO t1 VALUES (8, 8, 8, 'again');
+SELECT * FROM t1 WHERE id = 8;
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # 4. Unique checks against a concurrent transaction's flushed rows
+--echo #
+connection con2;
+COMMIT;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+--echo # Conflicts with con1's uncommitted primary key and unique value
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (500, 1, 99999, 'con2');
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (99999, 1, 500, 'con2');
+--echo # No conflict: allowed
+INSERT INTO t1 VALUES (2000, 1, 2000, 'con2');
+
+connection con1;
+COMMIT;
+SELECT COUNT(*) FROM t1;
+
+connection con2;
+--echo # con1 committed: the values are now taken
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (500, 1, 99999, 'con2');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (99999, 1, 500, 'con2');
+COMMIT;
+
+--echo #
+--echo # 5. A concurrent transaction rolls back: its flushed values are free
+--echo #
+connection con1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO t1 SELECT n + 10000, n, n + 10000, 'tmp' FROM seq WHERE n <= 200;
+connection con2;
+BEGIN;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (10001, 1, 1, 'con2');
+connection con1;
+ROLLBACK;
+connection con2;
+INSERT INTO t1 VALUES (10001, 1, 10001, 'con2');
+COMMIT;
+
+connection default;
+disconnect con1;
+disconnect con2;
+SELECT COUNT(*), SUM(v), SUM(u) FROM t1;
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*), SUM(u) FROM t1 FORCE INDEX (ku);
+SELECT COUNT(*) FROM r1;
+SELECT COUNT(*) FROM r1 FORCE INDEX (kv);
+CHECK TABLE t1, r1;
+DROP TABLE t1, r1, seq;

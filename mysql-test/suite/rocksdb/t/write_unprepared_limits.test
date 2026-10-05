@@ -1,0 +1,159 @@
+# write_unprepared: how batch flushing interacts with the other mechanisms
+# for large transactions. Write-policy plan, step 3 (write_unprepared).
+#
+# 1. Flushing only happens while the transaction has no open MyRocks
+#    iterator (RocksDB WriteUnpreparedTxn::HandleWrite checks
+#    active_iterators_.empty()). Statements that scan MyRocks while writing
+#    (INSERT ... SELECT from a MyRocks table, range UPDATE, range DELETE)
+#    therefore keep their whole batch in memory, whatever the threshold.
+# 2. rocksdb_write_batch_max_bytes limits the in-memory batch, so with
+#    flushing a transaction can write more than the limit in total, but a
+#    scanning statement still hits it.
+# 3. rocksdb_max_row_locks counts every locked row, flushed or not.
+# 4. Commit-in-the-middle (rocksdb_commit_in_the_middle and bulk load's
+#    commit-in-the-middle) is disabled by design under write_unprepared
+#    (commit_in_the_middle() in ha_rocksdb.cc), so a failing statement is
+#    rolled back completely.
+
+--source include/have_rocksdb.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE iseq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO iseq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) x;
+CREATE TABLE rseq (n INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO rseq SELECT n FROM iseq;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+
+--echo #
+--echo # 1. Which statements flush before COMMIT (threshold 1)
+--echo #
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+--let $s= 1
+while ($s <= 6)
+{
+  INSERT INTO t1 SELECT n, n, n FROM iseq WHERE n <= 200;
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+  BEGIN;
+  if ($s == 1)
+  {
+    --echo # INSERT ... SELECT from an InnoDB table
+    INSERT INTO t1 SELECT n + 1000, n, n + 1000 FROM iseq WHERE n <= 200;
+  }
+  if ($s == 2)
+  {
+    --echo # INSERT ... VALUES, one row per statement
+    INSERT INTO t1 VALUES (2001, 1, 2001);
+    INSERT INTO t1 VALUES (2002, 1, 2002);
+    INSERT INTO t1 VALUES (2003, 1, 2003);
+  }
+  if ($s == 3)
+  {
+    --echo # UPDATE of single rows by primary key
+    UPDATE t1 SET v = v + 1 WHERE id = 1;
+    UPDATE t1 SET v = v + 1 WHERE id = 2;
+    UPDATE t1 SET v = v + 1 WHERE id = 3;
+  }
+  if ($s == 4)
+  {
+    --echo # INSERT ... SELECT from a MyRocks table: no flush
+    INSERT INTO t1 SELECT n + 1000, n, n + 1000 FROM rseq WHERE n <= 200;
+  }
+  if ($s == 5)
+  {
+    --echo # Range UPDATE: no flush
+    UPDATE t1 SET v = v + 1 WHERE id <= 100;
+  }
+  if ($s == 6)
+  {
+    --echo # Range DELETE: no flush
+    DELETE FROM t1 WHERE id <= 100;
+  }
+  --let $wup_check= 1
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+  ROLLBACK;
+  SELECT COUNT(*), SUM(v) FROM t1;
+  DELETE FROM t1;
+  --inc $s
+}
+
+--echo #
+--echo # 2. rocksdb_write_batch_max_bytes with flushing
+--echo #
+SET SESSION rocksdb_write_batch_max_bytes = 4096;
+SET SESSION rocksdb_write_batch_flush_threshold = 1024;
+--echo # Flushing statements: total far above the limit, each batch below it
+BEGIN;
+INSERT INTO t1 SELECT n, n, n FROM iseq;
+COMMIT;
+SELECT COUNT(*) FROM t1;
+--echo # A scanning statement keeps everything in memory and hits the limit
+BEGIN;
+--error ER_GET_ERRMSG
+UPDATE t1 SET v = v + 1 WHERE id <= 1000;
+ROLLBACK;
+SELECT SUM(v) FROM t1;
+--echo # Without flushing the same load hits the limit
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+DELETE FROM t1;
+SET SESSION rocksdb_write_batch_max_bytes = 4096;
+SET SESSION rocksdb_write_batch_flush_threshold = 0;
+BEGIN;
+--error ER_GET_ERRMSG
+INSERT INTO t1 SELECT n, n, n FROM iseq;
+ROLLBACK;
+SELECT COUNT(*) FROM t1;
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+
+--echo #
+--echo # 3. rocksdb_max_row_locks counts flushed rows too
+--echo #
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+SET SESSION rocksdb_max_row_locks = 100;
+BEGIN;
+INSERT INTO t1 SELECT n, n, n FROM iseq WHERE n <= 40;
+--error ER_GET_ERRMSG
+INSERT INTO t1 SELECT n, n, n FROM iseq WHERE n BETWEEN 41 AND 200;
+SELECT COUNT(*) FROM t1;
+ROLLBACK;
+SELECT COUNT(*) FROM t1;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+
+--echo #
+--echo # 4. Commit-in-the-middle is disabled under write_unprepared
+--echo #
+SET SESSION rocksdb_commit_in_the_middle = 1;
+SET SESSION rocksdb_bulk_load_size = 10;
+--error ER_DUP_ENTRY
+INSERT INTO t1 SELECT n, n, IF(n = 900, 1, n) FROM iseq;
+SELECT COUNT(*) FROM t1;
+--error ER_DUP_ENTRY
+INSERT INTO t1 SELECT n, n, IF(n = 900, 1, n) FROM rseq;
+SELECT COUNT(*) FROM t1;
+INSERT INTO t1 SELECT n, n, n FROM iseq;
+SELECT COUNT(*) FROM t1;
+--error ER_DUP_ENTRY
+UPDATE t1 SET u = 1 WHERE id >= 900 ORDER BY id DESC;
+SELECT COUNT(*), SUM(u) FROM t1;
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION rocksdb_bulk_load_size = DEFAULT;
+
+--echo # Bulk load still works under write_unprepared
+--echo # TRUNCATE gives the table new index ids, so the ingested keys overlap no
+--echo # delete markers left in SST files (MyRocks ingests without a global
+--echo # sequence number); the memtable must also hold no keys of the range
+--echo # (allow_blocking_flush = false), as in the other bulk load tests
+TRUNCATE TABLE t1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 SELECT n, n, n FROM iseq;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SELECT COUNT(*), SUM(v) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+
+CHECK TABLE t1;
+DROP TABLE t1, iseq, rseq;

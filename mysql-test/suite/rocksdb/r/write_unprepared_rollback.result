@@ -1,0 +1,170 @@
+SELECT @@rocksdb_write_policy;
+@@rocksdb_write_policy
+write_unprepared
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 2000) SELECT n FROM s) x;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u VARCHAR(20), KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (100000, -1, 'keep');
+#
+# 1. Large transaction flushed several times, then ROLLBACK
+#
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+SELECT @@rocksdb_write_batch_flush_threshold;
+@@rocksdb_write_batch_flush_threshold
+1
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq;
+UPDATE t1 SET v = -2 WHERE id = 100000;
+INSERT INTO t1 VALUES (5001, 5001, 'u5001'), (5002, 5002, 'u5002');
+DELETE FROM t1 WHERE id = 1;
+# Keys written to the database before COMMIT: yes
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2002
+ROLLBACK;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+1	-1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+1
+SELECT * FROM t1 FORCE INDEX (ku) WHERE u = 'u1';
+id	v	u
+SET SESSION rocksdb_write_batch_flush_threshold = 4096;
+SELECT @@rocksdb_write_batch_flush_threshold;
+@@rocksdb_write_batch_flush_threshold
+4096
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq;
+UPDATE t1 SET v = -2 WHERE id = 100000;
+INSERT INTO t1 VALUES (5001, 5001, 'u5001'), (5002, 5002, 'u5002');
+DELETE FROM t1 WHERE id = 1;
+# Keys written to the database before COMMIT: yes
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2002
+ROLLBACK;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+1	-1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+1
+SELECT * FROM t1 FORCE INDEX (ku) WHERE u = 'u1';
+id	v	u
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Values written and rolled back are free again
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 10;
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+11
+DELETE FROM t1 WHERE id <= 10;
+#
+# 2. Disconnect with flushed writes: implicit rollback
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 500;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+1
+#
+# 3. Statement rollback undoes only the failing statement
+#
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 100;
+# Fails on its last row, after writing rows 101-300
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n BETWEEN 101 AND 300 UNION ALL SELECT 1, 0, 'x';
+ERROR 23000: Duplicate entry '1' for key 't1.PRIMARY'
+# Fails on the unique secondary key
+INSERT INTO t1 VALUES (400, 400, 'u400'), (401, 401, 'u401'), (402, 402, 'u50');
+ERROR 23000: Duplicate entry 'u50' for key 't1.ku'
+UPDATE t1 SET v = v + 1000 WHERE id = 5;
+# Keys written to the database before COMMIT: yes
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)	SUM(v)
+101	1	100000	6049
+COMMIT;
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)	SUM(v)
+101	1	100000	6049
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+COUNT(*)	SUM(v)
+101	6049
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+101
+SELECT COUNT(*) FROM t1 WHERE id BETWEEN 101 AND 402;
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# 4. Statement rollback after a lock wait timeout
+#
+BEGIN;
+SELECT * FROM t1 WHERE id = 50 FOR UPDATE;
+id	v	u
+50	50	u50
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n BETWEEN 1001 AND 1300;
+UPDATE t1 SET v = -50 WHERE id = 50;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 VALUES (1301, 1301, 'u1301');
+COMMIT;
+ROLLBACK;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+402	352500
+SELECT v FROM t1 WHERE id = 50;
+v
+50
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+402
+DELETE FROM t1 WHERE id <> 100000;
+#
+# 5. Explicit savepoints: MyRocks rejects ROLLBACK TO SAVEPOINT after
+#    writes and marks the transaction rollback-only
+#
+BEGIN;
+SAVEPOINT a;
+# No writes yet: allowed
+ROLLBACK TO SAVEPOINT a;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 300;
+SAVEPOINT b;
+INSERT INTO t1 VALUES (301, 301, 'u301');
+ROLLBACK TO SAVEPOINT b;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+ROLLBACK;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+1
+DROP TABLE t1, seq;

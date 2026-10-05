@@ -1,0 +1,98 @@
+#
+# Write-policy step 3: many concurrent snapshots across many commits.
+#
+# Under write_prepared, a reader decides whether a row version is visible by
+# looking up its commit in RocksDB's commit cache and comparing it with the
+# reader's snapshot. RocksDB keeps the live snapshots in a fixed-size snapshot
+# cache of 2^7 = 128 entries (TransactionDBOptions::wp_snapshot_cache_bits) and
+# spills the rest into a slower list. MyRocks does not expose that knob, so the
+# test opens more than 128 snapshots to cover the spill path.
+# The commit cache itself (2^23 entries, wp_commit_cache_bits) is also not
+# exposed and is far too large to overflow in MTR, so eviction from it
+# (max_evicted_seq) is not covered here; see write-policy-step3-wp.md.
+#
+# 140 sessions each take a REPEATABLE READ snapshot right after a different
+# commit; then 2000 more commits update the same row and add rows. Every
+# snapshot must still see exactly the value and row count of its moment.
+#
+# The test runs under write_committed as the reference and under
+# write_prepared (see the .combinations file). Both must give the same result.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+
+CREATE TABLE c (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=ROCKSDB;
+CREATE TABLE h (id INT PRIMARY KEY, k INT NOT NULL, KEY kk (k)) ENGINE=ROCKSDB;
+INSERT INTO c VALUES (1, 0);
+
+--let $n_snap= 140
+--echo # Open $n_snap snapshots, each right after a different commit.
+--disable_query_log
+--let $i= 1
+while ($i <= $n_snap)
+{
+  connection default;
+  eval UPDATE c SET v = $i WHERE id = 1;
+  eval INSERT INTO h VALUES ($i, $i);
+  connect (s$i, localhost, root,,);
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  --inc $i
+}
+--enable_query_log
+
+connection default;
+--echo # More live RocksDB snapshots than the 128-entry snapshot cache holds.
+SELECT VALUE > 128 AS more_than_128_snapshots FROM information_schema.rocksdb_dbstats
+  WHERE stat_type = 'DB_NUM_SNAPSHOTS';
+
+--echo # 2000 more commits on the same row and new rows.
+--disable_query_log
+--let $j= 1
+while ($j <= 2000)
+{
+  eval UPDATE c SET v = 100000 + $j WHERE id = 1;
+  eval INSERT INTO h VALUES (1000 + $j, $j % 7);
+  --inc $j
+}
+--enable_query_log
+SELECT v FROM c;
+SELECT COUNT(*) FROM h;
+
+--echo # Every snapshot must still see its own moment.
+--disable_query_log
+--let $bad= 0
+--let $i= 1
+while ($i <= $n_snap)
+{
+  connection s$i;
+  --let $v= `SELECT v FROM c WHERE id = 1`
+  --let $cnt= `SELECT COUNT(*) FROM h`
+  --let $cnt_k= `SELECT COUNT(*) FROM h FORCE INDEX (kk) WHERE k > 0`
+  if ($v != $i)
+  {
+    --echo snapshot $i sees v=$v
+    --inc $bad
+  }
+  if ($cnt != $i)
+  {
+    --echo snapshot $i sees $cnt rows in h
+    --inc $bad
+  }
+  if ($cnt_k != $i)
+  {
+    --echo snapshot $i sees $cnt_k rows through index kk
+    --inc $bad
+  }
+  COMMIT;
+  disconnect s$i;
+  --inc $i
+}
+--enable_query_log
+--echo mismatches: $bad
+
+connection default;
+DROP TABLE c, h;
+--source include/wait_until_count_sessions.inc

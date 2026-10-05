@@ -1,0 +1,77 @@
+#
+# Write-policy step 3: rollback of a prepared MyRocks transaction (binlog 2PC).
+#
+# Under write_prepared, MyRocks writes a transaction's rows into the memtable
+# at PREPARE. If the 2PC commit then fails, MyRocks must roll back a
+# transaction whose rows are already in the database, including secondary and
+# unique index entries.
+#
+# The failure is produced with a mixed transaction: InnoDB is written first
+# and MyRocks last, so MyRocks prepares first. InnoDB's prepare then fails
+# (debug keyword simulate_xa_failure_prepare_in_engine), and the server rolls
+# back the whole transaction. The debug_sync point rocksdb.prepared proves
+# that MyRocks had prepared before the failure.
+#
+# Checked afterwards: no row of the transaction is visible through any access
+# path, secondary indexes match the primary key (CHECK TABLE), unique keys of
+# the rolled-back rows are free, and keys deleted by it are still taken.
+#
+# The test runs under write_committed as the reference and under
+# write_prepared (see the .combinations file). Both must give the same result.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_log_bin.inc
+
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(20) NOT NULL,
+  UNIQUE KEY ua (a),
+  KEY kb (b)
+) ENGINE=ROCKSDB;
+CREATE TABLE ti (id INT PRIMARY KEY) ENGINE=InnoDB;
+
+INSERT INTO t1 VALUES (1,10,'r01'),(2,20,'r02'),(3,30,'r03'),(4,40,'r04'),
+                      (5,50,'r05'),(6,60,'r06'),(7,70,'r07'),(8,80,'r08'),
+                      (9,90,'r09'),(10,100,'r10');
+
+--let $wp_label= state before the failing transaction
+--source suite/rocksdb/include/wp_show_state.inc
+
+--echo # Mixed transaction: InnoDB first, MyRocks last, so MyRocks prepares first.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO ti VALUES (1);
+INSERT INTO t1 VALUES (11,110,'r11'),(12,120,'r12'),(13,130,'r13');
+UPDATE t1 SET b = CONCAT(b, 'x') WHERE pk <= 3;
+UPDATE t1 SET a = a + 1000 WHERE pk = 3;
+DELETE FROM t1 WHERE pk IN (9, 10);
+SET DEBUG_SYNC = 'rocksdb.prepared SIGNAL rocksdb_prepared';
+SET SESSION debug = '+d,simulate_xa_failure_prepare_in_engine';
+--error ER_ERROR_DURING_COMMIT
+COMMIT;
+SET SESSION debug = '-d,simulate_xa_failure_prepare_in_engine';
+
+--echo # MyRocks had prepared before InnoDB's prepare failed.
+SET DEBUG_SYNC = 'now WAIT_FOR rocksdb_prepared';
+SET DEBUG_SYNC = 'RESET';
+
+--let $wp_label= state after the rollback: same as before
+--source suite/rocksdb/include/wp_show_state.inc
+SELECT COUNT(*) FROM ti;
+CHECK TABLE t1;
+
+--echo # Unique keys of rolled-back rows are free; keys of deleted rows are still taken.
+INSERT INTO t1 VALUES (11,110,'again'),(31,1030,'again');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (50,90,'dup_a');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (9,999,'dup_pk');
+SELECT pk, a, b FROM t1 WHERE pk IN (3, 9, 11, 31) ORDER BY pk;
+CHECK TABLE t1;
+
+DROP TABLE t1, ti;

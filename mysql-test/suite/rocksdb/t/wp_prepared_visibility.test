@@ -1,0 +1,144 @@
+#
+# Write-policy step 3: visibility of a transaction that is held between
+# PREPARE and COMMIT.
+#
+# Under write_prepared, MyRocks writes a transaction's rows into the memtable
+# at PREPARE (binlog 2PC), and COMMIT only records a commit marker in the
+# RocksDB commit cache. Readers must therefore filter prepared-but-uncommitted
+# versions through the commit cache. This test parks a multi-statement
+# transaction (inserts, updates, deletes, unique and secondary indexes) right
+# after its MyRocks PREPARE (debug_sync point rocksdb.prepared) and checks:
+#   - READ COMMITTED and REPEATABLE READ readers see none of its changes,
+#     through full scans, a covering secondary-index scan, a unique-index
+#     lookup, a range scan, point lookups and COUNT(*);
+#   - locking reads and conflicting inserts wait for its row locks
+#     (rocksdb_lock_wait_timeout=1 from suite.opt);
+#   - after COMMIT, READ COMMITTED and new snapshots see all of it, while a
+#     snapshot taken before PREPARE and a snapshot taken while the
+#     transaction was prepared both still see none of it.
+#
+# The test runs under write_committed as the reference and under
+# write_prepared (see the .combinations file). Both must give the same result.
+# write_unprepared is covered by the step-3b tests.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_log_bin.inc
+--source include/count_sessions.inc
+
+--echo # Policy check: this test must run under the policy of its combination.
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(20) NOT NULL,
+  UNIQUE KEY ua (a),
+  KEY kb (b)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES (1,10,'r01'),(2,20,'r02'),(3,30,'r03'),(4,40,'r04'),
+                      (5,50,'r05'),(6,60,'r06'),(7,70,'r07'),(8,80,'r08'),
+                      (9,90,'r09'),(10,100,'r10');
+
+connect (writer, localhost, root,,);
+connect (rr_before, localhost, root,,);
+connect (rr_during, localhost, root,,);
+connect (rc_reader, localhost, root,,);
+connect (locker, localhost, root,,);
+
+--echo # Snapshot taken before the writer prepares.
+connection rr_before;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+
+--echo # The writer changes rows and is parked after its MyRocks PREPARE.
+connection writer;
+# READ COMMITTED: at REPEATABLE READ MyRocks rejects range writes inside a
+# multi-statement transaction (gap-lock rule). The readers below keep their
+# own isolation levels.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO t1 VALUES (11,110,'r11'),(12,120,'r12'),(13,130,'r13');
+UPDATE t1 SET b = CONCAT(b, 'x') WHERE pk <= 3;
+UPDATE t1 SET a = a + 1000 WHERE pk = 3;
+DELETE FROM t1 WHERE pk IN (9, 10);
+SET DEBUG_SYNC = 'rocksdb.prepared SIGNAL parked WAIT_FOR go';
+--send COMMIT
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+
+--echo # Snapshot taken while the writer is prepared but not committed.
+connection rr_during;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--let $wp_label= REPEATABLE READ snapshot taken while prepared: old state
+--source suite/rocksdb/include/wp_show_state.inc
+
+connection rc_reader;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+--let $wp_label= READ COMMITTED while prepared: old state
+--source suite/rocksdb/include/wp_show_state.inc
+
+connection rr_before;
+--let $wp_label= REPEATABLE READ snapshot taken before prepare: old state
+--source suite/rocksdb/include/wp_show_state.inc
+
+--echo # Locking reads and conflicting writes wait for the prepared row locks.
+connection locker;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT pk FROM t1 WHERE pk = 11 FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT pk FROM t1 WHERE pk = 2 FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (99, 110, 'dup_a');
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (11, 999, 'dup_pk');
+ROLLBACK;
+
+--echo # Let the writer commit.
+connection default;
+SET DEBUG_SYNC = 'now SIGNAL go';
+connection writer;
+--reap
+SET DEBUG_SYNC = 'RESET';
+
+connection rc_reader;
+--let $wp_label= READ COMMITTED after commit: new state
+--source suite/rocksdb/include/wp_show_state.inc
+
+connection rr_before;
+--let $wp_label= REPEATABLE READ snapshot taken before prepare, after commit: still old state
+--source suite/rocksdb/include/wp_show_state.inc
+COMMIT;
+
+connection rr_during;
+--let $wp_label= REPEATABLE READ snapshot taken while prepared, after commit: still old state
+--source suite/rocksdb/include/wp_show_state.inc
+COMMIT;
+
+connection default;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--let $wp_label= new REPEATABLE READ snapshot after commit: new state
+--source suite/rocksdb/include/wp_show_state.inc
+COMMIT;
+
+--echo # The unique key of a committed row is enforced again; deleted keys are free.
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (99, 110, 'dup_a');
+INSERT INTO t1 VALUES (9, 90, 'r09_again');
+CHECK TABLE t1;
+
+disconnect writer;
+disconnect rr_before;
+disconnect rr_during;
+disconnect rc_reader;
+disconnect locker;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
