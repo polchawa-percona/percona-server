@@ -3985,6 +3985,8 @@ class Rdb_transaction {
           file_count);
     }
 
+    DEBUG_SYNC(m_thd, "rocksdb.bulk_load_before_ingest");
+
     const rocksdb::Status s = ingest_bulk_load_files(args);
     if (THDVAR(m_thd, trace_sst_api)) {
       LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
@@ -14977,6 +14979,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {
@@ -14987,6 +14992,9 @@ int ha_rocksdb::inplace_populate_sk(
     }
 
     ha_rnd_end();
+
+    /* The scan is done; the merge sort and SST ingestion have not started. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_before_merge");
 
     bool is_critical_error;
     res = tx->finish_bulk_load(&is_critical_error, true, new_table_arg,
