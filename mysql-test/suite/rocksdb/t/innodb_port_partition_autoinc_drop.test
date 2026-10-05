@@ -1,0 +1,102 @@
+# Ported from the DROP PARTITION section of innodb.partition_autoinc
+# (suite/innodb/t/partition_autoinc.test). Same changes as innodb_port_partition_autoinc,
+# and the SHOW CREATE TABLE statements are removed so that the expected rows can be taken
+# from InnoDB unchanged. Added: a full row listing after each DROP PARTITION, because the
+# original MAX(id) checks cannot see rows that survive the drop.
+#
+# The .result file expects the InnoDB values: DROP PARTITION deletes the rows stored in
+# the dropped partition. On MyRocks without rocksdb_allow_unsafe_alter the ALTER runs as
+# COPY and keeps those rows (port-findings.md #16), so the MAX(id) checks differ. The test
+# is disabled in collections/disabled.def until that is fixed.
+
+--source include/have_rocksdb.inc
+
+
+CALL mtr.add_suppression('Unsafe statement written to the binary log using statement format since BINLOG_FORMAT = STATEMENT.');
+
+CREATE TABLE tr (
+id INT NOT NULL AUTO_INCREMENT,
+name VARCHAR(50),
+purchased DATE,
+KEY(id)) ENGINE = ROCKSDB;
+
+INSERT INTO tr VALUES
+(1, 'desk organiser', '2003-10-15'),
+(2, 'CD player', '1993-11-05'),
+(3, 'TV set', '1996-03-10'),
+(4, 'bookcase', '1982-01-10'),
+(5, 'exercise bike', '2004-05-09'),
+(6, 'sofa', '1987-06-05');
+
+###############################################################
+--echo # Test for DROP PARTITION, along with some ADD PARTITION
+###############################################################
+
+CREATE TABLE t1 (
+id INT NOT NULL AUTO_INCREMENT,
+name VARCHAR(50),
+purchased DATE,
+KEY(id)) ENGINE = ROCKSDB
+PARTITION BY RANGE( YEAR(purchased) ) (
+PARTITION p0 VALUES LESS THAN (1990),
+PARTITION p1 VALUES LESS THAN (1995),
+PARTITION p2 VALUES LESS THAN (2000),
+PARTITION p3 VALUES LESS THAN (2005)
+);
+
+--disable_warnings
+INSERT INTO t1 SELECT * FROM tr;
+--enable_warnings
+
+
+SELECT id FROM t1 PARTITION(p0);
+SELECT id FROM t1 PARTITION(p1);
+SELECT id FROM t1 PARTITION(p2);
+SELECT id FROM t1 PARTITION(p3);
+
+--echo # This doesn't delete the row containing max(id) in the table
+ALTER TABLE t1 DROP PARTITION p2;
+SELECT id, purchased FROM t1 ORDER BY id;
+
+
+INSERT INTO t1 VALUES (0, 'aquarium', '2001-07-02');
+
+SELECT MAX(id) AS `Expect 7` FROM t1;
+
+--echo # This will delete the row containing max(id) in the table
+ALTER TABLE t1 DROP PARTITION p3;
+SELECT id, purchased FROM t1 ORDER BY id;
+
+SELECT MAX(id) AS `Expect 6` FROM t1;
+
+
+INSERT INTO t1 VALUES(0, 'study desk', '1988-09-16');
+
+SELECT MAX(id) AS `Expect 8` FROM t1;
+
+ALTER TABLE t1 ADD PARTITION (PARTITION p3 VALUES LESS THAN (2008));
+
+ALTER TABLE t1 DROP PARTITION p0;
+SELECT id, purchased FROM t1 ORDER BY id;
+
+
+--source include/restart_mysqld.inc
+
+
+INSERT INTO t1 VALUES(0, 'lava lamp', '2006-01-02');
+
+SELECT MAX(id) AS `Expect 9` FROM t1;
+
+DELETE FROM t1 WHERE id >= 0;
+
+ALTER TABLE t1 DROP PARTITION p3;
+SELECT id, purchased FROM t1 ORDER BY id;
+
+
+INSERT INTO t1 VALUES(0, 'lava lamp', '1992-01-15');
+
+SELECT MAX(id) AS `Expect 10` FROM t1;
+
+DROP TABLE t1;
+
+DROP TABLE tr;

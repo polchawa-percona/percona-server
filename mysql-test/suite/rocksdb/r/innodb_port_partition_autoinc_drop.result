@@ -1,0 +1,97 @@
+CALL mtr.add_suppression('Unsafe statement written to the binary log using statement format since BINLOG_FORMAT = STATEMENT.');
+CREATE TABLE tr (
+id INT NOT NULL AUTO_INCREMENT,
+name VARCHAR(50),
+purchased DATE,
+KEY(id)) ENGINE = ROCKSDB;
+INSERT INTO tr VALUES
+(1, 'desk organiser', '2003-10-15'),
+(2, 'CD player', '1993-11-05'),
+(3, 'TV set', '1996-03-10'),
+(4, 'bookcase', '1982-01-10'),
+(5, 'exercise bike', '2004-05-09'),
+(6, 'sofa', '1987-06-05');
+# Test for DROP PARTITION, along with some ADD PARTITION
+CREATE TABLE t1 (
+id INT NOT NULL AUTO_INCREMENT,
+name VARCHAR(50),
+purchased DATE,
+KEY(id)) ENGINE = ROCKSDB
+PARTITION BY RANGE( YEAR(purchased) ) (
+PARTITION p0 VALUES LESS THAN (1990),
+PARTITION p1 VALUES LESS THAN (1995),
+PARTITION p2 VALUES LESS THAN (2000),
+PARTITION p3 VALUES LESS THAN (2005)
+);
+INSERT INTO t1 SELECT * FROM tr;
+SELECT id FROM t1 PARTITION(p0);
+id
+4
+6
+SELECT id FROM t1 PARTITION(p1);
+id
+2
+SELECT id FROM t1 PARTITION(p2);
+id
+3
+SELECT id FROM t1 PARTITION(p3);
+id
+1
+5
+# This doesn't delete the row containing max(id) in the table
+ALTER TABLE t1 DROP PARTITION p2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT id, purchased FROM t1 ORDER BY id;
+id	purchased
+1	2003-10-15
+2	1993-11-05
+4	1982-01-10
+5	2004-05-09
+6	1987-06-05
+INSERT INTO t1 VALUES (0, 'aquarium', '2001-07-02');
+SELECT MAX(id) AS `Expect 7` FROM t1;
+Expect 7
+7
+# This will delete the row containing max(id) in the table
+ALTER TABLE t1 DROP PARTITION p3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT id, purchased FROM t1 ORDER BY id;
+id	purchased
+2	1993-11-05
+4	1982-01-10
+6	1987-06-05
+SELECT MAX(id) AS `Expect 6` FROM t1;
+Expect 6
+6
+INSERT INTO t1 VALUES(0, 'study desk', '1988-09-16');
+SELECT MAX(id) AS `Expect 8` FROM t1;
+Expect 8
+8
+ALTER TABLE t1 ADD PARTITION (PARTITION p3 VALUES LESS THAN (2008));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE t1 DROP PARTITION p0;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT id, purchased FROM t1 ORDER BY id;
+id	purchased
+2	1993-11-05
+# restart
+INSERT INTO t1 VALUES(0, 'lava lamp', '2006-01-02');
+SELECT MAX(id) AS `Expect 9` FROM t1;
+Expect 9
+9
+DELETE FROM t1 WHERE id >= 0;
+ALTER TABLE t1 DROP PARTITION p3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT id, purchased FROM t1 ORDER BY id;
+id	purchased
+INSERT INTO t1 VALUES(0, 'lava lamp', '1992-01-15');
+SELECT MAX(id) AS `Expect 10` FROM t1;
+Expect 10
+10
+DROP TABLE t1;
+DROP TABLE tr;
