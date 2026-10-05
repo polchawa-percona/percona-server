@@ -1,0 +1,23 @@
+# Server A (the MTR server) uses the shared persistent cache path.
+SELECT @@rocksdb_persistent_cache_path LIKE '%shared_pcache' AS a_uses_shared_cache;
+a_uses_shared_cache
+1
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Remember A's cache file.
+# Start instance B on A's persistent cache path: B must refuse to start.
+# B refused to start.
+Pattern "Can't lock rocksdb_persistent_cache_path directory .*shared_pcache" found
+# A's cache file is still the same file.
+A's cache file kept (correct).
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+3	6
+# Stop A: B now starts on the same persistent cache path.
+# B started.
+# Stop B: A starts on the same persistent cache path again.
+# restart
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+3	6
+DROP TABLE t1;

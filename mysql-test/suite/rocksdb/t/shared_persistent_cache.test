@@ -1,0 +1,109 @@
+# Finding #33 (myrocks-notes/port-findings.md, section SD2).
+#
+# RocksDB locks only <db dir>/LOCK. At open, the persistent cache (BlockCacheTier::Open)
+# deletes every *.rc file under <rocksdb_persistent_cache_path>/cache and then creates
+# its own files numbered from 0. A second instance pointed at the same cache path
+# therefore deletes the running instance's cache files and reuses their names.
+#
+# MyRocks therefore holds an fcntl lock on
+# <rocksdb_persistent_cache_path>/MYROCKS_PERSISTENT_CACHE_LOCK while the engine is
+# running. Asserted here:
+#  1. A second instance refuses to start when its rocksdb_persistent_cache_path is in
+#     use by a running instance, and says why.
+#  2. The running instance's cache files are not deleted or replaced.
+#  3. After a clean shutdown of the first instance the lock is free: the second
+#     instance starts on the same path (a cache can be reused one instance after
+#     the other), and then the first instance starts on it again.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/not_windows.inc
+
+--let $b_dir= $MYSQL_TMP_DIR/spc_b
+--let $b_sock= $MYSQL_TMP_DIR/spc_b.sock
+--let $b_err= $MYSQL_TMP_DIR/spc_b.err
+--let $b_err2= $MYSQL_TMP_DIR/spc_b2.err
+# A port inside this test worker's reserved MTR port range (30 ports from
+# @@port) that the single-server configuration does not use.
+--let $b_port= `SELECT @@port + 10`
+--let PC_FILE= $MYSQL_TMP_DIR/shared_pcache/cache/0.rc
+--let PC_INODE_FILE= $MYSQL_TMP_DIR/spc_a_inode.txt
+
+--echo # Server A (the MTR server) uses the shared persistent cache path.
+SELECT @@rocksdb_persistent_cache_path LIKE '%shared_pcache' AS a_uses_shared_cache;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+
+--echo # Remember A's cache file.
+perl;
+  my @st = stat($ENV{PC_FILE}) or die "A's cache file $ENV{PC_FILE} is missing: $!";
+  open(my $f, '>', $ENV{PC_INODE_FILE}) or die;
+  print $f "$st[1]\n";
+  close($f);
+EOF
+
+--echo # Start instance B on A's persistent cache path: B must refuse to start.
+--exec $MYSQLD --no-defaults --initialize-insecure --datadir=$b_dir --innodb-use-native-aio=0 > $MYSQL_TMP_DIR/spc_b_init.log 2>&1
+--let $b_cmd= $MYSQLD --no-defaults --datadir=$b_dir --socket=$b_sock --port=$b_port --mysqlx=OFF --log-error=$b_err --innodb-use-native-aio=0 $ROCKSDB_OPT --plugin-load-add=$ROCKSDB --default-storage-engine=rocksdb
+# A refused start exits with status 1. If B started anyway, timeout would stop it
+# after 60 s with status 124 and the test would fail here.
+--error 1
+--exec timeout 60 $b_cmd --rocksdb-persistent-cache-path=$MYSQL_TMP_DIR/shared_pcache --rocksdb-persistent-cache-size-mb=100 > /dev/null 2>&1
+--echo # B refused to start.
+--let SEARCH_FILE= $b_err
+--let SEARCH_PATTERN= Can't lock rocksdb_persistent_cache_path directory .*shared_pcache
+--source include/search_pattern.inc
+
+--echo # A's cache file is still the same file.
+perl;
+  open(my $f, '<', $ENV{PC_INODE_FILE}) or die;
+  my $before = <$f>;
+  chomp $before;
+  close($f);
+  my @st = stat($ENV{PC_FILE});
+  if (!@st) {
+    print "A's cache file was deleted (wrong).\n";
+  } elsif ($st[1] != $before) {
+    print "A's cache file was replaced by another file (wrong).\n";
+  } else {
+    print "A's cache file kept (correct).\n";
+  }
+EOF
+
+SELECT COUNT(*), SUM(v) FROM t1;
+
+--echo # Stop A: B now starts on the same persistent cache path.
+--source include/shutdown_mysqld.inc
+--let $b_cmd2= $MYSQLD --no-defaults --datadir=$b_dir --socket=$b_sock --port=$b_port --mysqlx=OFF --log-error=$b_err2 --innodb-use-native-aio=0 $ROCKSDB_OPT --plugin-load-add=$ROCKSDB --default-storage-engine=rocksdb
+--exec_in_background $b_cmd2 --rocksdb-persistent-cache-path=$MYSQL_TMP_DIR/shared_pcache --rocksdb-persistent-cache-size-mb=100 > /dev/null 2>&1
+--let $wait_counter= 600
+--source suite/rocksdb/include/shared_wal_dir_wait_b.inc
+--echo # B started.
+--exec $MYSQLADMIN --no-defaults -uroot -S $b_sock shutdown
+# The socket closes before the storage engines shut down, so wait for the end of
+# B's shutdown, when its lock is released.
+--let B_SECOND_LOG= $MYSQL_TMP_DIR/spc_b2.err
+perl;
+  my $t = 0;
+  while ($t++ < 600) {
+    if (open(my $f, '<', $ENV{B_SECOND_LOG})) {
+      my $done = grep { /Shutdown complete/ } <$f>;
+      close($f);
+      exit(0) if $done;
+    }
+    select(undef, undef, undef, 0.1);
+  }
+  die "Instance B did not shut down ($ENV{B_SECOND_LOG})";
+EOF
+
+--echo # Stop B: A starts on the same persistent cache path again.
+--source include/start_mysqld.inc
+SELECT COUNT(*), SUM(v) FROM t1;
+DROP TABLE t1;
+
+--remove_file $PC_INODE_FILE
+--remove_file $MYSQL_TMP_DIR/spc_b_init.log
+--remove_file $b_err
+--remove_file $b_err2
+--force-rmdir $b_dir
