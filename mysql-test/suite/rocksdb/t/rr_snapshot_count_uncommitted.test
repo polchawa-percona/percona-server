@@ -1,0 +1,80 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# A REPEATABLE READ snapshot counts only committed rows while other
+# transactions hold many uncommitted rows in the same table, and a long
+# COUNT(*) can be killed (port of the scenario of innodb.parallel_read_kill,
+# Bug#31016076).
+#
+# Under write_prepared and write_unprepared (see the .combinations file)
+# the uncommitted rows of the other transactions are already written to the
+# database (write_unprepared flushes every batch with
+# rocksdb_write_batch_flush_threshold=1), so the scan has to skip them by
+# visibility, not merely not see them.
+#
+
+CREATE TABLE t1 (f1 INT NOT NULL PRIMARY KEY, f2 INT NOT NULL, KEY k2 (f2))
+  ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--let $counter = 1
+while ($counter <= 4)
+{
+  --connect (c$counter,localhost,root,,)
+  BEGIN;
+  --disable_query_log
+  --let $n = 1
+  while ($n <= 500)
+  {
+    --let $id = `SELECT $counter * 100000 + $n * 10`
+    --eval INSERT INTO t1 VALUES ($id, $id), ($id + 1, $id + 1), ($id + 2, $id + 2), ($id + 3, $id + 3), ($id + 4, $id + 4)
+    --inc $n
+  }
+  --enable_query_log
+  --inc $counter
+}
+
+--connect (reader,localhost,root,,)
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k2);
+SELECT COUNT(*) FROM t1 WHERE f1 > 100000;
+SELECT MAX(f1) FROM t1;
+COMMIT;
+
+--echo # KILL QUERY of a COUNT(*) paused inside the scan.
+--let $reader_id = `SELECT CONNECTION_ID()`
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL scanning WAIT_FOR go';
+--send SELECT COUNT(*) FROM t1 FORCE INDEX (k2)
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+--replace_result $reader_id READER_ID
+--eval KILL QUERY $reader_id
+SET DEBUG_SYNC = 'now SIGNAL go';
+--connection reader
+--error ER_QUERY_INTERRUPTED
+--reap
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM t1;
+
+--echo # The other transactions commit; their rows become visible.
+--let $counter = 1
+while ($counter <= 4)
+{
+  --connection c$counter
+  COMMIT;
+  --disconnect c$counter
+  --inc $counter
+}
+--connection reader
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k2);
+
+--connection default
+--disconnect reader
+DROP TABLE t1;
+SET DEBUG_SYNC = 'RESET';
+--source include/wait_until_count_sessions.inc
