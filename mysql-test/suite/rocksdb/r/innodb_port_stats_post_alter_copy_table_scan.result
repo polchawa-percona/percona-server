@@ -1,0 +1,15 @@
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT, KEY k2 (c2)) ENGINE=ROCKSDB;
+# Let the background thread calculate the statistics.
+FLUSH TABLE t1;
+SELECT s.index_name, t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' ORDER BY s.index_name;
+INDEX_NAME	has_rows	has_cardinality
+k2	1	1
+PRIMARY	1	1
+ALTER TABLE t1 ADD COLUMN c5 INT, ALGORITHM = COPY;
+# Wait up to 30 seconds for the background recalculation.
+SELECT s.index_name, t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' ORDER BY s.index_name;
+INDEX_NAME	has_rows	has_cardinality
+k2	1	1
+PRIMARY	1	1
+DROP TABLE t1;
