@@ -1,0 +1,58 @@
+SELECT LENGTH(@longblob), LENGTH(@longblob2);
+LENGTH(@longblob)	LENGTH(@longblob2)
+200000000	200000000
+CREATE TABLE t1 (
+c1 INT DEFAULT NULL,
+c2 LONGBLOB NOT NULL,
+KEY k2 (c2(250), c1)
+) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+INSERT INTO t1 VALUES (1, '');
+UPDATE t1 SET c2=@longblob;
+# The full value reads back through the hidden primary key and the prefix index.
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1;
+c1	LENGTH(c2)	same
+1	200000000	1
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1 FORCE INDEX (k2)
+WHERE c2 = @longblob;
+c1	LENGTH(c2)	same
+1	200000000	1
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1 FORCE INDEX (k2)
+WHERE c2 = @longblob;
+c1	LENGTH(c2)	same
+1	200000000	1
+# A second 200 MB UPDATE rolled back leaves the first value. It runs at
+# READ COMMITTED: the table has no unique key, so the gap-lock rule refuses
+# the UPDATE inside a multi-statement transaction at REPEATABLE READ.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+UPDATE t1 SET c2=@longblob2;
+SELECT LENGTH(c2), c2 = @longblob2 AS same FROM t1;
+LENGTH(c2)	same
+200000000	1
+ROLLBACK;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT LENGTH(c2), c2 = @longblob AS same FROM t1;
+LENGTH(c2)	same
+200000000	1
+# A write batch limit below the row size fails the UPDATE and keeps the row.
+SET SESSION rocksdb_write_batch_max_bytes = 10485760;
+UPDATE t1 SET c2=@longblob2;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+SELECT LENGTH(c2), c2 = @longblob AS same FROM t1;
+LENGTH(c2)	same
+200000000	1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+UPDATE t1 SET c2=@longblob2;
+SELECT LENGTH(c2), c2 = @longblob2 AS same FROM t1 FORCE INDEX (k2)
+WHERE c2 = @longblob2;
+LENGTH(c2)	same
+200000000	1
+DELETE FROM t1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+DROP TABLE t1;
