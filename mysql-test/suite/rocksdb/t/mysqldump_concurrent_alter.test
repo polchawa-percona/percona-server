@@ -1,0 +1,84 @@
+#
+# mysqldump --single-transaction must not dump a MyRocks table as empty when
+# a COPY ALTER rebuilds it after the dump's snapshot was taken. The dump must
+# fail with "Table definition has changed" (ER_TABLE_DEF_CHANGED), as with
+# InnoDB, instead of silently writing no rows.
+#
+# Sequence:
+#   1. con_lock holds LOCK TABLES t1 WRITE.
+#   2. mysqldump starts in the background, takes its consistent snapshot and
+#      blocks on the metadata lock while dumping t1.
+#   3. con_ddl rebuilds t2 with ALGORITHM=COPY without changing its columns
+#      (with a column change, mysqldump's own field-count check would abort
+#      the dump regardless of the engine); mysqldump has not touched t2.
+#   4. con_lock unlocks; mysqldump dumps t1 and then reads t2.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE DATABASE dumpdb;
+CREATE TABLE dumpdb.t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO dumpdb.t1 VALUES (1),(2),(3);
+CREATE TABLE dumpdb.t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO dumpdb.t2 VALUES (1,10),(2,20),(3,30);
+
+--let $dump_file = $MYSQLTEST_VARDIR/tmp/mysqldump_concurrent_alter.sql
+--let $dump_err = $MYSQLTEST_VARDIR/tmp/mysqldump_concurrent_alter.err
+--let $dump_done = $MYSQLTEST_VARDIR/tmp/mysqldump_concurrent_alter.done
+# Remove leftovers of an earlier failed run, so that --write_file does not fail
+# and a stale marker cannot end the wait below early.
+--remove_files_wildcard $MYSQLTEST_VARDIR/tmp mysqldump_concurrent_alter.*
+--write_file $dump_done
+started
+EOF
+
+connect (con_lock,localhost,root,,);
+LOCK TABLES dumpdb.t1 WRITE;
+
+connection default;
+# The marker is appended only after mysqldump has exited and closed its
+# output files; its disconnect alone does not guarantee that.
+--exec_in_background sh -c "$MYSQL_DUMP --single-transaction --skip-lock-tables dumpdb t1 t2 > $dump_file 2> $dump_err; echo mysqldump_exited >> $dump_done"
+
+--echo # Wait until mysqldump is blocked on t1, after taking its snapshot.
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE id <> CONNECTION_ID() AND state = 'Waiting for table metadata lock';
+--source include/wait_condition.inc
+
+connect (con_ddl,localhost,root,,);
+ALTER TABLE dumpdb.t2 FORCE, ALGORITHM=COPY;
+disconnect con_ddl;
+
+connection con_lock;
+UNLOCK TABLES;
+disconnect con_lock;
+
+connection default;
+--echo # Wait for mysqldump to exit.
+--let $grep_file = $dump_done
+--let $grep_pattern = mysqldump_exited
+--let $wait_timeout = 300
+--source include/wait_for_pattern_in_file.inc
+--source include/wait_until_count_sessions.inc
+
+--echo # The dump must report the changed table definition ...
+--let SEARCH_FILE = $dump_err
+--let SEARCH_PATTERN = Table definition has changed
+--source include/search_pattern.inc
+
+--echo # ... and must not contain an empty dump of t2.
+--let SEARCH_FILE = $dump_file
+--let SEARCH_PATTERN = INSERT INTO `t2`
+--source include/search_pattern.inc
+
+--echo # A dump taken after the ALTER contains all rows of the rebuilt table.
+--exec $MYSQL_DUMP --single-transaction --skip-lock-tables --skip-extended-insert dumpdb t2 > $dump_file
+--let SEARCH_FILE = $dump_file
+--let SEARCH_PATTERN = INSERT INTO `t2` VALUES
+--source include/search_pattern.inc
+
+--remove_file $dump_file
+--remove_file $dump_err
+--remove_file $dump_done
+DROP DATABASE dumpdb;

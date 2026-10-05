@@ -955,6 +955,17 @@ class Rdb_key_def {
   mutable Rdb_index_stats m_stats;
 
   /*
+    RocksDB sequence number at which this index was published by a DDL
+    statement (CREATE TABLE, TRUNCATE, the final rename of a COPY ALTER, or an
+    inplace ADD INDEX). Its contents were written at sequence numbers not newer
+    than this, so a transaction whose snapshot is older must not read the
+    index: it would see it as empty or incomplete. 0 means the index has
+    existed since server startup, which is older than any snapshot. Not
+    persisted, because snapshots do not survive a restart.
+  */
+  std::atomic<uint64_t> m_create_seqno{0};
+
+  /*
     Bitmap containing information about whether TTL or other special fields
     are enabled for the given index.
   */
