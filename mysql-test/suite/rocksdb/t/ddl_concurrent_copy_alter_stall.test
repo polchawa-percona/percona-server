@@ -1,0 +1,18 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/count_sessions.inc
+
+#
+# Concurrent COPY and INSTANT ALTER TABLE loops with a tiny write buffer and
+# low L0 slowdown and stop triggers, so writes stall while the copies run,
+# and with background work paused for 2 s at times. No ALTER may hang while
+# holding its metadata lock. See include/ddl_concurrent_copy_alter.inc.
+#
+
+--let $ntab= 4
+--let $nrows= 20000
+--let $iters= 8
+--let $chaos= 1
+--let $chaos_iters= 40
+--let $chaos_pause= 1
+--source suite/rocksdb/include/ddl_concurrent_copy_alter.inc
