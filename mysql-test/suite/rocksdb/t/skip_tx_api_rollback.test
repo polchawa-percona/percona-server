@@ -1,0 +1,83 @@
+--source include/have_rocksdb.inc
+
+#
+# With rocksdb_master_skip_tx_api=ON, MyRocks writes through a plain
+# WriteBatchWithIndex (Rdb_writebatch_impl) instead of a TransactionDB
+# transaction. Statement rollback and ROLLBACK TO SAVEPOINT then rely on
+# WriteBatch savepoints. A failed statement must leave no partial changes,
+# and secondary indexes must stay consistent with the primary key.
+#
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b VARCHAR(10),
+                 UNIQUE KEY ua (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 'x'), (2, 20, 'y'), (3, 30, 'z');
+
+# The write batch is chosen when the session's MyRocks transaction object is
+# created, so the variable must be set in a fresh connection before it touches
+# any MyRocks table. Setting it later in a session has no effect.
+connect (con1, localhost, root,,);
+SET SESSION rocksdb_master_skip_tx_api = ON;
+# READ COMMITTED: multi-statement locking reads below are not on a full
+# unique key, which MyRocks rejects at REPEATABLE READ.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # 1. Multi-row INSERT that fails on a duplicate after inserting rows.
+BEGIN;
+INSERT INTO t1 VALUES (4, 40, 'p');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (5, 50, 'q'), (6, 60, 'r'), (1, 70, 's');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (7, 80, 't'), (8, 10, 'u');
+SELECT * FROM t1 ORDER BY pk;
+COMMIT;
+SELECT * FROM t1 ORDER BY pk;
+SELECT pk, a FROM t1 FORCE INDEX (ua) ORDER BY a;
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+
+--echo # 2. UPDATE that changes indexed columns and fails part way.
+BEGIN;
+--error ER_DUP_ENTRY
+UPDATE t1 SET a = a + 10 ORDER BY pk;
+SELECT * FROM t1 ORDER BY pk;
+UPDATE t1 SET b = CONCAT(b, '2') WHERE pk <= 2;
+COMMIT;
+SELECT * FROM t1 ORDER BY pk;
+SELECT pk, a FROM t1 FORCE INDEX (ua) ORDER BY a;
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+
+--echo # 3. Savepoints. MyRocks allows ROLLBACK TO SAVEPOINT only while the
+--echo #    transaction has no modifications; otherwise it fails and the
+--echo #    transaction becomes rollback-only.
+BEGIN;
+SAVEPOINT s0;
+SELECT COUNT(*) FROM t1;
+ROLLBACK TO SAVEPOINT s0;
+INSERT INTO t1 VALUES (10, 100, 'sp0');
+SAVEPOINT s1;
+INSERT INTO t1 VALUES (11, 110, 'sp1');
+--error ER_ROLLBACK_TO_SAVEPOINT
+ROLLBACK TO SAVEPOINT s1;
+--error ER_ROLLBACK_ONLY
+COMMIT;
+ROLLBACK;
+SELECT * FROM t1 ORDER BY pk;
+SELECT pk, a FROM t1 FORCE INDEX (ua) ORDER BY a;
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+
+--echo # 4. Full rollback discards everything.
+BEGIN;
+DELETE FROM t1;
+INSERT INTO t1 VALUES (99, 990, 'gone');
+ROLLBACK;
+SELECT * FROM t1 ORDER BY pk;
+
+disconnect con1;
+connection default;
+
+--echo # The table is consistent when read with the normal transaction API.
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ua);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+
+DROP TABLE t1;

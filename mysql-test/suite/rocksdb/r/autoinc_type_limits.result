@@ -1,0 +1,82 @@
+CREATE TABLE t_tiny_u   (a TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_tiny     (a TINYINT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_medium_u (a MEDIUMINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_medium   (a MEDIUMINT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+# 8.4 no longer allows AUTO_INCREMENT on FLOAT or DOUBLE.
+CREATE TABLE t_float  (a FLOAT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+ERROR 42000: Incorrect column specifier for column 'a'
+CREATE TABLE t_double (a DOUBLE AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+ERROR 42000: Incorrect column specifier for column 'a'
+INSERT INTO t_tiny_u   VALUES (254, 0);
+INSERT INTO t_tiny     VALUES (126, 0);
+INSERT INTO t_medium_u VALUES (16777214, 0);
+INSERT INTO t_medium   VALUES (8388606, 0);
+# The next value is the type maximum.
+INSERT INTO t_tiny_u   (b) VALUES (1);
+INSERT INTO t_tiny     (b) VALUES (1);
+INSERT INTO t_medium_u (b) VALUES (1);
+INSERT INTO t_medium   (b) VALUES (1);
+# Past the maximum: duplicate key, no wrap-around.
+INSERT INTO t_tiny_u   (b) VALUES (2);
+ERROR 23000: Duplicate entry '255' for key 't_tiny_u.PRIMARY'
+INSERT INTO t_tiny     (b) VALUES (2);
+ERROR 23000: Duplicate entry '127' for key 't_tiny.PRIMARY'
+INSERT INTO t_medium_u (b) VALUES (2);
+ERROR 23000: Duplicate entry '16777215' for key 't_medium_u.PRIMARY'
+INSERT INTO t_medium   (b) VALUES (2);
+ERROR 23000: Duplicate entry '8388607' for key 't_medium.PRIMARY'
+SELECT a, b FROM t_tiny_u;
+a	b
+254	0
+255	1
+SELECT a, b FROM t_tiny;
+a	b
+126	0
+127	1
+SELECT a, b FROM t_medium_u;
+a	b
+16777214	0
+16777215	1
+SELECT a, b FROM t_medium;
+a	b
+8388606	0
+8388607	1
+SELECT table_name, auto_increment FROM information_schema.tables
+WHERE table_schema = 'test' ORDER BY table_name;
+TABLE_NAME	AUTO_INCREMENT
+t_medium	8388607
+t_medium_u	16777215
+t_tiny	127
+t_tiny_u	255
+# Restart: the counter is reloaded from the last index value.
+# restart
+SELECT table_name, auto_increment FROM information_schema.tables
+WHERE table_schema = 'test' ORDER BY table_name;
+TABLE_NAME	AUTO_INCREMENT
+t_medium	8388607
+t_medium_u	16777215
+t_tiny	127
+t_tiny_u	255
+INSERT INTO t_tiny_u   (b) VALUES (3);
+ERROR 23000: Duplicate entry '255' for key 't_tiny_u.PRIMARY'
+INSERT INTO t_medium_u (b) VALUES (3);
+ERROR 23000: Duplicate entry '16777215' for key 't_medium_u.PRIMARY'
+INSERT INTO t_tiny     (b) VALUES (3);
+ERROR 23000: Duplicate entry '127' for key 't_tiny.PRIMARY'
+INSERT INTO t_medium   (b) VALUES (3);
+ERROR 23000: Duplicate entry '8388607' for key 't_medium.PRIMARY'
+# Deleting the top row frees the maximum again.
+DELETE FROM t_tiny_u WHERE a = 255;
+DELETE FROM t_medium_u WHERE a = 16777215;
+# restart
+INSERT INTO t_tiny_u   (b) VALUES (4);
+INSERT INTO t_medium_u (b) VALUES (4);
+SELECT a, b FROM t_tiny_u;
+a	b
+254	0
+255	4
+SELECT a, b FROM t_medium_u;
+a	b
+16777214	0
+16777215	4
+DROP TABLE t_tiny_u, t_tiny, t_medium_u, t_medium;
