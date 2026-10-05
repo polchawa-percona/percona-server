@@ -1,0 +1,129 @@
+#
+# DDL interleaved with DML, replicated to a MyRocks replica that uses
+# read-free replication (rocksdb_read_free_rpl=PK_SK) and 4 applier workers.
+#
+# Covers INPLACE and COPY ALTER, INSTANT ADD COLUMN, CONVERT TO CHARACTER SET,
+# partition DDL, a table without a primary key that gets one, and a table
+# whose secondary indexes differ between source and replica. After each step
+# the tables must be identical on both servers, and on the replica every
+# secondary index must have as many entries as the primary key: read-free
+# replication writes rows without reading them first, so a wrong index
+# definition on the replica would leave stale or missing index entries.
+#
+--source include/have_rocksdb.inc
+--source include/have_binlog_format_row.inc
+--source include/not_group_replication_plugin.inc
+--source include/rpl/init_source_replica.inc
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c VARCHAR(20), KEY kb (b))
+  ENGINE=ROCKSDB;
+CREATE TABLE p (a INT PRIMARY KEY, b INT, KEY kpb (b)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (100),
+                          PARTITION p1 VALUES LESS THAN (200),
+                          PARTITION p2 VALUES LESS THAN MAXVALUE);
+CREATE TABLE n (a INT, b INT) ENGINE=ROCKSDB;
+CREATE TABLE w (a INT PRIMARY KEY, b INT, c INT, KEY kw (b), KEY kw2 (c))
+  ENGINE=ROCKSDB;
+
+--disable_query_log
+let $i = 1;
+BEGIN;
+while ($i <= 300)
+{
+  eval INSERT INTO t VALUES ($i, $i % 17, CONCAT('v', $i));
+  eval INSERT INTO p VALUES ($i, $i % 13);
+  eval INSERT INTO n VALUES ($i % 50, $i);
+  eval INSERT INTO w VALUES ($i, $i % 11, $i % 7);
+  inc $i;
+}
+COMMIT;
+--enable_query_log
+
+--echo # The replica gets an extra index on w and lacks index kw2.
+--source include/rpl/sync_to_replica.inc
+SET SESSION sql_log_bin = 0;
+ALTER TABLE w ADD INDEX kw_extra (c, b), DROP INDEX kw2;
+SET SESSION sql_log_bin = 1;
+SHOW CREATE TABLE w;
+--source include/rpl/connection_source.inc
+--let $step = initial load
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+--echo # DML on the other tables between the DDL statements runs on
+--echo # different applier workers.
+ALTER TABLE t ADD INDEX kc (c), ALGORITHM=INPLACE;
+UPDATE t SET c = CONCAT(c, 'u') WHERE b = 2;
+DELETE FROM t WHERE b = 3;
+UPDATE w SET b = b + 1, c = c + 1 WHERE a % 5 = 0;
+INSERT INTO p VALUES (1000, 1);
+--let $step = INPLACE ADD INDEX
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+ALTER TABLE t ADD COLUMN d INT DEFAULT 7, ALGORITHM=INSTANT;
+INSERT INTO t VALUES (1001, 1, 'n', 8);
+UPDATE t SET d = 9 WHERE a <= 20;
+UPDATE w SET c = c * 2 WHERE b = 4;
+--let $step = INSTANT ADD COLUMN
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+ALTER TABLE t MODIFY b BIGINT, ALGORITHM=COPY;
+UPDATE t SET b = b + 100 WHERE a IN (1, 4, 1001);
+DELETE FROM w WHERE c = 0;
+--let $step = COPY ALTER
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+ALTER TABLE t CONVERT TO CHARACTER SET latin1;
+UPDATE t SET c = 'x' WHERE a BETWEEN 10 AND 20;
+DELETE FROM t WHERE c = 'x' AND a % 2 = 0;
+--let $step = CONVERT TO CHARACTER SET
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+ALTER TABLE t DROP INDEX kc, ALGORITHM=INPLACE;
+UPDATE t SET c = 'y' WHERE a <= 5;
+--let $step = INPLACE DROP INDEX
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+--echo # Partition DDL
+ALTER TABLE p TRUNCATE PARTITION p1;
+INSERT INTO p VALUES (150, 5);
+ALTER TABLE p REORGANIZE PARTITION p2 INTO
+  (PARTITION p2a VALUES LESS THAN (250), PARTITION p2b VALUES LESS THAN MAXVALUE);
+UPDATE p SET b = b + 1 WHERE a > 200;
+INSERT INTO p VALUES (3000, 3);
+ALTER TABLE p ADD INDEX kpb2 (b, a), ALGORITHM=INPLACE;
+DELETE FROM p WHERE a = 1000;
+--let $step = partition DDL
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+--echo # A table without a primary key gets one.
+ALTER TABLE n ADD INDEX ka (a);
+DELETE FROM n WHERE a = 1 LIMIT 1;
+UPDATE n SET b = b + 1000 WHERE a = 2;
+ALTER TABLE n ADD PRIMARY KEY (a, b);
+INSERT INTO n VALUES (3, 9999);
+UPDATE n SET b = b + 1 WHERE a = 4;
+--let $step = PRIMARY KEY added
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+--echo # The table with different indexes on the replica keeps working.
+UPDATE w SET b = b + 10, c = c + 10;
+DELETE FROM w WHERE a % 3 = 0;
+INSERT INTO w VALUES (5000, 1, 1);
+--source include/rpl/sync_to_replica.inc
+--let $assert_text = Replica index kw_extra matches the table
+--let $assert_cond = [SELECT COUNT(*) FROM w FORCE INDEX (kw_extra)] = [SELECT COUNT(*) FROM w]
+--source include/assert.inc
+--source include/rpl/connection_source.inc
+--let $step = DML on w with different replica indexes
+--source suite/rocksdb_rpl/include/rpl_rocksdb_ddl_read_free_check.inc
+
+--echo # The replica applied the DDL without errors.
+--source include/rpl/sync_to_replica.inc
+SHOW CREATE TABLE t;
+SHOW CREATE TABLE p;
+SHOW CREATE TABLE n;
+SHOW CREATE TABLE w;
+--source include/rpl/connection_source.inc
+
+DROP TABLE t, p, n, w;
+--source include/rpl/deinit.inc
