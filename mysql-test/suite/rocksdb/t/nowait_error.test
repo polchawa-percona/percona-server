@@ -1,0 +1,43 @@
+--source include/have_rocksdb.inc
+
+# NOWAIT must fail immediately with ER_LOCK_NOWAIT, as InnoDB does
+# (port-findings.md #35). MyRocks takes the lock with a zero timeout but
+# reports the result as a lock wait timeout (ER_LOCK_WAIT_TIMEOUT), counts it
+# in rocksdb_row_lock_wait_timeouts and, with rocksdb_rollback_on_timeout=ON,
+# rolls back the whole transaction.
+#
+# The lock wait timeouts are large, so a NOWAIT statement that waited would be
+# visible in did_not_wait (or fail the test with a timeout).
+
+SET @old_innodb_lock_wait_timeout = @@global.innodb_lock_wait_timeout;
+SET @old_rocksdb_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @old_rocksdb_rollback_on_timeout = @@global.rocksdb_rollback_on_timeout;
+SET GLOBAL innodb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION innodb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+# With rollback_on_timeout, a NOWAIT failure reported as a lock wait timeout
+# rolls back the whole transaction. NOWAIT is not a timeout.
+SET GLOBAL rocksdb_rollback_on_timeout = ON;
+
+--connect (con1, localhost, root,,)
+
+--connection default
+--let $engine = InnoDB
+--source suite/rocksdb/include/nowait_error.inc
+
+SELECT VARIABLE_VALUE INTO @timeouts_before FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_row_lock_wait_timeouts';
+
+--let $engine = ROCKSDB
+--source suite/rocksdb/include/nowait_error.inc
+
+--echo # NOWAIT failures are not lock wait timeouts
+SELECT VARIABLE_VALUE - @timeouts_before AS new_lock_wait_timeouts
+  FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_row_lock_wait_timeouts';
+
+--disconnect con1
+SET GLOBAL innodb_lock_wait_timeout = @old_innodb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = @old_rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_rollback_on_timeout = @old_rocksdb_rollback_on_timeout;
