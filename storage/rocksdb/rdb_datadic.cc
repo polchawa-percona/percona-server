@@ -2363,8 +2363,12 @@ int Rdb_key_def::skip_variable_length_encoding(
   const uchar *ptr;
   bool finished = false;
 
-  size_t dst_len; /* How much data can be there */
-  dst_len = fpi->m_max_field_bytes;
+  /*
+    How much data can be there. The key holds the strnxfrm() image, which
+    can be longer than the value itself (e.g. multi-level collations or
+    expanding characters), so bound it by the maximum image length.
+  */
+  size_t dst_len = fpi->m_max_image_len_before_encoding;
 
   bool use_legacy_format = fpi->m_use_legacy_varbinary_format;
 
@@ -2412,7 +2416,8 @@ int Rdb_key_def::skip_variable_space_pad(const Rdb_field_packing *const fpi,
   const uchar *ptr;
   bool finished = false;
 
-  size_t dst_len = fpi->m_max_field_bytes; /* How much data can be there */
+  /* How much data can be there: see skip_variable_length_encoding(). */
+  size_t dst_len = fpi->m_max_image_len_before_encoding;
 
   if (fpi->m_use_space_pad_lead_byte) {
     uchar encoded_byte = *(const uchar *)reader->read(1);

@@ -1,0 +1,50 @@
+call mtr.add_suppression("Plugin rocksdb reported: 'Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Plugin rocksdb reported: 'Will handle this collation internally as if it had a NO_PAD attribute.'");
+# utf8mb4_0900_as_cs
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: )
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (22 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (22 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (22 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# utf8mb4_0900_as_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 41,6669,C785,F09D9080)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (32 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (32 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (18 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
