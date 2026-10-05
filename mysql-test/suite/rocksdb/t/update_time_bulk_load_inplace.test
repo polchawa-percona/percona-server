@@ -1,0 +1,35 @@
+#
+# INFORMATION_SCHEMA.TABLES.UPDATE_TIME must be set after every committed
+# change to a MyRocks table, and an INPLACE ALTER that keeps the data must
+# not reset it (InnoDB keeps it). Port-findings #56; disabled until fixed.
+#
+# Today:
+#   - rows loaded with rocksdb_bulk_load=1 leave UPDATE_TIME NULL: the
+#     statement's transaction has a write count of 0, so commit() takes the
+#     rollback path, which clears the list of modified tables;
+#   - INPLACE ADD INDEX creates a new table definition and UPDATE_TIME
+#     becomes NULL.
+#
+--source include/have_rocksdb.inc
+
+SET SESSION information_schema_stats_expiry = 0;
+
+--echo # Bulk load
+CREATE TABLE b (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO b VALUES (1), (2), (3);
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM b;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'b'
+AND update_time IS NOT NULL OR FALSE;
+
+--echo # INPLACE ADD INDEX keeps the value (InnoDB: kept)
+CREATE TABLE z (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO z VALUES (1, 1);
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'z'
+AND update_time IS NOT NULL OR FALSE;
+ALTER TABLE z ADD INDEX kb (b), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'z'
+AND update_time IS NOT NULL OR FALSE;
+
+DROP TABLE b, z;
