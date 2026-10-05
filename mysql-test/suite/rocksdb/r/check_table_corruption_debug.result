@@ -1,0 +1,63 @@
+call mtr.add_suppression("CHECKTABLE .*index scan error");
+call mtr.add_suppression("CHECKTABLE .*failed to fetch row by rowid");
+call mtr.add_suppression("Checksum mismatch in key of key-value pair for index");
+call mtr.add_suppression("Checksum mismatch in value of key-value pair for index");
+call mtr.add_suppression("Data with incorrect checksum");
+SET @save_store = @@global.rocksdb_store_row_debug_checksums;
+SET GLOBAL rocksdb_store_row_debug_checksums = ON;
+SET SESSION rocksdb_store_row_debug_checksums = ON;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b VARCHAR(20), KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three'), (4, 40, 'four');
+CREATE TABLE t2 (a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 1), (2, 2), (3, 3);
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+# 1. Bad checksum in a secondary key: the index scan fails.
+SET SESSION debug = "+d,myrocks_simulate_bad_key_checksum1";
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	Error	Internal error: Record checksum mismatch
+test.t1	check	error	Corrupt
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	Error	Internal error: Record checksum mismatch
+test.t2	check	error	Corrupt
+SET SESSION debug = "-d,myrocks_simulate_bad_key_checksum1";
+# 2. Bad checksum in the primary key: the row fetch by rowid fails.
+SET SESSION debug = "+d,myrocks_simulate_bad_pk_checksum1";
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	Error	Internal error: Record checksum mismatch
+test.t1	check	error	Corrupt
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	Error	Internal error: Record checksum mismatch
+test.t2	check	error	Corrupt
+SET SESSION debug = "-d,myrocks_simulate_bad_pk_checksum1";
+# 3. Bad checksum in the row value.
+SET SESSION debug = "+d,myrocks_simulate_bad_pk_checksum2";
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	Error	Internal error: Record checksum mismatch
+test.t1	check	error	Corrupt
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	Error	Internal error: Record checksum mismatch
+test.t2	check	error	Corrupt
+SET SESSION debug = "-d,myrocks_simulate_bad_pk_checksum2";
+# 4. Without injected faults the tables are clean again.
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+CHECK TABLE t1 EXTENDED;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_store_row_debug_checksums = @save_store;

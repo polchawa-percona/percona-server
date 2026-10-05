@@ -1,0 +1,74 @@
+--source include/have_rocksdb.inc
+
+#
+# AUTO_INCREMENT at the upper limit of each column type. MyRocks computes the
+# per-type maximum in rdb_get_int_col_max_value(); reaching it must give a
+# duplicate key error, never a wrapped or out-of-range value. The value must
+# also survive a restart, when it is reloaded from the index.
+#
+
+CREATE TABLE t_tiny_u   (a TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_tiny     (a TINYINT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_medium_u (a MEDIUMINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t_medium   (a MEDIUMINT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+
+--echo # 8.4 no longer allows AUTO_INCREMENT on FLOAT or DOUBLE.
+--error ER_WRONG_FIELD_SPEC
+CREATE TABLE t_float  (a FLOAT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+--error ER_WRONG_FIELD_SPEC
+CREATE TABLE t_double (a DOUBLE AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+
+INSERT INTO t_tiny_u   VALUES (254, 0);
+INSERT INTO t_tiny     VALUES (126, 0);
+INSERT INTO t_medium_u VALUES (16777214, 0);
+INSERT INTO t_medium   VALUES (8388606, 0);
+
+--echo # The next value is the type maximum.
+INSERT INTO t_tiny_u   (b) VALUES (1);
+INSERT INTO t_tiny     (b) VALUES (1);
+INSERT INTO t_medium_u (b) VALUES (1);
+INSERT INTO t_medium   (b) VALUES (1);
+
+--echo # Past the maximum: duplicate key, no wrap-around.
+--error ER_DUP_ENTRY
+INSERT INTO t_tiny_u   (b) VALUES (2);
+--error ER_DUP_ENTRY
+INSERT INTO t_tiny     (b) VALUES (2);
+--error ER_DUP_ENTRY
+INSERT INTO t_medium_u (b) VALUES (2);
+--error ER_DUP_ENTRY
+INSERT INTO t_medium   (b) VALUES (2);
+
+SELECT a, b FROM t_tiny_u;
+SELECT a, b FROM t_tiny;
+SELECT a, b FROM t_medium_u;
+SELECT a, b FROM t_medium;
+
+SELECT table_name, auto_increment FROM information_schema.tables
+  WHERE table_schema = 'test' ORDER BY table_name;
+
+--echo # Restart: the counter is reloaded from the last index value.
+--source include/restart_mysqld.inc
+
+SELECT table_name, auto_increment FROM information_schema.tables
+  WHERE table_schema = 'test' ORDER BY table_name;
+
+--error ER_DUP_ENTRY
+INSERT INTO t_tiny_u   (b) VALUES (3);
+--error ER_DUP_ENTRY
+INSERT INTO t_medium_u (b) VALUES (3);
+--error ER_DUP_ENTRY
+INSERT INTO t_tiny     (b) VALUES (3);
+--error ER_DUP_ENTRY
+INSERT INTO t_medium   (b) VALUES (3);
+
+--echo # Deleting the top row frees the maximum again.
+DELETE FROM t_tiny_u WHERE a = 255;
+DELETE FROM t_medium_u WHERE a = 16777215;
+--source include/restart_mysqld.inc
+INSERT INTO t_tiny_u   (b) VALUES (4);
+INSERT INTO t_medium_u (b) VALUES (4);
+SELECT a, b FROM t_tiny_u;
+SELECT a, b FROM t_medium_u;
+
+DROP TABLE t_tiny_u, t_tiny, t_medium_u, t_medium;

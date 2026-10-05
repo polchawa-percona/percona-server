@@ -1,0 +1,172 @@
+# Column family: cf
+CREATE TABLE t1 (pk INT PRIMARY KEY, s8 SET('m1','m2','m3','m4','m5','m6','m7','m8'), s16 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16'), s24 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24'), s32 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24','m25','m26','m27','m28','m29','m30','m31','m32'), s64 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24','m25','m26','m27','m28','m29','m30','m31','m32','m33','m34','m35','m36','m37','m38','m39','m40','m41','m42','m43','m44','m45','m46','m47','m48','m49','m50','m51','m52','m53','m54','m55','m56','m57','m58','m59','m60','m61','m62','m63','m64'), e2 ENUM('e1','e2','e3','e4','e5','e6','e7','e8','e9','e10','e11','e12','e13','e14','e15','e16','e17','e18','e19','e20','e21','e22','e23','e24','e25','e26','e27','e28','e29','e30','e31','e32','e33','e34','e35','e36','e37','e38','e39','e40','e41','e42','e43','e44','e45','e46','e47','e48','e49','e50','e51','e52','e53','e54','e55','e56','e57','e58','e59','e60','e61','e62','e63','e64','e65','e66','e67','e68','e69','e70','e71','e72','e73','e74','e75','e76','e77','e78','e79','e80','e81','e82','e83','e84','e85','e86','e87','e88','e89','e90','e91','e92','e93','e94','e95','e96','e97','e98','e99','e100','e101','e102','e103','e104','e105','e106','e107','e108','e109','e110','e111','e112','e113','e114','e115','e116','e117','e118','e119','e120','e121','e122','e123','e124','e125','e126','e127','e128','e129','e130','e131','e132','e133','e134','e135','e136','e137','e138','e139','e140','e141','e142','e143','e144','e145','e146','e147','e148','e149','e150','e151','e152','e153','e154','e155','e156','e157','e158','e159','e160','e161','e162','e163','e164','e165','e166','e167','e168','e169','e170','e171','e172','e173','e174','e175','e176','e177','e178','e179','e180','e181','e182','e183','e184','e185','e186','e187','e188','e189','e190','e191','e192','e193','e194','e195','e196','e197','e198','e199','e200','e201','e202','e203','e204','e205','e206','e207','e208','e209','e210','e211','e212','e213','e214','e215','e216','e217','e218','e219','e220','e221','e222','e223','e224','e225','e226','e227','e228','e229','e230','e231','e232','e233','e234','e235','e236','e237','e238','e239','e240','e241','e242','e243','e244','e245','e246','e247','e248','e249','e250','e251','e252','e253','e254','e255','e256','e257','e258','e259','e260','e261','e262','e263','e264','e265','e266','e267','e268','e269','e270','e271','e272','e273','e274','e275','e276','e277','e278','e279','e280','e281','e282','e283','e284','e285','e286','e287','e288','e289','e290','e291','e292','e293','e294','e295','e296','e297','e298','e299','e300'), KEY k8 (s8) COMMENT 'cfname=cf', KEY k16 (s16) COMMENT 'cfname=cf', KEY k24 (s24) COMMENT 'cfname=cf', KEY k32 (s32) COMMENT 'cfname=cf', KEY k64 (s64) COMMENT 'cfname=cf', KEY ke2 (e2) COMMENT 'cfname=cf') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+(1, '', '', '', '', '', 'e1'),
+(2, 'm1', 'm1', 'm1', 'm1', 'm1', 'e2'),
+(3, 'm8', 'm16', 'm24', 'm32', 'm64', 'e300'),
+(4, 'm1,m8', 'm8,m9,m16', 'm16,m17,m24', 'm24,m25,m32', 'm32,m33,m64', 'e255'),
+(5, 'm2,m3', 'm10', 'm17', 'm25', 'm33', 'e256'),
+(6, 'm4', 'm1,m2,m3', 'm9,m24', 'm1,m32', 'm63', 'e257');
+INSERT INTO t1 VALUES (7, 255, 65535, 16777215, 4294967295,
+18446744073709551615, 'e299');
+# SET column s8: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s8 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k8) WHERE s8 = '' OR FIND_IN_SET('m1', s8) ORDER BY pk;
+pk	bits
+1	0
+2	1
+4	129
+7	255
+# SET column s16: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s16 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k16) WHERE s16 = '' OR FIND_IN_SET('m1', s16) ORDER BY pk;
+pk	bits
+1	0
+2	1
+6	7
+7	65535
+# SET column s24: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s24 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k24) WHERE s24 = '' OR FIND_IN_SET('m1', s24) ORDER BY pk;
+pk	bits
+1	0
+2	1
+7	16777215
+# SET column s32: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s32 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k32) WHERE s32 = '' OR FIND_IN_SET('m1', s32) ORDER BY pk;
+pk	bits
+1	0
+2	1
+6	2147483649
+7	4294967295
+# SET column s64: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s64 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k64) WHERE s64 = '' OR FIND_IN_SET('m1', s64) ORDER BY pk;
+pk	bits
+1	0
+2	1
+7	18446744073709551615
+# ENUM with a 2-byte pack length.
+SELECT pk, e2 + 0 FROM t1 FORCE INDEX (ke2) WHERE e2 BETWEEN 'e255' AND 'e300' ORDER BY e2;
+pk	e2 + 0
+4	255
+5	256
+6	257
+7	299
+3	300
+# Values survive a flush (read back from SST files).
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT pk, s8 + 0, s16 + 0, s24 + 0, s32 + 0, CAST(s64 AS UNSIGNED), e2 + 0
+FROM t1 ORDER BY pk;
+pk	s8 + 0	s16 + 0	s24 + 0	s32 + 0	CAST(s64 AS UNSIGNED)	e2 + 0
+1	0	0	0	0	0	1
+2	1	1	1	1	1	2
+3	128	32768	8388608	2147483648	9223372036854775808	300
+4	129	33152	8486912	2172649472	9223372043297226752	255
+5	6	512	65536	16777216	4294967296	256
+6	8	7	8388864	2147483649	4611686018427387904	257
+7	255	65535	16777215	4294967295	18446744073709551615	299
+SELECT pk, s24 + 0 FROM t1 FORCE INDEX (k24) ORDER BY s24, pk;
+pk	s24 + 0
+1	0
+2	1
+5	65536
+3	8388608
+6	8388864
+4	8486912
+7	16777215
+SELECT pk, CAST(s64 AS UNSIGNED) FROM t1 FORCE INDEX (k64) ORDER BY s64, pk;
+pk	CAST(s64 AS UNSIGNED)
+1	0
+2	1
+5	4294967296
+6	4611686018427387904
+3	9223372036854775808
+4	9223372043297226752
+7	18446744073709551615
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Column family: rev:cf
+CREATE TABLE t1 (pk INT PRIMARY KEY, s8 SET('m1','m2','m3','m4','m5','m6','m7','m8'), s16 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16'), s24 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24'), s32 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24','m25','m26','m27','m28','m29','m30','m31','m32'), s64 SET('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12','m13','m14','m15','m16','m17','m18','m19','m20','m21','m22','m23','m24','m25','m26','m27','m28','m29','m30','m31','m32','m33','m34','m35','m36','m37','m38','m39','m40','m41','m42','m43','m44','m45','m46','m47','m48','m49','m50','m51','m52','m53','m54','m55','m56','m57','m58','m59','m60','m61','m62','m63','m64'), e2 ENUM('e1','e2','e3','e4','e5','e6','e7','e8','e9','e10','e11','e12','e13','e14','e15','e16','e17','e18','e19','e20','e21','e22','e23','e24','e25','e26','e27','e28','e29','e30','e31','e32','e33','e34','e35','e36','e37','e38','e39','e40','e41','e42','e43','e44','e45','e46','e47','e48','e49','e50','e51','e52','e53','e54','e55','e56','e57','e58','e59','e60','e61','e62','e63','e64','e65','e66','e67','e68','e69','e70','e71','e72','e73','e74','e75','e76','e77','e78','e79','e80','e81','e82','e83','e84','e85','e86','e87','e88','e89','e90','e91','e92','e93','e94','e95','e96','e97','e98','e99','e100','e101','e102','e103','e104','e105','e106','e107','e108','e109','e110','e111','e112','e113','e114','e115','e116','e117','e118','e119','e120','e121','e122','e123','e124','e125','e126','e127','e128','e129','e130','e131','e132','e133','e134','e135','e136','e137','e138','e139','e140','e141','e142','e143','e144','e145','e146','e147','e148','e149','e150','e151','e152','e153','e154','e155','e156','e157','e158','e159','e160','e161','e162','e163','e164','e165','e166','e167','e168','e169','e170','e171','e172','e173','e174','e175','e176','e177','e178','e179','e180','e181','e182','e183','e184','e185','e186','e187','e188','e189','e190','e191','e192','e193','e194','e195','e196','e197','e198','e199','e200','e201','e202','e203','e204','e205','e206','e207','e208','e209','e210','e211','e212','e213','e214','e215','e216','e217','e218','e219','e220','e221','e222','e223','e224','e225','e226','e227','e228','e229','e230','e231','e232','e233','e234','e235','e236','e237','e238','e239','e240','e241','e242','e243','e244','e245','e246','e247','e248','e249','e250','e251','e252','e253','e254','e255','e256','e257','e258','e259','e260','e261','e262','e263','e264','e265','e266','e267','e268','e269','e270','e271','e272','e273','e274','e275','e276','e277','e278','e279','e280','e281','e282','e283','e284','e285','e286','e287','e288','e289','e290','e291','e292','e293','e294','e295','e296','e297','e298','e299','e300'), KEY k8 (s8) COMMENT 'cfname=rev:cf', KEY k16 (s16) COMMENT 'cfname=rev:cf', KEY k24 (s24) COMMENT 'cfname=rev:cf', KEY k32 (s32) COMMENT 'cfname=rev:cf', KEY k64 (s64) COMMENT 'cfname=rev:cf', KEY ke2 (e2) COMMENT 'cfname=rev:cf') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+(1, '', '', '', '', '', 'e1'),
+(2, 'm1', 'm1', 'm1', 'm1', 'm1', 'e2'),
+(3, 'm8', 'm16', 'm24', 'm32', 'm64', 'e300'),
+(4, 'm1,m8', 'm8,m9,m16', 'm16,m17,m24', 'm24,m25,m32', 'm32,m33,m64', 'e255'),
+(5, 'm2,m3', 'm10', 'm17', 'm25', 'm33', 'e256'),
+(6, 'm4', 'm1,m2,m3', 'm9,m24', 'm1,m32', 'm63', 'e257');
+INSERT INTO t1 VALUES (7, 255, 65535, 16777215, 4294967295,
+18446744073709551615, 'e299');
+# SET column s8: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s8 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k8) WHERE s8 = '' OR FIND_IN_SET('m1', s8) ORDER BY pk;
+pk	bits
+1	0
+2	1
+4	129
+7	255
+# SET column s16: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s16 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k16) WHERE s16 = '' OR FIND_IN_SET('m1', s16) ORDER BY pk;
+pk	bits
+1	0
+2	1
+6	7
+7	65535
+# SET column s24: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s24 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k24) WHERE s24 = '' OR FIND_IN_SET('m1', s24) ORDER BY pk;
+pk	bits
+1	0
+2	1
+7	16777215
+# SET column s32: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s32 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k32) WHERE s32 = '' OR FIND_IN_SET('m1', s32) ORDER BY pk;
+pk	bits
+1	0
+2	1
+6	2147483649
+7	4294967295
+# SET column s64: index-only reads and range scans match the primary key.
+SELECT pk, CAST(s64 AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k64) WHERE s64 = '' OR FIND_IN_SET('m1', s64) ORDER BY pk;
+pk	bits
+1	0
+2	1
+7	18446744073709551615
+# ENUM with a 2-byte pack length.
+SELECT pk, e2 + 0 FROM t1 FORCE INDEX (ke2) WHERE e2 BETWEEN 'e255' AND 'e300' ORDER BY e2;
+pk	e2 + 0
+4	255
+5	256
+6	257
+7	299
+3	300
+# Values survive a flush (read back from SST files).
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT pk, s8 + 0, s16 + 0, s24 + 0, s32 + 0, CAST(s64 AS UNSIGNED), e2 + 0
+FROM t1 ORDER BY pk;
+pk	s8 + 0	s16 + 0	s24 + 0	s32 + 0	CAST(s64 AS UNSIGNED)	e2 + 0
+1	0	0	0	0	0	1
+2	1	1	1	1	1	2
+3	128	32768	8388608	2147483648	9223372036854775808	300
+4	129	33152	8486912	2172649472	9223372043297226752	255
+5	6	512	65536	16777216	4294967296	256
+6	8	7	8388864	2147483649	4611686018427387904	257
+7	255	65535	16777215	4294967295	18446744073709551615	299
+SELECT pk, s24 + 0 FROM t1 FORCE INDEX (k24) ORDER BY s24, pk;
+pk	s24 + 0
+1	0
+2	1
+5	65536
+3	8388608
+6	8388864
+4	8486912
+7	16777215
+SELECT pk, CAST(s64 AS UNSIGNED) FROM t1 FORCE INDEX (k64) ORDER BY s64, pk;
+pk	CAST(s64 AS UNSIGNED)
+1	0
+2	1
+5	4294967296
+6	4611686018427387904
+3	9223372036854775808
+4	9223372043297226752
+7	18446744073709551615
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

@@ -1,0 +1,90 @@
+--source include/have_rocksdb.inc
+
+#
+# Exact point lookups on a partial index using the full extended key
+# (secondary key parts + primary key parts). These go through
+# Rdb_iterator_partial::get() instead of seek(). Results must match the same
+# lookups on an ordinary secondary index, for groups below and above the
+# materialization threshold, on forward and reverse column families.
+#
+
+--let $cf_iter = 0
+while ($cf_iter < 2)
+{
+  --let $cfname = cf
+  if ($cf_iter == 1)
+  {
+    --let $cfname = rev:cf
+  }
+  --echo # Column family: $cfname
+
+  --eval CREATE TABLE t (i INT, j INT, k INT, l INT, PRIMARY KEY (i, j), KEY ik1 (i, k) COMMENT 'cfname=$cfname;partial_group_keyparts=1;partial_group_threshold=3', KEY ik2 (i, k) COMMENT 'cfname=$cfname') ENGINE=ROCKSDB
+
+  # Group i=1 stays below the threshold (not materialized).
+  INSERT INTO t VALUES (1, 1, 10, 100), (1, 2, 20, 200);
+  # Group i=2 is above the threshold and gets materialized on first read.
+  INSERT INTO t VALUES (2, 1, 30, 300), (2, 2, 20, 400), (2, 3, 10, 500),
+                       (2, 4, 20, 600), (2, 5, 30, 700);
+  # Group i=3 has duplicate k values, so j decides the match.
+  INSERT INTO t VALUES (3, 1, 5, 800), (3, 2, 5, 900), (3, 3, 5, 1000),
+                       (3, 4, 5, 1100);
+
+  --let $i = 0
+  while ($i < 2)
+  {
+    if ($i == 1)
+    {
+      --echo # Second pass: all groups above the threshold are now materialized.
+    }
+
+    --replace_column 10 # 11 #
+    EXPLAIN SELECT * FROM t FORCE INDEX (ik1) WHERE i = 2 AND k = 20 AND j = 4;
+
+    --let $q = WHERE i = 1 AND k = 20 AND j = 2
+    --let $query1 = SELECT * FROM t FORCE INDEX (ik1) $q
+    --let $query2 = SELECT * FROM t FORCE INDEX (ik2) $q
+    --source include/diff_queries.inc
+
+    --let $q = WHERE i = 2 AND k = 20 AND j = 4
+    --let $query1 = SELECT * FROM t FORCE INDEX (ik1) $q
+    --let $query2 = SELECT * FROM t FORCE INDEX (ik2) $q
+    --source include/diff_queries.inc
+
+    --let $q = WHERE i = 3 AND k = 5 AND j = 3
+    --let $query1 = SELECT * FROM t FORCE INDEX (ik1) $q
+    --let $query2 = SELECT * FROM t FORCE INDEX (ik2) $q
+    --source include/diff_queries.inc
+
+    # Keys that do not exist: wrong j, wrong k, missing group, and a group
+    # boundary just past the last row.
+    SELECT * FROM t FORCE INDEX (ik1) WHERE i = 2 AND k = 20 AND j = 3;
+    SELECT * FROM t FORCE INDEX (ik1) WHERE i = 1 AND k = 99 AND j = 1;
+    SELECT * FROM t FORCE INDEX (ik1) WHERE i = 9 AND k = 10 AND j = 1;
+    SELECT * FROM t FORCE INDEX (ik1) WHERE i = 3 AND k = 5 AND j = 5;
+
+    # Equality join that drives one full-key lookup per outer row.
+    CREATE TEMPORARY TABLE probe (i INT, k INT, j INT) ENGINE=InnoDB;
+    INSERT INTO probe VALUES (1, 10, 1), (1, 20, 2), (2, 30, 1), (2, 30, 5),
+                             (2, 10, 3), (3, 5, 4), (3, 5, 9), (4, 1, 1);
+    --sorted_result
+    SELECT p.i, p.k, p.j, t.l FROM probe p
+      JOIN t FORCE INDEX (ik1) ON t.i = p.i AND t.k = p.k AND t.j = p.j;
+    --sorted_result
+    SELECT p.i, p.k, p.j, t.l FROM probe p
+      JOIN t FORCE INDEX (ik2) ON t.i = p.i AND t.k = p.k AND t.j = p.j;
+    DROP TEMPORARY TABLE probe;
+
+    # Locking read inside a transaction (READ COMMITTED avoids the gap-lock check).
+    SET SESSION transaction_isolation = 'READ-COMMITTED';
+    BEGIN;
+    SELECT * FROM t FORCE INDEX (ik1) WHERE i = 2 AND k = 30 AND j = 5 FOR UPDATE;
+    ROLLBACK;
+    SET SESSION transaction_isolation = DEFAULT;
+
+    --inc $i
+  }
+
+  DROP TABLE t;
+
+  --inc $cf_iter
+}
