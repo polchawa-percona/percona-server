@@ -1,0 +1,36 @@
+#
+# Port of innodb.innodb-index-debug (mysql-test/suite/innodb/t/innodb-index-debug.test)
+# to MyRocks, the Bug#17657223 part (index build that sorts through many
+# temporary chunks) with a small rocksdb_merge_combine_read_size.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - The InnoDB sort buffer keyword ddl_buf_add_two becomes small
+#     rocksdb_merge_buf_size and rocksdb_merge_combine_read_size values, both
+#     inside their allowed ranges. The index build must succeed.
+#   - Disabled until port-findings.md #39 is fixed: MyRocks divides
+#     rocksdb_merge_combine_read_size among all sorted chunks without a lower
+#     bound, so the build fails with ER_SK_POPULATE_DURING_ALTER and
+#     "Chunk size is too small to process merge." in the error log.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, b CHAR(200) NOT NULL) ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 2000) SELECT n, REPEAT('x', 1 + n % 100) FROM v;
+
+SET @saved_merge_buf_size = @@session.rocksdb_merge_buf_size;
+SET @saved_merge_combine_read_size = @@session.rocksdb_merge_combine_read_size;
+SET SESSION rocksdb_merge_buf_size = 4096;
+SET SESSION rocksdb_merge_combine_read_size = 4096;
+
+ALTER TABLE t1 ADD INDEX kb (b), ALGORITHM=INPLACE;
+
+SET SESSION rocksdb_merge_buf_size = @saved_merge_buf_size;
+SET SESSION rocksdb_merge_combine_read_size = @saved_merge_combine_read_size;
+
+SHOW CREATE TABLE t1;
+CHECK TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= kb
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;

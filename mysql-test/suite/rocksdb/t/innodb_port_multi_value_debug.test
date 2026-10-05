@@ -1,0 +1,572 @@
+#
+# Port of innodb.multi_value_debug (mysql-test/suite/innodb/t/multi_value_debug.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; have_innodb_max_16k.inc dropped.
+#   - MyRocks does not support multi-valued indexes. Every multi-valued index
+#     form of the original is pinned as rejected (ER_CHECK_NOT_IMPLEMENTED), and
+#     each scenario runs with a single-valued functional index on the first
+#     array element instead (CAST(f->'$[0]' AS ...)), which MyRocks supports.
+#     MEMBER OF queries stay; they scan the table.
+#   - InnoDB lock-wait keywords (row_ins_sec_index_entry_lock_wait,
+#     row_upd_sec_index_entry_lock_wait, delete_one_multi_sec_index_entry_lock_wait)
+#     are dropped; the DML runs as in the original.
+#   - MyRocks adds and drops a functional index (a hidden virtual column) only
+#     with ALGORITHM=COPY (InnoDB: INPLACE); this is pinned. So ddl_add_multi_value
+#     (InnoDB sort buffer too small for one row) has no equivalent and is dropped.
+#   - InnoDB purge control becomes a consistent snapshot in another connection
+#     plus a memtable flush and a manual compaction.
+#   - The aborted ADD INDEX scenarios pause at the server point
+#     alter_table_copy_after_lock_upgrade instead of
+#     innodb_commit_inplace_alter_table_enter, and run the concurrent SELECT
+#     there (InnoDB's row_search_for_mysql_before_return has no equivalent).
+#     A single-valued CAST only warns on an invalid JSON value (InnoDB too), so
+#     the index build fails through the server keyword abort_copy_table.
+#   - OPTIMIZE TABLE pauses at after_admin_flush; the first concurrent DML
+#     statement queues behind it and the rest runs afterwards. DROP INDEX pauses
+#     at alter_table_copy_after_lock_upgrade with a queued DELETE.
+#   - The concurrent unique-key scenario waits on MyRocks row locks instead of
+#     InnoDB's lock_rec_convert_impl_to_expl / row_update_for_mysql_error.
+#   - Bug#31474182: set debug='d:t' (full debug trace) is dropped.
+#   - Every functional index is compared with a scan without it.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/have_debug.inc
+
+--source include/count_sessions.inc
+
+--echo # Multi-valued indexes are rejected by MyRocks.
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE INDEX i1 ON t1((CAST(f1->"$[*]" AS DECIMAL(4,2) ARRAY)));
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE INDEX i2 ON t1((CAST(f1->"$[*]" AS CHAR(10) ARRAY)));
+--error ER_CHECK_NOT_IMPLEMENTED
+ALTER TABLE t1 ADD INDEX i3 ((CAST(f1->"$[*]" AS UNSIGNED ARRAY))), ALGORITHM=COPY;
+DROP TABLE t1;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (
+  i INT NOT NULL PRIMARY KEY,
+  j JSON DEFAULT (CAST('["HelloWorld"]' AS JSON)),
+  KEY mv_idx_binary (( CAST(j->'$[*]' AS BINARY(10) ARRAY) )) ) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE IF NOT EXISTS t1 (
+           i INT NOT NULL PRIMARY KEY,
+           j JSON DEFAULT (CAST('["100"]' AS JSON)),
+           UNIQUE KEY mv_idx_binary (( CAST(j->'$[*]' AS UNSIGNED ARRAY) )) ) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE `t1` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `j2` JSON, `j3` JSON, `j4` JSON,
+  PRIMARY KEY (`id`),
+  KEY `mv_idx_binary` ((JSON_LENGTH(`j3`)), (CAST(JSON_EXTRACT(`j4`,_utf8mb4'$[*]') AS BINARY(10) ARRAY)), (JSON_DEPTH(`j2`)))
+) ENGINE=ROCKSDB;
+--error ER_NO_SUCH_TABLE
+SHOW CREATE TABLE t1;
+
+--echo # Functional indexes on the first array element instead.
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->"$[0]" AS DECIMAL(4,2))));
+CREATE INDEX i2 ON t1((CAST(f1->>"$[0]" AS CHAR(10))));
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD INDEX i0 ((CAST(f1->"$[0]" AS UNSIGNED))), ALGORITHM=INPLACE;
+--let $fi_table= t1
+--let $fi_pk= id
+
+INSERT INTO t1(f1) VALUES(CAST('["11.11", "22.22", "33.33", "44.44", "55.55", "66.66", "77.77", "88.88", "99.99"]' AS JSON));
+
+SELECT * FROM t1;
+SELECT * FROM t1 WHERE 11.11 MEMBER OF (f1->'$[*]');
+SELECT * FROM t1 WHERE 99.99 MEMBER OF (f1->'$[*]');
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 11.11;
+SELECT id FROM t1 WHERE CAST(f1->>"$[0]" AS CHAR(10)) = '11.11';
+
+TRUNCATE TABLE t1;
+
+INSERT INTO t1(f1) VALUES(CAST('["13.33","13.21"]' AS JSON));
+INSERT INTO t1(f1) VALUES(CAST('["15.67","18.55"]' AS JSON));
+
+SELECT * FROM t1 WHERE 13.33 MEMBER OF (f1->'$[*]');
+SELECT * FROM t1 WHERE "18.55" MEMBER OF (f1->'$[*]');
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 15.67;
+
+DELETE FROM t1;
+
+SELECT * FROM t1 WHERE 13.33 MEMBER OF (f1->'$[*]');
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 15.67;
+
+INSERT INTO t1(f1) VALUES(CAST('["13.33","13.21","13.45"]' AS JSON));
+INSERT INTO t1(f1) VALUES(CAST('["15.67","18.55","19.32"]' AS JSON));
+
+UPDATE t1 SET f1 = CAST('["13.21","13.33"]' AS JSON) WHERE 13.45 MEMBER OF (f1->'$[*]');
+UPDATE t1 SET f1 = CAST('["19.32","15.67","18.55"]' AS JSON) WHERE 19.32 MEMBER OF (f1->'$[*]');
+SELECT * FROM t1;
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 13.21;
+SELECT id FROM t1 WHERE CAST(f1->>"$[0]" AS CHAR(10)) = '19.32';
+
+CHECK TABLE t1;
+--let $fi_index= i1
+--let $fi_expr= CAST(f1->"$[0]" AS DECIMAL(4,2))
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+--let $fi_index= i2
+--let $fi_expr= CAST(f1->>"$[0]" AS CHAR(10))
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+
+DELETE FROM t1;
+
+DROP TABLE t1;
+
+
+
+# Test alter table with adding index, to check the scenario
+# when the sort buffer is small. A functional index is added with
+# ALGORITHM=COPY in MyRocks, so no external sort is involved.
+
+CREATE TABLE t1(id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+
+INSERT INTO t1(f1) VALUES (CAST('[1,3]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[1,3,9,8]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[1,3,9,8,10,11,20,30]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[9,3,9,8,10,11,20,30]' AS JSON));
+
+
+CREATE INDEX idx1 ON t1((CAST(f1->"$[0]" AS UNSIGNED)));
+
+SELECT * FROM t1 WHERE 9 MEMBER OF (f1->'$[*]');
+SELECT * FROM t1 WHERE 30 MEMBER OF (f1->'$[*]');
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS UNSIGNED) = 9;
+
+
+CHECK TABLE t1;
+--let $fi_table= t1
+--let $fi_pk= id
+--let $fi_index= idx1
+--let $fi_expr= CAST(f1->"$[0]" AS UNSIGNED)
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+DROP TABLE t1;
+
+
+
+# Test the aborted index scenario
+CREATE TABLE t1(j JSON) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES ('["test"]'), ('[]'), ('null');
+
+connect (conn1,localhost,root,,);
+
+connection default;
+
+SET SESSION debug = "+d,abort_copy_table";
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL rolling_back WAIT_FOR drop_created';
+--send CREATE INDEX mv_idx_date ON t1 ((CAST(j->'$[0]' AS UNSIGNED)));
+
+connection conn1;
+SET DEBUG_SYNC='now WAIT_FOR rolling_back';
+SELECT * FROM t1;
+SET DEBUG_SYNC='now SIGNAL drop_created';
+
+connection default;
+--error ER_LOCK_WAIT_TIMEOUT
+--reap
+SET SESSION debug = "-d,abort_copy_table";
+
+disconnect conn1;
+
+INSERT INTO t1 VALUES ('["Hello"]');
+
+CHECK TABLE t1;
+SHOW CREATE TABLE t1;
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+
+
+# Test for the scenario that a record is re-inserted after a delete, and the
+# operation has to be rolled back.
+CREATE TABLE t1 (
+  i INT NOT NULL PRIMARY KEY,
+  j JSON DEFAULT (CAST('["HelloWorld"]' AS JSON)),
+  KEY mv_idx_binary (( CAST(j->>'$[0]' AS BINARY(10)) )) ) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(1, CAST('["HelloWorld", "Hello"]' AS JSON));
+INSERT INTO t1 VALUES(2, CAST('["HelloMySQL", "Hello"]' AS JSON));
+
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+SELECT * FROM t1 WHERE "Hello" MEMBER OF (j->'$[*]');
+
+connect (con1,localhost,root,,);
+--echo # A consistent snapshot needs REPEATABLE READ (the test runs at READ COMMITTED).
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1;
+
+START TRANSACTION;
+INSERT INTO t1 VALUES(1, CAST('["HelloMySQL", "Hello"]' AS JSON));
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+SELECT i FROM t1 WHERE CAST(j->>'$[0]' AS BINARY(10)) = 'HelloMySQL';
+ROLLBACK;
+
+connection con1;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+SELECT * FROM t1 WHERE "Hello" MEMBER OF (j->'$[*]');
+SELECT i FROM t1 WHERE CAST(j->>'$[0]' AS BINARY(10)) = 'HelloMySQL';
+
+CHECK TABLE t1;
+
+DROP TABLE t1;
+
+
+# A more complicated case with several indexed expressions.
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON, f2 JSON, f3 JSON, f4 JSON , f5 JSON, f6 JSON,
+KEY mv_idx_binary (( CAST(f1->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary1 (( CAST(f2->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary2 (( CAST(f3->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary3 (( CAST(f4->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary4 (( CAST(f5->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary5 (( CAST(f6->>'$[0]' AS CHAR(10)) ))) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(1, CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON));
+
+connection con1;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1;
+
+INSERT INTO t1 VALUES(1, CAST('["Helloworl", "hell"]' AS JSON), CAST('["Helloworl", "hell"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON), CAST('["helloworl", "well"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON));
+
+CHECK TABLE t1;
+--let $fi_table= t1
+--let $fi_pk= id
+--let $fi_index= mv_idx_binary
+--let $fi_expr= CAST(f1->>'$[0]' AS CHAR(10))
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+--let $fi_index= mv_idx_binary4
+--let $fi_expr= CAST(f5->>'$[0]' AS CHAR(10))
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+
+DELETE FROM t1;
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (mv_idx_binary3);
+
+DROP TABLE t1;
+
+connection con1;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+
+
+# Concurrent DMLs testing on a unique functional index: an insert waits for
+# the row lock of another transaction that holds the same key, and fails
+# with a duplicate key error once that transaction commits; an insert of a
+# key deleted by an open transaction waits and fails once it rolls back.
+
+CREATE TABLE IF NOT EXISTS t1 (
+           i INT NOT NULL PRIMARY KEY,
+           j JSON DEFAULT (CAST('["100"]' AS JSON)),
+           UNIQUE KEY mv_idx_binary (( CAST(j->'$[0]' AS UNSIGNED) )) ) ENGINE=ROCKSDB;
+
+connect (conn1,localhost,root,,);
+connect (conn2,localhost,root,,);
+
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for row lock';
+
+connection default;
+
+INSERT INTO t1 VALUES(1, CAST('["90"]' AS JSON));
+
+connection conn2;
+START TRANSACTION;
+INSERT INTO t1 VALUES(2, CAST('["100"]' AS JSON));
+
+connection default;
+SET SESSION rocksdb_lock_wait_timeout = 60;
+START TRANSACTION;
+--send INSERT INTO t1 VALUES(3, CAST('["100"]' AS JSON))
+
+connection conn2;
+--source include/wait_condition.inc
+COMMIT;
+
+connection default;
+--error ER_DUP_ENTRY
+--reap
+--echo # Like InnoDB, the failed insert keeps a lock on the duplicate key until
+--echo # the transaction ends.
+COMMIT;
+
+connection conn1;
+START TRANSACTION;
+DELETE FROM t1;
+
+connection default;
+--send INSERT INTO t1 VALUES(4, CAST('["100"]' AS JSON))
+
+connection conn1;
+--source include/wait_condition.inc
+ROLLBACK;
+
+connection default;
+--error ER_DUP_ENTRY
+--reap
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+
+disconnect conn1;
+disconnect conn2;
+
+connection default;
+
+CHECK TABLE t1;
+
+SELECT * FROM t1;
+--let $fi_table= t1
+--let $fi_pk= i
+--let $fi_index= mv_idx_binary
+--let $fi_expr= CAST(j->'$[0]' AS UNSIGNED)
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+
+DROP TABLE t1;
+
+
+
+# Test the indexed expression doesn't need to be handled when old versions
+# are removed, because the index has been dropped
+
+CREATE TABLE t1 (a INT, b INT, f JSON,
+  KEY mv_idx_binary ((( CAST(f->>'$[0]' AS BINARY(10) ))))
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 (a,b,f) VALUES(1, 1, '["foobar"]');
+
+connection con1;
+# hold old row versions
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+connection default;
+UPDATE t1 SET f = NULL;
+
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP INDEX mv_idx_binary, ALGORITHM=INPLACE;
+ALTER TABLE t1 DROP INDEX mv_idx_binary;
+
+connection con1;
+# release old row versions
+COMMIT;
+UPDATE t1 SET a = 1;
+
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+CHECK TABLE t1;
+SELECT * FROM t1;
+
+connection con1;
+disconnect con1;
+
+connection default;
+
+DROP TABLE t1;
+
+
+
+# Test online DDL
+
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for table metadata lock';
+
+CREATE TABLE t1(a INT PRIMARY KEY, b INT, f1 JSON) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->>"$[0]" AS CHAR(10))));
+
+INSERT INTO t1 VALUES(1, 1, CAST('["1111", "2222"]' AS JSON));
+INSERT INTO t1 VALUES(2, 2, CAST('["11111", "2222", "22222", "3333"]' AS JSON));
+INSERT INTO t1 VALUES(3, 3, CAST('["1111", "2222", "22222", "3333", "444"]' AS JSON));
+INSERT INTO t1 VALUES(4, 4, CAST('["22222", "3333", "444", "5555"]' AS JSON));
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+connection default;
+SET DEBUG_SYNC='after_admin_flush SIGNAL before_apply WAIT_FOR apply';
+--send OPTIMIZE TABLE t1;
+
+connection con1;
+--echo connection con1
+
+SET DEBUG_SYNC='now WAIT_FOR before_apply';
+connection con2;
+--send INSERT INTO t1 VALUES(5, 5, CAST('["2222", "5555"]' AS JSON))
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL apply';
+
+connection default;
+--echo connection default
+--echo /* reap */ OPTIMIZE TABLE t1;
+reap;
+connection con2;
+reap;
+DELETE FROM t1 WHERE "444" MEMBER OF (f1->"$[*]");
+INSERT INTO t1 VALUES(6, 6, CAST('["1111", "444"]' AS JSON));
+UPDATE t1 SET f1 = CAST('["11111", "2222"]' AS JSON) WHERE a = 1;
+UPDATE t1 SET f1 = CAST('["11111", "22222", "33333", "44444"]' AS JSON) WHERE a = 3;
+UPDATE t1 SET f1 = CAST('["2222", "5555", "6666"]' AS JSON) WHERE a = 5;
+connection default;
+
+CHECK TABLE t1;
+
+SELECT * FROM t1;
+SELECT * FROM t1 WHERE "1111" MEMBER OF (f1->"$[*]");
+SELECT * FROM t1 WHERE "5555" MEMBER OF (f1->"$[*]");
+SELECT * FROM t1 WHERE "11111" MEMBER OF (f1->"$[*]");
+--let $fi_table= t1
+--let $fi_pk= a
+--let $fi_index= i1
+--let $fi_expr= CAST(f1->>"$[0]" AS CHAR(10))
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+
+
+SET DEBUG_SYNC='after_admin_flush SIGNAL before_apply_1 WAIT_FOR apply_1';
+--send OPTIMIZE TABLE t1;
+
+connection con1;
+SET DEBUG_SYNC='now WAIT_FOR before_apply_1';
+connection con2;
+--send INSERT INTO t1 VALUES(7, 7, CAST('["6666", "1111"]' AS JSON))
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL apply_1';
+
+connection default;
+--echo connection default
+--echo /* reap */ OPTIMIZE TABLE t1;
+reap;
+connection con2;
+reap;
+DELETE FROM t1 WHERE "22222" MEMBER OF (f1->"$[*]");
+INSERT INTO t1 VALUES(8, 8, CAST('["1111", "3333", "444", "6666"]' AS JSON));
+UPDATE t1 SET f1 = CAST('["5555", "2222", "6666", "777"]' AS JSON) WHERE a = 5;
+UPDATE t1 SET f1 = CAST('["666", "777", "6666", "7777"]' AS JSON) WHERE a = 6;
+connection default;
+
+disconnect con1;
+disconnect con2;
+
+CHECK TABLE t1;
+
+SELECT * FROM t1;
+SELECT * FROM t1 WHERE "1111" MEMBER OF (f1->"$[*]");
+SELECT * FROM t1 WHERE "6666" MEMBER OF (f1->"$[*]");
+SELECT * FROM t1 WHERE "777" MEMBER OF (f1->"$[*]");
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+
+DROP TABLE t1;
+
+
+
+# A failed ADD INDEX, a concurrent read, and then a DROP INDEX of another
+# functional index with a DELETE queued behind it.
+
+CREATE TABLE `t1` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `j1` JSON DEFAULT (CAST(_utf8mb4'[5,-1,0]' AS JSON)),
+  `j2` JSON DEFAULT (CAST(_utf8mb4'[9,8,0,1]' AS JSON)),
+  `j3` JSON DEFAULT (CAST(_utf8mb4'["foobar"]' AS JSON)),
+  `j4` JSON DEFAULT (CAST(_utf8mb4'["HelloWorld"]' AS JSON)),
+  `j5` JSON DEFAULT (CAST(_utf8mb4'["HelloMySQL"]' AS JSON)),
+  PRIMARY KEY (`id`),
+  KEY `mv_idx_binary` ((JSON_LENGTH(`j3`)), (CAST(JSON_UNQUOTE(JSON_EXTRACT(`j4`,_utf8mb4'$[0]')) AS BINARY(10))), (JSON_DEPTH(`j2`)))
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO t1 VALUES(0, CAST(_utf8mb4'[5,-1,0]' AS JSON), CAST(_utf8mb4'[9,8,0,1]' AS JSON), CAST(_utf8mb4'["foobar"]' AS JSON), CAST(_utf8mb4'["HelloWorld"]' AS JSON), CAST(_utf8mb4'["HelloMySQL"]' AS JSON));
+
+# In InnoDB this row fails the next (multi-valued) ADD INDEX; here the index
+# build fails through abort_copy_table.
+INSERT INTO t1 VALUES(0, CAST(_utf8mb4'[5,-1,0]' AS JSON), CAST(_utf8mb4'[9,8,0,1]' AS JSON), CAST(_utf8mb4'["foobar"]' AS JSON), CAST(_utf8mb4'["HelloWorld"]' AS JSON), '[]');
+
+SELECT * FROM t1;
+
+connect (conn1,localhost,root,,);
+connect (conn2,localhost,root,,);
+
+connection default;
+
+SET SESSION debug = "+d,abort_copy_table";
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL rollback WAIT_FOR try_drop';
+--send CREATE INDEX mv_idx_date ON t1 ((CAST(j5->'$' AS UNSIGNED)));
+
+connection conn1;
+SET DEBUG_SYNC='now WAIT_FOR rollback';
+SELECT id, JSON_LENGTH(j3), JSON_DEPTH(j2) FROM t1 FORCE INDEX (mv_idx_binary) WHERE JSON_LENGTH(j3) = 1;
+SET DEBUG_SYNC='now SIGNAL try_drop';
+
+connection default;
+--error ER_LOCK_WAIT_TIMEOUT
+--reap
+SET SESSION debug = "-d,abort_copy_table";
+
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL inplace_done WAIT_FOR upgrade_lock';
+--send ALTER TABLE t1 DROP INDEX mv_idx_binary;
+
+connection conn1;
+
+SET DEBUG_SYNC='now WAIT_FOR inplace_done';
+connection conn2;
+--send DELETE FROM t1
+connection conn1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL upgrade_lock';
+
+connection conn2;
+# If everything goes well, the DELETE should succeed.
+--reap
+
+connection default;
+--reap
+
+disconnect conn1;
+disconnect conn2;
+
+connection default;
+
+SELECT * FROM t1;
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+SET DEBUG_SYNC='RESET';
+
+--source include/wait_until_count_sessions.inc
+
+--echo #
+--echo # Bug#31474182 THE MULTI-VALUED INDEX RETURNS ERROR WHEN --DEBUG OPTION SPECIFIED.
+--echo #
+
+CREATE TABLE t1 (f1 JSON, id VARCHAR(64) AS (f1->"$[0]") STORED NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE INDEX i1 ON t1((CAST(f1->"$[*]" AS UNSIGNED ARRAY)));
+CREATE INDEX i1 ON t1((CAST(f1->"$[1]" AS UNSIGNED)));
+INSERT INTO t1(f1) VALUES ('[1,2,3]'), ('[4,3,7]'), ('[7,8,9]'), ('[5,6]');
+ANALYZE TABLE t1;
+SELECT * FROM t1 WHERE JSON_OVERLAPS(f1->'$[*]', '[4,3,7]') ORDER BY id;
+SELECT id FROM t1 WHERE CAST(f1->"$[1]" AS UNSIGNED) = 3;
+--let $fi_table= t1
+--let $fi_pk= id
+--let $fi_index= i1
+--let $fi_expr= CAST(f1->"$[1]" AS UNSIGNED)
+--source suite/rocksdb/include/innodb_port_check_func_index.inc
+DROP TABLE t1;

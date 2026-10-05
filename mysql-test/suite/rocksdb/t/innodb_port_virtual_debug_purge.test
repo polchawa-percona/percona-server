@@ -1,0 +1,219 @@
+#
+# Port of innodb.virtual_debug_purge (mysql-test/suite/innodb/t/virtual_debug_purge.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB (ROW_FORMAT=COMPACT dropped)
+#   - ib_purge_virtual_index_callback (InnoDB purge of a virtual index) and
+#     select sleep(3) become a memtable flush plus a manual compaction, and the
+#     virtual index is compared with a scan without it.
+#   - BUG#22082762: InnoDB purge is held by an open transaction and released
+#     while the ALTER is paused at InnoDB's inplace_after_index_build. Here a
+#     consistent snapshot (reading no table, so it holds no metadata lock) keeps
+#     the old row versions, and the paused ALTER waits while the snapshot is
+#     released and the deleted versions are compacted away.
+#       - MyRocks adds a virtual column only with ALGORITHM=COPY, so ADD COLUMN
+#         ... ADD INDEX with INPLACE is rejected for both LOCK=NONE and
+#         LOCK=SHARED (pinned), and runs as COPY paused at
+#         copy_data_between_tables_before.
+#       - ADD INDEX on an existing virtual column is INPLACE with LOCK=SHARED
+#         only (LOCK=NONE is pinned as rejected), paused at
+#         alter_table_inplace_after_lock_downgrade. The DML that the original
+#         runs in con1 during the ALTER would wait for the ALTER, so it runs
+#         before the ALTER instead.
+#   - The Bug#21869656 part is the same as innodb.virtual_purge, which is ported
+#     as rocksdb.innodb_port_virtual_purge, so it is not repeated here.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/have_debug.inc
+
+
+CREATE TABLE `t` (
+  `a` BLOB,
+  `b` BLOB,
+  `c` BLOB GENERATED ALWAYS AS (CONCAT(a,b)) VIRTUAL,
+  `h` VARCHAR(10) DEFAULT NULL,
+  `i` int
+) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (REPEAT('g', 16000), REPEAT('x', 16000), DEFAULT, "kk", 1);
+INSERT INTO t VALUES (REPEAT('a', 16000), REPEAT('b', 16000), DEFAULT, "mm", 2);
+
+CREATE INDEX idx ON t(c(100));
+
+UPDATE t SET a = REPEAT('m', 16000) WHERE a like "aaa%";
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+CHECK TABLE t;
+SELECT LEFT(c, 3), LENGTH(c), h FROM t FORCE INDEX (idx) ORDER BY c;
+--let $pk_check_table= t
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+
+CREATE TABLE t (
+  a TINYBLOB,
+  b TINYBLOB,
+  c TINYBLOB GENERATED ALWAYS AS (CONCAT(a,b)) VIRTUAL,
+  h VARCHAR(10) DEFAULT NULL,
+  i INT
+) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (REPEAT('g', 100), REPEAT('x', 100), DEFAULT, "kk", 1);
+INSERT INTO t VALUES (REPEAT('a', 100), REPEAT('b', 100), DEFAULT, "mm", 2);
+
+CREATE INDEX idx ON t(c(100));
+
+UPDATE t SET a = REPEAT('m', 100) WHERE a like "aaa%";
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+CHECK TABLE t;
+SELECT LEFT(c, 3), LENGTH(c), h FROM t FORCE INDEX (idx) ORDER BY c;
+--let $pk_check_table= t
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+
+CREATE TABLE t1 (
+    id INT NOT NULL,
+    store_id INT NOT NULL,
+    x INT GENERATED ALWAYS AS (id + store_id)
+) ENGINE=ROCKSDB
+PARTITION BY RANGE (store_id) (
+    PARTITION p0 VALUES LESS THAN (6),
+    PARTITION p1 VALUES LESS THAN (11),
+    PARTITION p2 VALUES LESS THAN (16),
+    PARTITION p3 VALUES LESS THAN (21)
+);
+
+insert into t1 values(1, 2, default);
+insert into t1 values(3, 4, default);
+
+insert into t1 values(3, 12, default);
+insert into t1 values(4, 18, default);
+
+CREATE INDEX idx ON t1(x);
+
+UPDATE t1 SET id = 10 WHERE id = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+CHECK TABLE t1;
+SELECT * FROM t1 FORCE INDEX (idx) ORDER BY x;
+--let $pk_check_table= t1
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+#
+# BUG#22082762 RE-ENABLE SUPPORT FOR ADDING VIRTUAL INDEX WHILE DROPPING VIRTUAL COLUMN
+#
+--source include/count_sessions.inc
+
+connect (con1,localhost,root,,);
+connection default;
+
+# Test adding virtual index on newly added virtual column
+CREATE TABLE t1 (a INT, b INT) ENGINE=ROCKSDB;
+
+INSERT INTO t1(a, b) VALUES (1, 1), (2, 2), (3, 3);
+
+connection con1;
+--echo # hold old row versions
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+connection default;
+DELETE FROM t1 WHERE a = 1;
+
+UPDATE t1 SET a = 4, b = 4 WHERE a = 3;
+
+INSERT INTO t1(a, b) VALUES (5, 5);
+
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c INT GENERATED ALWAYS AS(a+b), ADD INDEX idx (c), ALGORITHM=INPLACE, LOCK=NONE;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c INT GENERATED ALWAYS AS(a+b), ADD INDEX idx (c), ALGORITHM=INPLACE, LOCK=SHARED;
+SET DEBUG_SYNC= 'copy_data_between_tables_before SIGNAL uncommitted WAIT_FOR purged';
+send ALTER TABLE t1 ADD COLUMN c INT GENERATED ALWAYS AS(a+b), ADD INDEX idx (c), ALGORITHM=COPY, LOCK=SHARED;
+
+connection con1;
+SET DEBUG_SYNC= 'now WAIT_FOR uncommitted';
+
+--echo # release old row versions
+COMMIT;
+
+--echo # compact away the deleted versions.
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+SET DEBUG_SYNC= 'now SIGNAL purged';
+
+connection default;
+--echo /* connection default */ ALTER TABLE t1 ADD COLUMN c INT GENERATED ALWAYS AS(a+b), ADD INDEX idx (c), ALGORITHM=COPY, LOCK=SHARED;
+--reap
+SHOW CREATE TABLE t1;
+
+SELECT * FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+
+# Test adding virutal index on existing virtual column
+CREATE TABLE t1 (a INT, b INT, c INT GENERATED ALWAYS AS(a+b)) ENGINE=ROCKSDB;
+
+INSERT INTO t1(a, b) VALUES (1, 1), (2, 2), (3, 3), (4, 4);
+
+connection con1;
+--echo # hold old row versions
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+connection default;
+DELETE FROM t1 WHERE a = 1;
+
+UPDATE t1 SET a = 2, b = 2 WHERE a = 5;
+
+INSERT INTO t1(a, b) VALUES (6, 6);
+
+--echo # DML that the original runs in con1 during the ALTER
+DELETE FROM t1 WHERE a = 3;
+
+UPDATE t1 SET a = 7, b = 7 WHERE a = 4;
+
+INSERT INTO t1(a, b) VALUES (8, 8);
+
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD INDEX idx (c), ALGORITHM=INPLACE, LOCK=NONE;
+SET DEBUG_SYNC= 'alter_table_inplace_after_lock_downgrade SIGNAL uncommitted WAIT_FOR purged';
+send ALTER TABLE t1 ADD INDEX idx (c), ALGORITHM=INPLACE, LOCK=SHARED;
+
+connection con1;
+SET DEBUG_SYNC= 'now WAIT_FOR uncommitted';
+
+--echo # release old row versions
+COMMIT;
+
+--echo # compact away the deleted/updated versions.
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+SET DEBUG_SYNC= 'now SIGNAL purged';
+
+disconnect con1;
+
+connection default;
+--echo /* connection default */ ALTER TABLE t1 ADD INDEX idx (c), ALGORITHM=INPLACE, LOCK=SHARED;
+--reap
+SHOW CREATE TABLE t1;
+
+SELECT * FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+SET DEBUG_SYNC= 'RESET';
+
+--source include/wait_until_count_sessions.inc
