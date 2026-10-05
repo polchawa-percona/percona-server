@@ -1,0 +1,18 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/count_sessions.inc
+
+#
+# Four sessions run COPY and INSTANT ALTER TABLE loops on four tables of the
+# same column family, with concurrent DML, readers, an old snapshot and forced
+# flushes, compactions and drop-index wakeups. Runs under all write policies.
+# See include/ddl_concurrent_copy_alter.inc.
+#
+
+--let $ntab= 4
+--let $nrows= 20000
+--let $iters= 8
+--let $chaos= 1
+--let $chaos_iters= 40
+--let $chaos_pause= 0
+--source suite/rocksdb/include/ddl_concurrent_copy_alter.inc
