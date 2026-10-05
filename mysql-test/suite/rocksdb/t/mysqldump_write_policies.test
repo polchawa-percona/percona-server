@@ -1,0 +1,112 @@
+# Write-policy coverage (step 3c): mysqldump --single-transaction and
+# consistent snapshots under every write policy.
+#
+# Under write_prepared and write_unprepared (flush threshold 1 in the
+# combination), changes of open transactions are already in the database
+# before COMMIT. A consistent snapshot, and therefore a dump taken with
+# --single-transaction, must still see only committed data:
+#   - rows of a transaction that is open during the dump must not appear;
+#   - transfers committed by a background client while the dump runs must
+#     appear either completely or not at all, so the dumped balances still
+#     sum to zero and no account is lost or duplicated;
+#   - secondary indexes in the restored copy must match the primary key.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE acct (id INT PRIMARY KEY, bal INT NOT NULL, grp INT NOT NULL, KEY grp (grp)) ENGINE=ROCKSDB;
+INSERT INTO acct WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 99) SELECT n, 0, n % 10 FROM s;
+CREATE TABLE pending (id INT PRIMARY KEY, v VARCHAR(50)) ENGINE=ROCKSDB;
+
+--echo # An open transaction whose changes are written before COMMIT under
+--echo # write_unprepared. None of them may appear in the dump.
+connect (con1,localhost,root,,test);
+BEGIN;
+INSERT INTO pending VALUES (1, 'uncommitted'), (2, 'uncommitted');
+UPDATE acct SET bal = bal + 1000000 WHERE id = 0;
+DELETE FROM acct WHERE id = 99;
+
+--echo # A background client commits balanced transfers while the dump runs.
+connection default;
+--let $marker= $MYSQLTEST_VARDIR/tmp/mysqldump_wp_done
+--remove_files_wildcard $MYSQLTEST_VARDIR/tmp mysqldump_wp_done
+--let $script= $MYSQLTEST_VARDIR/tmp/mysqldump_wp_load.sh
+--write_file $script
+#!/bin/bash
+# Each transaction moves 1 unit from one account to another.
+for i in $(seq 1 400); do
+  a=$(( (i * 7) % 98 + 1 )); b=$(( (i * 13) % 98 + 1 ))
+  $MYSQL test -e "BEGIN; UPDATE acct SET bal = bal - 1 WHERE id = $a; UPDATE acct SET bal = bal + 1 WHERE id = $b; COMMIT;" 2>/dev/null
+done
+touch $1
+EOF
+--chmod 0755 $script
+--exec_in_background $script $marker
+
+--let $dump= $MYSQLTEST_VARDIR/tmp/mysqldump_wp.sql
+--exec $MYSQL_DUMP --single-transaction --skip-dump-date test acct pending > $dump
+
+--echo # Wait for the background client to finish.
+--perl
+my $f = "$ENV{MYSQLTEST_VARDIR}/tmp/mysqldump_wp_done";
+for (my $i = 0; $i < 600 && !-e $f; $i++) { select(undef, undef, undef, 0.5); }
+die "background load did not finish" unless -e $f;
+EOF
+
+--echo # Restore the dump into another schema and check it.
+CREATE DATABASE restored;
+--exec $MYSQL restored < $dump
+--let $assert_text= Dumped balances sum to zero
+--let $assert_cond= [SELECT SUM(bal) FROM restored.acct] = 0
+--source include/assert.inc
+--let $assert_text= All 100 accounts are in the dump
+--let $assert_cond= [SELECT COUNT(*) FROM restored.acct] = 100
+--source include/assert.inc
+--let $assert_text= No uncommitted row in the dump
+--let $assert_cond= [SELECT COUNT(*) FROM restored.pending] = 0
+--source include/assert.inc
+--let $assert_text= Uncommitted balance change not in the dump
+--let $assert_cond= [SELECT MAX(bal) FROM restored.acct] < 1000
+--source include/assert.inc
+--let $assert_text= Restored secondary index matches primary key
+--let $assert_cond= [SELECT COUNT(*) FROM restored.acct FORCE INDEX(grp)] = [SELECT COUNT(*) FROM restored.acct FORCE INDEX(PRIMARY)]
+--source include/assert.inc
+
+--echo # The live table: still balanced, open transaction still invisible.
+--let $assert_text= The background client committed transfers
+--let $assert_cond= [SELECT COUNT(*) FROM acct WHERE bal <> 0] > 0
+--source include/assert.inc
+--let $assert_text= Live balances sum to zero
+--let $assert_cond= [SELECT SUM(bal) FROM acct] = 0
+--source include/assert.inc
+--let $assert_text= Open transaction invisible to other sessions
+--let $assert_cond= [SELECT COUNT(*) FROM pending] = 0
+--source include/assert.inc
+
+--echo # A consistent snapshot taken now does not see the open transaction,
+--echo # and still sees the old state after the open transaction commits.
+connect (con2,localhost,root,,test);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*), SUM(bal) FROM acct;
+connection con1;
+COMMIT;
+connection con2;
+SELECT COUNT(*), SUM(bal) FROM acct;
+SELECT COUNT(*) FROM pending;
+COMMIT;
+SELECT COUNT(*) FROM pending;
+--let $assert_text= Committed changes visible after the snapshot ends
+--let $assert_cond= [SELECT SUM(bal) FROM acct] = 1000000
+--source include/assert.inc
+
+CHECK TABLE acct, pending;
+
+connection default;
+disconnect con1;
+disconnect con2;
+DROP DATABASE restored;
+DROP TABLE acct, pending;
+--remove_file $dump
+--remove_file $script
+--remove_file $marker
+--source include/wait_until_count_sessions.inc

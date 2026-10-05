@@ -1,0 +1,105 @@
+SET @saved_instant = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE ttl_col (a INT PRIMARY KEY, ts BIGINT UNSIGNED NOT NULL, v INT, KEY v (v))
+ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+CREATE TABLE ttl_hidden (a INT PRIMARY KEY, v INT, KEY v (v))
+ENGINE=ROCKSDB COMMENT='ttl_duration=3600;';
+CREATE TABLE part_idx (i INT, j INT, k INT, v INT, PRIMARY KEY (i, j),
+KEY ik (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5') ENGINE=ROCKSDB;
+CREATE TABLE inst (a INT PRIMARY KEY, b INT, KEY b (b)) ENGINE=ROCKSDB;
+CREATE TABLE nopk (a INT, b INT, KEY a (a)) ENGINE=ROCKSDB;
+CREATE TABLE rev (a INT, b INT, PRIMARY KEY (a) COMMENT 'rev:cf_rev', KEY b (b) COMMENT 'rev:cf_rev') ENGINE=ROCKSDB;
+INSERT INTO ttl_col WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50)
+SELECT n, UNIX_TIMESTAMP(), n FROM s;
+INSERT INTO ttl_hidden WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50) SELECT n, n FROM s;
+INSERT INTO part_idx WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 59)
+SELECT n DIV 10, n, n % 7, n FROM s;
+INSERT INTO inst WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50) SELECT n, n FROM s;
+ALTER TABLE inst ADD COLUMN c VARCHAR(20) DEFAULT 'dflt', ALGORITHM=INSTANT;
+INSERT INTO nopk WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50) SELECT n, n FROM s;
+INSERT INTO rev WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50) SELECT n, n FROM s;
+# Initial state.
+SELECT (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_col) AS ttl_col, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_hidden) AS ttl_hidden, (SELECT CONCAT(COUNT(*), ':', SUM(i * 1000 + j * 7 + k + v)) FROM part_idx) AS part_idx, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b), ':', GROUP_CONCAT(DISTINCT c ORDER BY c)) FROM inst) AS inst, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM nopk) AS nopk, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM rev) AS rev;
+ttl_col	ttl_hidden	part_idx	inst	nopk	rev
+50:10200	50:10200	60:164334	50:10200:dflt	50:10200	50:10200
+SELECT (SELECT COUNT(*) FROM ttl_col FORCE INDEX(v)) AS ttl_col_v, (SELECT COUNT(*) FROM ttl_hidden FORCE INDEX(v)) AS ttl_hidden_v, (SELECT COUNT(*) FROM part_idx FORCE INDEX(ik)) AS part_idx_ik, (SELECT COUNT(*) FROM inst FORCE INDEX(b)) AS inst_b, (SELECT COUNT(*) FROM nopk FORCE INDEX(a)) AS nopk_a, (SELECT COUNT(*) FROM rev FORCE INDEX(b)) AS rev_b;
+ttl_col_v	ttl_hidden_v	part_idx_ik	inst_b	nopk_a	rev_b
+50	50	60	50	50	50
+BEGIN;
+INSERT INTO ttl_col WITH RECURSIVE s(n) AS (SELECT 101 UNION ALL SELECT n + 1 FROM s WHERE n < 130) SELECT n, UNIX_TIMESTAMP(), n FROM s;
+UPDATE ttl_col SET v = v + 1000 WHERE a = 1;
+UPDATE ttl_col SET v = v + 1000 WHERE a = 2;
+DELETE FROM ttl_col WHERE a = 3;
+INSERT INTO ttl_hidden VALUES (101, 101), (102, 102);
+UPDATE ttl_hidden SET v = v + 1000 WHERE a = 1;
+DELETE FROM ttl_hidden WHERE a = 2;
+INSERT INTO part_idx VALUES (0, 1000, 1, 1), (0, 1001, 2, 2), (7, 1002, 3, 3), (7, 1003, 4, 4), (7, 1004, 5, 5), (7, 1005, 6, 6);
+UPDATE part_idx SET k = k + 100 WHERE i = 1 AND j = 11;
+DELETE FROM part_idx WHERE i = 2 AND j = 21;
+INSERT INTO inst VALUES (101, 101, 'new'), (102, 102, DEFAULT);
+UPDATE inst SET c = 'upd' WHERE a = 1;
+UPDATE inst SET b = b + 1000 WHERE a = 2;
+DELETE FROM inst WHERE a = 3;
+INSERT INTO nopk VALUES (101, 101), (102, 102);
+INSERT INTO rev VALUES (101, 101), (102, 102);
+UPDATE rev SET b = b + 1000 WHERE a = 1;
+DELETE FROM rev WHERE a = 2;
+# Round 0: other sessions see none of the open transaction.
+SELECT (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_col) AS ttl_col, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_hidden) AS ttl_hidden, (SELECT CONCAT(COUNT(*), ':', SUM(i * 1000 + j * 7 + k + v)) FROM part_idx) AS part_idx, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b), ':', GROUP_CONCAT(DISTINCT c ORDER BY c)) FROM inst) AS inst, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM nopk) AS nopk, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM rev) AS rev;
+ttl_col	ttl_hidden	part_idx	inst	nopk	rev
+50:10200	50:10200	60:164334	50:10200:dflt	50:10200	50:10200
+SELECT (SELECT COUNT(*) FROM ttl_col FORCE INDEX(v)) AS ttl_col_v, (SELECT COUNT(*) FROM ttl_hidden FORCE INDEX(v)) AS ttl_hidden_v, (SELECT COUNT(*) FROM part_idx FORCE INDEX(ik)) AS part_idx_ik, (SELECT COUNT(*) FROM inst FORCE INDEX(b)) AS inst_b, (SELECT COUNT(*) FROM nopk FORCE INDEX(a)) AS nopk_a, (SELECT COUNT(*) FROM rev FORCE INDEX(b)) AS rev_b;
+ttl_col_v	ttl_hidden_v	part_idx_ik	inst_b	nopk_a	rev_b
+50	50	60	50	50	50
+# Round 0: ROLLBACK restores the initial state.
+ROLLBACK;
+SELECT (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_col) AS ttl_col, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_hidden) AS ttl_hidden, (SELECT CONCAT(COUNT(*), ':', SUM(i * 1000 + j * 7 + k + v)) FROM part_idx) AS part_idx, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b), ':', GROUP_CONCAT(DISTINCT c ORDER BY c)) FROM inst) AS inst, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM nopk) AS nopk, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM rev) AS rev;
+ttl_col	ttl_hidden	part_idx	inst	nopk	rev
+50:10200	50:10200	60:164334	50:10200:dflt	50:10200	50:10200
+SELECT (SELECT COUNT(*) FROM ttl_col FORCE INDEX(v)) AS ttl_col_v, (SELECT COUNT(*) FROM ttl_hidden FORCE INDEX(v)) AS ttl_hidden_v, (SELECT COUNT(*) FROM part_idx FORCE INDEX(ik)) AS part_idx_ik, (SELECT COUNT(*) FROM inst FORCE INDEX(b)) AS inst_b, (SELECT COUNT(*) FROM nopk FORCE INDEX(a)) AS nopk_a, (SELECT COUNT(*) FROM rev FORCE INDEX(b)) AS rev_b;
+ttl_col_v	ttl_hidden_v	part_idx_ik	inst_b	nopk_a	rev_b
+50	50	60	50	50	50
+BEGIN;
+INSERT INTO ttl_col WITH RECURSIVE s(n) AS (SELECT 101 UNION ALL SELECT n + 1 FROM s WHERE n < 130) SELECT n, UNIX_TIMESTAMP(), n FROM s;
+UPDATE ttl_col SET v = v + 1000 WHERE a = 1;
+UPDATE ttl_col SET v = v + 1000 WHERE a = 2;
+DELETE FROM ttl_col WHERE a = 3;
+INSERT INTO ttl_hidden VALUES (101, 101), (102, 102);
+UPDATE ttl_hidden SET v = v + 1000 WHERE a = 1;
+DELETE FROM ttl_hidden WHERE a = 2;
+INSERT INTO part_idx VALUES (0, 1000, 1, 1), (0, 1001, 2, 2), (7, 1002, 3, 3), (7, 1003, 4, 4), (7, 1004, 5, 5), (7, 1005, 6, 6);
+UPDATE part_idx SET k = k + 100 WHERE i = 1 AND j = 11;
+DELETE FROM part_idx WHERE i = 2 AND j = 21;
+INSERT INTO inst VALUES (101, 101, 'new'), (102, 102, DEFAULT);
+UPDATE inst SET c = 'upd' WHERE a = 1;
+UPDATE inst SET b = b + 1000 WHERE a = 2;
+DELETE FROM inst WHERE a = 3;
+INSERT INTO nopk VALUES (101, 101), (102, 102);
+INSERT INTO rev VALUES (101, 101), (102, 102);
+UPDATE rev SET b = b + 1000 WHERE a = 1;
+DELETE FROM rev WHERE a = 2;
+# Round 1: other sessions see none of the open transaction.
+SELECT (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_col) AS ttl_col, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_hidden) AS ttl_hidden, (SELECT CONCAT(COUNT(*), ':', SUM(i * 1000 + j * 7 + k + v)) FROM part_idx) AS part_idx, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b), ':', GROUP_CONCAT(DISTINCT c ORDER BY c)) FROM inst) AS inst, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM nopk) AS nopk, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM rev) AS rev;
+ttl_col	ttl_hidden	part_idx	inst	nopk	rev
+50:10200	50:10200	60:164334	50:10200:dflt	50:10200	50:10200
+SELECT (SELECT COUNT(*) FROM ttl_col FORCE INDEX(v)) AS ttl_col_v, (SELECT COUNT(*) FROM ttl_hidden FORCE INDEX(v)) AS ttl_hidden_v, (SELECT COUNT(*) FROM part_idx FORCE INDEX(ik)) AS part_idx_ik, (SELECT COUNT(*) FROM inst FORCE INDEX(b)) AS inst_b, (SELECT COUNT(*) FROM nopk FORCE INDEX(a)) AS nopk_a, (SELECT COUNT(*) FROM rev FORCE INDEX(b)) AS rev_b;
+ttl_col_v	ttl_hidden_v	part_idx_ik	inst_b	nopk_a	rev_b
+50	50	60	50	50	50
+# Round 1: COMMIT keeps every change.
+COMMIT;
+SELECT (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_col) AS ttl_col, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + v)) FROM ttl_hidden) AS ttl_hidden, (SELECT CONCAT(COUNT(*), ':', SUM(i * 1000 + j * 7 + k + v)) FROM part_idx) AS part_idx, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b), ':', GROUP_CONCAT(DISTINCT c ORDER BY c)) FROM inst) AS inst, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM nopk) AS nopk, (SELECT CONCAT(COUNT(*), ':', SUM(a * 7 + b)) FROM rev) AS rev;
+ttl_col	ttl_hidden	part_idx	inst	nopk	rev
+79:39896	51:12808	65:232413	51:12800:dflt,new,upd	52:11824	51:12808
+SELECT (SELECT COUNT(*) FROM ttl_col FORCE INDEX(v)) AS ttl_col_v, (SELECT COUNT(*) FROM ttl_hidden FORCE INDEX(v)) AS ttl_hidden_v, (SELECT COUNT(*) FROM part_idx FORCE INDEX(ik)) AS part_idx_ik, (SELECT COUNT(*) FROM inst FORCE INDEX(b)) AS inst_b, (SELECT COUNT(*) FROM nopk FORCE INDEX(a)) AS nopk_a, (SELECT COUNT(*) FROM rev FORCE INDEX(b)) AS rev_b;
+ttl_col_v	ttl_hidden_v	part_idx_ik	inst_b	nopk_a	rev_b
+79	51	65	51	52	51
+CHECK TABLE ttl_col, ttl_hidden, part_idx, inst, nopk, rev;
+Table	Op	Msg_type	Msg_text
+test.ttl_col	check	status	OK
+test.ttl_hidden	check	status	OK
+test.part_idx	check	status	OK
+test.inst	check	status	OK
+test.nopk	check	status	OK
+test.rev	check	status	OK
+DROP TABLE ttl_col, ttl_hidden, part_idx, inst, nopk, rev;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_instant;
