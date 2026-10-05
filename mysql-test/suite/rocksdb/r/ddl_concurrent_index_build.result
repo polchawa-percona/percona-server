@@ -1,0 +1,142 @@
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE t3 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t3 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE t4 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t4 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE r1 (pk INT PRIMARY KEY COMMENT 'cfname=rev:cc3r', a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO r1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE r2 (pk INT PRIMARY KEY COMMENT 'cfname=rev:cc3r', a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO r2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+# S1: two builds in the same CF, both paused before ingest, released in reverse order
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p2 WAIT_FOR g2';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p2';
+SET DEBUG_SYNC = 'now SIGNAL g2';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SELECT INDEX_NUMBER INTO @t1ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t1' AND INDEX_NAME='ka';
+SELECT INDEX_NUMBER INTO @t2ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t2' AND INDEX_NAME='ka';
+SELECT @t2ka - @t1ka AS id_gap;
+id_gap
+1
+# S2: build paused before ingest; DML + flush + manual compaction of the CF meanwhile
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t3 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+UPDATE t4 SET a = a + 1 WHERE pk <= 1000;
+DELETE FROM t4 WHERE pk > 2900;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t4 SET a = a - 1 WHERE pk <= 1000;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+# S3: drop of the adjacent lower index id (DeleteRange) while the next build waits before ingest
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+ALTER TABLE t4 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t4 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+# (t4 is MDL-locked by c1: drop on t2 instead, whose ka is a lower id in the same CF)
+ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SELECT INDEX_NUMBER INTO @t4kb FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t4' AND INDEX_NAME='kb';
+SELECT INDEX_NUMBER INTO @t4ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t4' AND INDEX_NAME='ka';
+SELECT @t4ka - @t4kb AS id_gap;
+id_gap
+1
+# S3b: true adjacency: build index N, drop it with DeleteRange while index N+1 waits before ingest
+ALTER TABLE t3 ADD INDEX kx(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SELECT INDEX_NUMBER INTO @t3kx FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t3' AND INDEX_NAME='kx';
+ALTER TABLE t3 DROP INDEX kx, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SELECT INDEX_NUMBER INTO @t1kb FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t1' AND INDEX_NAME='kb';
+SELECT @t1kb - @t3kx AS id_gap;
+id_gap
+1
+# S3c: same adjacency in a reverse CF
+ALTER TABLE r2 ADD INDEX kx(b) COMMENT 'cfname=rev:cc3r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE r1 ADD INDEX ka(a) COMMENT 'cfname=rev:cc3r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE r2 DROP INDEX kx, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = OFF;
+# S4: good UNIQUE build paused before ingest while a failing UNIQUE build runs; then the
+#     failing build paused before its merge while a good build runs to the end
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t3 ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t1 ADD UNIQUE INDEX ua(a), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.ua'
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p2 WAIT_FOR g2';
+ALTER TABLE t2 ADD UNIQUE INDEX ua(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p2';
+ALTER TABLE t1 ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g2';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.ua'
+# S5: build paused in the PK scan while another table's build completes and the table is dropped
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t3 ADD INDEX kab(a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t4 ADD INDEX kab(a, b), ALGORITHM=INPLACE;
+CREATE TABLE t5 (pk INT PRIMARY KEY, a INT, KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t5 VALUES (1,1),(2,2),(3,3);
+DROP TABLE t5;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# checks
+# t1.ka matches the primary key
+# t3.ka matches the primary key
+# t4.ka matches the primary key
+# r1.ka matches the primary key
+# t1.kb matches the primary key
+# t3.ub matches the primary key
+# t1.ub matches the primary key
+# t4.kb matches the primary key
+# t3.kab matches the primary key
+# t4.kab matches the primary key
+CHECK TABLE t1, t2, t3, t4, r1, r2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+test.t4	check	status	OK
+test.r1	check	status	OK
+test.r2	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cc3r';
+# data of dropped indexes left in SST files after the drop thread and compaction
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+# restart:--rocksdb_validate_tables=1
+# t1.ka matches the primary key
+CHECK TABLE t1, t2, t3, t4, r1, r2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+test.t4	check	status	OK
+test.r1	check	status	OK
+test.r2	check	status	OK
+DROP TABLE t1, t2, t3, t4, r1, r2;
