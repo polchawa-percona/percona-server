@@ -1,0 +1,62 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+INSERT INTO t1 VALUES (4,4,4);
+UPDATE t1 SET b = b + 10 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	1	11
+2	2	2
+3	3	3
+4	4	4
+SELECT id FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY id;
+id
+1
+2
+3
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at rocksdb_crash_before_finish_create_index during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+INSERT INTO t1 VALUES (4,4,4);
+UPDATE t1 SET b = b + 10 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	1	11
+2	2	2
+3	3	3
+4	4	4
+SELECT id FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY id;
+id
+1
+2
+3
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+DROP TABLE t1;
