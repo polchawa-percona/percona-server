@@ -1,0 +1,64 @@
+# Crash during bulk load (rocksdb_bulk_load = 1).
+#
+# Rows go to temporary SST files that are ingested when the transaction
+# commits (for autocommit, at the end of each statement) or the bulk
+# load of the table ends. A server kill must:
+#  - keep rows of committed bulk-load statements, with a consistent
+#    secondary index,
+#  - for a bulk load inside a transaction that never commits: rocksdb_bulk_load
+#    implies commit-in-the-middle, so rows already committed by internal
+#    batches (every rocksdb_bulk_load_size writes) stay; the test records it,
+#  - remove the temporary SST files at startup,
+# and the tables must be usable for a new bulk load afterwards.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+
+--let ROCKSDB_DIR = `SELECT CONCAT(@@datadir, '/', @@rocksdb_datadir)`
+
+--echo # t1: committed autocommit bulk-load statement
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 20000)
+  SELECT n, n FROM seq;
+
+--echo # t2: bulk load inside a transaction that never commits
+BEGIN;
+INSERT INTO t2
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 20000)
+  SELECT n, n FROM seq;
+
+--source include/kill_and_restart_mysqld.inc
+
+--echo # After recovery
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0;
+SELECT COUNT(*) FROM t2;
+SELECT COUNT(*) FROM t2 FORCE INDEX (k) WHERE k > 0;
+
+--echo # Temporary bulk load files are removed at startup
+--perl
+  my @left = glob("$ENV{'ROCKSDB_DIR'}/*.bulk_load.tmp.sst");
+  print "leftover_tmp_sst_files: " . scalar(@left) . "\n";
+EOF
+
+--echo # The tables are usable for a new bulk load after the crash
+TRUNCATE TABLE t2;
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 20000)
+  SELECT n, n FROM seq;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*), MIN(id), MAX(id) FROM t2;
+SELECT COUNT(*) FROM t2 FORCE INDEX (k) WHERE k > 0;
+CHECK TABLE t1, t2;
+
+DROP TABLE t1, t2;

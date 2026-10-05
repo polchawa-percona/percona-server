@@ -1,0 +1,39 @@
+# Crash durability matrix with the binary log disabled.
+#
+# Without the binary log there is no group commit flush of the RocksDB
+# WAL. With rocksdb_flush_log_at_trx_commit = 1 every commit is synced,
+# so a process kill must not lose any acknowledged commit. With 0 and 2
+# the WAL buffer (manual_wal_flush) is written out only by the
+# background thread, so recent commits may be lost on a process kill;
+# only the invariants are checked for those values.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+if (`SELECT @@log_bin = 1`)
+{
+  --skip Test needs the binary log disabled
+}
+
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, pad VARCHAR(64), KEY k (k))
+  ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--let $rows = 200
+--let $check_binlog = 0
+
+--let $flush_val = 1
+--let $expect_all = 1
+--source suite/rocksdb/include/crash_durability_round.inc
+
+--let $flush_val = 2
+--let $expect_all = 0
+--source suite/rocksdb/include/crash_durability_round.inc
+
+--let $flush_val = 0
+--let $expect_all = 0
+--source suite/rocksdb/include/crash_durability_round.inc
+
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;
