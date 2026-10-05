@@ -41,6 +41,7 @@
 #include "sql/sql_show.h"    // append_identifier
 #include "sql/sql_table.h"   // tablename_to_filename
 #include "sql/thd_raii.h"
+#include "strxmov.h"
 
 #include "sql/dd/dd.h"
 #include "sql/dd/dictionary.h"
@@ -88,27 +89,62 @@ static const char *opt_op_name[] = {
 static PSI_memory_key key_memory_Partition_base_part_ids;
 PSI_file_key key_file_Partition_base_par;
 
-void part_name(char *out_buf, const char *path, const char *parent_elem_name,
-               const char *elem_name) {
-  static const char *sp_prefix = "#SP#";
-  static const size_t sp_prefix_length = 4;
+/**
+  Build the name of a (sub)partition: <path>#P#<part>[#SP#<subpart>].
 
+  @param[out] out_buf           buffer of FN_REFLEN bytes
+  @param      path              table path
+  @param      parent_elem_name  partition name for a subpartition, else nullptr
+  @param      elem_name         (sub)partition name
+
+  @retval false  success
+  @retval true   the name does not fit into FN_REFLEN bytes; out_buf is
+                 set to an empty string
+*/
+[[nodiscard]] static bool part_name(char *out_buf, const char *path,
+                                    const char *parent_elem_name,
+                                    const char *elem_name) {
+  static const char *part_prefix = "#P#";
+  static const char *sp_prefix = "#SP#";
+
+  /* Each identifier can expand up to 5 times in tablename_to_filename(). */
   char part_name[FN_REFLEN];
-  size_t part_name_length = tablename_to_filename(
+  char subpart_name[FN_REFLEN];
+  const size_t part_name_length = tablename_to_filename(
       parent_elem_name ? parent_elem_name : elem_name, part_name, FN_REFLEN);
+  size_t subpart_name_length = 0;
   if (parent_elem_name) {
-    assert(part_name_length + sp_prefix_length < sizeof(part_name));
-    strncat(part_name, sp_prefix, sizeof(part_name) - part_name_length - 1);
-    part_name_length += sp_prefix_length;
-    char subpart_name[FN_REFLEN];
-    size_t subpart_name_length =
+    subpart_name_length =
         tablename_to_filename(elem_name, subpart_name, FN_REFLEN);
-    assert(part_name_length + subpart_name_length < sizeof(part_name));
-    strncat(part_name, subpart_name, sizeof(part_name) - part_name_length - 1);
-    part_name_length += subpart_name_length;
   }
 
-  create_partition_name(out_buf, path, part_name, false);
+  const size_t total_length =
+      strlen(path) + strlen(part_prefix) + part_name_length +
+      (parent_elem_name ? strlen(sp_prefix) + subpart_name_length : 0);
+  if (total_length >= FN_REFLEN) {
+    out_buf[0] = '\0';
+    return true;
+  }
+
+  if (parent_elem_name) {
+    strxmov(out_buf, path, part_prefix, part_name, sp_prefix, subpart_name,
+            NullS);
+  } else {
+    strxmov(out_buf, path, part_prefix, part_name, NullS);
+  }
+  return false;
+}
+
+/**
+  Raise ER_PATH_LENGTH for a (sub)partition whose name is too long.
+*/
+static void report_part_name_too_long(const char *path,
+                                      const char *parent_elem_name,
+                                      const char *elem_name) {
+  std::string name(path);
+  name.append("#P#").append(parent_elem_name ? parent_elem_name : elem_name);
+  if (parent_elem_name) name.append("#SP#").append(elem_name);
+  my_error(ER_PATH_LENGTH, MYF(0), name.c_str());
 }
 
 Parts_share_refs::Parts_share_refs() : num_parts(0), ha_shares(nullptr) {}
@@ -623,9 +659,15 @@ int Partition_base::create(const char *name, TABLE *table_arg,
   if (foreach_partition([&](partition_element *parent_elem,
                             partition_element *part_elem) -> bool {
         char name_buff[FN_REFLEN];
-        part_name(name_buff, path,
-                  parent_elem ? parent_elem->partition_name : nullptr,
-                  part_elem->partition_name);
+        const char *parent_name =
+            parent_elem ? parent_elem->partition_name : nullptr;
+        if (part_name(name_buff, path, parent_name,
+                      part_elem->partition_name)) {
+          report_part_name_too_long(path, parent_name,
+                                    part_elem->partition_name);
+          error = HA_ERR_INTERNAL_ERROR;
+          return false;
+        }
         const char *old_data_file_name = nullptr;
         if (part_elem->data_file_name) {
           old_data_file_name = create_info->data_file_name;
@@ -1291,9 +1333,13 @@ int Partition_base::del_ren_table(const char *from, const char *to,
 
   for (const dd::Partition *dd_part : table_def_from->leaf_partitions()) {
     char name_buff[FN_REFLEN];
-    part_name(name_buff, from_path,
-              dd_part->parent() ? dd_part->parent()->name().c_str() : nullptr,
-              dd_part->name().c_str());
+    const char *parent_name =
+        dd_part->parent() ? dd_part->parent()->name().c_str() : nullptr;
+    if (part_name(name_buff, from_path, parent_name, dd_part->name().c_str())) {
+      report_part_name_too_long(from_path, parent_name,
+                                dd_part->name().c_str());
+      return HA_ERR_INTERNAL_ERROR;
+    }
     from_names.push_back(name_buff);
   }
 
@@ -1301,9 +1347,13 @@ int Partition_base::del_ren_table(const char *from, const char *to,
     for (const dd::Partition *dd_part :
          const_cast<const dd::Table *>(table_def_to)->leaf_partitions()) {
       char name_buff[FN_REFLEN];
-      part_name(name_buff, to_path,
-                dd_part->parent() ? dd_part->parent()->name().c_str() : nullptr,
-                dd_part->name().c_str());
+      const char *parent_name =
+          dd_part->parent() ? dd_part->parent()->name().c_str() : nullptr;
+      if (part_name(name_buff, to_path, parent_name, dd_part->name().c_str())) {
+        report_part_name_too_long(to_path, parent_name,
+                                  dd_part->name().c_str());
+        return HA_ERR_INTERNAL_ERROR;
+      }
       to_names.push_back(name_buff);
     }
 
@@ -1629,9 +1679,15 @@ int Partition_base::open(const char *name, int mode, uint test_if_locked,
   if (!foreach_partition([&](const partition_element *parent_part_elem,
                              const partition_element *part_elem) -> bool {
         char name_buff[FN_REFLEN];
-        part_name(name_buff, name,
-                  parent_part_elem ? parent_part_elem->partition_name : nullptr,
-                  part_elem->partition_name);
+        const char *parent_name =
+            parent_part_elem ? parent_part_elem->partition_name : nullptr;
+        if (part_name(name_buff, name, parent_name,
+                      part_elem->partition_name)) {
+          report_part_name_too_long(name, parent_name,
+                                    part_elem->partition_name);
+          error = HA_ERR_INTERNAL_ERROR;
+          return false;
+        }
 
         if (m_clone_base != nullptr) {
           uint ref_length = (*clone_base_file)->ref_length;
@@ -4133,9 +4189,15 @@ bool Partition_base::commit_inplace_alter_table(
               partition_element *sub_part_elem;
               while ((sub_part_elem = sub_part_it++) != nullptr) {
                 char name[FN_REFLEN];
-                create_subpartition_name(name, table->s->normalized_path.str,
-                                         part_elem->partition_name,
-                                         sub_part_elem->partition_name);
+                if (part_name(name, table->s->normalized_path.str,
+                              part_elem->partition_name,
+                              sub_part_elem->partition_name)) {
+                  report_part_name_too_long(table->s->normalized_path.str,
+                                            part_elem->partition_name,
+                                            sub_part_elem->partition_name);
+                  error = HA_ERR_INTERNAL_ERROR;
+                  goto end;
+                }
                 error = (*file)->ha_external_lock(get_thd(), F_UNLCK);
                 if (error) goto end;
                 error = (*file)->ha_delete_table(name, old_table_def);
@@ -4147,8 +4209,13 @@ bool Partition_base::commit_inplace_alter_table(
               }
             } else {
               char name[FN_REFLEN];
-              create_partition_name(name, table->s->normalized_path.str,
-                                    part_elem->partition_name, false);
+              if (part_name(name, table->s->normalized_path.str, nullptr,
+                            part_elem->partition_name)) {
+                report_part_name_too_long(table->s->normalized_path.str,
+                                          nullptr, part_elem->partition_name);
+                error = HA_ERR_INTERNAL_ERROR;
+                goto end;
+              }
               error = (*file)->ha_external_lock(get_thd(), F_UNLCK);
               if (error) goto end;
               error = (*file)->ha_delete_table(name, old_table_def);
@@ -4209,9 +4276,16 @@ bool Partition_base::commit_inplace_alter_table(
                     &altered_table->s->ha_share);
                 // construct sub parition name
                 char name[FN_REFLEN];
-                create_subpartition_name(name, table->s->normalized_path.str,
-                                         part_elem->partition_name,
-                                         sub_part_elem->partition_name);
+                if (part_name(name, table->s->normalized_path.str,
+                              part_elem->partition_name,
+                              sub_part_elem->partition_name)) {
+                  report_part_name_too_long(table->s->normalized_path.str,
+                                            part_elem->partition_name,
+                                            sub_part_elem->partition_name);
+                  error = HA_ERR_INTERNAL_ERROR;
+                  close_new_partitions(/* delete new partition */ true);
+                  goto end;
+                }
                 // save sub partition name for recovery
                 m_new_partitions_name[part_index + sub_part_index] =
                     (char *)altered_table->s->mem_root.Alloc(FN_REFLEN *
@@ -4269,8 +4343,14 @@ bool Partition_base::commit_inplace_alter_table(
                   &altered_table->s->ha_share);
               // Create and init partition
               char name[FN_REFLEN];
-              create_partition_name(name, table->s->normalized_path.str,
-                                    part_elem->partition_name, false);
+              if (part_name(name, table->s->normalized_path.str, nullptr,
+                            part_elem->partition_name)) {
+                report_part_name_too_long(table->s->normalized_path.str,
+                                          nullptr, part_elem->partition_name);
+                error = HA_ERR_INTERNAL_ERROR;
+                close_new_partitions(/* delete new partition */ true);
+                goto end;
+              }
               // save parition name for error case
               m_new_partitions_name[part_index] =
                   (char *)altered_table->s->mem_root.Alloc(FN_REFLEN *

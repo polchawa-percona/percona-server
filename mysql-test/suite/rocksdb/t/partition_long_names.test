@@ -1,0 +1,60 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Partition and subpartition names that do not fit into the internal
+--echo # name buffer (FN_REFLEN) once encoded must be rejected, and names that
+--echo # fit must stay distinct.
+--echo #
+
+# '中' is encoded as @4e2d (5 bytes) in file names.
+--let $p64 = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中
+--let $s64 = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中s
+--let $s30a = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中a
+--let $s30b = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中b
+--let $t10 = 中中中中中中中中中中
+
+SET NAMES utf8mb4;
+
+--echo # Partition and subpartition names of 64 characters: too long.
+--replace_regex /The path specified for .* is too long/The path specified for PATH is too long/
+--error ER_PATH_LENGTH
+eval CREATE TABLE t1 (i INT) ENGINE=ROCKSDB
+  PARTITION BY LIST(MOD(i, 2))
+  SUBPARTITION BY HASH(i DIV 2)
+  (PARTITION $p64 VALUES IN (0) (SUBPARTITION $s64, SUBPARTITION sp2),
+   PARTITION p2 VALUES IN (1) (SUBPARTITION sp3, SUBPARTITION sp4));
+
+SHOW TABLES;
+
+--echo # Long names that fit, with subpartitions differing in the last character.
+eval CREATE TABLE t1 (i INT) ENGINE=ROCKSDB
+  PARTITION BY LIST(MOD(i, 2))
+  SUBPARTITION BY HASH(i DIV 2)
+  (PARTITION $p64 VALUES IN (0) (SUBPARTITION $s30a, SUBPARTITION $s30b),
+   PARTITION p2 VALUES IN (1) (SUBPARTITION sp3, SUBPARTITION sp4));
+
+INSERT INTO t1 VALUES (0), (2), (4), (6), (8), (10), (12), (14), (16), (18),
+                      (1), (3), (5);
+--echo # Every row of partition 0 is in exactly one of its two subpartitions,
+--echo # and both subpartitions are used.
+eval SELECT COUNT(*) INTO @a FROM t1 PARTITION ($s30a);
+eval SELECT COUNT(*) INTO @b FROM t1 PARTITION ($s30b);
+SELECT @a > 0, @b > 0, @a + @b;
+eval SELECT COUNT(*) FROM t1 PARTITION ($p64);
+SELECT COUNT(*) FROM t1;
+
+--source include/restart_mysqld.inc
+SET NAMES utf8mb4;
+eval SELECT COUNT(*) FROM t1 PARTITION ($s30a);
+eval SELECT COUNT(*) FROM t1 PARTITION ($s30b);
+SELECT COUNT(*) FROM t1;
+
+--echo # Renaming the table so that partition names become too long fails
+--echo # and leaves the table intact.
+--replace_regex /The path specified for .* is too long/The path specified for PATH is too long/
+--error ER_PATH_LENGTH
+eval RENAME TABLE t1 TO $t10;
+SHOW TABLES;
+SELECT COUNT(*) FROM t1;
+
+DROP TABLE t1;
