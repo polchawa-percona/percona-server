@@ -1,0 +1,46 @@
+CREATE TABLE acct (id INT PRIMARY KEY, bal INT NOT NULL, grp INT NOT NULL, KEY grp (grp)) ENGINE=ROCKSDB;
+INSERT INTO acct WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 99) SELECT n, 0, n % 10 FROM s;
+CREATE TABLE pending (id INT PRIMARY KEY, v VARCHAR(50)) ENGINE=ROCKSDB;
+# An open transaction whose changes are written before COMMIT under
+# write_unprepared. None of them may appear in the dump.
+BEGIN;
+INSERT INTO pending VALUES (1, 'uncommitted'), (2, 'uncommitted');
+UPDATE acct SET bal = bal + 1000000 WHERE id = 0;
+DELETE FROM acct WHERE id = 99;
+# A background client commits balanced transfers while the dump runs.
+# Wait for the background client to finish.
+# Restore the dump into another schema and check it.
+CREATE DATABASE restored;
+include/assert.inc [Dumped balances sum to zero]
+include/assert.inc [All 100 accounts are in the dump]
+include/assert.inc [No uncommitted row in the dump]
+include/assert.inc [Uncommitted balance change not in the dump]
+include/assert.inc [Restored secondary index matches primary key]
+# The live table: still balanced, open transaction still invisible.
+include/assert.inc [The background client committed transfers]
+include/assert.inc [Live balances sum to zero]
+include/assert.inc [Open transaction invisible to other sessions]
+# A consistent snapshot taken now does not see the open transaction,
+# and still sees the old state after the open transaction commits.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*), SUM(bal) FROM acct;
+COUNT(*)	SUM(bal)
+100	0
+COMMIT;
+SELECT COUNT(*), SUM(bal) FROM acct;
+COUNT(*)	SUM(bal)
+100	0
+SELECT COUNT(*) FROM pending;
+COUNT(*)
+0
+COMMIT;
+SELECT COUNT(*) FROM pending;
+COUNT(*)
+2
+include/assert.inc [Committed changes visible after the snapshot ends]
+CHECK TABLE acct, pending;
+Table	Op	Msg_type	Msg_text
+test.acct	check	status	OK
+test.pending	check	status	OK
+DROP DATABASE restored;
+DROP TABLE acct, pending;
