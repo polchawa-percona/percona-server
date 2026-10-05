@@ -1,0 +1,36 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE ti (a INT PRIMARY KEY, b INT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 1);
+INSERT INTO ti VALUES (1, 1);
+SET SESSION binlog_format = STATEMENT;
+INSERT INTO t1 VALUES (2, 2);
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+UPDATE t1 SET b = 10 WHERE a = 1;
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+DELETE FROM t1 WHERE a = 1;
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+REPLACE INTO t1 VALUES (1, 5);
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+# Reads are allowed
+SELECT * FROM t1;
+a	b
+1	1
+# InnoDB writes are allowed
+INSERT INTO ti VALUES (2, 2);
+# A multi-table UPDATE touching MyRocks is refused as a whole
+UPDATE t1, ti SET t1.b = 7, ti.b = 7 WHERE t1.a = ti.a;
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+SELECT * FROM ti ORDER BY a;
+a	b
+1	1
+2	2
+SET SESSION binlog_format = MIXED;
+INSERT INTO t1 VALUES (3, 3);
+ERROR HY000: Can't execute updates on master with binlog_format != ROW.
+SET SESSION binlog_format = ROW;
+INSERT INTO t1 VALUES (4, 4);
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+4	4
+DROP TABLE t1, ti;

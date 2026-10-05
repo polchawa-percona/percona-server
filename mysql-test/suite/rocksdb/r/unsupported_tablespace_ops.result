@@ -1,0 +1,55 @@
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+# DISCARD / IMPORT TABLESPACE
+ALTER TABLE t1 DISCARD TABLESPACE;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+ALTER TABLE t1 IMPORT TABLESPACE;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+# FLUSH TABLES ... FOR EXPORT
+FLUSH TABLES t1 FOR EXPORT;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+UNLOCK TABLES;
+# Built-in InnoDB tablespaces
+ALTER TABLE t1 TABLESPACE innodb_system;
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+ALTER TABLE t1 TABLESPACE innodb_file_per_table;
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB TABLESPACE=innodb_system;
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB TABLESPACE=innodb_file_per_table;
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+# Per-table DATA DIRECTORY
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB DATA DIRECTORY='/tmp';
+ERROR HY000: Got error 501 'Specifying DATA DIRECTORY for an individual table is not supported.' from ROCKSDB
+# The table is unchanged
+SELECT * FROM t1;
+a
+1
+2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Per-partition DISCARD / IMPORT
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB
+PARTITION BY HASH (a) PARTITIONS 2;
+INSERT INTO t1 VALUES (1), (2), (3);
+ALTER TABLE t1 DISCARD PARTITION p0 TABLESPACE;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+ALTER TABLE t1 IMPORT PARTITION p0 TABLESPACE;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+SELECT * FROM t1 ORDER BY a;
+a
+1
+2
+3
+DROP TABLE t1;
+# Temporary tables need rocksdb_enable_tmp_table (OFF by default);
+# rocksdb.tmp_table covers the enabled case.
+SELECT @@global.rocksdb_enable_tmp_table;
+@@global.rocksdb_enable_tmp_table
+0
+CREATE TEMPORARY TABLE tt (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+ERROR HY000: Table storage engine 'ROCKSDB' does not support the create option 'TEMPORARY'
+DROP TEMPORARY TABLE tt;
+ERROR 42S02: Unknown table 'test.tt'

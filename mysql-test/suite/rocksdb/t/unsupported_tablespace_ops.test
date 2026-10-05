@@ -1,0 +1,66 @@
+#
+# MyRocks negative tests: tablespace and file-level operations.
+#
+# Statements are taken from the InnoDB suite, rewritten to ENGINE=ROCKSDB:
+#   DISCARD/IMPORT TABLESPACE: innodb.alter_missing_tablespace, innodb.auto_increment
+#   FLUSH TABLES ... FOR EXPORT: innodb.auto_increment, innodb.bug34307874
+#   TABLESPACE=:  innodb.create_tablespace
+#   TEMPORARY:    innodb.create_tablespace, innodb.alter_kill
+#
+# rocksdb.create_table already covers CREATE TABLESPACE ... ENGINE=ROCKSDB,
+# TABLESPACE=<general tablespace>, ENCRYPTION and COMPRESSION.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+
+--echo # DISCARD / IMPORT TABLESPACE
+--error ER_ILLEGAL_HA
+ALTER TABLE t1 DISCARD TABLESPACE;
+--error ER_ILLEGAL_HA
+ALTER TABLE t1 IMPORT TABLESPACE;
+
+--echo # FLUSH TABLES ... FOR EXPORT
+--error ER_ILLEGAL_HA
+FLUSH TABLES t1 FOR EXPORT;
+UNLOCK TABLES;
+
+--echo # Built-in InnoDB tablespaces
+--error ER_NOT_SUPPORTED_YET
+ALTER TABLE t1 TABLESPACE innodb_system;
+--error ER_NOT_SUPPORTED_YET
+ALTER TABLE t1 TABLESPACE innodb_file_per_table;
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB TABLESPACE=innodb_system;
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB TABLESPACE=innodb_file_per_table;
+
+--echo # Per-table DATA DIRECTORY
+--error ER_GET_ERRMSG
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB DATA DIRECTORY='/tmp';
+
+--echo # The table is unchanged
+SELECT * FROM t1;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo # Per-partition DISCARD / IMPORT
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB
+  PARTITION BY HASH (a) PARTITIONS 2;
+INSERT INTO t1 VALUES (1), (2), (3);
+--error ER_ILLEGAL_HA
+ALTER TABLE t1 DISCARD PARTITION p0 TABLESPACE;
+--error ER_ILLEGAL_HA
+ALTER TABLE t1 IMPORT PARTITION p0 TABLESPACE;
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1;
+
+--echo # Temporary tables need rocksdb_enable_tmp_table (OFF by default);
+--echo # rocksdb.tmp_table covers the enabled case.
+SELECT @@global.rocksdb_enable_tmp_table;
+--error ER_ILLEGAL_HA_CREATE_OPTION
+CREATE TEMPORARY TABLE tt (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--error ER_BAD_TABLE_ERROR
+DROP TEMPORARY TABLE tt;
