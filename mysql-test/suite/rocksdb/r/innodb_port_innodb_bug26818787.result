@@ -1,0 +1,95 @@
+SET DEBUG_SYNC='reset';
+#
+# Index without virtual columns
+#
+CREATE TABLE t1 (
+id INT UNIQUE NOT NULL,
+a INT,
+b BLOB,
+ag INT GENERATED ALWAYS AS (a) VIRTUAL,
+PRIMARY KEY(id),
+INDEX bugidx (b(100),a)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (id, a, b) VALUES (1001, 1, REPEAT('a', 50001));
+INSERT INTO t1 (id, a, b) VALUES (1002, 2, REPEAT('b', 50002));
+DELETE FROM t1 WHERE id = 1001;
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL s1 WAIT_FOR s2 TIMEOUT 10';
+INSERT INTO t1 (id, a, b) VALUES (1001, 1, REPEAT('z', 60001));
+SET DEBUG_SYNC='now WAIT_FOR s1';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL s2';
+SET DEBUG_SYNC='reset';
+SET DEBUG_SYNC='reset';
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 FORCE INDEX (bugidx) ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+SELECT id FROM t1 FORCE INDEX (id) ORDER BY id;
+id
+1001
+1002
+SELECT id, LENGTH(b) FROM t1 FORCE INDEX (bugidx) WHERE b LIKE 'z%';
+id	LENGTH(b)
+1001	60001
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 FORCE INDEX (bugidx) ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# Index with a virtual column
+#
+CREATE TABLE t1 (
+id INT UNIQUE NOT NULL,
+a INT,
+b BLOB,
+ag INT GENERATED ALWAYS AS (a) VIRTUAL,
+PRIMARY KEY(id),
+INDEX bugidx (b(100),ag)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (id, a, b) VALUES (1001, 1, REPEAT('a', 50001));
+INSERT INTO t1 (id, a, b) VALUES (1002, 2, REPEAT('b', 50002));
+DELETE FROM t1 WHERE id = 1001;
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL s1 WAIT_FOR s2 TIMEOUT 10';
+INSERT INTO t1 (id, a, b) VALUES (1001, 1, REPEAT('z', 60001));
+SET DEBUG_SYNC='now WAIT_FOR s1';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL s2';
+SET DEBUG_SYNC='reset';
+SET DEBUG_SYNC='reset';
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 FORCE INDEX (bugidx) ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+SELECT id FROM t1 FORCE INDEX (id) ORDER BY id;
+id
+1001
+1002
+SELECT id, LENGTH(b) FROM t1 FORCE INDEX (bugidx) WHERE b LIKE 'z%';
+id	LENGTH(b)
+1001	60001
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT id, a, ag, LEFT(b, 3), LENGTH(b) FROM t1 FORCE INDEX (bugidx) ORDER BY id;
+id	a	ag	LEFT(b, 3)	LENGTH(b)
+1001	1	1	zzz	60001
+1002	2	2	bbb	50002
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

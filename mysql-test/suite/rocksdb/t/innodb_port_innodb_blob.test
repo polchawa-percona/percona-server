@@ -1,0 +1,217 @@
+#
+# Port of innodb.innodb-blob (mysql-test/suite/innodb/t/innodb-blob.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - --innodb_page_size option dropped
+#   - InnoDB sync points that pause an UPDATE while it writes off-page columns
+#     (before_row_upd_extern, after_row_upd_extern, blob_write_middle) are replaced by
+#     the MyRocks sync points rocksdb.update_write_row_after_unique_check (before the row
+#     is written) and rocksdb.encode_value_slice (while the new row value is encoded;
+#     this point exists only with rocksdb_store_row_debug_checksums=ON, set in -master.opt)
+#   - InnoDB blocks readers behind the page latch; MyRocks readers never block on a
+#     writer, so the concurrent SELECT is expected to return the old values at once and
+#     is recorded instead of being checked for blocking
+#   - READ UNCOMMITTED is not supported by MyRocks; the reading session uses READ
+#     COMMITTED, so it never sees the uncommitted rows
+#   - the InnoDB-only debug keywords row_ins_extern_checkpoint and
+#     row_upd_extern_checkpoint are dropped; the server-level crash point
+#     crash_commit_before is kept
+#   - runs at READ COMMITTED because MyRocks rejects gap locks at REPEATABLE READ
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b TEXT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t3 (a INT PRIMARY KEY, b TEXT, c TEXT) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES (1,REPEAT('a',30000)),(2,REPEAT('b',40000));
+BEGIN;
+UPDATE t1 SET a=a+2;
+ROLLBACK;
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL have_latch WAIT_FOR go1';
+BEGIN;
+--send
+UPDATE t1 SET b=CONCAT(b,'foo');
+
+connect (con1,localhost,root,,);
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+
+# MyRocks readers do not wait for the writer: the old values are returned.
+SELECT a, RIGHT(b,20) FROM t1;
+
+SET DEBUG_SYNC='now SIGNAL go1';
+
+connection default;
+reap;
+SELECT a, RIGHT(b,20) FROM t1;
+ROLLBACK;
+SELECT a, RIGHT(b,20) FROM t1;
+
+BEGIN;
+INSERT INTO t1 VALUES (3,REPEAT('c',50000));
+
+connection con1;
+SELECT @@transaction_isolation;
+
+# The uncommitted row is not visible.
+SELECT a, RIGHT(b,20) FROM t1;
+SELECT a FROM t1;
+
+# Request a crash, and restart the server.
+SET DEBUG='+d,crash_commit_before';
+# Write file to make mysql-test-run.pl restart the server
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--error 2013
+INSERT INTO t2 VALUES (42);
+
+disconnect con1;
+connection default;
+# This connection should notice the crash as well.
+--error 2013
+SELECT 1;
+
+--source include/wait_until_connected_again.inc
+
+CHECK TABLE t1;
+SELECT a, RIGHT(b,20) FROM t1;
+SELECT * FROM t2;
+
+INSERT INTO t3 VALUES
+       (1,REPEAT('d',7000),REPEAT('e',100)),
+       (2,REPEAT('g',7000),REPEAT('h',100));
+SET DEBUG_SYNC='rocksdb.encode_value_slice SIGNAL go_sel WAIT_FOR go_upd';
+--send
+UPDATE t3 SET c=REPEAT('f',3000) WHERE a=1;
+
+--echo # Connection con1:
+connect (con1,localhost,root,,);
+SET DEBUG_SYNC='now WAIT_FOR go_sel';
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+set debug_sync='now SIGNAL go_upd';
+
+--echo # Connection default:
+connection default;
+--echo # reap UPDATE t3 SET c=REPEAT('f',3000) WHERE a=1;
+reap;
+
+--echo # Connection con1:
+connection con1;
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+
+disconnect con1;
+
+connection default;
+CHECK TABLE t1,t2,t3;
+
+connect (con2,localhost,root,,);
+BEGIN;
+INSERT INTO t2 VALUES (347);
+connection default;
+
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL have_latch WAIT_FOR crash';
+--send
+UPDATE t3 SET c=REPEAT('i',3000) WHERE a=2;
+
+connection con2;
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+
+# Check that the above UPDATE is waiting at the sync point
+--disable_warnings
+SELECT info FROM information_schema.processlist
+WHERE state = 'debug sync point: rocksdb.update_write_row_after_unique_check';
+--enable_warnings
+
+# Request a crash, and restart the server.
+SET DEBUG='+d,crash_commit_before';
+# Write file to make mysql-test-run.pl restart the server
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--error 2013
+COMMIT;
+
+disconnect con2;
+connection default;
+# This connection should notice the crash as well.
+--error 2013
+reap;
+
+--source include/wait_until_connected_again.inc
+
+CHECK TABLE t1,t2,t3;
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+SELECT a FROM t3;
+
+connect (con2,localhost,root,,);
+BEGIN;
+INSERT INTO t2 VALUES (33101);
+connection default;
+
+SET DEBUG_SYNC='rocksdb.encode_value_slice SIGNAL have_latch WAIT_FOR crash';
+--send
+UPDATE t3 SET c=REPEAT('j',3000) WHERE a=2;
+
+connection con2;
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+
+# Check that the above UPDATE is waiting at the sync point
+--disable_warnings
+SELECT info FROM information_schema.processlist
+WHERE state = 'debug sync point: rocksdb.encode_value_slice';
+--enable_warnings
+
+# Request a crash, and restart the server.
+SET DEBUG='+d,crash_commit_before';
+# Write file to make mysql-test-run.pl restart the server
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--error 2013
+COMMIT;
+
+disconnect con2;
+connection default;
+# This connection should notice the crash as well.
+--error 2013
+reap;
+
+--source include/wait_until_connected_again.inc
+
+CHECK TABLE t1,t2,t3;
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+SELECT a FROM t3;
+
+SELECT * FROM t2;
+
+DROP TABLE t1,t2,t3;
+
+
+--echo #
+--echo # Bug #29866408	SERVER CRASHES WHEN ADDING LONGTEXT COLUMN
+--echo #
+
+CREATE TABLE t1 (
+  id int(11) COLLATE utf8mb4_unicode_ci NOT NULL,
+  data longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY unq_id (id)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO t1 VALUES (1,'');
+SET @old_mode=@@sql_mode;
+SET GLOBAL SQL_MODE="";
+
+let $num = 3;
+while($num)
+{
+connect (con1,localhost,root,,);
+connection con1;
+eval ALTER TABLE t1 ADD COLUMN d$num DATETIME NOT NULL;
+disconnect con1;
+dec $num;
+}
+connection default;
+SET GLOBAL SQL_MODE=@old_mode;
+SELECT * FROM t1;
+CHECK TABLE t1;
+DROP TABLE t1;

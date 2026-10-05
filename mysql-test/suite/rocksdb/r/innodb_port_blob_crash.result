@@ -1,0 +1,168 @@
+#
+# Bug #16963396 INNODB: USE OF LARGE EXTERNALLY-STORED FIELDS MAKES
+# CRASH RECOVERY LOSE DATA
+#
+#
+# Insert Operation - Crash Test
+# Fresh insert with blobs
+#
+CREATE TABLE t1 (a BIGINT PRIMARY KEY, b LONGBLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 (a, b) VALUES (1, repeat('^', 40000));
+INSERT INTO t1 (a, b) VALUES (2, '2');
+INSERT INTO t1 (a, b) VALUES (3, '3');
+INSERT INTO t1 (a, b) VALUES (4, '4');
+INSERT INTO t1 (a, b) VALUES (5, '5');
+begin;
+INSERT INTO t1 (a, b) VALUES (6, REPEAT('a', 4*1024*1024));
+# Kill and restart
+SELECT a, right(b, 50) FROM t1;
+a	right(b, 50)
+1	^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2	2
+3	3
+4	4
+5	5
+#
+# UPDATE Operation - Crash Test
+# Update of a small value to a large blob.
+#
+begin;
+UPDATE t1 set b = REPEAT('a', 4*1024*1024) where a = 5 ;
+# Kill and restart
+SELECT a, right(b, 50) FROM t1;
+a	right(b, 50)
+1	^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2	2
+3	3
+4	4
+5	5
+#
+# UPDATE Operation - Crash Test
+# Update of blob column to blob.
+#
+begin;
+UPDATE t1 set b = REPEAT('$', 50000) where a = 1 ;
+# Kill and restart
+SELECT a, right(b, 50) FROM t1;
+a	right(b, 50)
+1	^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2	2
+3	3
+4	4
+5	5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# Kill during an uncommitted multi-statement UPDATE that shrinks large
+# values; the rollback on recovery must restore the old values.
+#
+create table t2 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+insert into t2 values (10, repeat('.', 40000), repeat('?', 40000));
+start transaction;
+update t2 set f2 = '=';
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	=	????????????????????
+update t2 set f3 = '&';
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	=	&
+# Kill and restart
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+select f1, right(f2, 20), right(f3, 20) from t2 force index (f2);
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Committed large UPDATE followed by a kill: the new value must survive
+#
+insert into t2 values (20, repeat('.', 40000), repeat('?', 40000));
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+20	....................	????????????????????
+start transaction;
+update t2 set f2 = repeat('$', 60000) where f1 = 20;
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+20	$$$$$$$$$$$$$$$$$$$$	????????????????????
+commit;
+# Kill and restart
+select f1, right(f2, 20), right(f3, 20) from t2;
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+20	$$$$$$$$$$$$$$$$$$$$	????????????????????
+select f1, right(f2, 20), right(f3, 20) from t2 force index (f2);
+f1	right(f2, 20)	right(f3, 20)
+10	....................	????????????????????
+20	$$$$$$$$$$$$$$$$$$$$	????????????????????
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+drop table t2;
+#
+# Insert Operation - Crash Test (former compressed-table round)
+# fresh insert with BLOBs
+#
+create table t3 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+# Kill and restart
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+select f1, right(f2, 30), right(f3, 20) from t3;
+f1	right(f2, 30)	right(f3, 20)
+check table t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+#
+# Update Operation - Crash Test
+# update of a non-BLOB-sized value so that it becomes large
+#
+insert into t3 values (2, repeat('!', 30), repeat('+', 30));
+begin;
+UPDATE t3 set f2 = repeat('>', 40000) where f1 = 2;
+# Kill and restart
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+2	30	30
+select f1, right(f2, 30), right(f3, 20) from t3;
+f1	right(f2, 30)	right(f3, 20)
+2	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	++++++++++++++++++++
+select f1, length(f2), length(f3) from t3 force index (f2);
+f1	length(f2)	length(f3)
+2	30	30
+check table t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+#
+# Update Operation - Crash Test
+# update blob to blob
+#
+insert into t3 values (3, repeat('%', 40000), repeat('~', 40000));
+begin;
+UPDATE t3 set f2 = concat(f2, repeat(',', 10)) where f1 = 3;
+# Kill and restart
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+2	30	30
+3	40000	40000
+select f1, right(f2, 30), right(f3, 20) from t3;
+f1	right(f2, 30)	right(f3, 20)
+2	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	++++++++++++++++++++
+3	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	~~~~~~~~~~~~~~~~~~~~
+select f1, length(f2), length(f3) from t3 force index (f2);
+f1	length(f2)	length(f3)
+2	30	30
+3	40000	40000
+check table t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;

@@ -1,0 +1,157 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET @pad = REPEAT('abcdefghijklmnopqrstuvwxyz1234', 6006);
+SET @doc = CONCAT('["Sven", "', @pad, '", {"k": "v", "n": 1}]');
+#
+# 1. Update, then rollback (json_small_partial_update_04)
+#
+CREATE TABLE t (f1 INT, j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, @doc);
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+f1	JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)
+1	"Sven"	180212
+START TRANSACTION;
+UPDATE t SET f1 = 2, j1 = JSON_SET(j1, '$[0]', 'Knut');
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+f1	JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)
+2	"Knut"	180212
+ROLLBACK;
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1), CRC32(j1->>'$[1]') = CRC32(@pad) AS pad_ok FROM t;
+f1	JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)	pad_ok
+1	"Sven"	180212	1
+DROP TABLE t;
+#
+# 2. Ten updates in one transaction, then rollback (json_small_partial_update_05)
+#
+CREATE TABLE t (f1 INT, j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (0, REPLACE(@doc, 'Sven', 'Init00'));
+START TRANSACTION;
+UPDATE t SET f1 = 1, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(1, 2, '0')));
+UPDATE t SET f1 = 2, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(2, 2, '0')));
+UPDATE t SET f1 = 3, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(3, 2, '0')));
+UPDATE t SET f1 = 4, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(4, 2, '0')));
+UPDATE t SET f1 = 5, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(5, 2, '0')));
+UPDATE t SET f1 = 6, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(6, 2, '0')));
+UPDATE t SET f1 = 7, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(7, 2, '0')));
+UPDATE t SET f1 = 8, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(8, 2, '0')));
+UPDATE t SET f1 = 9, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(9, 2, '0')));
+UPDATE t SET f1 = 10, j1 = JSON_SET(j1, '$[0]', CONCAT('Init', LPAD(10, 2, '0')));
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+f1	JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)
+10	"Init10"	180214
+ROLLBACK;
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1), CRC32(j1->>'$[1]') = CRC32(@pad) AS pad_ok FROM t;
+f1	JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)	pad_ok
+0	"Init00"	180214	1
+DROP TABLE t;
+#
+# 3. JSON_REPLACE / JSON_REMOVE / shrinking and growing values, committed
+#    (lob_long_partial_update)
+#
+CREATE TABLE t (pk INT PRIMARY KEY, j JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, JSON_ARRAY('OpenSource', REPEAT('Linux+Ubuntu+', 2000), JSON_OBJECT('a', 1, 'b', REPEAT('x', 5000))));
+UPDATE t SET j = JSON_SET(j, '$[1]', REPEAT('MySQL+Oracle+', 2000)) WHERE pk = 1;
+SELECT pk, LENGTH(j), LEFT(j->>'$[1]', 13), LENGTH(j->>'$[1]') FROM t;
+pk	LENGTH(j)	LEFT(j->>'$[1]', 13)	LENGTH(j->>'$[1]')
+1	31037	MySQL+Oracle+	26000
+UPDATE t SET j = JSON_REPLACE(j, '$[2].b', 'short', '$[0]', 'Closed') WHERE pk = 1;
+SELECT pk, LENGTH(j), j->>'$[0]', j->>'$[2].b', JSON_LENGTH(j) FROM t;
+pk	LENGTH(j)	j->>'$[0]'	j->>'$[2].b'	JSON_LENGTH(j)
+1	26038	Closed	short	3
+UPDATE t SET j = JSON_REMOVE(j, '$[1]') WHERE pk = 1;
+SELECT pk, LENGTH(j), JSON_LENGTH(j), j->>'$[1].a' FROM t;
+pk	LENGTH(j)	JSON_LENGTH(j)	j->>'$[1].a'
+1	34	2	1
+UPDATE t SET j = JSON_ARRAY_APPEND(j, '$', REPEAT('z', 100000)) WHERE pk = 1;
+SELECT pk, LENGTH(j), JSON_LENGTH(j), LENGTH(j->>'$[2]') FROM t;
+pk	LENGTH(j)	JSON_LENGTH(j)	LENGTH(j->>'$[2]')
+1	100038	3	100000
+DROP TABLE t;
+#
+# 4. Statement rollback: a multi-row JSON update that fails part-way leaves
+#    every document unchanged
+#
+CREATE TABLE t (pk INT PRIMARY KEY, u INT, j JSON, UNIQUE KEY (u)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1, @doc), (2, 2, @doc), (3, 3, @doc);
+UPDATE t SET j = JSON_SET(j, '$[0]', 'Changed'), u = 3 WHERE pk <= 2 ORDER BY pk;
+ERROR 23000: Duplicate entry '3' for key 't.u'
+SELECT pk, u, JSON_EXTRACT(j, '$[0]'), LENGTH(j) FROM t ORDER BY pk;
+pk	u	JSON_EXTRACT(j, '$[0]')	LENGTH(j)
+1	1	"Sven"	180212
+2	2	"Sven"	180212
+3	3	"Sven"	180212
+DROP TABLE t;
+#
+# 5. Savepoints (lob_partial_update). MyRocks does not support ROLLBACK TO
+#    SAVEPOINT after rows were modified: the statement fails and the whole
+#    transaction must be rolled back. InnoDB rolls back to the savepoint.
+#
+CREATE TABLE t (j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (@doc);
+START TRANSACTION;
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Knut');
+SAVEPOINT a;
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Anna');
+SELECT JSON_EXTRACT(j1, '$[0]') FROM t;
+JSON_EXTRACT(j1, '$[0]')
+"Anna"
+ROLLBACK TO a;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+ROLLBACK;
+SELECT JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+JSON_EXTRACT(j1, '$[0]')	LENGTH(j1)
+"Sven"	180212
+DROP TABLE t;
+#
+# 6. Snapshot reader vs a concurrent partial update (json_small_partial_update_06)
+#
+CREATE TABLE tt2 (ff1 JSON) ENGINE=ROCKSDB;
+INSERT INTO tt2 VALUES (JSON_ARRAY('OpenSource00', REPEAT('Linux+Ubuntu+', 3000)));
+SET SESSION transaction_isolation = DEFAULT;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]') FROM tt2;
+LENGTH(ff1)	JSON_EXTRACT(ff1, '$[0]')
+39020	"OpenSource00"
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+UPDATE tt2 SET ff1 = JSON_SET(ff1, '$[0]', 'OpenSource01', '$[1]', REPEAT('MySQL+Oracle+', 2500));
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+LENGTH(ff1)	JSON_EXTRACT(ff1, '$[0]')	LEFT(ff1->>'$[1]', 13)
+32520	"OpenSource01"	MySQL+Oracle+
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+LENGTH(ff1)	JSON_EXTRACT(ff1, '$[0]')	LEFT(ff1->>'$[1]', 13)
+39020	"OpenSource00"	Linux+Ubuntu+
+COMMIT;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+LENGTH(ff1)	JSON_EXTRACT(ff1, '$[0]')	LEFT(ff1->>'$[1]', 13)
+39020	"OpenSource00"	Linux+Ubuntu+
+COMMIT;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+LENGTH(ff1)	JSON_EXTRACT(ff1, '$[0]')	LEFT(ff1->>'$[1]', 13)
+32520	"OpenSource01"	MySQL+Oracle+
+DROP TABLE tt2;
+#
+# 7. binlog_row_value_options=PARTIAL_JSON: the binary log carries the
+#    partial JSON diff, and replaying it gives the same document
+#
+SET SESSION binlog_row_value_options = PARTIAL_JSON;
+Warnings:
+Warning	3647	When binlog_row_image=FULL, the option binlog_row_value_options=PARTIAL_JSON will be used only for the after-image. Full values will be written in the before-image, so the saving in disk space due to binlog_row_value_options is limited to less than 50%.
+CREATE TABLE t (pk INT PRIMARY KEY, j JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, @doc);
+RESET BINARY LOGS AND GTIDS;
+UPDATE t SET j = JSON_SET(j, '$[0]', 'Partial') WHERE pk = 1;
+UPDATE t SET j = JSON_REPLACE(j, '$[2].n', 2) WHERE pk = 1;
+FLUSH BINARY LOGS;
+SELECT pk, j->>'$[0]', j->>'$[2].n', CRC32(j) INTO @pk, @v0, @vn, @crc FROM t;
+SELECT @v0, @vn;
+@v0	@vn
+Partial	2
+UPDATE t SET j = @doc WHERE pk = 1;
+SELECT pk, j->>'$[0]' = @v0 AS v0_ok, j->>'$[2].n' = @vn AS vn_ok, CRC32(j) = @crc AS doc_ok FROM t;
+pk	v0_ok	vn_ok	doc_ok
+1	1	1	1
+SET SESSION binlog_row_value_options = DEFAULT;
+DROP TABLE t;
+SET SESSION transaction_isolation = DEFAULT;
