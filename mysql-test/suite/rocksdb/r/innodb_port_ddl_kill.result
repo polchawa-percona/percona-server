@@ -1,0 +1,69 @@
+CREATE TABLE t (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000) SELECT n, n FROM v;
+call mtr.add_suppression("Error retrieving index entry from primary key");
+# con1: Start the DDL, paused at rocksdb.inplace_populate_sk_scan_row
+SET DEBUG_SYNC='rocksdb.inplace_populate_sk_scan_row SIGNAL ready WAIT_FOR interrupt';
+ALTER TABLE t ADD INDEX i(c), ALGORITHM=INPLACE;
+# default: Kill the DDL
+SET DEBUG_SYNC='now WAIT_FOR ready';
+KILL QUERY @id;
+SET DEBUG_SYNC='now SIGNAL interrupt';
+# con1: reap
+ERROR 70100: Query execution was interrupted
+SET DEBUG_SYNC='RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'i';
+COUNT(*)
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+ALTER TABLE t ADD INDEX i(c), ALGORITHM=INPLACE;
+SELECT COUNT(*), SUM(c) FROM t FORCE INDEX (i);
+COUNT(*)	SUM(c)
+1000	500500
+ALTER TABLE t DROP INDEX i;
+# con1: Start the DDL, paused at rocksdb.inplace_populate_sk_before_merge
+SET DEBUG_SYNC='rocksdb.inplace_populate_sk_before_merge SIGNAL ready WAIT_FOR interrupt';
+ALTER TABLE t ADD INDEX i(c), ALGORITHM=INPLACE;
+# default: Kill the DDL
+SET DEBUG_SYNC='now WAIT_FOR ready';
+KILL QUERY @id;
+SET DEBUG_SYNC='now SIGNAL interrupt';
+# con1: reap
+SET DEBUG_SYNC='RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'i';
+COUNT(*)
+1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT COUNT(*), SUM(c) FROM t FORCE INDEX (i);
+COUNT(*)	SUM(c)
+1000	500500
+ALTER TABLE t DROP INDEX i;
+# con1: Start the DDL, paused at rocksdb.bulk_load_before_ingest
+SET DEBUG_SYNC='rocksdb.bulk_load_before_ingest SIGNAL ready WAIT_FOR interrupt';
+ALTER TABLE t ADD INDEX i(c), ALGORITHM=INPLACE;
+# default: Kill the DDL
+SET DEBUG_SYNC='now WAIT_FOR ready';
+KILL QUERY @id;
+SET DEBUG_SYNC='now SIGNAL interrupt';
+# con1: reap
+SET DEBUG_SYNC='RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'i';
+COUNT(*)
+1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT COUNT(*), SUM(c) FROM t FORCE INDEX (i);
+COUNT(*)	SUM(c)
+1000	500500
+ALTER TABLE t DROP INDEX i;
+# Cleanup
+SET DEBUG_SYNC="RESET";
+DROP TABLE t;
