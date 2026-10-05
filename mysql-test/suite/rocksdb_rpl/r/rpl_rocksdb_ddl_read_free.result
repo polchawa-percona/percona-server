@@ -1,0 +1,184 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c VARCHAR(20), KEY kb (b))
+ENGINE=ROCKSDB;
+CREATE TABLE p (a INT PRIMARY KEY, b INT, KEY kpb (b)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN MAXVALUE);
+CREATE TABLE n (a INT, b INT) ENGINE=ROCKSDB;
+CREATE TABLE w (a INT PRIMARY KEY, b INT, c INT, KEY kw (b), KEY kw2 (c))
+ENGINE=ROCKSDB;
+# The replica gets an extra index on w and lacks index kw2.
+include/rpl/sync_to_replica.inc
+SET SESSION sql_log_bin = 0;
+ALTER TABLE w ADD INDEX kw_extra (c, b), DROP INDEX kw2;
+SET SESSION sql_log_bin = 1;
+SHOW CREATE TABLE w;
+Table	Create Table
+w	CREATE TABLE `w` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kw` (`b`),
+  KEY `kw_extra` (`c`,`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+[connection master]
+# Check after: initial load
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+# DML on the other tables between the DDL statements runs on
+# different applier workers.
+ALTER TABLE t ADD INDEX kc (c), ALGORITHM=INPLACE;
+UPDATE t SET c = CONCAT(c, 'u') WHERE b = 2;
+DELETE FROM t WHERE b = 3;
+UPDATE w SET b = b + 1, c = c + 1 WHERE a % 5 = 0;
+INSERT INTO p VALUES (1000, 1);
+# Check after: INPLACE ADD INDEX
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+ALTER TABLE t ADD COLUMN d INT DEFAULT 7, ALGORITHM=INSTANT;
+INSERT INTO t VALUES (1001, 1, 'n', 8);
+UPDATE t SET d = 9 WHERE a <= 20;
+UPDATE w SET c = c * 2 WHERE b = 4;
+# Check after: INSTANT ADD COLUMN
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+ALTER TABLE t MODIFY b BIGINT, ALGORITHM=COPY;
+UPDATE t SET b = b + 100 WHERE a IN (1, 4, 1001);
+DELETE FROM w WHERE c = 0;
+# Check after: COPY ALTER
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+ALTER TABLE t CONVERT TO CHARACTER SET latin1;
+UPDATE t SET c = 'x' WHERE a BETWEEN 10 AND 20;
+DELETE FROM t WHERE c = 'x' AND a % 2 = 0;
+# Check after: CONVERT TO CHARACTER SET
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+ALTER TABLE t DROP INDEX kc, ALGORITHM=INPLACE;
+UPDATE t SET c = 'y' WHERE a <= 5;
+# Check after: INPLACE DROP INDEX
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+# Partition DDL
+ALTER TABLE p TRUNCATE PARTITION p1;
+INSERT INTO p VALUES (150, 5);
+ALTER TABLE p REORGANIZE PARTITION p2 INTO
+(PARTITION p2a VALUES LESS THAN (250), PARTITION p2b VALUES LESS THAN MAXVALUE);
+Warnings:
+Warning	138	Inplace partition altering is not supported
+UPDATE p SET b = b + 1 WHERE a > 200;
+INSERT INTO p VALUES (3000, 3);
+ALTER TABLE p ADD INDEX kpb2 (b, a), ALGORITHM=INPLACE;
+DELETE FROM p WHERE a = 1000;
+# Check after: partition DDL
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+# A table without a primary key gets one.
+ALTER TABLE n ADD INDEX ka (a);
+DELETE FROM n WHERE a = 1 LIMIT 1;
+UPDATE n SET b = b + 1000 WHERE a = 2;
+ALTER TABLE n ADD PRIMARY KEY (a, b);
+INSERT INTO n VALUES (3, 9999);
+UPDATE n SET b = b + 1 WHERE a = 4;
+# Check after: PRIMARY KEY added
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+# The table with different indexes on the replica keeps working.
+UPDATE w SET b = b + 10, c = c + 10;
+DELETE FROM w WHERE a % 3 = 0;
+INSERT INTO w VALUES (5000, 1, 1);
+include/rpl/sync_to_replica.inc
+include/assert.inc [Replica index kw_extra matches the table]
+[connection master]
+# Check after: DML on w with different replica indexes
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:t, slave:t]
+include/diff_tables.inc [master:p, slave:p]
+include/diff_tables.inc [master:n, slave:n]
+include/diff_tables.inc [master:w, slave:w]
+[connection master]
+# The replica applied the DDL without errors.
+include/rpl/sync_to_replica.inc
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` bigint DEFAULT NULL,
+  `c` varchar(20) DEFAULT NULL,
+  `d` int DEFAULT '7',
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+SHOW CREATE TABLE p;
+Table	Create Table
+p	CREATE TABLE `p` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kpb` (`b`),
+  KEY `kpb2` (`b`,`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`a`)
+(PARTITION p0 VALUES LESS THAN (100) ENGINE = ROCKSDB,
+ PARTITION p1 VALUES LESS THAN (200) ENGINE = ROCKSDB,
+ PARTITION p2a VALUES LESS THAN (250) ENGINE = ROCKSDB,
+ PARTITION p2b VALUES LESS THAN MAXVALUE ENGINE = ROCKSDB) */
+SHOW CREATE TABLE n;
+Table	Create Table
+n	CREATE TABLE `n` (
+  `a` int NOT NULL,
+  `b` int NOT NULL,
+  PRIMARY KEY (`a`,`b`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE w;
+Table	Create Table
+w	CREATE TABLE `w` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kw` (`b`),
+  KEY `kw_extra` (`c`,`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+[connection master]
+DROP TABLE t, p, n, w;
+include/rpl/deinit.inc

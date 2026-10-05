@@ -1,0 +1,4 @@
+--rocksdb_enable_instant_ddl_for_append_column=ON
+--rocksdb_read_free_rpl=PK_SK
+--replica_parallel_workers=4
+--replica_preserve_commit_order=ON
