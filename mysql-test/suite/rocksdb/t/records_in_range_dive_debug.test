@@ -149,7 +149,14 @@ explain select * from t2 where c = 50;
 --echo # full count.
 SET SESSION rocksdb_records_in_range_dive_threshold = 0;
 explain select * from t2 where c = 50;
+# The ballooned estimate depends on the SST block layout, which differs
+# between write policies, so assert the effect instead of the exact count.
+--replace_column 10 #
 explain select * from t2 where c = 777;
+--let $narrow_rows = query_get_value(explain select * from t2 where c = 777, rows, 1)
+--let $assert_text = SST-only estimate for the 3-row group balloons to the block count
+--let $assert_cond = $narrow_rows > 3
+--source include/assert.inc
 
 --echo #
 --echo # rocksdb_skip_fill_cache is honored by the dive's own iterator too.

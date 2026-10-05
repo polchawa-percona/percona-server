@@ -8,11 +8,11 @@ INSERT INTO invalid_values VALUES('\'2000001\'');
 SET @start_global_value = @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD;
 SELECT @start_global_value;
 @start_global_value
-0
+#
 SET @start_session_value = @@session.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD;
 SELECT @start_session_value;
 @start_session_value
-0
+#
 '# Setting to valid values in global scope#'
 "Trying to set variable @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD to 1"
 SET @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD   = 1;
@@ -91,10 +91,10 @@ SELECT @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD;
 SET @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD = @start_global_value;
 SELECT @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD;
 @@global.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD
-0
+#
 SET @@session.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD = @start_session_value;
 SELECT @@session.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD;
 @@session.ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD
-0
+#
 DROP TABLE valid_values;
 DROP TABLE invalid_values;

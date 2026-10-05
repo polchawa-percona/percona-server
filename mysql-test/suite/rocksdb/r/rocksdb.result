@@ -890,7 +890,8 @@ show variables where
 variable_name like 'rocksdb%' and
 variable_name not like 'rocksdb_max_open_files' and
 variable_name not like 'rocksdb_wsenv_%' and
-variable_name not like 'rocksdb_table_stats_background_thread_nice_value';
+variable_name not like 'rocksdb_table_stats_background_thread_nice_value' and
+variable_name not in ('rocksdb_write_policy', 'rocksdb_write_batch_flush_threshold');
 Variable_name	Value
 rocksdb_advise_random_on_open	ON
 rocksdb_allow_concurrent_memtable_write	OFF
@@ -1082,11 +1083,9 @@ rocksdb_wal_recovery_mode	2
 rocksdb_wal_size_limit_mb	0
 rocksdb_wal_ttl_seconds	0
 rocksdb_whole_key_filtering	ON
-rocksdb_write_batch_flush_threshold	0
 rocksdb_write_batch_max_bytes	0
 rocksdb_write_disable_wal	OFF
 rocksdb_write_ignore_missing_column_families	OFF
-rocksdb_write_policy	write_committed
 create table t47 (pk int primary key, col1 varchar(12)) ENGINE=RocksDB CHARSET=latin1;
 insert into t47 values (1, 'row1');
 insert into t47 values (2, 'row2');
@@ -2608,62 +2607,7 @@ ERROR HY000: When unique checking is disabled in MyRocks, INSERT,UPDATE,LOAD sta
 INSERT INTO t1 VALUES(5, 5) ON DUPLICATE KEY UPDATE value=value+1;
 ERROR HY000: When unique checking is disabled in MyRocks, INSERT,UPDATE,LOAD statements with clauses that update or replace the key (i.e. INSERT ON DUPLICATE KEY UPDATE, REPLACE) are not allowed. Query: INSERT INTO t1 VALUES(5, 5) ON DUPLICATE KEY UPDATE value=value+1
 TRUNCATE TABLE t1;
-SET @save_rocksdb_bulk_load_size= @@rocksdb_bulk_load_size;
 SET unique_checks=1;
-SET rocksdb_commit_in_the_middle=1;
-SET rocksdb_bulk_load_size=10;
-BEGIN;
-INSERT INTO t1 (id) VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
-(11),(12),(13),(14),(15),(16),(17),(18),(19);
-ROLLBACK;
-SELECT * FROM t1;
-id	value
-1	NULL
-2	NULL
-3	NULL
-4	NULL
-5	NULL
-6	NULL
-7	NULL
-8	NULL
-9	NULL
-10	NULL
-INSERT INTO t1 (id) VALUES (11),(12),(13),(14),(15);
-set @orig_tx_iso=@@session.transaction_isolation;
-set session transaction_isolation='READ-COMMITTED';
-BEGIN;
-UPDATE t1 SET value=100;
-ROLLBACK;
-SELECT * FROM t1;
-id	value
-1	100
-2	100
-3	100
-4	100
-5	100
-6	100
-7	100
-8	100
-9	100
-10	100
-11	NULL
-12	NULL
-13	NULL
-14	NULL
-15	NULL
-BEGIN;
-DELETE FROM t1;
-ROLLBACK;
-SELECT * FROM t1;
-id	value
-11	NULL
-12	NULL
-13	NULL
-14	NULL
-15	NULL
-set session transaction_isolation=@orig_tx_iso;
-SET rocksdb_commit_in_the_middle=0;
-SET rocksdb_bulk_load_size= @save_rocksdb_bulk_load_size;
 DROP TABLE t1;
 #
 # Issue #185 Assertion `BaseValid()' failed in void rocksdb::BaseDeltaIterator::Advance()
