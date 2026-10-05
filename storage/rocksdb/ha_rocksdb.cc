@@ -6379,6 +6379,84 @@ static void rocksdb_truncation_table_cleanup(void) {
 }
 
 /*
+  RocksDB locks only <rocksdb_datadir>/LOCK, but it also treats the WAL
+  directory and the persistent cache directory as exclusively its own: at open
+  it purges WAL files it does not know and replays the others, and the cache
+  tier deletes the existing cache files. If two instances are configured with
+  the same directory, they destroy each other's data. Take an exclusive lock
+  on a file in each of these directories, so the second instance refuses to
+  start. The lock uses the same mechanism as the RocksDB LOCK file (fcntl), so
+  it is released when the process exits, also on a crash.
+*/
+struct Rdb_dir_lock {
+  rocksdb::Env *env = nullptr;
+  rocksdb::FileLock *lock = nullptr;
+};
+
+static Rdb_dir_lock rdb_wal_dir_lock;
+static Rdb_dir_lock rdb_persistent_cache_lock;
+
+/* Returns true if both paths name the same existing directory. */
+static bool rdb_same_dir(const char *const a, const char *const b) {
+  char real_a[FN_REFLEN];
+  char real_b[FN_REFLEN];
+  if (my_realpath(real_a, a, MYF(0)) || my_realpath(real_b, b, MYF(0))) {
+    return false;
+  }
+  return strcmp(real_a, real_b) == 0;
+}
+
+/**
+  Lock the directory dir for this instance.
+
+  @param env       RocksDB environment
+  @param dir       directory to lock, created if missing
+  @param var_name  name of the system variable that configures the directory
+  @param lock_file name of the lock file created in the directory
+  @param dir_lock  receives the lock
+
+  @return true on error (already logged), false on success
+*/
+static bool rdb_lock_dir(rocksdb::Env *const env, const char *const dir,
+                         const char *const var_name,
+                         const char *const lock_file,
+                         Rdb_dir_lock *const dir_lock) {
+  assert(dir_lock->lock == nullptr);
+
+  rocksdb::Status s = env->CreateDirIfMissing(dir);
+  if (!s.ok()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0, "Can't create %s directory %s: %s",
+                    var_name, dir, s.ToString().c_str());
+    return true;
+  }
+
+  s = env->LockFile(std::string(dir) + "/" + lock_file, &dir_lock->lock);
+  if (!s.ok()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Can't lock %s directory %s: %s. Another server instance "
+                    "may be using it; every instance needs its own %s.",
+                    var_name, dir, s.ToString().c_str(), var_name);
+    dir_lock->lock = nullptr;
+    return true;
+  }
+
+  dir_lock->env = env;
+  return false;
+}
+
+static void rdb_unlock_dir(Rdb_dir_lock *const dir_lock) {
+  if (dir_lock->lock == nullptr) return;
+
+  const rocksdb::Status s = dir_lock->env->UnlockFile(dir_lock->lock);
+  if (!s.ok()) {
+    LogPluginErrMsg(WARNING_LEVEL, 0, "Can't unlock directory: %s",
+                    s.ToString().c_str());
+  }
+  dir_lock->lock = nullptr;
+  dir_lock->env = nullptr;
+}
+
+/*
   Storage Engine initialization function, invoked when plugin is loaded.
 */
 
@@ -6592,6 +6670,15 @@ static int rocksdb_init_internal(void *const p) {
   myrocks_logger->SetInfoLogLevel(
       static_cast<rocksdb::InfoLogLevel>(rocksdb_info_log_level));
   rocksdb_db_options->wal_dir = rocksdb_wal_dir;
+
+  // A WAL directory equal to the data directory is covered by the RocksDB
+  // LOCK file.
+  if (rocksdb_wal_dir != nullptr && *rocksdb_wal_dir != '\0' &&
+      !rdb_same_dir(rocksdb_wal_dir, rocksdb_datadir) &&
+      rdb_lock_dir(rocksdb_db_options->env, rocksdb_wal_dir, "rocksdb_wal_dir",
+                   "MYROCKS_WAL_DIR_LOCK", &rdb_wal_dir_lock)) {
+    DBUG_RETURN(HA_EXIT_FAILURE);
+  }
 
   rocksdb_db_options->wal_recovery_mode =
       static_cast<rocksdb::WALRecoveryMode>(rocksdb_wal_recovery_mode);
@@ -6825,6 +6912,13 @@ static int rocksdb_init_internal(void *const p) {
     if (!strlen(rocksdb_persistent_cache_path)) {
       LogPluginErrMsg(ERROR_LEVEL, 0,
                       "Specify rocksdb_persistent_cache_path");
+      DBUG_RETURN(HA_EXIT_FAILURE);
+    }
+
+    if (rdb_lock_dir(rocksdb_db_options->env, rocksdb_persistent_cache_path,
+                     "rocksdb_persistent_cache_path",
+                     "MYROCKS_PERSISTENT_CACHE_LOCK",
+                     &rdb_persistent_cache_lock)) {
       DBUG_RETURN(HA_EXIT_FAILURE);
     }
 
@@ -7245,6 +7339,9 @@ static int rocksdb_shutdown(bool minimalShutdown) {
   rocksdb_db_options = nullptr;
   rocksdb_tbl_options = nullptr;
   rocksdb_stats = nullptr;
+
+  rdb_unlock_dir(&rdb_persistent_cache_lock);
+  rdb_unlock_dir(&rdb_wal_dir_lock);
 
   if (!minimalShutdown) {
     my_error_unregister(HA_ERR_ROCKSDB_FIRST, HA_ERR_ROCKSDB_LAST);

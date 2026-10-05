@@ -1,0 +1,1 @@
+--rocksdb-wal-dir=$MYSQL_TMP_DIR/shared_wal
