@@ -1,0 +1,180 @@
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE a_int (id INT AUTO_INCREMENT PRIMARY KEY, tag BIGINT NOT NULL,
+c INT, KEY kc (c)) ENGINE=ROCKSDB;
+CREATE TABLE a_part (id BIGINT AUTO_INCREMENT PRIMARY KEY, tag BIGINT NOT NULL)
+ENGINE=ROCKSDB PARTITION BY HASH(id) PARTITIONS 4;
+CREATE TABLE a_sk (pk BIGINT PRIMARY KEY, id BIGINT NOT NULL AUTO_INCREMENT,
+tag BIGINT NOT NULL, KEY kid (id)) ENGINE=ROCKSDB;
+CREATE TABLE a_ofs (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+tag BIGINT NOT NULL) ENGINE=ROCKSDB;
+# Round 1
+# Kill the server
+# restart
+CREATE TABLE chk_ack (t VARCHAR(10), tag BIGINT, id BIGINT, KEY (t, tag))
+ENGINE=InnoDB;
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost FROM chk_ack k
+WHERE NOT EXISTS (SELECT 1 FROM a_int  r WHERE k.t = 'a_int'  AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_part r WHERE k.t = 'a_part' AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_sk   r WHERE k.t = 'a_sk'   AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_ofs  r WHERE k.t = 'a_ofs'  AND r.tag = k.tag);
+acked_lost
+0
+SELECT COUNT(*) AS acked_id_changed FROM chk_ack k
+WHERE k.id IS NOT NULL AND NOT (
+(k.t = 'a_int'  AND EXISTS (SELECT 1 FROM a_int  r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_part' AND EXISTS (SELECT 1 FROM a_part r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_sk'   AND EXISTS (SELECT 1 FROM a_sk   r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_ofs'  AND EXISTS (SELECT 1 FROM a_ofs  r WHERE r.tag = k.tag AND r.id = k.id)));
+acked_id_changed
+0
+SELECT COUNT(*) AS rolled_back_rows FROM a_part WHERE tag <= -1000000;
+rolled_back_rows
+0
+SELECT COUNT(*) - COUNT(DISTINCT id) AS a_sk_duplicate_ids FROM a_sk;
+a_sk_duplicate_ids
+0
+SELECT COUNT(*) AS a_ofs_ids_off_pattern FROM a_ofs WHERE id % 3 <> 2;
+a_ofs_ids_off_pattern
+0
+SELECT COUNT(*) AS counters_not_above_max FROM (
+SELECT 'a_int' AS t, MAX(id) AS m FROM a_int
+UNION ALL SELECT 'a_part', MAX(id) FROM a_part
+UNION ALL SELECT 'a_sk', MAX(id) FROM a_sk
+UNION ALL SELECT 'a_ofs', MAX(id) FROM a_ofs) mx
+JOIN information_schema.TABLES it
+ON it.table_schema = 'test' AND it.table_name = mx.t
+WHERE it.AUTO_INCREMENT <= mx.m;
+counters_not_above_max
+0
+INSERT INTO a_int (tag, c) VALUES (-101, 0), (-102, 0), (-103, 0);
+INSERT INTO a_part (tag) VALUES (-101), (-102), (-103);
+INSERT INTO a_sk (pk, tag) VALUES (-101, -101), (-102, -102), (-103, -103);
+SET SESSION auto_increment_increment = 3, auto_increment_offset = 2;
+INSERT INTO a_ofs (tag) VALUES (-101), (-102), (-103);
+SET SESSION auto_increment_increment = DEFAULT, auto_increment_offset = DEFAULT;
+a_int_new_ids_above_max
+1
+a_part_new_ids_above_max
+1
+a_sk_new_ids_above_max
+1
+a_ofs_new_ids_above_max_and_on_pattern
+1
+SELECT COUNT(*) - COUNT(DISTINCT id) AS a_sk_duplicate_ids_after_inserts FROM a_sk;
+a_sk_duplicate_ids_after_inserts
+0
+CHECK TABLE a_int, a_part, a_sk, a_ofs;
+Table	Op	Msg_type	Msg_text
+test.a_int	check	status	OK
+test.a_part	check	status	OK
+test.a_sk	check	status	OK
+test.a_ofs	check	status	OK
+DROP TABLE chk_ack;
+# Rewrite the persisted counters, then run a second round.
+ALTER TABLE a_int AUTO_INCREMENT = 1;
+ALTER TABLE a_sk AUTO_INCREMENT = 5;
+OPTIMIZE TABLE a_part;
+Table	Op	Msg_type	Msg_text
+test.a_part	optimize	status	OK
+SELECT (SELECT AUTO_INCREMENT FROM information_schema.TABLES
+WHERE table_schema = 'test' AND table_name = 'a_int') >
+(SELECT MAX(id) FROM a_int) AS a_int_counter_above_max_after_alter;
+a_int_counter_above_max_after_alter
+1
+SELECT (SELECT AUTO_INCREMENT FROM information_schema.TABLES
+WHERE table_schema = 'test' AND table_name = 'a_sk') >
+(SELECT MAX(id) FROM a_sk) AS a_sk_counter_above_max_after_alter;
+a_sk_counter_above_max_after_alter
+1
+# Round 2
+# Kill the server
+# restart
+CREATE TABLE chk_ack (t VARCHAR(10), tag BIGINT, id BIGINT, KEY (t, tag))
+ENGINE=InnoDB;
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost FROM chk_ack k
+WHERE NOT EXISTS (SELECT 1 FROM a_int  r WHERE k.t = 'a_int'  AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_part r WHERE k.t = 'a_part' AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_sk   r WHERE k.t = 'a_sk'   AND r.tag = k.tag)
+AND NOT EXISTS (SELECT 1 FROM a_ofs  r WHERE k.t = 'a_ofs'  AND r.tag = k.tag);
+acked_lost
+0
+SELECT COUNT(*) AS acked_id_changed FROM chk_ack k
+WHERE k.id IS NOT NULL AND NOT (
+(k.t = 'a_int'  AND EXISTS (SELECT 1 FROM a_int  r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_part' AND EXISTS (SELECT 1 FROM a_part r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_sk'   AND EXISTS (SELECT 1 FROM a_sk   r WHERE r.tag = k.tag AND r.id = k.id))
+OR (k.t = 'a_ofs'  AND EXISTS (SELECT 1 FROM a_ofs  r WHERE r.tag = k.tag AND r.id = k.id)));
+acked_id_changed
+0
+SELECT COUNT(*) AS rolled_back_rows FROM a_part WHERE tag <= -1000000;
+rolled_back_rows
+0
+SELECT COUNT(*) - COUNT(DISTINCT id) AS a_sk_duplicate_ids FROM a_sk;
+a_sk_duplicate_ids
+0
+SELECT COUNT(*) AS a_ofs_ids_off_pattern FROM a_ofs WHERE id % 3 <> 2;
+a_ofs_ids_off_pattern
+0
+SELECT COUNT(*) AS counters_not_above_max FROM (
+SELECT 'a_int' AS t, MAX(id) AS m FROM a_int
+UNION ALL SELECT 'a_part', MAX(id) FROM a_part
+UNION ALL SELECT 'a_sk', MAX(id) FROM a_sk
+UNION ALL SELECT 'a_ofs', MAX(id) FROM a_ofs) mx
+JOIN information_schema.TABLES it
+ON it.table_schema = 'test' AND it.table_name = mx.t
+WHERE it.AUTO_INCREMENT <= mx.m;
+counters_not_above_max
+0
+INSERT INTO a_int (tag, c) VALUES (-201, 0), (-202, 0), (-203, 0);
+INSERT INTO a_part (tag) VALUES (-201), (-202), (-203);
+INSERT INTO a_sk (pk, tag) VALUES (-201, -201), (-202, -202), (-203, -203);
+SET SESSION auto_increment_increment = 3, auto_increment_offset = 2;
+INSERT INTO a_ofs (tag) VALUES (-201), (-202), (-203);
+SET SESSION auto_increment_increment = DEFAULT, auto_increment_offset = DEFAULT;
+a_int_new_ids_above_max
+1
+a_part_new_ids_above_max
+1
+a_sk_new_ids_above_max
+1
+a_ofs_new_ids_above_max_and_on_pattern
+1
+SELECT COUNT(*) - COUNT(DISTINCT id) AS a_sk_duplicate_ids_after_inserts FROM a_sk;
+a_sk_duplicate_ids_after_inserts
+0
+CHECK TABLE a_int, a_part, a_sk, a_ofs;
+Table	Op	Msg_type	Msg_text
+test.a_int	check	status	OK
+test.a_part	check	status	OK
+test.a_sk	check	status	OK
+test.a_ofs	check	status	OK
+DROP TABLE chk_ack;
+# A counter raised by ALTER right before a kill is not lost.
+# Kill the server
+# restart
+INSERT INTO a_int (tag, c) VALUES (-1, 0);
+raised_counter_survived_kill
+1
+# A TINYINT counter that reached its maximum before a kill.
+CREATE TABLE a_tiny (id TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, v INT)
+ENGINE=ROCKSDB;
+INSERT INTO a_tiny VALUES (250, 0);
+INSERT INTO a_tiny (v) VALUES (1), (2), (3), (4), (5);
+SELECT MAX(id) FROM a_tiny;
+MAX(id)
+255
+# Kill the server
+# restart
+INSERT INTO a_tiny (v) VALUES (6);
+Got one of the listed errors
+SELECT COUNT(*), MAX(id) FROM a_tiny;
+COUNT(*)	MAX(id)
+6	255
+DROP TABLE a_int, a_part, a_sk, a_ofs, a_tiny;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;

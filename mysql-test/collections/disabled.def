@@ -135,6 +135,8 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.crash_bulk_load_sk_release : BUG#0 PS-11696 bulk load crash: SK rows without PK
+rocksdb.crash_commit_in_the_middle_release : BUG#0 PS-11697 interrupted CITM rows not in binlog
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
