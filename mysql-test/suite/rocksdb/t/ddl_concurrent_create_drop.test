@@ -1,0 +1,43 @@
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/count_sessions.inc
+
+#
+# CREATE TABLE, DROP TABLE and DROP DATABASE run concurrently from several
+# connections, on one shared table name per column family and on per-thread
+# table names, while another connection flushes memtables, compacts the
+# column families and wakes the drop-index thread. Several tables share the
+# same column families, so their keys share SST files. Survivor tables with
+# known content stay in the same column families for the whole run.
+#
+# Dropping column families (rocksdb_delete_cf) while this load runs is not
+# part of the test: it crashes the server through a race in the RocksDB lock
+# manager (PointLockManager::RemoveColumnFamily frees other threads'
+# lock-map caches). The driver's "cfdrop" mode reproduces it.
+#
+# Checked afterwards, and again after a restart with table validation:
+#  - no unexpected error during the run,
+#  - the drop-index list is empty and no SST file keeps keys of a dropped
+#    index after a manual compaction,
+#  - the survivor tables have all their rows through the primary and the
+#    secondary key.
+#
+# Runs with the drop-index thread, with DeleteRange-based drops and with
+# small SST files (many overlapping files, frequent compactions).
+#
+
+call mtr.add_suppression("Column family .* not found");
+
+--let $cc_rows = 400
+--exec python suite/rocksdb/t/ddl_concurrent_create_drop.py root 127.0.0.1 $MASTER_MYPORT 20 3 3 100 2>/dev/null
+
+--source suite/rocksdb/include/ddl_concurrent_check.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+
+--source suite/rocksdb/include/ddl_concurrent_check.inc
+
+DROP TABLE survivor_0, survivor_1;
+--exec python suite/rocksdb/t/ddl_concurrent_create_drop.py root 127.0.0.1 $MASTER_MYPORT cleanup
+--source include/wait_until_count_sessions.inc
