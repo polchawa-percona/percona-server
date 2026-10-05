@@ -1,0 +1,63 @@
+create table t1 (id int primary key, value int, value2 int,
+value3 int, index(value,value2)) ENGINE=ROCKSDB;
+insert into t1 values
+(10,10,10,10),(11,11,11,11),(12,12,12,12),(13,13,13,13),(14,14,14,14),
+(15,15,15,15),(16,16,16,16),(17,17,17,17),(18,18,18,18),(19,19,19,19),
+(20,20,20,20);
+start transaction with consistent snapshot;
+CREATE PROCEDURE update_t1()
+BEGIN
+DECLARE i INT DEFAULT 1;
+while (i <= 28000) DO
+update test.t1 set value2=value2+1, value3=value3+1 where id=12;
+SET i = i + 1;
+END WHILE;
+END|
+set autocommit=0;
+CALL update_t1();
+select * from t1 where id = 12;
+id	value	value2	value3
+12	12	28012	28012
+set autocommit=1;
+select * from t1 where id = 12;
+id	value	value2	value3
+12	12	28012	28012
+# The old snapshot still sees the original row.
+select * from t1 force index(value) where value=12;
+id	value	value2	value3
+12	12	12	12
+select * from t1 force index(primary) where id=12;
+id	value	value2	value3
+12	12	12	12
+select count(*), sum(value2), sum(value3) from t1;
+count(*)	sum(value2)	sum(value3)
+11	165	165
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# After flush and compaction the snapshot still sees the original row.
+select * from t1 force index(value) where value=12;
+id	value	value2	value3
+12	12	12	12
+select * from t1 force index(value) where value=12 and value2 = 12;
+id	value	value2	value3
+12	12	12	12
+select * from t1 force index(value) where value=12 and value2 = 28012;
+id	value	value2	value3
+select * from t1 force index(primary) where id=12;
+id	value	value2	value3
+12	12	12	12
+select count(*), sum(value2), sum(value3) from t1;
+count(*)	sum(value2)	sum(value3)
+11	165	165
+commit;
+# A new transaction sees the updated row.
+select * from t1 force index(value) where value=12;
+id	value	value2	value3
+12	12	28012	28012
+select * from t1 force index(value) where value=12 and value2 = 12;
+id	value	value2	value3
+select * from t1 force index(primary) where id=12;
+id	value	value2	value3
+12	12	28012	28012
+drop procedure update_t1;
+drop table t1;
