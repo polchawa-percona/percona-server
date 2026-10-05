@@ -1,0 +1,983 @@
+call mtr.add_suppression("Plugin rocksdb reported: 'Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Plugin rocksdb reported: 'Will handle this collation internally as if it had a NO_PAD attribute.'");
+#
+# Part 1: innodb-index.inc flow for other character sets
+#
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=utf16 ;
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf16
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf16
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	41	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	83	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf16
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=utf32 ;
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf32
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf32
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	41	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	83	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf32
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=utf8mb4 ;
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	41	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	83	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) DEFAULT NULL,
+  `d` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=utf8mb4 COLLATE utf8mb4_general_ci;
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	41	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	83	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=utf8mb4 COLLATE utf8mb4_bin;
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	41	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	83	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE utf8mb4_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+create table t1(a int not null, b int, c char(10), d varchar(20), primary key (a)) engine = rocksdb default charset=ucs2 COLLATE ucs2_bin;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_bin' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+insert into t1 values (1,1,'ab','ab'),(2,2,'ac','ac'),(3,2,'ad','ad'),(4,4,'afe','afe');
+commit;
+alter table t1 add unique index (b);
+ERROR 23000: Duplicate entry '2' for key '#sql-tmp.b'
+insert into t1 values(8,9,'fff','fff');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE ucs2_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE ucs2_bin DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=ucs2 COLLATE=ucs2_bin
+alter table t1 add index (b);
+insert into t1 values(10,10,'kkk','iii');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE ucs2_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE ucs2_bin DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=ucs2 COLLATE=ucs2_bin
+alter table t1 add unique index (c), add index (d);
+insert into t1 values(11,11,'aaa','mmm');
+select * from t1;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(b) order by b;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+select * from t1 force index(c) order by c;
+a	b	c	d
+11	11	aaa	mmm
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+select * from t1 force index(d) order by d;
+a	b	c	d
+1	1	ab	ab
+2	2	ac	ac
+3	2	ad	ad
+4	4	afe	afe
+8	9	fff	fff
+10	10	kkk	iii
+11	11	aaa	mmm
+explain select * from t1 force index(b) order by b;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	b	5	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`b`) order by `test`.`t1`.`b`
+explain select * from t1 force index(c) order by c;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	c	21	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`c`) order by `test`.`t1`.`c`
+explain select * from t1 force index(d) order by d;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	d	43	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`d` AS `d` from `test`.`t1` FORCE INDEX (`d`) order by `test`.`t1`.`d`
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` char(10) COLLATE ucs2_bin DEFAULT NULL,
+  `d` varchar(20) COLLATE ucs2_bin DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  UNIQUE KEY `c` (`c`),
+  KEY `b` (`b`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=ucs2 COLLATE=ucs2_bin
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.b: index scan matches primary key scan
+# t1.b: equality lookups match (9 pairs)
+# t1.c: index scan matches primary key scan
+# t1.c: equality lookups match (7 pairs)
+# t1.d: index scan matches primary key scan
+# t1.d: equality lookups match (7 pairs)
+drop table t1;
+#
+# Part 2: MyRocks vs InnoDB on PAD SPACE / NO PAD collations
+#
+# utf8mb4_0900_ai_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 41,C3A1,C3A4,7373,C3A6,6669,C785,F09D9080)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (50 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (50 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (14 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# utf8mb4_general_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 6120,41,C3A1,C3A4,20,6162632020,C785,F09F988020,F09D9080)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (54 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (54 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (13 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# utf8mb4_unicode_520_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 6120,41,C3A1,C3A4,7373,C3A6,20,6162632020,6669,C785,F09F988020,F09D9080)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (66 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (66 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (10 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# ucs2_general_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_general_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL);
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_general_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL);
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 00610020,0041,00E1,00E4,0020,00610062006300200020,01C5)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (44 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (44 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (11 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# ucs2_unicode_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_unicode_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_unicode_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_unicode_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_unicode_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL);
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_unicode_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_unicode_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET ucs2 COLLATE ucs2_unicode_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_unicode_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL);
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 00610020,0041,00E1,00E4,00730073,0020,00610062006300200020,00660069,01C5)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (48 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (48 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (9 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# utf16_unicode_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf16 COLLATE utf16_unicode_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf16 COLLATE utf16_unicode_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf16 COLLATE utf16_unicode_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf16 COLLATE utf16_unicode_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 00610020,0041,00E1,00E4,00730073,0020,00610062006300200020,00660069,01C5,D83DDE000020,D835DC00)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (58 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (58 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (11 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
+# utf32_general_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf32 COLLATE utf32_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+CREATE TABLE ur (c VARCHAR(10) CHARACTER SET utf32 COLLATE utf32_general_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+INSERT INTO r (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(10) CHARACTER SET utf32 COLLATE utf32_general_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+CREATE TABLE ui (c VARCHAR(10) CHARACTER SET utf32 COLLATE utf32_general_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+INSERT INTO i (c) VALUES ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀');
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 0000006100000020,00000041,000000E1,000000E4,00000020,0000006100000062000000630000002000000020,000001C5,0001F60000000020,0001D400)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (54 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (54 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (13 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;

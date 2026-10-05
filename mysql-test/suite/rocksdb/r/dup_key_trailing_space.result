@@ -1,0 +1,52 @@
+# PAD SPACE (latin1_swedish_ci): 'a' and 'a ' are duplicates
+CREATE TABLE t1 (v VARCHAR(20)) CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('a '), ('a');
+ALTER TABLE t1 ADD PRIMARY KEY (v);
+ERROR 23000: Duplicate entry 'a' for key 't1.PRIMARY'
+ALTER TABLE t1 ADD UNIQUE KEY (v);
+ERROR 23000: Duplicate entry 'a' for key 't1.v'
+TRUNCATE TABLE t1;
+INSERT INTO t1 VALUES ('a'), ('a ');
+ALTER TABLE t1 ADD PRIMARY KEY (v);
+ERROR 23000: Duplicate entry 'a ' for key 't1.PRIMARY'
+DROP TABLE t1;
+CREATE TABLE t1 (v VARCHAR(20) PRIMARY KEY) CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('b ');
+INSERT INTO t1 VALUES ('b');
+ERROR 23000: Duplicate entry 'b' for key 't1.PRIMARY'
+INSERT INTO t1 VALUES ('b   ');
+ERROR 23000: Duplicate entry 'b   ' for key 't1.PRIMARY'
+# The stored value keeps its trailing space; lookups ignore it
+SELECT CONCAT('[', v, ']') AS v, LENGTH(v) FROM t1;
+v	LENGTH(v)
+[b ]	2
+SELECT CONCAT('[', v, ']') AS v FROM t1 WHERE v = 'b';
+v
+[b ]
+SELECT CONCAT('[', v, ']') AS v FROM t1 WHERE v = 'b    ';
+v
+[b ]
+DROP TABLE t1;
+CREATE TABLE t2 (id INT PRIMARY KEY, v VARCHAR(20), UNIQUE KEY (v))
+CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 'c  ');
+INSERT INTO t2 VALUES (2, 'c');
+ERROR 23000: Duplicate entry 'c' for key 't2.v'
+SELECT id, CONCAT('[', v, ']') AS v FROM t2 FORCE INDEX (v) WHERE v = 'c';
+id	v
+1	[c  ]
+DROP TABLE t2;
+# NO PAD (utf8mb4_0900_ai_ci): 'd' and 'd ' are different values
+CREATE TABLE t3 (v VARCHAR(20) PRIMARY KEY)
+CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES ('d '), ('d');
+INSERT INTO t3 VALUES ('d ');
+ERROR 23000: Duplicate entry 'd ' for key 't3.PRIMARY'
+SELECT CONCAT('[', v, ']') AS v, LENGTH(v) FROM t3 ORDER BY v;
+v	LENGTH(v)
+[d ]	2
+[d]	1
+SELECT CONCAT('[', v, ']') AS v FROM t3 WHERE v = 'd ';
+v
+[d ]
+DROP TABLE t3;
