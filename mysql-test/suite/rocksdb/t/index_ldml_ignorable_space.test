@@ -1,0 +1,26 @@
+# MyRocks extension of the suite/innodb/t/innodb_ctype_ldml.test port.
+# Index a column that uses the user-defined collation utf8mb3_phone_ci from
+# std_data/Index.xml. The collation ignores spaces, brackets, '-' and '+', so
+# '+7 (912) 800 80 04' and '79128008004' compare equal.
+#
+# Expected: the same behaviour as InnoDB (create succeeds; equality, LIKE and
+# range lookups through the index match InnoDB).
+# Currently CREATE TABLE never returns: rdb_get_mem_comparable_space() loops
+# forever because strnxfrm(' ') is empty for this collation, and it holds a
+# global mutex while doing so. This test is listed in
+# collections/disabled.def until that is fixed; see port-findings.md (P1).
+
+--source include/have_rocksdb.inc
+
+--disable_query_log
+call mtr.add_suppression("Syntax error at '\\[strength tertiary\\]'");
+call mtr.add_suppression("Failed to reset before a primary ignorable character U\\+A48C");
+--enable_query_log
+
+SET NAMES utf8mb4;
+--let $cs = utf8mb3
+--let $coll = utf8mb3_phone_ci
+--let $len = 32
+--let $values = ('+7 912 800 80 02'),('+7 (912) 800 80 04'),('+7-912-800-80-01'),('(7912) 800 80 03'),('+380 (912) 8008005'),('+7(912)800-80-01'),('79128008001'),('7 9 1 2 8 0 0 8 0 0 1'),(''),(NULL)
+--source suite/rocksdb/include/innodb_port_compare_collation.inc
+--let $len =

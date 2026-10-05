@@ -1,0 +1,41 @@
+SET NAMES utf8mb4;
+# utf8mb3_phone_ci
+CREATE TABLE r (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(32) CHARACTER SET utf8mb3 COLLATE utf8mb3_phone_ci, KEY kc (c), KEY kp (c(2))) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3778	'utf8mb3_phone_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+Warning	4162	'utf8mb3_phone_ci' is a user defined collation. User defined collations are deprecated and will be removed in a future release. Consider using a compiled collation instead.
+CREATE TABLE ur (c VARCHAR(32) CHARACTER SET utf8mb3 COLLATE utf8mb3_phone_ci, UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3778	'utf8mb3_phone_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+Warning	4162	'utf8mb3_phone_ci' is a user defined collation. User defined collations are deprecated and will be removed in a future release. Consider using a compiled collation instead.
+INSERT INTO r (c) VALUES ('+7 912 800 80 02'),('+7 (912) 800 80 04'),('+7-912-800-80-01'),('(7912) 800 80 03'),('+380 (912) 8008005'),('+7(912)800-80-01'),('79128008001'),('7 9 1 2 8 0 0 8 0 0 1'),(''),(NULL);
+CREATE TEMPORARY TABLE dup_r (id INT, rejected INT) ENGINE=InnoDB;
+CREATE TABLE i (id INT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(32) CHARACTER SET utf8mb3 COLLATE utf8mb3_phone_ci, KEY kc (c), KEY kp (c(2))) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3778	'utf8mb3_phone_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+Warning	4162	'utf8mb3_phone_ci' is a user defined collation. User defined collations are deprecated and will be removed in a future release. Consider using a compiled collation instead.
+CREATE TABLE ui (c VARCHAR(32) CHARACTER SET utf8mb3 COLLATE utf8mb3_phone_ci, UNIQUE KEY uc (c)) ENGINE=InnoDB;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3778	'utf8mb3_phone_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+Warning	4162	'utf8mb3_phone_ci' is a user defined collation. User defined collations are deprecated and will be removed in a future release. Consider using a compiled collation instead.
+INSERT INTO i (c) VALUES ('+7 912 800 80 02'),('+7 (912) 800 80 04'),('+7-912-800-80-01'),('(7912) 800 80 03'),('+380 (912) 8008005'),('+7(912)800-80-01'),('79128008001'),('7 9 1 2 8 0 0 8 0 0 1'),(''),(NULL);
+CREATE TEMPORARY TABLE dup_i (id INT, rejected INT) ENGINE=InnoDB;
+#   unique-key duplicates same as InnoDB (rejected: 2B3728393132293830302D38302D3031,3739313238303038303031,372039203120322038203020302038203020302031)
+# r.kc: index scan matches primary key scan
+# r.kc: equality lookups match (21 pairs)
+# r.kp: index scan matches primary key scan
+# r.kp: equality lookups match (21 pairs)
+# ur.uc: index scan matches primary key scan
+# ur.uc: equality lookups match (6 pairs)
+#   kc: y.c = x.c same rows as InnoDB
+#   kp: y.c = x.c same rows as InnoDB
+#   kc: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kp: y.c LIKE CONCAT(LEFT(x.c, 1), '%') same rows as InnoDB
+#   kc: y.c > x.c same rows as InnoDB
+#   kp: y.c BETWEEN x.c AND CONCAT(x.c, 'z') same rows as InnoDB
+DROP TABLE r, i, ur, ui;
+DROP TEMPORARY TABLE dup_r, dup_i;
