@@ -1,0 +1,59 @@
+#
+# Pinned behaviour, not a bug: duplicate-key error message
+# with trailing spaces. Exposed by main.type_varchar with MyRocks as the
+# default engine:
+#   CREATE TABLE t1 (v VARCHAR(20)) CHARSET latin1;
+#   INSERT INTO t1 VALUES ('a '), ('a');
+#   ALTER TABLE t1 ADD PRIMARY KEY (v);
+# InnoDB reports "Duplicate entry 'a '", MyRocks "Duplicate entry 'a'".
+#
+# Assessment: cosmetic. Both values are equal under the PAD SPACE collation,
+# and each engine names one of the two conflicting rows: InnoDB the row read
+# second, MyRocks the row read first (insert order reversed gives the
+# opposite message). Uniqueness, stored values and lookups match InnoDB for
+# PAD SPACE and NO PAD collations, which this test pins.
+#
+--source include/have_rocksdb.inc
+
+--echo # PAD SPACE (latin1_swedish_ci): 'a' and 'a ' are duplicates
+CREATE TABLE t1 (v VARCHAR(20)) CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('a '), ('a');
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD PRIMARY KEY (v);
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE KEY (v);
+TRUNCATE TABLE t1;
+INSERT INTO t1 VALUES ('a'), ('a ');
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD PRIMARY KEY (v);
+DROP TABLE t1;
+
+CREATE TABLE t1 (v VARCHAR(20) PRIMARY KEY) CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('b ');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES ('b');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES ('b   ');
+--echo # The stored value keeps its trailing space; lookups ignore it
+SELECT CONCAT('[', v, ']') AS v, LENGTH(v) FROM t1;
+SELECT CONCAT('[', v, ']') AS v FROM t1 WHERE v = 'b';
+SELECT CONCAT('[', v, ']') AS v FROM t1 WHERE v = 'b    ';
+DROP TABLE t1;
+
+CREATE TABLE t2 (id INT PRIMARY KEY, v VARCHAR(20), UNIQUE KEY (v))
+  CHARSET latin1 ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 'c  ');
+--error ER_DUP_ENTRY
+INSERT INTO t2 VALUES (2, 'c');
+SELECT id, CONCAT('[', v, ']') AS v FROM t2 FORCE INDEX (v) WHERE v = 'c';
+DROP TABLE t2;
+
+--echo # NO PAD (utf8mb4_0900_ai_ci): 'd' and 'd ' are different values
+CREATE TABLE t3 (v VARCHAR(20) PRIMARY KEY)
+  CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES ('d '), ('d');
+--error ER_DUP_ENTRY
+INSERT INTO t3 VALUES ('d ');
+SELECT CONCAT('[', v, ']') AS v, LENGTH(v) FROM t3 ORDER BY v;
+SELECT CONCAT('[', v, ']') AS v FROM t3 WHERE v = 'd ';
+DROP TABLE t3;

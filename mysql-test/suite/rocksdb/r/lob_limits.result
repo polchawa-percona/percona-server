@@ -1,0 +1,94 @@
+SET @old_max_allowed_packet = @@GLOBAL.max_allowed_packet;
+CREATE TABLE t1 (id INT PRIMARY KEY, b LONGBLOB, t LONGTEXT) ENGINE=ROCKSDB;
+#
+# 1. max_allowed_packet: a value just below the limit is stored intact,
+#    a value above it is rejected without a partial row
+#
+SET GLOBAL max_allowed_packet = 16 * 1024 * 1024;
+INSERT INTO t1 VALUES (1, REPEAT('a', 16 * 1024 * 1024 - 1024), NULL);
+SELECT id, LENGTH(b), RIGHT(b, 3) FROM t1;
+id	LENGTH(b)	RIGHT(b, 3)
+1	16776192	aaa
+INSERT INTO t1 VALUES (2, REPEAT('b', 16 * 1024 * 1024 + 1), NULL);
+ERROR HY000: Result of repeat() was larger than max_allowed_packet (16777216) - truncated
+UPDATE t1 SET b = CONCAT(b, REPEAT('c', 2048)) WHERE id = 1;
+ERROR HY000: Result of concat() was larger than max_allowed_packet (16777216) - truncated
+SELECT id, LENGTH(b), RIGHT(b, 3) FROM t1;
+id	LENGTH(b)	RIGHT(b, 3)
+1	16776192	aaa
+UPDATE t1 SET t = REPEAT('t', 15 * 1024 * 1024) WHERE id = 1;
+SELECT id, LENGTH(b), LENGTH(t) FROM t1;
+id	LENGTH(b)	LENGTH(t)
+1	16776192	15728640
+SET GLOBAL max_allowed_packet = @old_max_allowed_packet;
+SELECT id, LENGTH(b), LENGTH(t), CRC32(t) = CRC32(REPEAT('t', 15 * 1024 * 1024)) AS t_ok FROM t1;
+id	LENGTH(b)	LENGTH(t)	t_ok
+1	16776192	15728640	1
+DELETE FROM t1;
+#
+# 2. rocksdb_write_batch_max_bytes: the statement that exceeds the batch
+#    limit fails and is rolled back; earlier statements in the same
+#    transaction survive and can be committed
+#
+INSERT INTO t1 VALUES (1, REPEAT('a', 1000), NULL);
+SET SESSION rocksdb_write_batch_max_bytes = 100000;
+INSERT INTO t1 VALUES (2, REPEAT('b', 200000), NULL);
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+BEGIN;
+INSERT INTO t1 VALUES (5, REPEAT('e', 60000), NULL);
+INSERT INTO t1 VALUES (6, REPEAT('f', 60000), NULL);
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT id, LENGTH(b) FROM t1 ORDER BY id;
+id	LENGTH(b)
+1	1000
+5	60000
+INSERT INTO t1 VALUES (7, 'small', NULL);
+COMMIT;
+SELECT id, LENGTH(b), LEFT(b, 1) FROM t1 ORDER BY id;
+id	LENGTH(b)	LEFT(b, 1)
+1	1000	a
+5	60000	e
+7	5	s
+# A LOB update over the limit leaves the old value
+UPDATE t1 SET b = REPEAT('z', 300000) WHERE id = 1;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT id, LENGTH(b), LEFT(b, 1) FROM t1 WHERE id = 1;
+id	LENGTH(b)	LEFT(b, 1)
+1	1000	a
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+UPDATE t1 SET b = REPEAT('z', 300000) WHERE id = 1;
+SELECT id, LENGTH(b), LEFT(b, 1) FROM t1 WHERE id = 1;
+id	LENGTH(b)	LEFT(b, 1)
+1	300000	z
+DELETE FROM t1;
+#
+# 3. rocksdb_max_row_locks: a LOB update touching more rows than allowed
+#    fails as a whole; earlier work in the transaction is kept
+#
+INSERT INTO t1 (id, b)
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 20)
+SELECT n, REPEAT(CHAR(64 + n), 10000) FROM s;
+SET SESSION rocksdb_max_row_locks = 10;
+BEGIN;
+UPDATE t1 SET b = REPEAT('z', 20000) WHERE id <= 5;
+UPDATE t1 SET b = REPEAT('y', 20000);
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SELECT COUNT(*), SUM(LENGTH(b)), SUM(LEFT(b, 1) = 'z') AS z_rows, SUM(LEFT(b, 1) = 'y') AS y_rows FROM t1;
+COUNT(*)	SUM(LENGTH(b))	z_rows	y_rows
+20	250000	5	0
+COMMIT;
+SELECT COUNT(*), SUM(LENGTH(b)), SUM(LEFT(b, 1) = 'z') AS z_rows, SUM(LEFT(b, 1) = 'y') AS y_rows FROM t1;
+COUNT(*)	SUM(LENGTH(b))	z_rows	y_rows
+20	250000	5	0
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+#
+# 4. A large multi-row LOB transaction commits and reads back intact
+#    (about 60 MB in one write batch)
+#
+BEGIN;
+UPDATE t1 SET b = REPEAT(CHAR(96 + id), 3 * 1024 * 1024);
+COMMIT;
+SELECT COUNT(*), SUM(LENGTH(b)), SUM(CRC32(b) = CRC32(REPEAT(CHAR(96 + id), 3 * 1024 * 1024))) AS ok_rows FROM t1;
+COUNT(*)	SUM(LENGTH(b))	ok_rows
+20	62914560	20
+DROP TABLE t1;
