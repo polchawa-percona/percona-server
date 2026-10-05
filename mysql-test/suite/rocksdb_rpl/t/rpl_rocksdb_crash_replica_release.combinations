@@ -1,0 +1,12 @@
+[row-wc]
+binlog-format=row
+loose-rocksdb_write_policy=write_committed
+
+[row-wp]
+binlog-format=row
+loose-rocksdb_write_policy=write_prepared
+
+[row-wup]
+binlog-format=row
+loose-rocksdb_write_policy=write_unprepared
+loose-rocksdb_write_batch_flush_threshold=1

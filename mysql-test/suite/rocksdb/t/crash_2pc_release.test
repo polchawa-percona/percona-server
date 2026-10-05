@@ -1,0 +1,91 @@
+# Release-capable 2PC / binary log consistency test after SIGKILL under load.
+#
+# Release variant R3 (myrocks-notes/release-variants.md) of the debug-only
+# tests rpl_rocksdb_2pc_crash_recover, multiclient_2pc and
+# crash_2pc_mixed_engines. It uses no debug points and no debug_sync, so it
+# runs on debug and release builds alike.
+#
+# Several client processes run money-transfer transactions concurrently:
+# every transaction moves one unit between two MyRocks accounts and logs its
+# id; every second transaction also does the same on InnoDB tables, so it is
+# a two-engine 2PC transaction. While the load runs, the server is killed
+# with SIGKILL at a point the test does not control, restarted, and the
+# recovered state is checked against invariants:
+#   - MyRocks and InnoDB transactions are atomic (zero-sum balances, move
+#     counters match the logged transactions)
+#   - the MyRocks secondary index agrees with the primary key
+#   - mixed transactions are either in both engines or in neither
+#   - every commit acknowledged to a client survived
+#   - the engines hold exactly the transactions committed in the binary log
+#
+# The test-level .combinations file runs it under all three
+# rocksdb_write_policy values.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/have_binlog_format_row.inc
+--source include/not_valgrind.inc
+
+SELECT @@global.sync_binlog;
+
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+
+CREATE TABLE r_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL,
+                    KEY kbal (bal)) ENGINE=ROCKSDB;
+CREATE TABLE r_log (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE i_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL)
+  ENGINE=InnoDB;
+CREATE TABLE i_log (id INT PRIMARY KEY) ENGINE=InnoDB;
+
+--let $load_script = $MYSQLTEST_VARDIR/tmp/crash_2pc_release_load.sh
+--write_file $load_script
+#!/bin/bash
+# Load generator for crash_2pc_release.
+# Usage: load.sh "<mysql command>" <conn> <seed> <accounts> <ack file> <done file>
+# Runs transactions until the server goes away, appending the id of every
+# transaction whose COMMIT was acknowledged to <ack file>.
+MYSQL_CMD=$1; CONN=$2; SEED=$3; NACC=$4; ACK=$5; DONE=$6
+RANDOM=$SEED
+i=0
+while [ $i -lt 100000 ]; do
+  i=$((i + 1))
+  id=$((CONN * 1000000 + i))
+  a=$((RANDOM % NACC + 1))
+  b=$((RANDOM % NACC + 1))
+  if [ $a -eq $b ]; then b=$((a % NACC + 1)); fi
+  # Always lock the lower id first, so that the clients never deadlock.
+  if [ $a -lt $b ]; then lo=$a; hi=$b; dlo=-1; dhi=1; else lo=$b; hi=$a; dlo=1; dhi=-1; fi
+  sql="BEGIN;"
+  sql="$sql UPDATE r_acc SET bal = bal + ($dlo), moves = moves + 1 WHERE id = $lo;"
+  sql="$sql UPDATE r_acc SET bal = bal + ($dhi), moves = moves + 1 WHERE id = $hi;"
+  sql="$sql INSERT INTO r_log VALUES ($id);"
+  if [ $((id % 2)) -eq 0 ]; then
+    sql="$sql UPDATE i_acc SET bal = bal + ($dlo), moves = moves + 1 WHERE id = $lo;"
+    sql="$sql UPDATE i_acc SET bal = bal + ($dhi), moves = moves + 1 WHERE id = $hi;"
+    sql="$sql INSERT INTO i_log VALUES ($id);"
+  fi
+  sql="$sql COMMIT;"
+  if eval "$MYSQL_CMD test -e \"\$sql\"" >/dev/null 2>&1; then
+    echo $id >> "$ACK"
+  else
+    # A lock wait timeout only loses this transaction; a dead server ends the load.
+    if ! eval "$MYSQL_CMD -e 'SELECT 1'" >/dev/null 2>&1; then break; fi
+  fi
+done
+echo done > "$DONE"
+EOF
+
+--let $flush_val = 1
+--let $round = 1
+--source suite/rocksdb/include/crash_2pc_release_round.inc
+--let $round = 2
+--source suite/rocksdb/include/crash_2pc_release_round.inc
+
+--let $flush_val = 2
+--let $round = 3
+--source suite/rocksdb/include/crash_2pc_release_round.inc
+--let $round = 4
+--source suite/rocksdb/include/crash_2pc_release_round.inc
+
+--remove_file $load_script
+DROP TABLE r_acc, r_log, i_acc, i_log;
