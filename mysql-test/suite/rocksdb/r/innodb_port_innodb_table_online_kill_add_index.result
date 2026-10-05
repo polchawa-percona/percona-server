@@ -1,0 +1,33 @@
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 TEXT NOT NULL)
+ENGINE = ROCKSDB;
+INSERT INTO t1 VALUES (1,1,''), (2,2,''), (3,3,''), (4,4,''), (5,5,'');
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL built WAIT_FOR kill_done';
+ALTER TABLE t1 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+SET DEBUG_SYNC = 'now SIGNAL kill_done';
+ERROR 70100: Query execution was interrupted
+SET DEBUG_SYNC = 'RESET';
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` text NOT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Nothing of the killed index is left in the MyRocks dictionary.
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'k_c2';
+COUNT(*)
+0
+SELECT * FROM t1 ORDER BY c1;
+c1	c2	c3
+1	1	
+2	2	
+3	3	
+4	4	
+5	5	
+DROP TABLE t1;

@@ -1,0 +1,370 @@
+#
+# Port of innodb.innodb-table-online (mysql-test/suite/innodb/t/innodb-table-online.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB keeps DML running during an online ALTER and replays it from a modification
+#     log. MyRocks has no such log: INPLACE index builds need LOCK=SHARED and COPY ALTERs
+#     block writes too. The ALTERs are paused at server debug_sync points instead of
+#     InnoDB's row_log_* points, and the test checks MyRocks' model: readers proceed,
+#     writers wait (ER_LOCK_WAIT_TIMEOUT), and the ALTER result is consistent afterwards.
+#   - The duplicate-key, NULL to NOT NULL, prefix-PK and KILL QUERY scenarios are kept;
+#     KILL QUERY now hits a paused COPY ALTER and an INPLACE ADD INDEX paused at
+#     rocksdb_after_inplace_alter_table (a MyRocks debug_sync point no test used before).
+#   - ROW_FORMAT rebuilds are replaced by ALTER ... FORCE (MyRocks ignores ROW_FORMAT).
+#   - INNODB_METRICS, OOM injection, innodb_online_alter_log_max_size and DISCARD
+#     TABLESPACE parts removed (InnoDB-only).
+#   - After every ALTER the secondary indexes are checked against the primary key.
+#   - Primary-key and NULL to NOT NULL changes are COPY ALTERs on MyRocks, which report
+#     ER_WARN_DATA_TRUNCATED for NULLs (same as InnoDB with ALGORITHM=COPY) instead of the
+#     ER_INVALID_USE_OF_NULL of InnoDB's INPLACE path.
+#   - Runs at READ COMMITTED (-master.opt) because MyRocks rejects the gap locks of
+#     INSERT ... SELECT at REPEATABLE READ.
+#   - The instant ADD COLUMN step enables rocksdb_enable_instant_ddl_for_append_column
+#     (off by default) and adds a NOT NULL column, because MyRocks refuses instant ADD when
+#     the null bitmap would grow.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--let $rocksdb_lock_wait_timeout_orig= `SELECT @@global.rocksdb_lock_wait_timeout`
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 TEXT NOT NULL)
+ENGINE = ROCKSDB;
+INSERT INTO t1 VALUES (1,1,''), (2,2,''), (3,3,''), (4,4,''), (5,5,'');
+
+--echo #
+--echo # An INSERT that holds a metadata lock blocks the ALTER (lock wait timeout).
+--echo #
+SET DEBUG_SYNC = 'RESET';
+SET DEBUG_SYNC = 'write_row_noreplace SIGNAL have_handle WAIT_FOR go_ahead';
+--send INSERT INTO t1 VALUES(1,2,3)
+
+--echo # Establish session con1 (user=root)
+connect (con1,localhost,root,,);
+connection con1;
+SET DEBUG_SYNC = 'now WAIT_FOR have_handle';
+SET lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t1 FORCE;
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+--echo # session default
+connection default;
+--error ER_DUP_ENTRY
+reap;
+
+--echo # session con1
+connection con1;
+--echo # MyRocks cannot build indexes with concurrent DML (no online log).
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD INDEX(c2), ALGORITHM=INPLACE, LOCK=NONE;
+ALTER TABLE t1 FORCE;
+
+--echo # session default
+connection default;
+SHOW CREATE TABLE t1;
+# Insert a duplicate entry (4) for the upcoming UNIQUE INDEX(c2).
+BEGIN;
+INSERT INTO t1 VALUES(7,4,2);
+
+--echo # session con1
+connection con1;
+--echo # Lock wait timeout on the metadata lock: the transaction is still open.
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t1 DROP PRIMARY KEY, ADD UNIQUE INDEX(c2);
+
+--echo # session default
+connection default;
+COMMIT;
+
+--echo # session con1
+connection con1;
+--error ER_DUP_ENTRY
+ALTER TABLE t1 DROP PRIMARY KEY, ADD UNIQUE INDEX(c2);
+--replace_regex /#sql-[0-9a-f_]+/#sql-temp/
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE INDEX(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SHOW CREATE TABLE t1;
+
+--echo # session default
+connection default;
+DELETE FROM t1 WHERE c1 = 7;
+
+--echo # session con1
+connection con1;
+ALTER TABLE t1 DROP PRIMARY KEY, ADD UNIQUE INDEX(c2);
+ALTER TABLE t1 ADD UNIQUE INDEX(c2), LOCK = EXCLUSIVE, ALGORITHM = INPLACE;
+SHOW CREATE TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= c2_2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+--echo #
+--echo # A COPY ALTER paused after it took its locks: readers proceed, writers wait.
+--echo #
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL scanned WAIT_FOR insert_done';
+--send ALTER TABLE t1 DROP INDEX c2, ADD PRIMARY KEY(c1)
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR scanned';
+SELECT COUNT(*) FROM t1;
+SET lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES(4,7,2);
+SET lock_wait_timeout = DEFAULT;
+SET DEBUG_SYNC = 'now SIGNAL insert_done';
+
+--echo # session con1
+connection con1;
+reap;
+SHOW CREATE TABLE t1;
+--let $pk_check_index= c2_2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+--echo # session default
+connection default;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES(6,3,1);
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES(7,4,2);
+DROP INDEX c2_2 ON t1;
+BEGIN;
+INSERT INTO t1 VALUES(7,4,2);
+ROLLBACK;
+
+--echo #
+--echo # KILL QUERY of a COPY ALTER paused before it copies the rows.
+--echo #
+--echo # session con1
+connection con1;
+let $ID= `SELECT @id := CONNECTION_ID()`;
+--error ER_QUERY_INTERRUPTED
+KILL QUERY @id;
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL rebuilt WAIT_FOR kill_done';
+--send ALTER TABLE t1 FORCE
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR rebuilt';
+let $ignore= `SELECT @id := $ID`;
+KILL QUERY @id;
+SET DEBUG_SYNC = 'now SIGNAL kill_done';
+
+--echo # session con1
+connection con1;
+--error ER_QUERY_INTERRUPTED
+reap;
+
+--echo # session default
+connection default;
+CHECK TABLE t1;
+SELECT * FROM t1 ORDER BY c1;
+
+--echo #
+--echo # An INPLACE ADD INDEX paused after MyRocks prepared the index and the lock was
+--echo # downgraded to SHARED: readers proceed, writers wait, the index is complete.
+--echo # (KILL QUERY at this point is in innodb_port_innodb_table_online_kill_add_index.)
+--echo #
+--echo # session con1
+connection con1;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL built WAIT_FOR go_on';
+--send ALTER TABLE t1 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+SELECT COUNT(*) FROM t1;
+SET lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET c2 = c2 + 100 WHERE c1 = 1;
+SET lock_wait_timeout = DEFAULT;
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+
+--echo # session con1
+connection con1;
+reap;
+
+--echo # session default
+connection default;
+SHOW CREATE TABLE t1;
+CHECK TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= k_c2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+ALTER TABLE t1 DROP INDEX k_c2;
+
+--echo #
+--echo # An INSTANT ADD COLUMN paused at rocksdb_after_inplace_alter_table, then killed:
+--echo # the column must not appear.
+--echo #
+--echo # session con1
+connection con1;
+--let $instant_append_orig= `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+SET DEBUG_SYNC = 'rocksdb_after_inplace_alter_table SIGNAL instant_paused WAIT_FOR kill_done3';
+--send ALTER TABLE t1 ADD COLUMN ci INT NOT NULL DEFAULT 7, ALGORITHM = INSTANT
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR instant_paused';
+SELECT COUNT(*) FROM t1;
+let $ignore= `SELECT @id := $ID`;
+KILL QUERY @id;
+SET DEBUG_SYNC = 'now SIGNAL kill_done3';
+
+--echo # session con1
+connection con1;
+--error 0,ER_QUERY_INTERRUPTED
+reap;
+--disable_query_log
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $instant_append_orig;
+--enable_query_log
+
+--echo # session default
+connection default;
+--echo # The ALTER either completed or left the table unchanged; both are consistent.
+let $has_ci= `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='test' AND table_name='t1' AND column_name='ci'`;
+let $instant_ok= 1;
+if ($has_ci)
+{
+  let $instant_ok= `SELECT COUNT(*) = SUM(ci = 7) FROM t1`;
+  --disable_query_log
+  ALTER TABLE t1 DROP COLUMN ci;
+  --enable_query_log
+}
+--echo # Table consistent after the killed INSTANT ALTER: $instant_ok
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1;
+
+INSERT INTO t1 SELECT  5 + c1, c2, c3 FROM t1;
+INSERT INTO t1 SELECT 10 + c1, c2, c3 FROM t1;
+INSERT INTO t1 SELECT 20 + c1, c2, c3 FROM t1;
+INSERT INTO t1 SELECT 40 + c1, c2, c3 FROM t1;
+ANALYZE TABLE t1;
+
+--echo #
+--echo # A long COPY ALTER paused after the copy: DML issued before the pause is in
+--echo # the new table, DML attempted during the pause waits and times out.
+--echo #
+--echo # session con1
+connection con1;
+SHOW CREATE TABLE t1;
+SET DEBUG_SYNC = 'alter_after_copy_table SIGNAL rebuilt2 WAIT_FOR dml2_done';
+SET lock_wait_timeout = 10;
+--send ALTER TABLE t1 ADD COLUMN c4 VARCHAR(6) DEFAULT 'Online'
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR rebuilt2';
+SET lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 SELECT 80 + c1, c2, c3 FROM t1;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET c2 = c2 + 1;
+SET lock_wait_timeout = DEFAULT;
+SELECT COUNT(*), SUM(c2) FROM t1;
+SET DEBUG_SYNC = 'now SIGNAL dml2_done';
+
+--echo # session con1
+connection con1;
+reap;
+SET lock_wait_timeout = 1;
+SELECT COUNT(*), SUM(c2), COUNT(c4) FROM t1;
+CHECK TABLE t1;
+
+--echo #
+--echo # Primary-key changes with duplicates, renamed columns and NULLs.
+--echo #
+--error ER_MULTIPLE_PRI_KEY
+ALTER TABLE t1 ADD PRIMARY KEY(c22f), CHANGE c2 c22f INT;
+--replace_regex /'\d+'/'N'/
+--error ER_DUP_ENTRY
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY(c22f), CHANGE c2 c22f INT;
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY(c1,c22f,c4(5)),
+CHANGE c2 c22f INT, CHANGE c3 c3 TEXT NULL, CHANGE c1 c1 INT AFTER c22f;
+SELECT COUNT(c22f) FROM t1;
+CHECK TABLE t1;
+# Create a column prefix index.
+--error ER_DUP_ENTRY
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY c3p5(c3(5));
+UPDATE t1 SET c3 = NULL WHERE c3 = '';
+--error ER_MULTIPLE_PRI_KEY
+ALTER TABLE t1 DROP COLUMN c22f, ADD PRIMARY KEY c3p5(c3(5));
+--error 1265
+ALTER TABLE t1 DROP COLUMN c22f, DROP PRIMARY KEY, ADD PRIMARY KEY c3p5(c3(5));
+--error 1265
+ALTER TABLE t1 MODIFY c3 TEXT NOT NULL;
+UPDATE t1 SET c3=CONCAT(c1,REPEAT('foo',c1)) WHERE c3 IS NULL;
+
+--echo # A NULL inserted before the ALTER takes its lock makes the ALTER fail.
+--echo # session default
+connection default;
+BEGIN;
+INSERT INTO t1 VALUES(347,33101,NULL,'');
+--echo # session con1
+connection con1;
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t1 MODIFY c3 TEXT NOT NULL, DROP COLUMN c22f,
+ADD COLUMN c5 CHAR(5) DEFAULT 'tired' FIRST;
+--echo # session default
+connection default;
+COMMIT;
+--echo # session con1
+connection con1;
+--error 1265
+ALTER TABLE t1 MODIFY c3 TEXT NOT NULL, DROP COLUMN c22f,
+ADD COLUMN c5 CHAR(5) DEFAULT 'tired' FIRST;
+DELETE FROM t1 WHERE c1 = 33101;
+ALTER TABLE t1 MODIFY c3 TEXT NOT NULL;
+ALTER TABLE t1 DROP PRIMARY KEY, DROP COLUMN c22f,
+ADD COLUMN c6 VARCHAR(1000) DEFAULT
+'I love tracking down hard-to-reproduce bugs.',
+ADD PRIMARY KEY c3p5(c3(5), c6(2));
+
+--echo # session default
+connection default;
+--error ER_BAD_NULL_ERROR
+INSERT INTO t1 VALUES(347,NULL,'','x');
+SELECT COUNT(*) FROM t1;
+ALTER TABLE t1 FORCE;
+SELECT * FROM t1 ORDER BY c3, c6 LIMIT 10;
+CHECK TABLE t1;
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#18894337 ONLINE ALTER TABLE LOG APPLY FAILS TO SKIP LOCKING
+--echo # (MyRocks: duplicate NULLs in a UNIQUE column inserted while a rebuild waits.)
+--echo #
+--echo # session con1
+connection con1;
+CREATE TABLE t1 (a SERIAL, c64 VARCHAR(64) UNIQUE) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(0, NULL);
+SET DEBUG_SYNC='alter_table_before_open_tables SIGNAL t1_ddl WAIT_FOR t1_dml';
+--send ALTER TABLE t1 ENGINE=ROCKSDB
+
+--echo # session default
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR t1_ddl';
+INSERT INTO t1 VALUES(0, NULL), (0, NULL);
+SET DEBUG_SYNC='now SIGNAL t1_dml';
+
+--echo # session con1
+connection con1;
+reap;
+SELECT COUNT(*) FROM t1;
+CHECK TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= c64
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+--echo # Disconnect session con1
+disconnect con1;
+--echo # session default
+connection default;
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

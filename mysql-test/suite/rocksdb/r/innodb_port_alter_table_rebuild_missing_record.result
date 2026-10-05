@@ -1,0 +1,249 @@
+connect  con1, localhost, root,,;
+connect  con2, localhost, root,,;
+CREATE PROCEDURE test.insert_records (IN record_count INT)
+BEGIN
+DECLARE counter INT DEFAULT 1;
+WHILE counter <= record_count DO
+INSERT INTO test.t1 (id) VALUES (0);
+SET counter = counter + 1;
+END WHILE;
+END //
+##############################################################
+# Bug#36846567 Inplace ALTER TABLE might cause lost rows if concurrent purge
+##############################################################
+
+connection default;
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+ALTER TABLE t1 ENGINE=ROCKSDB, ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE pk = 'bbbcc';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='copy_data_between_tables_before SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ENGINE=ROCKSDB
+ALTER TABLE t1 ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Before the fix row 'ddddd' was missing from the table after ALTER.
+SELECT * FROM t1;
+pk
+aaaaa
+bbbbb
+ccccc
+ddddd
+eeeee
+# Test cleanup
+DROP TABLE t1;
+##############################################################
+# Test#2 Delete the first record
+##############################################################
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE pk = 'aaaaa';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='copy_data_between_tables_before SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ENGINE=ROCKSDB
+ALTER TABLE t1 ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Verify intended records are present
+SELECT * FROM t1;
+pk
+bbbbb
+bbbcc
+ccccc
+ddddd
+eeeee
+# Test cleanup
+DROP TABLE t1;
+##############################################################
+# Test#3 Delete the second record
+##############################################################
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE pk = 'bbbbb';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='copy_data_between_tables_before SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ENGINE=ROCKSDB
+ALTER TABLE t1 ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Verify intended records are present
+SELECT * FROM t1;
+pk
+aaaaa
+bbbcc
+ccccc
+ddddd
+eeeee
+# Test cleanup
+DROP TABLE t1;
+##############################################################
+# Test#4 Delete the fourth record
+##############################################################
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE pk = 'ccccc';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='copy_data_between_tables_before SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ENGINE=ROCKSDB
+ALTER TABLE t1 ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Verify intended records are present
+SELECT * FROM t1;
+pk
+aaaaa
+bbbbb
+bbbcc
+ddddd
+eeeee
+# Test cleanup
+DROP TABLE t1;
+############################################################
+# Test#5 Bug#37318367 Delete a range of records in the middle
+# of a larger table
+############################################################
+CREATE TABLE t1 (id int AUTO_INCREMENT NOT NULL, c INT, PRIMARY KEY(id)) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 (id) WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 2000) SELECT 0 FROM v;
+UPDATE t1 SET c = id % 97;
+# Rebuild by ALGORITHM=COPY.
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE id > 2 AND id < 7 OR id BETWEEN 500 AND 1499;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='copy_data_between_tables_before SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ENGINE=ROCKSDB
+ALTER TABLE t1 ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 996
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Online index build (ALGORITHM=INPLACE).
+connection con2;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+connection default;
+DELETE FROM t1 WHERE id BETWEEN 1500 AND 1899;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+connection con1;
+SET DEBUG_SYNC='alter_table_inplace_after_lock_downgrade SIGNAL paused WAIT_FOR go';
+# Send ALTER TABLE t1 ADD INDEX k_c (c), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX k_c (c), ALGORITHM=INPLACE;
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR paused';
+connection con2;
+COMMIT;
+connection default;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC='now SIGNAL go';
+connection con1;
+# Reap ALTER TABLE
+connection default;
+SET DEBUG_SYNC='RESET';
+# Row count unchanged by the rebuild: 596
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.k_c matches the table: 1
+SELECT COUNT(*), MIN(id), MAX(id), SUM(c) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)	SUM(c)
+596	1	2000	28257
+# Test cleanup.
+DROP TABLE t1;
+#
+# Cleanup.
+connection default;
+DROP PROCEDURE test.insert_records;
+disconnect con1;
+disconnect con2;

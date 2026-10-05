@@ -1,0 +1,152 @@
+#
+# Port of innodb.alter_table_rebuild_missing_record
+# (mysql-test/suite/innodb/t/alter_table_rebuild_missing_record.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB purge of delete-marked records becomes RocksDB compaction of
+#     deleted versions. INNODB_PURGE_STOP_NOW becomes a consistent snapshot in
+#     another connection; innodb_purge_run_now plus wait_innodb_all_purged.inc
+#     become releasing that snapshot, a memtable flush and a manual compaction,
+#     run while the ALTER is paused.
+#   - ALTER TABLE ... ENGINE=ROCKSDB rebuilds the table with ALGORITHM=COPY
+#     (INPLACE is rejected, which is pinned), so it is paused at the server
+#     point copy_data_between_tables_before instead of InnoDB's
+#     ddl_bulk_inserter_latches_released; ddl_buf_add_two is dropped.
+#   - Test#5 (PCursor::move_to_next_block, innodb_limit_optimistic_insert_debug)
+#     has no MyRocks equivalent. It becomes a larger table with a deleted range
+#     in the middle, rebuilt by COPY and indexed by an INPLACE ADD INDEX paused
+#     at alter_table_inplace_after_lock_downgrade, the MyRocks online scan.
+#   - The shared steps are in suite/rocksdb/include/innodb_port_rebuild_missing_record.inc.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--source include/have_debug_sync.inc
+
+--enable_connect_log
+--connect (con1, localhost, root,,)
+--connect (con2, localhost, root,,)
+
+--DELIMITER //
+
+CREATE PROCEDURE test.insert_records (IN record_count INT)
+BEGIN
+    DECLARE counter INT DEFAULT 1;
+
+    WHILE counter <= record_count DO
+        INSERT INTO test.t1 (id) VALUES (0);
+        SET counter = counter + 1;
+    END WHILE;
+END //
+
+--DELIMITER ;
+
+--let $alter_stmt= ALTER TABLE t1 ENGINE=ROCKSDB
+--let $sync_point= copy_data_between_tables_before
+--let $check_index=
+
+--echo ##############################################################
+--echo # Bug#36846567 Inplace ALTER TABLE might cause lost rows if concurrent purge
+--echo ##############################################################
+--echo
+
+--connection default
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ENGINE=ROCKSDB, ALGORITHM=INPLACE;
+
+--let $delete_where= pk = 'bbbcc'
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+--echo # Before the fix row 'ddddd' was missing from the table after ALTER.
+SELECT * FROM t1;
+
+--echo # Test cleanup
+DROP TABLE t1;
+
+--echo ##############################################################
+--echo # Test#2 Delete the first record
+--echo ##############################################################
+--echo
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+
+--let $delete_where= pk = 'aaaaa'
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+--echo # Verify intended records are present
+SELECT * FROM t1;
+
+--echo # Test cleanup
+DROP TABLE t1;
+
+--echo ##############################################################
+--echo # Test#3 Delete the second record
+--echo ##############################################################
+--echo
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+
+--let $delete_where= pk = 'bbbbb'
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+--echo # Verify intended records are present
+SELECT * FROM t1;
+
+--echo # Test cleanup
+DROP TABLE t1;
+
+--echo ##############################################################
+--echo # Test#4 Delete the fourth record
+--echo ##############################################################
+--echo
+
+CREATE TABLE t1 (pk CHAR(5) PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('aaaaa'), ('bbbbb'), ('bbbcc'), ('ccccc'), ('ddddd'), ('eeeee');
+
+--let $delete_where= pk = 'ccccc'
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+--echo # Verify intended records are present
+SELECT * FROM t1;
+
+--echo # Test cleanup
+DROP TABLE t1;
+
+--echo ############################################################
+--echo # Test#5 Bug#37318367 Delete a range of records in the middle
+--echo # of a larger table
+--echo ############################################################
+
+CREATE TABLE t1 (id int AUTO_INCREMENT NOT NULL, c INT, PRIMARY KEY(id)) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 (id) WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 2000) SELECT 0 FROM v;
+UPDATE t1 SET c = id % 97;
+
+--echo # Rebuild by ALGORITHM=COPY.
+--let $delete_where= id > 2 AND id < 7 OR id BETWEEN 500 AND 1499
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+--echo # Online index build (ALGORITHM=INPLACE).
+--let $delete_where= id BETWEEN 1500 AND 1899
+--let $alter_stmt= ALTER TABLE t1 ADD INDEX k_c (c), ALGORITHM=INPLACE
+--let $sync_point= alter_table_inplace_after_lock_downgrade
+--let $check_index= k_c
+--source suite/rocksdb/include/innodb_port_rebuild_missing_record.inc
+
+SELECT COUNT(*), MIN(id), MAX(id), SUM(c) FROM t1;
+
+--echo # Test cleanup.
+DROP TABLE t1;
+
+--echo #
+--echo # Cleanup.
+--connection default
+DROP PROCEDURE test.insert_records;
+--disconnect con1
+--disconnect con2
+--disable_connect_log
+# Wait till all disconnects are completed
+--source include/wait_until_count_sessions.inc
