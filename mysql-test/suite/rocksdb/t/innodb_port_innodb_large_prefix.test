@@ -1,0 +1,76 @@
+#
+# Port of innodb.innodb-large-prefix (mysql-test/suite/innodb/t/innodb-large-prefix.test) to MyRocks.
+# Duplicate key columns and index key-part length limits.
+#
+# Changes from the InnoDB original:
+# - ENGINE=ROCKSDB.
+# - The original checks InnoDB's 768-byte limit for ROW_FORMAT=COMPACT.
+#   MyRocks ignores ROW_FORMAT and allows 3072-byte key parts
+#   (MAX_INDEX_COL_LEN in storage/rocksdb/rdb_global.h), so the 768-byte
+#   prefixes succeed here and the limit is checked at 3072/3073 bytes
+#   instead, for single-byte and multi-byte character sets, for CREATE TABLE
+#   and CREATE INDEX, and for the total key length.
+# - Rows are read back through the long prefix index and compared with the
+#   primary key.
+
+--source include/have_rocksdb.inc
+
+--error ER_DUP_FIELDNAME
+CREATE TABLE t1(a int not null,key(a,a)) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+CREATE TABLE t1(a int,b text,key(b(768))) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+DROP TABLE t1;
+CREATE TABLE t1(a int not null,b text) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+INSERT INTO t1 VALUES (1,''),(2,''),(3,''),(4,''),(5,''),(6,''),(7,'');
+--error ER_DUP_FIELDNAME
+CREATE INDEX t1aa ON t1(a,a);
+CREATE INDEX t1b ON t1(b(768));
+SHOW CREATE TABLE t1;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+CREATE TABLE t2(a int primary key, b text) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+INSERT INTO t2 VALUES (1,''),(2,''),(3,''),(4,''),(5,''),(6,''),(7,'');
+--error ER_DUP_FIELDNAME
+CREATE INDEX t2aa ON t2(a,a);
+CREATE INDEX t2b ON t2(b(768));
+SELECT * FROM t2;
+DROP TABLE t2;
+
+--echo #
+--echo # MyRocks limits: 3072 bytes per key part and per key.
+--echo #
+CREATE TABLE t3 (a INT PRIMARY KEY, b TEXT, KEY kb (b(3072))) ENGINE=ROCKSDB CHARSET latin1;
+--error ER_TOO_LONG_KEY
+CREATE INDEX kb2 ON t3 (b(3073));
+--error ER_TOO_LONG_KEY
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(3073))) ENGINE=ROCKSDB CHARSET latin1;
+# utf8mb4: 768 characters are 3072 bytes.
+--error ER_TOO_LONG_KEY
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(769))) ENGINE=ROCKSDB CHARSET utf8mb4;
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(768))) ENGINE=ROCKSDB CHARSET utf8mb4;
+# Two key parts that are each allowed but together exceed the key limit.
+--error ER_TOO_LONG_KEY
+CREATE TABLE t5 (a VARCHAR(2000), b VARCHAR(2000), KEY kab (a, b)) ENGINE=ROCKSDB CHARSET latin1;
+
+INSERT INTO t3 VALUES (1, REPEAT('a', 3072)), (2, CONCAT(REPEAT('a', 3071), 'b')),
+                      (3, CONCAT(REPEAT('a', 3072), 'tail')), (4, REPEAT('a', 4000));
+INSERT INTO t4 VALUES (1, REPEAT('ą', 768)), (2, CONCAT(REPEAT('ą', 767), 'ę')),
+                      (3, CONCAT(REPEAT('ą', 768), 'tail')), (4, REPEAT('😀', 800));
+
+SELECT a, LENGTH(b) FROM t3 FORCE INDEX (kb) WHERE b = REPEAT('a', 3072);
+SELECT a, LENGTH(b) FROM t3 FORCE INDEX (kb) WHERE b LIKE CONCAT(REPEAT('a', 3071), '%') ORDER BY a;
+SELECT a, CHAR_LENGTH(b) FROM t4 FORCE INDEX (kb) WHERE b = REPEAT('ą', 768);
+SELECT a, CHAR_LENGTH(b) FROM t4 FORCE INDEX (kb) WHERE b LIKE CONCAT(REPEAT('ą', 767), '%') ORDER BY a;
+
+--let $cpi_pk = a
+--let $cpi_index = kb
+--let $cpi_cols = b
+--let $cpi_table = t3
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_table = t4
+--source suite/rocksdb/include/innodb_port_check_index.inc
+CHECK TABLE t3, t4;
+DROP TABLE t3, t4;
