@@ -135,6 +135,8 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.shutdown_paused_background_work : BUG#0 PS-11729 shutdown hangs when background paused
+rocksdb.ddl_concurrent_admin_ops_stats : BUG#0 PS-11730 stats lost after concurrent DDL
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
