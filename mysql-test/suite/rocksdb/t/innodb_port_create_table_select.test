@@ -1,0 +1,106 @@
+#
+# Port of innodb.create_table_select
+# (mysql-test/suite/innodb/t/create_table_select.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every table
+#   - the lock list comes from INFORMATION_SCHEMA.ROCKSDB_LOCKS (via
+#     innodb_port_show_row_locks.inc) instead of performance_schema.data_locks,
+#     which is empty for MyRocks tables. The point of that part is unchanged:
+#     the locks taken by REPLACE and INSERT ... ON DUPLICATE KEY UPDATE must
+#     be the same with and without a trigger that runs its own query on the
+#     same table.
+#   - runs at READ COMMITTED (-master.opt): at REPEATABLE READ MyRocks refuses
+#     CREATE TABLE ... SELECT with the gap-lock error (1105), because the SELECT
+#     is a locking read in a multi-table statement
+#   - have_debug_sync.inc dropped: the original sources it but uses no sync
+#     point
+#
+--source include/have_rocksdb.inc
+
+--echo # Bug #28523025: INNODB: ASSERTION FAILURE:
+--echo #                LOCK0LOCK.CC:1468:LOCK_REC_GET_REC_NOT_GAP(LOCK)
+
+# Minimal reproduction of original issue:
+CREATE TABLE t0(a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE VIEW v0 AS SELECT a FROM t0;
+DROP TABLE t0;
+CREATE TABLE t0(a int) ENGINE=ROCKSDB REPLACE SELECT 0 AS a;
+DROP TABLE t0;
+DROP VIEW v0;
+
+# A version in which there are conflicting rows and REPLACE is used:
+CREATE TABLE t0(a INT, b INT) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1,1), (1,2), (2,2);
+CREATE TABLE t1(a INT, b INT) ENGINE=ROCKSDB;
+CREATE VIEW v0 AS SELECT b FROM t1;
+DROP TABLE t1;
+CREATE TABLE t1(
+  a INT PRIMARY KEY,
+  b INT
+) ENGINE=ROCKSDB REPLACE SELECT a,b FROM t0 ORDER BY a,b;
+SELECT * FROM t1;
+DROP TABLE t1;
+DROP TABLE t0;
+DROP VIEW v0;
+
+# A version in which there are conflicting rows and IGNORE is used:
+CREATE TABLE t0(a INT, b INT) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1,1), (1,2), (2,2);
+CREATE TABLE t1(a INT, b INT) ENGINE=ROCKSDB;
+CREATE VIEW v0 AS SELECT b FROM t1;
+DROP TABLE t1;
+CREATE TABLE t1(
+  a INT PRIMARY KEY,
+  b INT
+) ENGINE=ROCKSDB IGNORE SELECT a,b FROM t0 ORDER BY a,b;
+SELECT * FROM t1;
+DROP TABLE t1;
+DROP TABLE t0;
+DROP VIEW v0;
+
+# A version in which there are conflicting rows and no modifier is used:
+CREATE TABLE t0(a INT, b INT) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1,1), (1,2), (2,2);
+CREATE TABLE t1(a INT, b INT) ENGINE=ROCKSDB;
+CREATE VIEW v0 AS SELECT b FROM t1;
+DROP TABLE t1;
+--error ER_DUP_ENTRY
+CREATE TABLE t1(
+  a INT PRIMARY KEY,
+  b INT
+) ENGINE=ROCKSDB SELECT a,b FROM t0 ORDER BY a,b;
+DROP TABLE t0;
+DROP VIEW v0;
+
+# The locks taken by REPLACE and IODKU must not depend on whether a trigger
+# runs a "subquery" with its own lifecycle on the same table: the list for
+# i=1 (no trigger) must be the same as the list for i=2 (trigger).
+--let i=1
+while ($i <= 2)
+{
+    --let table=t$i
+    eval CREATE TABLE $table(a INT NOT NULL PRIMARY KEY, b INT NOT NULL UNIQUE)
+      ENGINE=ROCKSDB;
+    eval INSERT INTO $table (a,b) VALUES
+        (1,10), (2,20), (3,30), (4,40), (5,50), (6,60), (8,80), (10,100);
+    if ($i==2)
+    {
+        CREATE TABLE tt (i INT) ENGINE=ROCKSDB;
+        CREATE TRIGGER t2_bi BEFORE INSERT ON t2
+            FOR EACH ROW
+                INSERT INTO tt SELECT a as i FROM t2 WHERE a=10000;
+    }
+    BEGIN;
+    --eval REPLACE INTO $table (a,b) VALUES (2,13)
+    --eval INSERT INTO $table (a,b) VALUES (4,43) ON DUPLICATE KEY UPDATE b=43
+    --eval REPLACE INTO $table (a,b) VALUES (7,60)
+    --eval INSERT INTO $table (a,b) VALUES (9,80) ON DUPLICATE KEY UPDATE a=9
+    --let $show_locks_table = $table
+    --source suite/rocksdb/include/innodb_port_show_row_locks.inc
+    ROLLBACK;
+    --inc $i
+}
+DROP TRIGGER t2_bi;
+DROP TABLE tt;
+DROP TABLE t2;
+DROP TABLE t1;

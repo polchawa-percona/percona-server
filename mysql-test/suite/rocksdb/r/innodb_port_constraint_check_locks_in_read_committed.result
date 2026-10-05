@@ -1,0 +1,248 @@
+# does not conflict
+INSERT INTO t1 VALUES (5,5);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	85
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+5	5
+# conflicts on `a`, but not on `b`
+INSERT INTO t1 VALUES (0,5);
+ERROR 23000: Duplicate entry '0' for key 't1.a'
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# conflicts on `b`, but not on `a`
+INSERT INTO t1 VALUES (5,0);
+ERROR 23000: Duplicate entry '0' for key 't1.PRIMARY'
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# conflicts on both `a` and `b`
+INSERT INTO t1 VALUES (0,0);
+ERROR 23000: Duplicate entry '0' for key 't1.PRIMARY'
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# conflicts on `a` with deleted, but not on `b`
+INSERT INTO t1 VALUES (2,5);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	82
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+2	5
+3	3
+4	4
+# conflicts on `b` with deleted, but not on `a`
+INSERT INTO t1 VALUES (5,2);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	85
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+5	2
+# conflicts on both `a` and `b` with deleted row
+INSERT INTO t1 VALUES (2,2);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	82
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+2	2
+3	3
+4	4
+# conflicts on `a` with deleted, and with `b` on not-deleted
+INSERT INTO t1 VALUES (2,0);
+ERROR 23000: Duplicate entry '0' for key 't1.PRIMARY'
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# conflicts on `b` with deleted, and with `a` on not-deleted
+INSERT INTO t1 VALUES (0,2);
+ERROR 23000: Duplicate entry '0' for key 't1.a'
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# does not conflict
+REPLACE INTO t1 VALUES (5,5);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	85
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+5	5
+# conflicts on `a`, but not on `b`
+REPLACE INTO t1 VALUES (0,5);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	PRIMARY	X	80
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	5
+1	1
+3	3
+4	4
+# conflicts on `b`, but not on `a`
+REPLACE INTO t1 VALUES (5,0);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	a	X	85
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+1	1
+3	3
+4	4
+5	0
+# conflicts on both `a` and `b`
+REPLACE INTO t1 VALUES (0,0);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+# conflicts on `a` with deleted, but not on `b`
+REPLACE INTO t1 VALUES (2,5);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	82
+t1	PRIMARY	X	85
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+2	5
+3	3
+4	4
+# conflicts on `b` with deleted, but not on `a`
+REPLACE INTO t1 VALUES (5,2);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	85
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+3	3
+4	4
+5	2
+# conflicts on both `a` and `b` with deleted row
+REPLACE INTO t1 VALUES (2,2);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	82
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	0
+1	1
+2	2
+3	3
+4	4
+# conflicts on `a` with deleted, and with `b` on not-deleted
+REPLACE INTO t1 VALUES (2,0);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	a	X	82
+t1	PRIMARY	X	80
+COMMIT;
+SELECT * FROM t1;
+a	b
+1	1
+2	0
+3	3
+4	4
+# conflicts on `b` with deleted, and with `a` on not-deleted
+REPLACE INTO t1 VALUES (0,2);
+# Row locks held (INFORMATION_SCHEMA.ROCKSDB_LOCKS):
+table_name	index_name	lock_mode	lock_key
+t1	a	X	80
+t1	PRIMARY	X	80
+t1	PRIMARY	X	82
+COMMIT;
+SELECT * FROM t1;
+a	b
+0	2
+1	1
+3	3
+4	4

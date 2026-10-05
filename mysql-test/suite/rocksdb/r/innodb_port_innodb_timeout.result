@@ -1,0 +1,42 @@
+set global rocksdb_lock_wait_timeout=42;
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+42
+set rocksdb_lock_wait_timeout=1;
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+1
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+42
+set global rocksdb_lock_wait_timeout=347;
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+42
+set rocksdb_lock_wait_timeout=10;
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+10
+select @@rocksdb_lock_wait_timeout;
+@@rocksdb_lock_wait_timeout
+347
+SET @connection_b_id = <connection_b_id>;
+create table t1(a int primary key)engine=rocksdb;
+insert into t1 values(1),(2),(3),(4);
+begin;
+update t1 set a=a where a in (1,2,3);
+select * from t1 for update;
+commit;
+a
+1
+2
+3
+4
+begin;
+update t1 set a=a where a=4;
+set rocksdb_lock_wait_timeout=3;
+select * from t1 for update;
+commit;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+drop table t1;
+set global rocksdb_lock_wait_timeout=<initial_timeout>;

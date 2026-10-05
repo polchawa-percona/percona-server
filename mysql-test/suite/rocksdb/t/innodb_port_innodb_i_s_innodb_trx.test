@@ -1,0 +1,137 @@
+#
+# Port of innodb.innodb_i_s_innodb_trx
+# (mysql-test/suite/innodb/t/innodb_i_s_innodb_trx.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on the tables
+#   - INFORMATION_SCHEMA.ROCKSDB_TRX replaces INFORMATION_SCHEMA.INNODB_TRX.
+#     It has no isolation level, unique/foreign key check, weight or foreign
+#     key error columns; the test checks what it has instead: STATE,
+#     WRITE_COUNT, LOCK_COUNT, TIMEOUT_SEC, READ_ONLY, HAS_DEADLOCK_DETECTION
+#     and whether the transaction waits (WAITING_KEY). QUERY is not shown,
+#     because it is broken (port-findings.md #31).
+#   - the foreign key part is dropped: MyRocks has no foreign keys
+#   - the transactions run at READ COMMITTED: at REPEATABLE READ MyRocks
+#     refuses SELECT ... FOR SHARE/UPDATE of a whole table inside a
+#     transaction with the gap-lock error (1105)
+#   - the wait chain: InnoDB reports trx_schedule_weight for the waiting
+#     transactions. MyRocks has no such weight; the test shows which of the
+#     three transactions wait. A later shared lock request is granted while an
+#     exclusive request waits, so con_3 does not wait in MyRocks.
+#
+--source include/have_rocksdb.inc
+
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout=600;
+
+CREATE TABLE t1 (
+  c01 INT,
+  c02 INT,
+  PRIMARY KEY (c01)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES
+(1,2),(2,4),(3,6),(4,8);
+
+-- source include/count_sessions.inc
+
+-- connect (con_trx,localhost,root,,)
+-- connect (con_verify_rocksdb_trx,localhost,root,,)
+
+-- connection con_trx
+--let $con_trx_id = `SELECT CONNECTION_ID()`
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET autocommit=0;
+INSERT INTO t1 VALUES (5,10);
+SELECT * FROM t1 FOR UPDATE;
+
+-- connection con_verify_rocksdb_trx
+--echo # One write. LOCK_COUNT counts lock requests: the inserted row is locked
+--echo # by the INSERT and again by SELECT ... FOR UPDATE, so 5 rows give 6.
+--replace_result $con_trx_id <con_trx_id>
+eval SELECT state, write_count, lock_count, timeout_sec, waiting_key,
+       read_only, has_deadlock_detection
+FROM INFORMATION_SCHEMA.ROCKSDB_TRX WHERE thread_id = $con_trx_id;
+
+-- connection con_trx
+ROLLBACK;
+SET SESSION rocksdb_lock_wait_timeout = 7;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+
+-- connection con_verify_rocksdb_trx
+--echo # READ_ONLY is set for a transaction started WITH CONSISTENT SNAPSHOT
+--echo # (not for START TRANSACTION READ ONLY). TIMEOUT_SEC and
+--echo # HAS_DEADLOCK_DETECTION follow the session values.
+--replace_result $con_trx_id <con_trx_id>
+eval SELECT state, write_count, lock_count, timeout_sec, waiting_key,
+       read_only, has_deadlock_detection
+FROM INFORMATION_SCHEMA.ROCKSDB_TRX WHERE thread_id = $con_trx_id;
+
+-- connection con_trx
+ROLLBACK;
+
+-- connection default
+-- disconnect con_trx
+-- disconnect con_verify_rocksdb_trx
+
+# Wait chain: con_2 waits for con_1. con_3 asks for a shared lock while con_2
+# waits for an exclusive one.
+
+# A helper table to map con_1,...,con_3 to their connection ids
+CREATE TABLE t0 (
+  id INT PRIMARY KEY,
+  thread_id BIGINT
+) ENGINE=ROCKSDB;
+
+-- connect (con_1,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  INSERT INTO t0 VALUES (1, CONNECTION_ID());
+  BEGIN;
+  SELECT * FROM t1 FOR SHARE;
+
+-- connect (con_2,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  INSERT INTO t0 VALUES (2, CONNECTION_ID());
+  BEGIN;
+  -- send SELECT * FROM t1 FOR UPDATE
+
+-- connection default
+  let $wait_condition=
+    SELECT waiting_key != ''
+    FROM INFORMATION_SCHEMA.ROCKSDB_TRX
+    JOIN t0 USING(thread_id)
+    WHERE t0.id = 2;
+  -- source include/wait_condition.inc
+
+-- connect (con_3,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  INSERT INTO t0 VALUES (3, CONNECTION_ID());
+  BEGIN;
+  SELECT * FROM t1 FOR SHARE;
+
+-- connection default
+  SELECT t0.id, waiting_key != '' AS is_waiting, lock_count
+  FROM INFORMATION_SCHEMA.ROCKSDB_TRX
+  JOIN t0 USING(thread_id)
+  ORDER BY t0.id;
+
+-- connection con_1
+  ROLLBACK;
+-- connection con_3
+  ROLLBACK;
+-- connection con_2
+  -- reap
+  ROLLBACK;
+
+-- connection default
+-- disconnect con_1
+-- disconnect con_2
+-- disconnect con_3
+
+DROP TABLE t1;
+DROP TABLE t0;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+
+-- source include/wait_until_count_sessions.inc
