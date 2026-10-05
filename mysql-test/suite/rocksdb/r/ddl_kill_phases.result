@@ -1,0 +1,522 @@
+
+######## InnoDB
+CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=InnoDB;
+# KILL QUERY at alter_opened_table: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_opened_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at copy_data_between_tables_before: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at after_copy_data_between_tables: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'after_copy_data_between_tables SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: completed
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+1
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_copy_after_lock_upgrade: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_before_rename_result_table: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: completed
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+1
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_opened_table: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_opened_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_after_lock_upgrade: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_upgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_after_lock_downgrade: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_before_commit: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_before_commit SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+
+######## ROCKSDB
+CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+# KILL QUERY at alter_opened_table: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_opened_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at copy_data_between_tables_before: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at after_copy_data_between_tables: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'after_copy_data_between_tables SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: completed
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+1
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_copy_after_lock_upgrade: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_before_rename_result_table: ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: completed
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+1
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_opened_table: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_opened_table SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_after_lock_upgrade: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_upgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_after_lock_downgrade: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: interrupted
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+0
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# KILL QUERY at alter_table_inplace_before_commit: ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE
+SET DEBUG_SYNC = 'alter_table_inplace_before_commit SIGNAL reached WAIT_FOR go';
+ALTER TABLE t ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+SET DEBUG_SYNC = 'now SIGNAL go';
+# result: completed
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS new_column FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND COLUMN_NAME = 'd';
+new_column
+0
+SELECT COUNT(*) AS new_index FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'kab';
+new_index
+2
+SELECT COUNT(*), SUM(a), SUM(b) FROM t;
+COUNT(*)	SUM(a)	SUM(b)
+200	19900	4900
+SELECT COUNT(*), SUM(b) FROM t FORCE INDEX (kb) WHERE b >= 0;
+COUNT(*)	SUM(b)
+200	4900
+SELECT INDEX_NAME FROM information_schema.rocksdb_ddl
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+INDEX_NAME
+kab
+kb
+PRIMARY
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.rocksdb_ddl
+WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
