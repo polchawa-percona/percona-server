@@ -1,0 +1,37 @@
+#
+# Finding #11 (C1 in myrocks-notes/port-findings.md, crash-durability.md):
+# with the binary log off and rocksdb_flush_log_at_trx_commit = 2, a mysqld
+# process kill loses the commits of the last second.
+#
+# MyRocks opens RocksDB with manual_wal_flush = true. Without the binary log
+# the WAL buffer is written to the OS only by the background thread, once a
+# second, so a process kill (the OS survives) loses acknowledged commits.
+# The variable's help text and the code comment in ha_rocksdb.cc promise
+# that value 2 writes the WAL at commit and only defers the sync, which is
+# what InnoDB's innodb_flush_log_at_trx_commit = 2 does: it survives a mysqld
+# crash.
+#
+# Expected: every acknowledged commit survives a process kill with value 2.
+# (crash_durability_nobinlog checks only the invariants for value 2.)
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+if (`SELECT @@log_bin = 1`)
+{
+  --skip Test needs the binary log disabled
+}
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, pad VARCHAR(64), KEY k (k))
+  ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--let $rows = 200
+--let $check_binlog = 0
+
+--let $flush_val = 2
+--let $expect_all = 1
+--source suite/rocksdb/include/crash_durability_round.inc
+
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;
