@@ -1,0 +1,35 @@
+#
+# Port of percona_innodb.bug88747 (mysql-test/suite/percona_innodb/t/bug88747.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB
+#   - rows are inserted before the ALTER, and the table and its new primary
+#     key are checked after it
+#
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Bug #27216817 / #88747 "InnoDB: Failing assertion: prebuilt->table->n_mysql_handles_opened == 1"
+--echo # Adding a primary key to a table on which multiple locks are held
+--echo #
+
+CREATE TABLE t1(
+  c1 INT NOT NULL,
+  c2 TIMESTAMP NOT NULL,
+  c3 INT NULL,
+  c4 CHAR(1) NOT NULL
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (2, '2020-01-01 00:00:00', NULL, 'b'), (1, '2020-01-01 00:00:00', 1, 'a');
+
+LOCK TABLES t1 WRITE, t1 AS a READ;
+
+ALTER TABLE t1 ADD PRIMARY KEY(c1);
+
+UNLOCK TABLES;
+
+SHOW CREATE TABLE t1;
+SELECT * FROM t1;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (1, '2020-01-01 00:00:00', NULL, 'x');
+
+DROP TABLE t1;

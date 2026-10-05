@@ -1,0 +1,131 @@
+#
+# Port of innodb.ddl_add_drop_basic (mysql-test/suite/innodb/t/ddl_add_drop_basic.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every table
+#   - the original reads INFORMATION_SCHEMA.INNODB_TABLES.TOTAL_ROW_VERSIONS
+#     after each ADD/DROP COLUMN; MyRocks has no row versions, so the port
+#     shows which algorithm is used through the affected-rows count (0 for an
+#     instant change, the row count for a COPY rebuild) and the data afterwards
+#   - each case runs with MyRocks instant DDL off (the default) and with
+#     rocksdb_enable_instant_ddl_for_append_column=ON
+#   - the delete-marked row of the original (InnoDB purge stopped) becomes a
+#     deleted row kept visible by an open snapshot in another connection
+#   - DROP COLUMN has no instant implementation in MyRocks: pinned as rejected
+#     for ALGORITHM=INSTANT and INPLACE
+#   - include/have_debug.inc removed (no debug variables are used)
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let $saved_append = `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
+
+--let $round = 0
+while ($round < 2)
+{
+  if ($round == 0)
+  {
+    --echo #
+    --echo # Instant DDL for appended columns OFF (default)
+    --echo #
+    SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = OFF;
+  }
+  if ($round == 1)
+  {
+    --echo #
+    --echo # Instant DDL for appended columns ON
+    --echo #
+    SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+  }
+
+  --echo # Scenario 1: table with 0 rows
+  CREATE TABLE t1 (c1 INT) ENGINE=ROCKSDB;
+  --enable_info
+  ALTER TABLE t1 ADD COLUMN c2 INT;
+  ALTER TABLE t1 ADD COLUMN c3 INT, ALGORITHM=DEFAULT;
+  if ($round == 0)
+  {
+    --error ER_ALTER_OPERATION_NOT_SUPPORTED
+    ALTER TABLE t1 ADD COLUMN c4 INT, ALGORITHM=INSTANT;
+  }
+  if ($round == 1)
+  {
+    ALTER TABLE t1 ADD COLUMN c4 INT, ALGORITHM=INSTANT;
+  }
+  --error ER_ALTER_OPERATION_NOT_SUPPORTED
+  ALTER TABLE t1 ADD COLUMN c5 INT, ALGORITHM=INPLACE;
+  --disable_info
+  SHOW CREATE TABLE t1;
+  DROP TABLE t1;
+
+  --echo # Scenario 2: table with rows
+  CREATE TABLE t1 (c1 INT) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1), (2);
+  --enable_info
+  ALTER TABLE t1 ADD COLUMN c2 INT;
+  ALTER TABLE t1 ADD COLUMN c3 INT DEFAULT 3, ALGORITHM=DEFAULT;
+  if ($round == 0)
+  {
+    --error ER_ALTER_OPERATION_NOT_SUPPORTED
+    ALTER TABLE t1 ADD COLUMN c4 INT DEFAULT 4, ALGORITHM=INSTANT;
+  }
+  if ($round == 1)
+  {
+    ALTER TABLE t1 ADD COLUMN c4 INT DEFAULT 4, ALGORITHM=INSTANT;
+  }
+  --error ER_ALTER_OPERATION_NOT_SUPPORTED
+  ALTER TABLE t1 ADD COLUMN c5 INT, ALGORITHM=INPLACE;
+  --disable_info
+  SELECT * FROM t1 ORDER BY c1;
+  INSERT INTO t1 (c1) VALUES (3);
+  SELECT * FROM t1 ORDER BY c1;
+
+  --echo # DROP COLUMN
+  --enable_info
+  --error ER_ALTER_OPERATION_NOT_SUPPORTED
+  ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INSTANT;
+  --error ER_ALTER_OPERATION_NOT_SUPPORTED
+  ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INPLACE;
+  ALTER TABLE t1 DROP COLUMN c2;
+  --disable_info
+  SELECT * FROM t1 ORDER BY c1;
+  DROP TABLE t1;
+
+  --echo # Scenario 3: a deleted row still visible to an open snapshot
+  --echo # (t1 has no nullable column, so adding a nullable one changes the
+  --echo # size of the MyRocks null-bit header: MyRocks then always copies,
+  --echo # see rocksdb_support_instant())
+  --echo # (the snapshot is taken through another table, so that it holds no
+  --echo # metadata lock on t1 and the ALTER can run)
+  CREATE TABLE t0 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+  CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1), (2);
+  connect (con1,localhost,root,,);
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  SELECT * FROM t0;
+  connection default;
+  DELETE FROM t1 WHERE c1 = 1;
+  --enable_info
+  ALTER TABLE t1 ADD COLUMN c2 INT DEFAULT 7;
+  --disable_info
+  SELECT * FROM t1;
+  connection con1;
+  --echo # The snapshot is older than the ALTER. For a COPY rebuild it gets
+  --echo # ER_TABLE_DEF_CHANGED once PS-11627 is merged (an empty table
+  --echo # before); for an instant change it sees the deleted row with the
+  --echo # new column (PS-11657). Not recorded here: covered by those tests.
+  --disable_result_log
+  --error 0,ER_TABLE_DEF_CHANGED
+  SELECT * FROM t1;
+  --enable_result_log
+  COMMIT;
+  SELECT * FROM t1;
+  disconnect con1;
+  connection default;
+  DROP TABLE t0, t1;
+
+  --inc $round
+}
+
+--eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $saved_append
+--source include/wait_until_count_sessions.inc

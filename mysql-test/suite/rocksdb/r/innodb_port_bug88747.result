@@ -1,0 +1,30 @@
+#
+# Bug #27216817 / #88747 "InnoDB: Failing assertion: prebuilt->table->n_mysql_handles_opened == 1"
+# Adding a primary key to a table on which multiple locks are held
+#
+CREATE TABLE t1(
+c1 INT NOT NULL,
+c2 TIMESTAMP NOT NULL,
+c3 INT NULL,
+c4 CHAR(1) NOT NULL
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (2, '2020-01-01 00:00:00', NULL, 'b'), (1, '2020-01-01 00:00:00', 1, 'a');
+LOCK TABLES t1 WRITE, t1 AS a READ;
+ALTER TABLE t1 ADD PRIMARY KEY(c1);
+UNLOCK TABLES;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` timestamp NOT NULL,
+  `c3` int DEFAULT NULL,
+  `c4` char(1) NOT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT * FROM t1;
+c1	c2	c3	c4
+1	2020-01-01 00:00:00	1	a
+2	2020-01-01 00:00:00	NULL	b
+INSERT INTO t1 VALUES (1, '2020-01-01 00:00:00', NULL, 'x');
+ERROR 23000: Duplicate entry '1' for key 't1.PRIMARY'
+DROP TABLE t1;
