@@ -1,0 +1,56 @@
+CREATE TABLE t1 (
+c1 INT AUTO_INCREMENT PRIMARY KEY,
+c2 INT,
+c3 INT,
+c4 INT,
+INDEX k2(c2)
+) ENGINE=ROCKSDB;
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 (SELECT * FROM t1);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+#
+# Default connection: REPEATABLE READ transaction with a snapshot.
+#
+BEGIN;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+10
+UPDATE t1 SET c2 = c2 * 3 WHERE c1 = 1;
+#
+# Make all indexes in t2 obsolete to the active repeatable read transaction
+# in the default connection.
+#
+ALTER TABLE t2 row_format=redundant;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+10
+#
+# Table t2 has been altered to a new row format.
+# The index should not be useable.
+#
+SELECT COUNT(*) FROM t2;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t2;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+10
+SELECT COUNT(*) FROM t2 FORCE INDEX(k2);
+COUNT(*)
+10
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;

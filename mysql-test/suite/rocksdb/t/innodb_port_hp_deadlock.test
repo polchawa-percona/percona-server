@@ -1,0 +1,102 @@
+#
+# Port of innodb.hp_deadlock (mysql-test/suite/innodb/t/hp_deadlock.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; innodb_lock_wait_timeout ->
+#     rocksdb_lock_wait_timeout; rocksdb_deadlock_detect=ON (OFF by default in MyRocks)
+#   - MyRocks has no high-priority transactions (start_transaction_high_prio.inc) and no
+#     commit-order coordinator, so the "fake" deadlocks the original provokes cannot happen.
+#     The port keeps the lock-ordering core: three transactions form a wait chain
+#     con1 -> con3 -> con2 on two tables, and
+#       scenario 1: con2 commits; the chain must unwind in order, with no false deadlock and
+#                   no timeout
+#       scenario 2: con2 instead requests a lock held by con3, closing the cycle
+#                   con2 -> con3 -> con2; the deadlock must be detected and reported to con2,
+#                   after which con3 and then con1 complete
+#   - runs at READ COMMITTED (-master.opt). At REPEATABLE READ MyRocks validates the
+#     transaction snapshot when a waiter gets a row lock: con3's DELETE of the row con2
+#     deleted and committed after con3's snapshot fails with ER_LOCK_DEADLOCK (snapshot
+#     conflict, covered by rocksdb.rocksdb_locks and rocksdb.rocksdb_concurrent_delete),
+#     where InnoDB deletes 0 rows
+#   - InnoDB debug sync points (lock_wait_will_wait, lock_wait_has_finished_waiting) are
+#     replaced by waits on INFORMATION_SCHEMA.ROCKSDB_TRX, so the test needs no debug build
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+
+--let $scenario = 1
+
+while($scenario <= 2){
+  --echo # SCENARIO $scenario
+
+  CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (0);
+  CREATE TABLE t2 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+  INSERT INTO t2 VALUES (0);
+
+  --connect(con1,localhost,root,,test)
+  --connect(con2,localhost,root,,test)
+  --connect(con3,localhost,root,,test)
+
+  --connection con2
+    --let $con2_id= `SELECT CONNECTION_ID()`
+    BEGIN;
+    DELETE FROM t2 WHERE c1 = 0;
+
+  --connection con3
+    --let $con3_id= `SELECT CONNECTION_ID()`
+    BEGIN;
+    DELETE FROM t1 WHERE c1 = 0;
+    --send DELETE FROM t2 WHERE c1 = 0
+
+  --connection con1
+    --let $con1_id= `SELECT CONNECTION_ID()`
+    --let $wait_conn_id= $con3_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+    BEGIN;
+    --send DELETE FROM t1 WHERE c1 = 0
+
+  --connection con2
+    --let $wait_conn_id= $con1_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+    if($scenario == 1){
+      COMMIT;
+    }
+    if($scenario == 2){
+      --echo # con2 asks for t1's row, held by con3, which waits for con2
+      --error ER_LOCK_DEADLOCK
+      DELETE FROM t1 WHERE c1 = 0;
+      ROLLBACK;
+    }
+
+  --connection con3
+    --reap
+    SELECT ROW_COUNT() AS con3_deleted;
+    COMMIT;
+
+  --connection con1
+    --reap
+    SELECT ROW_COUNT() AS con1_deleted;
+    COMMIT;
+
+  --connection default
+  SELECT COUNT(*) AS t1_rows FROM t1;
+  SELECT COUNT(*) AS t2_rows FROM t2;
+  --disconnect con1
+  --disconnect con2
+  --disconnect con3
+
+  DROP TABLE t1;
+  DROP TABLE t2;
+
+  --inc $scenario
+}
+
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+--source include/wait_until_count_sessions.inc

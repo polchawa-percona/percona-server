@@ -1,0 +1,66 @@
+#
+# Port of innodb.innodb-consistent
+# (mysql-test/suite/innodb/t/innodb-consistent.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB
+#   - the final SELECT is sorted (MyRocks has no InnoDB-ordered hidden PK)
+#
+# REPLACE INTO ... SELECT and INSERT INTO ... SELECT at READ COMMITTED must do
+# a consistent, non-locking read of the source table: another session can
+# delete from the source table without waiting.
+#
+--source include/have_rocksdb.inc
+
+--disable_warnings
+drop table if exists t1;
+--enable_warnings
+
+connect (a,localhost,root,,);
+connect (b,localhost,root,,);
+connection a;
+set session transaction isolation level read committed;
+create table t1(a int not null) engine=rocksdb DEFAULT CHARSET=latin1;
+create table t2 like t1;
+insert into t2 values (1),(2),(3),(4),(5),(6),(7);
+set autocommit=0;
+
+# REPLACE INTO ... SELECT case
+begin;
+# this should not result in any locks on t2.
+replace into t1 select * from t2;
+
+connection b;
+set session transaction isolation level read committed;
+set autocommit=0;
+# should not cause a lock wait.
+delete from t2 where a=5;
+commit;
+delete from t2;
+commit;
+connection a;
+commit;
+
+# INSERT INTO ... SELECT case
+begin;
+# this should not result in any locks on t2.
+insert into t1 select * from t2;
+
+connection b;
+set session transaction isolation level read committed;
+set autocommit=0;
+# should not cause a lock wait.
+delete from t2 where a=5;
+commit;
+delete from t2;
+commit;
+connection a;
+commit;
+
+--sorted_result
+select * from t1;
+drop table t1;
+drop table t2;
+
+connection default;
+disconnect a;
+disconnect b;
