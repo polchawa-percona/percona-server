@@ -1,0 +1,3 @@
+--binlog_format=row
+--replica-exec-mode=STRICT
+--transaction-isolation=READ-COMMITTED

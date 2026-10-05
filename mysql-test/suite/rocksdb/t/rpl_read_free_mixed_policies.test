@@ -1,0 +1,58 @@
+# Write-policy coverage (step 3c): read-free replication when the source and
+# the replica use different write policies.
+#
+# The source runs under the policy of the test combination. The replica is
+# restarted under each of the three policies (write_unprepared with flush
+# threshold 1, so changes are written before commit) with read-free
+# replication on, and a multi-threaded applier replays PK, secondary-key and
+# unique-key updates, deletes, re-inserts and rolled-back transactions.
+# Source and replica must stay identical.
+
+--source include/have_rocksdb.inc
+--source include/have_binlog_format_row.inc
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_source.inc
+CREATE TABLE seq_200 (seq INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO seq_200 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 200) SELECT n FROM s;
+CREATE TABLE tp  (a INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+CREATE TABLE tps (a INT PRIMARY KEY, b INT, c INT, KEY(b)) ENGINE=ROCKSDB;
+CREATE TABLE tpu (a INT PRIMARY KEY, b INT, c INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+CREATE TABLE ts  (b INT, c INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO tp  SELECT seq, seq FROM seq_200;
+INSERT INTO tps SELECT seq, seq, seq FROM seq_200;
+INSERT INTO tpu SELECT seq, seq, seq FROM seq_200;
+INSERT INTO ts  SELECT seq, seq FROM seq_200;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/stop_replica.inc
+--let $rf_round= 0
+
+--let $replica_policy= write_committed
+--let $replica_threshold= 0
+--let $read_free_mode= PK_SK
+--source suite/rocksdb/include/rpl_read_free_policy_round.inc
+
+--let $replica_policy= write_prepared
+--let $replica_threshold= 0
+--let $read_free_mode= PK_SK
+--source suite/rocksdb/include/rpl_read_free_policy_round.inc
+
+--let $replica_policy= write_unprepared
+--let $replica_threshold= 1
+--let $read_free_mode= PK_SK
+--source suite/rocksdb/include/rpl_read_free_policy_round.inc
+
+--let $replica_policy= write_unprepared
+--let $replica_threshold= 1
+--let $read_free_mode= PK_ONLY
+--source suite/rocksdb/include/rpl_read_free_policy_round.inc
+
+# Restore the replica's default configuration.
+--let $rpl_server_number= 2
+--let $rpl_server_parameters=
+--source include/rpl/restart_server.inc
+--source include/rpl/start_replica.inc
+
+--source include/rpl/connection_source.inc
+DROP TABLE seq_200, tp, tps, tpu, ts;
+--source include/rpl/deinit.inc
