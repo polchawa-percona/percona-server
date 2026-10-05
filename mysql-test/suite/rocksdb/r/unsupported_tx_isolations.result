@@ -7,6 +7,19 @@ ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation 
 select * from t1 where id=1;
 ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level READ-UNCOMMITTED
 rollback;
+# Autocommit statements are rejected as well
+insert into t1 values (2,1);
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level READ-UNCOMMITTED
+select * from t1;
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level READ-UNCOMMITTED
+# A consistent snapshot is not taken, and reads are still rejected
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+Warnings:
+Warning	138	RocksDB: Only REPEATABLE READ isolation level is supported for START TRANSACTION WITH CONSISTENT SNAPSHOT in RocksDB Storage Engine. Snapshot has not been taken.
+Warning	138	InnoDB: WITH CONSISTENT SNAPSHOT was ignored because this phrase can only be used with REPEATABLE READ isolation level.
+select * from t1;
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level READ-UNCOMMITTED
+rollback;
 SET session transaction isolation level serializable;
 begin;
 insert into t1 values (2,1);
@@ -14,4 +27,22 @@ ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation 
 select * from t1 where id=1;
 ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level SERIALIZABLE
 rollback;
+# Autocommit statements are rejected as well
+insert into t1 values (2,1);
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level SERIALIZABLE
+select * from t1;
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level SERIALIZABLE
+# A consistent snapshot is not taken, and reads are still rejected
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+Warnings:
+Warning	138	RocksDB: Only REPEATABLE READ isolation level is supported for START TRANSACTION WITH CONSISTENT SNAPSHOT in RocksDB Storage Engine. Snapshot has not been taken.
+Warning	138	InnoDB: WITH CONSISTENT SNAPSHOT was ignored because this phrase can only be used with REPEATABLE READ isolation level.
+select * from t1;
+ERROR HY000: MyRocks supports only READ COMMITTED and REPEATABLE READ isolation levels. Please change from current isolation level SERIALIZABLE
+rollback;
+SET session transaction isolation level repeatable read;
+# Nothing was written at the unsupported levels
+select * from t1;
+id	value
+1	1
 DROP TABLE t1;

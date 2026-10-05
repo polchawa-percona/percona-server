@@ -16,6 +16,7 @@ pk	col1
 set session debug= "+d,rocksdb_return_status_corrupted";
 select * from t1 where pk=1;
 ERROR HY000: Lost connection to MySQL server during query
+Pattern "data corruption detected" found
 #
 #  The same for scan queries
 #
@@ -28,9 +29,12 @@ pk	col1
 set session debug= "+d,rocksdb_return_status_corrupted";
 select * from t1;
 ERROR HY000: Lost connection to MySQL server during query
+Pattern "data corruption detected" found
 #
 #  Test restart failure. The server is shutdown at this point.
 #
+# Start mysqld with MyRocks loaded, expecting it to exit
+Pattern "The server will exit normally and stop restart attempts" found
 #
 #  Remove corruption file and restart cleanly
 #
