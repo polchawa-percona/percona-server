@@ -1,0 +1,92 @@
+#
+# Port of innodb.innodb_mysql to MyRocks: runs the engine template
+# include/mix1.inc with MyRocks as the engine under test.
+#
+# mix1.inc takes the engine from $engine_type, but many statements in it
+# name ENGINE=InnoDB explicitly. To keep following upstream changes to the
+# template without copying it, this test writes a copy of mix1.inc into the
+# vardir at run time with those explicit InnoDB engine clauses replaced by
+# ROCKSDB, and sources the copy. Foreign key cases are skipped through the
+# template's own $test_foreign_keys switch (MyRocks has no foreign keys).
+# MyRocks has no temporary tables, so temporary tables stay InnoDB.
+#
+# Like the original, the server default engine is MyISAM (the template
+# relies on helper tables created on other connections being
+# non-transactional) and the InnoDB lock wait timeout is 2 seconds.
+#
+# The template prints many EXPLAIN plans; MyRocks row estimates for data
+# still in the memtable vary between runs, so the estimate is pinned with
+# rocksdb_debug_optimizer_n_rows and rocksdb_records_in_range (this test is
+# not about estimates). The range estimate keeps index access cheaper than a
+# full scan, as InnoDB's real statistics do: the Bug #28570 section takes
+# row locks, and a full scan under MyRocks (which has no semi-consistent
+# read) would wait on rows the other connection locked.
+#
+# The test runs at READ COMMITTED (see -master.opt): at REPEATABLE READ
+# MyRocks rejects locking reads that are not on a full unique key inside
+# multi-statement transactions (the gap-lock rule), which the template uses
+# in its setup statements.
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+
+let $engine_type= ROCKSDB;
+let $other_engine_type= MEMORY;
+let $test_foreign_keys= 0;
+
+--let MIX1_SRC= $MYSQL_TEST_DIR/include/mix1.inc
+--let MIX1_DST= $MYSQLTEST_VARDIR/tmp/mix1_rocksdb.inc
+--perl
+  use strict;
+  my $src = $ENV{MIX1_SRC};
+  my $dst = $ENV{MIX1_DST};
+  open(my $in, '<', $src) or die "open $src: $!";
+  open(my $out, '>', $dst) or die "open $dst: $!";
+  # Sections of the template that cannot run on MyRocks: [first line,
+  # line that starts the next section, reason]. Each is replaced by a note.
+  my @skip = (
+    [qr/^# Bug #22728 /, qr/^# Bug #13191:/, 'HANDLER is not supported'],
+    [qr/^# BUG#18819:/, qr/^--echo End of 4.1 tests/, 'foreign keys are not supported'],
+    [qr/^# Bug#39793 /, qr/^--echo # Bug #36995:/, 'foreign keys are not supported'],
+  );
+  my $skipping;
+  while (my $line = <$in>) {
+    if ($skipping) {
+      next unless $line =~ $skipping->[1];
+      $skipping = undef;
+    }
+    for my $s (@skip) {
+      if ($line =~ $s->[0]) {
+        print $out "--echo # Skipped on MyRocks: $s->[2]\n#\n";
+        $skipping = $s;
+        last;
+      }
+    }
+    next if $skipping;
+    # InnoDB-specific include (innodb_rollback_on_timeout); MyRocks has its
+    # own rocksdb_rollback_on_timeout test.
+    if ($line =~ m{^--source include/innodb_rollback_on_timeout\.inc}) {
+      print $out "--echo # Skipped on MyRocks: include/innodb_rollback_on_timeout.inc (InnoDB-specific)\n";
+      next;
+    }
+    # MyRocks has no temporary tables: temporary tables in the template use
+    # InnoDB, permanent tables use MyRocks.
+    if ($line =~ /^eval SET SESSION DEFAULT_TMP_STORAGE_ENGINE/i) {
+      print $out "SET SESSION DEFAULT_TMP_STORAGE_ENGINE = InnoDB;\n";
+      next;
+    }
+    # MyRocks writes require row-based binary logging (statement and mixed
+    # formats are not supported); the template's Bug #31310 section switches
+    # to mixed only because InnoDB needs it at READ COMMITTED.
+    $line =~ s/^set binlog_format=mixed;/set binlog_format=row;/i;
+    $line =~ s/\bengine\s*=\s*innodb\b/ENGINE=ROCKSDB/gi
+      unless $line =~ /\btemporary\b/i;
+    print $out $line;
+  }
+  die "skip section not closed" if $skipping;
+  close($in);
+  close($out);
+EOF
+
+--source $MIX1_DST
+--remove_file $MIX1_DST
