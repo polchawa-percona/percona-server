@@ -17442,6 +17442,15 @@ double ha_rocksdb::read_time(uint index, uint ranges, ha_rows rows) {
 void ha_rocksdb::print_error(int error, myf errflag) {
   switch (error) {
     case HA_ERR_ROCKSDB_STATUS_BUSY:
+      /*
+        A snapshot conflict is reported as ER_LOCK_DEADLOCK. Like InnoDB and
+        like a real deadlock, roll back the whole transaction: an application
+        that retries on this error expects to start the transaction again.
+        This is done here, not in set_status_error(), because a busy status
+        can still be retried with a new snapshot or skipped by SKIP LOCKED
+        before it reaches the SQL layer.
+      */
+      ha_thd()->mark_transaction_to_rollback(true /* whole transaction */);
       handler::print_error(HA_ERR_LOCK_DEADLOCK, errflag);
       break;
     case HA_ERR_LOCK_WAIT_TIMEOUT:
