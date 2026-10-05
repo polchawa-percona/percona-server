@@ -1,0 +1,111 @@
+#
+# Port of innodb.update_time to MyRocks.
+#
+# INFORMATION_SCHEMA.TABLES.UPDATE_TIME must be filled in after a committed
+# change to a MyRocks table. MyRocks keeps the value in memory only, as
+# InnoDB does (WL#6917 has not made it persistent), so it is NULL again after
+# a restart until the next committed change.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB.
+#   - The InnoDB buffer pool eviction step is replaced by a memtable flush
+#     and a manual compaction: UPDATE_TIME must survive both.
+#   - The XA part (restart with a prepared XA transaction, then XA COMMIT)
+#     is in rocksdb.update_time_xa, which is disabled until the MyRocks XA
+#     bugs are fixed.
+#   - Extra MyRocks cases: commit vs rollback, a partitioned table, the
+#     default information_schema_stats_expiry, DDL that rebuilds the table,
+#     and commit_in_the_middle.
+#
+--source include/have_rocksdb.inc
+
+SET SESSION information_schema_stats_expiry = 0;
+
+CREATE TABLE t (a INT) ENGINE=ROCKSDB;
+
+ANALYZE TABLE t;
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+
+INSERT INTO t VALUES (1);
+
+ANALYZE TABLE t;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+
+--echo # We cannot check the exact value, but it must be a timestamp not older
+--echo # than 2 minutes.
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND TIMESTAMPDIFF(SECOND, update_time, NOW()) < 120 OR FALSE;
+
+--echo # UPDATE_TIME survives a memtable flush and a compaction.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+ANALYZE TABLE t;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+
+--echo # The value is kept in memory only: NULL after a restart.
+--source include/restart_mysqld.inc
+SET SESSION information_schema_stats_expiry = 0;
+ANALYZE TABLE t;
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+
+--echo # UPDATE and DELETE set it again; a statement that changes no row
+--echo # does not.
+UPDATE t SET a = 2 WHERE a = 99;
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+UPDATE t SET a = 2;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+
+--echo # A rolled-back transaction does not set it.
+CREATE TABLE r (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+BEGIN;
+INSERT INTO r VALUES (1);
+SELECT update_time FROM information_schema.tables WHERE table_name = 'r';
+ROLLBACK;
+SELECT update_time FROM information_schema.tables WHERE table_name = 'r';
+
+--echo # Partitioned table: only the changed partition gets a value, and the
+--echo # table shows it.
+CREATE TABLE p (a INT PRIMARY KEY) ENGINE=ROCKSDB
+  PARTITION BY RANGE (a)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO p VALUES (1);
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'p'
+AND update_time IS NOT NULL OR FALSE;
+SELECT partition_name, update_time IS NULL FROM information_schema.partitions
+WHERE table_name = 'p' ORDER BY partition_name;
+
+--echo # With the default information_schema_stats_expiry the first change
+--echo # is also visible (the cached statistics had no value yet).
+SET SESSION information_schema_stats_expiry = DEFAULT;
+CREATE TABLE e (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+SELECT update_time FROM information_schema.tables WHERE table_name = 'e';
+INSERT INTO e VALUES (1);
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'e'
+AND update_time IS NOT NULL OR FALSE;
+SET SESSION information_schema_stats_expiry = 0;
+
+--echo # DDL that rebuilds the table resets the value, as for InnoDB.
+INSERT INTO r VALUES (1);
+ALTER TABLE r FORCE, ALGORITHM=COPY;
+SELECT update_time FROM information_schema.tables WHERE table_name = 'r';
+INSERT INTO r VALUES (2);
+TRUNCATE TABLE r;
+SELECT update_time FROM information_schema.tables WHERE table_name = 'r';
+
+--echo # commit_in_the_middle commits in batches; the value is set.
+CREATE TABLE c (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET SESSION rocksdb_commit_in_the_middle = 1;
+SET SESSION rocksdb_bulk_load_size = 10;
+INSERT INTO c
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 100)
+  SELECT n FROM s;
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION rocksdb_bulk_load_size = DEFAULT;
+SELECT COUNT(*) FROM c;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'c'
+AND update_time IS NOT NULL OR FALSE;
+
+DROP TABLE t, r, p, e, c;
