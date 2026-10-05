@@ -1,0 +1,246 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# Every way an ALTER TABLE on a MyRocks table can fail after it started must
+# leave the table unchanged and leave nothing behind: no extra index in the
+# MyRocks dictionary, no temporary #sql table, no orphan SST data of the
+# indexes built by the failed statement, and a clean restart with table
+# validation.
+#
+# Failure modes, each for COPY and INPLACE where it applies, and each with
+# rocksdb_commit_in_the_middle OFF and ON (with commit_in_the_middle a COPY
+# ALTER commits the copied rows of the temporary table in batches, so a late
+# failure must also remove the committed part):
+#  - duplicate key for a new unique index, found late in the copy or merge;
+#  - data truncation in strict mode, found late in the copy;
+#  - lock_wait_timeout at the first metadata lock upgrade (a writer holds
+#    the table) and at the final upgrade (a reader holds the table);
+#  - KILL QUERY in the copy phase (after a commit_in_the_middle batch) and
+#    in the primary key scan of an INPLACE index build;
+#  - rocksdb_max_row_locks and rocksdb_write_batch_max_bytes reached during
+#    a COPY ALTER.
+#
+# The rollback of an INPLACE ADD INDEX does not wake the drop-index thread
+# (PS-11665, tested by inplace_add_index_rollback_reclaim), so before the
+# final reclaim check this test runs a DROP TABLE, which wakes it.
+#
+
+# Logged when the index-build scan is killed (case 9).
+call mtr.add_suppression("Error retrieving index entry from primary key");
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c VARCHAR(20), KEY kc (c))
+  ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO t VALUES ($i, $i % 1500,
+                             REPEAT('x', IF($i >= 1800, 10, 1 + $i % 5)));
+  inc $i;
+}
+--enable_query_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--source suite/rocksdb/include/ddl_cleanup_check.inc
+
+connect (ddl, localhost, root,,);
+connect (other, localhost, root,,);
+connection ddl;
+--let $ddl_id = `SELECT CONNECTION_ID()`
+
+--let $cim = 0
+while ($cim < 2)
+{
+  --echo
+  --echo ######## rocksdb_commit_in_the_middle = $cim
+  connection ddl;
+  eval SET SESSION rocksdb_commit_in_the_middle = $cim;
+  SET SESSION rocksdb_bulk_load_size = 100;
+
+  --echo # 1. COPY ADD UNIQUE INDEX: duplicate key late in the copy
+  --replace_regex /#sql-[0-9a-f_]+/#sql-X/
+  --error ER_DUP_ENTRY
+  ALTER TABLE t ADD UNIQUE INDEX ub (b), ALGORITHM=COPY;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 2. COPY MODIFY: data truncation late in the copy (strict mode)
+  connection ddl;
+  --error 1265
+  ALTER TABLE t MODIFY c VARCHAR(5), ALGORITHM=COPY;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 3. INPLACE ADD UNIQUE INDEX: duplicate key in the merge
+  connection ddl;
+  --replace_regex /#sql-[0-9a-f_]+/#sql-X/
+  --error ER_DUP_ENTRY
+  ALTER TABLE t ADD UNIQUE INDEX ub (b), ALGORITHM=INPLACE;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 4. COPY: lock_wait_timeout at the first upgrade (a writer holds t)
+  connection other;
+  BEGIN;
+  UPDATE t SET b = b WHERE a = 1;
+  connection ddl;
+  SET SESSION lock_wait_timeout = 1;
+  --error ER_LOCK_WAIT_TIMEOUT
+  ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+  SET SESSION lock_wait_timeout = DEFAULT;
+  connection other;
+  COMMIT;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 5. COPY: lock_wait_timeout at the final upgrade, after the copy
+  --echo #    (a reader holds t)
+  connection other;
+  BEGIN;
+  SELECT COUNT(*) FROM t;
+  connection ddl;
+  SET SESSION lock_wait_timeout = 1;
+  --error ER_LOCK_WAIT_TIMEOUT
+  ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+  SET SESSION lock_wait_timeout = DEFAULT;
+  connection other;
+  COMMIT;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 6. INPLACE ADD INDEX: lock_wait_timeout at the first upgrade
+  --echo #    (a writer holds t)
+  connection other;
+  BEGIN;
+  UPDATE t SET b = b WHERE a = 1;
+  connection ddl;
+  SET SESSION lock_wait_timeout = 1;
+  --error ER_LOCK_WAIT_TIMEOUT
+  ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE;
+  SET SESSION lock_wait_timeout = DEFAULT;
+  connection other;
+  COMMIT;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 7. INPLACE ADD INDEX: lock_wait_timeout at the commit upgrade,
+  --echo #    after the index was built (a reader starts during the build)
+  connection ddl;
+  SET SESSION lock_wait_timeout = 1;
+  SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL built WAIT_FOR go';
+  --send ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE
+  connection other;
+  SET DEBUG_SYNC = 'now WAIT_FOR built';
+  BEGIN;
+  SELECT COUNT(*) FROM t;
+  SET DEBUG_SYNC = 'now SIGNAL go';
+  connection ddl;
+  --error ER_LOCK_WAIT_TIMEOUT
+  --reap
+  SET SESSION lock_wait_timeout = DEFAULT;
+  connection other;
+  COMMIT;
+  SET DEBUG_SYNC = 'RESET';
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 8. COPY: KILL QUERY in the copy phase
+  connection ddl;
+  if ($cim)
+  {
+    --echo #    (after the first commit_in_the_middle batch was committed)
+    SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL in_copy WAIT_FOR go';
+  }
+  if (!$cim)
+  {
+    SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL in_copy WAIT_FOR go';
+  }
+  --send ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+  connection other;
+  SET DEBUG_SYNC = 'now WAIT_FOR in_copy';
+  --disable_query_log
+  eval KILL QUERY $ddl_id;
+  --enable_query_log
+  SET DEBUG_SYNC = 'now SIGNAL go';
+  connection ddl;
+  --error ER_QUERY_INTERRUPTED
+  --reap
+  SET DEBUG_SYNC = 'RESET';
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  --echo # 9. INPLACE ADD INDEX: KILL QUERY in the primary key scan
+  --echo #    (the error is ER_SK_POPULATE_DURING_ALTER until PS-11635 is
+  --echo #    fixed; the killed connection is not reused, see PS-11658)
+  connection ddl;
+  SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL in_scan WAIT_FOR go';
+  --send ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE
+  connection other;
+  SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+  --disable_query_log
+  eval KILL QUERY $ddl_id;
+  --enable_query_log
+  SET DEBUG_SYNC = 'now SIGNAL go';
+  connection ddl;
+  --replace_regex /^ERROR .*/ERROR: index build interrupted/
+  --error ER_QUERY_INTERRUPTED, ER_SK_POPULATE_DURING_ALTER
+  --reap
+  disconnect ddl;
+  connection other;
+  SET DEBUG_SYNC = 'RESET';
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+  connect (ddl, localhost, root,,);
+  --let $ddl_id = `SELECT CONNECTION_ID()`
+  eval SET SESSION rocksdb_commit_in_the_middle = $cim;
+  SET SESSION rocksdb_bulk_load_size = 100;
+
+  --echo # 10. COPY with rocksdb_max_row_locks reached
+  SET SESSION rocksdb_max_row_locks = 500;
+  --error 0, ER_GET_ERRMSG
+  ALTER TABLE t FORCE, ALGORITHM=COPY;
+  SET SESSION rocksdb_max_row_locks = DEFAULT;
+  --source suite/rocksdb/include/ddl_cleanup_check.inc
+
+  # Without commit_in_the_middle this ALTER loses rows silently instead of
+  # failing (finding #54, tested by copy_alter_write_batch_max_bytes), so it
+  # runs here only with commit_in_the_middle.
+  if ($cim)
+  {
+    --echo # 11. COPY with rocksdb_write_batch_max_bytes reached
+    connection ddl;
+    SET SESSION rocksdb_write_batch_max_bytes = 1024;
+    --error ER_GET_ERRMSG
+    ALTER TABLE t FORCE, ALGORITHM=COPY;
+    SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+    --source suite/rocksdb/include/ddl_cleanup_check.inc
+  }
+
+  inc $cim;
+}
+
+--echo
+--echo ######## Space of the failed statements is reclaimed
+connection default;
+# Wakes the drop-index thread (see PS-11665).
+CREATE TABLE wake (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE wake;
+let $wait_timeout = 120;
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+let $orphans = SELECT COUNT(*) FROM information_schema.rocksdb_index_file_map m
+  LEFT JOIN information_schema.rocksdb_ddl d
+  ON d.INDEX_NUMBER = m.INDEX_NUMBER AND d.COLUMN_FAMILY = m.COLUMN_FAMILY
+  WHERE d.INDEX_NUMBER IS NULL AND m.COLUMN_FAMILY = 0;
+let $wait_condition = SELECT ($orphans) = 0;
+--source include/wait_condition.inc
+eval SELECT ($orphans) AS orphan_sst_entries;
+
+--echo
+--echo ######## Restart with table validation
+disconnect ddl;
+disconnect other;
+--source include/restart_mysqld.inc
+--source suite/rocksdb/include/ddl_cleanup_check.inc
+eval SELECT ($orphans) AS orphan_sst_entries;
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+
+DROP TABLE t;
+--source include/wait_until_count_sessions.inc
