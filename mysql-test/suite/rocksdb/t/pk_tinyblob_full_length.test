@@ -1,0 +1,39 @@
+#
+# A primary key that covers the whole value of a TINYBLOB or TINYTEXT column:
+# an explicit PRIMARY KEY (c(255)), or a UNIQUE NOT NULL key over the whole
+# column that the server promotes to the primary key. The key can be unpacked
+# into the column, so MyRocks reads the column from the key and needs its blob
+# buffer, which it allocates only for secondary keys. Every read of such a table
+# asserts in blob_buffer::get_blob_buffer() on debug builds and crashes with
+# SIGSEGV on release builds. Expected results are those of InnoDB.
+# Disabled until fixed: port-findings.md #57.
+#
+--source include/have_rocksdb.inc
+
+--echo # Explicit primary key over the whole TINYBLOB
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, PRIMARY KEY (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo # UNIQUE NOT NULL over the whole TINYBLOB, promoted to primary key
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, UNIQUE (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+DROP TABLE t1;
+
+--echo # Same with TINYTEXT
+CREATE TABLE t1 (c42 TINYTEXT CHARACTER SET latin1 NOT NULL, c45 INT, UNIQUE (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT c42, c45 FROM t1;
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+DROP TABLE t1;
+
+--echo # A shorter prefix is not promoted and works today
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, UNIQUE (c42(100))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+DROP TABLE t1;

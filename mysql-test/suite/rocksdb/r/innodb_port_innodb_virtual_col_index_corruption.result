@@ -1,0 +1,72 @@
+CREATE TABLE `t1` (
+`a` int NOT NULL AUTO_INCREMENT,
+`b` varchar(2) CHARACTER SET latin1 COLLATE latin1_german2_ci DEFAULT NULL,
+`c` int DEFAULT NULL,
+`d2` VARCHAR(2) GENERATED ALWAYS AS (UPPER(b)) VIRTUAL,
+`d` varchar(2) CHARACTER SET latin1 COLLATE latin1_german2_ci  GENERATED ALWAYS AS (b) VIRTUAL,
+PRIMARY KEY (`a`),
+KEY `d` (`d`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=4096 DEFAULT CHARSET=utf8mb3 COLLATE=utf8_general_ci;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+INSERT INTO t1 VALUES(1,'SS',1, default,default);
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+HEX(d)	a
+5353	1
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+HEX(d)	a
+5353	1
+DELETE FROM t1 WHERE a=1;
+INSERT INTO t1 VALUES(1,_latin1 0xdf,1, default, default);
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+HEX(d)	a
+DF	1
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+HEX(d)	a
+DF	1
+# Covering scan of the secondary index and lookups by both spellings
+SELECT HEX(d) FROM t1 FORCE INDEX (d);
+HEX(d)
+DF
+SELECT a FROM t1 FORCE INDEX (d) WHERE d = 'SS';
+a
+1
+SELECT a FROM t1 FORCE INDEX (d) WHERE d = _latin1 0xdf;
+a
+1
+# After flush and compaction
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+HEX(d)	a
+DF	1
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+HEX(d)	a
+DF	1
+SELECT HEX(d) FROM t1 FORCE INDEX (d);
+HEX(d)
+DF
+# After a restart
+# restart
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+HEX(d)	a
+DF	1
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+HEX(d)	a
+DF	1
+# UPDATE back to 'SS' and a second row with the other spelling
+UPDATE t1 SET b = 'SS' WHERE a = 1;
+INSERT INTO t1 (a, b, c) VALUES (2, _latin1 0xdf, 2);
+SELECT HEX(d), a FROM t1 FORCE INDEX (d) ORDER BY a;
+HEX(d)	a
+5353	1
+DF	2
+SELECT HEX(d), a FROM t1 IGNORE INDEX (d) ORDER BY a;
+HEX(d)	a
+5353	1
+DF	2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
