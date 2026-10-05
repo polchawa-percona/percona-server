@@ -1,0 +1,125 @@
+#
+# Port of the InnoDB LOB rollback crash tests to MyRocks:
+#   innodb.lob_rollback_crash, innodb.lob_rollback_crash_2 .. _5,
+#   innodb.zlob_rollback_crash, innodb.zlob_rollback_crash_2 .. _6 and
+#   innodb.blob_redo (mysql-test/suite/innodb/t/).
+# Changes from the originals:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; ROW_FORMAT=COMPRESSED and
+#     innodb_compression_level removed: the zlob_* variants are the same
+#     scenarios on a compressed InnoDB table, so they map to the same MyRocks
+#     table.
+#   - The InnoDB crash points inside LOB rollback (crash_end_of_lob_rollback_0,
+#     crash_almost_end_of_lob_rollback_0, crash_middle_of_lob_rollback_6,
+#     ib_zlob_deleter_middle_crash) have no MyRocks equivalent. Each scenario
+#     instead kills the server at three moments: with the transaction still
+#     open (recovery has to discard it), while ROLLBACK is running, and right
+#     after ROLLBACK has returned. Whatever the moment, the recovered data must
+#     equal the committed data.
+#   - The error-log checks on InnoDB's "Rolling back LOB" messages are replaced
+#     by data checks: row count, lengths and checksums of the large values, a
+#     scan through every secondary index and CHECK TABLE.
+#   - The spatial-index part of lob_rollback_crash_2 is dropped: MyRocks does
+#     not support spatial indexes.
+#   - The .combinations file runs every scenario under write_committed and
+#     write_prepared. write_unprepared is left out: there, the third round
+#     brings the rolled-back transaction back after the restart
+#     (port-findings.md #44). rocksdb.wup_rollback_crash_recovery runs this
+#     test's scenarios under write_unprepared and stays disabled until that
+#     bug is fixed; then add write_unprepared back to the .combinations file.
+#   - No debug features are used, so the test also runs on release builds.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t_json (id INT PRIMARY KEY, j1 JSON) ENGINE=ROCKSDB;
+CREATE TABLE t_blob (f1 INT PRIMARY KEY, f2 LONGBLOB, KEY k_f2 (f2(50)))
+  ENGINE=ROCKSDB;
+
+# Committed baseline. Every scenario below must leave exactly this data.
+SET @doc = CONCAT('["Sven", "', REPEAT('abcdefghijklmnopqrstuvwxyz1234', 4000),
+                  '", "', REPEAT('a', 200), '"]');
+INSERT INTO t_json VALUES (1, @doc);
+INSERT INTO t_blob VALUES (1, REPEAT('+', 40000)), (2, REPEAT('x', 6*1024*1024)),
+                          (3, '3');
+
+--let $round = 1
+while ($round <= 3)
+{
+  # $round 1: kill with the transaction open, no ROLLBACK issued.
+  # $round 2: kill while ROLLBACK is running (sent, not waited for).
+  # $round 3: kill right after ROLLBACK returned.
+  if ($round == 1)
+  {
+    --echo #
+    --echo # Kill with the transaction still open
+    --echo #
+  }
+  if ($round == 2)
+  {
+    --echo #
+    --echo # Kill while ROLLBACK is running
+    --echo #
+  }
+  if ($round == 3)
+  {
+    --echo #
+    --echo # Kill right after ROLLBACK returned
+    --echo #
+  }
+
+  connect (con1,localhost,root,,);
+  --disable_query_log
+  SET @doc2 = CONCAT('["Glen", "', REPEAT('zyxwvutsrqponmlkjihgfedcba4321', 4000),
+                     '", "', REPEAT('b', 200), '"]');
+  --enable_query_log
+  START TRANSACTION;
+  # lob_rollback_crash / zlob_rollback_crash: insert of a large JSON document.
+  INSERT INTO t_json VALUES (2, @doc2);
+  # lob_rollback_crash_4: partial update of a large JSON document.
+  UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', REPEAT('c', 200)) WHERE id = 1;
+  # lob_rollback_crash_2 / _3: inserts of LONGBLOBs with a prefix index.
+  INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024)), (11, REPEAT('b', 70000));
+  # lob_rollback_crash_5 / zlob_rollback_crash_6: full update of a LONGBLOB.
+  UPDATE t_blob SET f2 = REPEAT('-', 50000) WHERE f1 = 1;
+  # blob_redo: a 6 MB insert and a 6 MB update.
+  INSERT INTO t_blob VALUES (12, REPEAT('y', 6*1024*1024));
+  UPDATE t_blob SET f2 = REPEAT('z', 6*1024*1024) WHERE f1 = 3;
+  DELETE FROM t_blob WHERE f1 = 2;
+
+  if ($round == 2)
+  {
+    --send ROLLBACK
+  }
+  if ($round == 3)
+  {
+    ROLLBACK;
+  }
+
+  connection default;
+  --source include/kill_and_restart_mysqld.inc
+  --disconnect con1
+
+  --echo # The recovered data equals the committed data.
+  SELECT id, LENGTH(j1), MD5(j1), JSON_EXTRACT(j1, '$[0]'),
+         JSON_LENGTH(j1) FROM t_json ORDER BY id;
+  SELECT f1, LENGTH(f2), MD5(f2) FROM t_blob ORDER BY f1;
+  SELECT COUNT(*) FROM t_blob FORCE INDEX (k_f2) WHERE f2 IS NOT NULL;
+  SELECT f1 FROM t_blob FORCE INDEX (k_f2) WHERE f2 LIKE '+%';
+  CHECK TABLE t_json, t_blob;
+
+  --inc $round
+}
+
+--echo #
+--echo # The tables are still writable after the crashes.
+--echo #
+INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024));
+UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', 'd') WHERE id = 1;
+SELECT f1, LENGTH(f2) FROM t_blob ORDER BY f1;
+SELECT JSON_EXTRACT(j1, '$[2]') FROM t_json;
+CHECK TABLE t_json, t_blob;
+
+DROP TABLE t_json, t_blob;
+--source include/wait_until_count_sessions.inc

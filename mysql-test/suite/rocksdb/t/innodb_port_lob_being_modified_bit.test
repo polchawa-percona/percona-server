@@ -1,0 +1,125 @@
+#
+# Port of innodb.lob-being-modified-bit and innodb.zlob_insert_by_update
+# (mysql-test/suite/innodb/t/) to MyRocks.
+# Changes from the originals:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; ROW_FORMAT=COMPRESSED removed.
+#   - The tables get an explicit primary key: the MyRocks pause point used
+#     below, rocksdb.after_unique_pk_check, fires during the primary key check
+#     of a write, which MyRocks skips for tables with a hidden primary key.
+#   - The InnoDB pause point blob_write_middle (a LOB half written to its
+#     pages) is replaced by rocksdb.after_unique_pk_check, the last point
+#     before MyRocks writes the row. MyRocks stores a LOB in the row value, so
+#     there is no half-written LOB state; the closest equivalent is a write
+#     that has locked its key but not yet written the row.
+#   - InnoDB checkpoint and page-cleaner controls (innodb_log_checkpoint_now,
+#     innodb_page_cleaner_disabled_debug, ...) are replaced by
+#     rocksdb_force_flush_memtable_now and rocksdb_compact_cf, the MyRocks
+#     operations that move data from the WAL and memtable into SST files.
+#   - zlob_insert_by_update's purge of the deleted LOB is replaced by a manual
+#     compaction, which drops the deleted row version in MyRocks.
+#   - After the restart the test checks the data, every secondary index and
+#     CHECK TABLE, not only that the server comes back.
+#   - The .combinations file runs the test under all three write policies.
+#     Under write_unprepared with rocksdb_write_batch_flush_threshold=1, the
+#     open transaction's earlier writes are already in RocksDB when the
+#     memtable is flushed, so they reach SST files before the kill.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # lob-being-modified-bit: flush and compaction while a large write is
+--echo # paused, then commit and kill.
+--echo #
+
+CREATE TABLE t1 (id INT PRIMARY KEY, f1 LONGBLOB, KEY k_f1 (f1(20)))
+  ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('x', 1024*16*4));
+SELECT COUNT(*) FROM t1;
+SELECT LEFT(f1, 40), RIGHT(f1, 40), LENGTH(f1) FROM t1;
+
+connect (con1,localhost,root,,);
+START TRANSACTION;
+# A first write in the same transaction, so that write_unprepared has already
+# written part of the transaction when the memtable is flushed.
+INSERT INTO t1 VALUES (3, REPEAT('w', 1024*16*4));
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL go_flush WAIT_FOR go_insert';
+--send INSERT INTO t1 VALUES (2, REPEAT('y', 1024*16*4))
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR go_flush';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL go_insert';
+
+connection con1;
+--reap
+COMMIT;
+disconnect con1;
+
+connection default;
+--source include/kill_and_restart_mysqld.inc
+
+SELECT id, LEFT(f1, 40), RIGHT(f1, 40), LENGTH(f1) FROM t1 ORDER BY id;
+SELECT id FROM t1 FORCE INDEX (k_f1) ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # zlob_insert_by_update: a deleted large row is compacted away while a
+--echo # new, larger row with the same key is being written; the server is
+--echo # killed before that write commits.
+--echo #
+
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 LONGBLOB, KEY k_f2 (f2(20)))
+  ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('x', 64*1024));
+DELETE FROM t1 WHERE f1 = 1;
+
+connect (con1,localhost,root,,);
+START TRANSACTION;
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL do_purge WAIT_FOR continue_insert';
+--send INSERT INTO t1 VALUES (1, REPEAT('y', 128*1024))
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR do_purge';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+--source include/kill_and_restart_mysqld.inc
+--disconnect con1
+
+--echo # Neither the deleted row nor the uncommitted one is visible.
+SELECT f1, LENGTH(f2) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k_f2);
+CHECK TABLE t1;
+
+--echo # The same write, this time committed before the kill.
+connect (con1,localhost,root,,);
+START TRANSACTION;
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL do_purge WAIT_FOR continue_insert';
+--send INSERT INTO t1 VALUES (1, REPEAT('y', 128*1024))
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR do_purge';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL continue_insert';
+
+connection con1;
+--reap
+COMMIT;
+disconnect con1;
+
+connection default;
+--source include/kill_and_restart_mysqld.inc
+
+SELECT f1, LEFT(f2, 10), LENGTH(f2) FROM t1;
+SELECT f1 FROM t1 FORCE INDEX (k_f2) WHERE f2 LIKE 'y%';
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc
