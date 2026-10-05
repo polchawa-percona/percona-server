@@ -1,0 +1,102 @@
+#
+# Port of innodb.blob-crash-4k and innodb.blob-crash-16k
+# (mysql-test/suite/innodb/t/blob-crash-4k.test, blob-crash-16k.test) to MyRocks.
+# The two sources differ only in value sizes chosen for InnoDB's 4k and 16k pages; this
+# port runs both size sets.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - --innodb_page_size options, ROW_FORMAT=COMPRESSED and innodb_compression_level removed
+#   - the ib_mv_nonupdated_column_offpage sync point (InnoDB moving a non-updated column
+#     off-page) is dropped: the UPDATE runs to completion uncommitted in its own
+#     connection, then the server is killed, as in the original
+#   - a committed round is added: the same UPDATE committed before the kill must survive
+#   - runs at READ COMMITTED because MyRocks rejects gap locks at REPEATABLE READ
+#   - no debug features are used, so the test also runs on release builds
+#
+--source include/have_rocksdb.inc
+--source include/not_crashrep.inc
+
+--echo #
+--echo # Bug #16963396 INNODB: USE OF LARGE EXTERNALLY-STORED FIELDS MAKES
+--echo # CRASH RECOVERY LOSE DATA
+--echo #
+
+let $round = 2;
+while ($round)
+{
+  if ($round == 2)
+  {
+    --echo # Value sizes from blob-crash-4k
+    let $f2_len = 1000;
+    let $f3_len = 1000;
+  }
+  if ($round == 1)
+  {
+    --echo # Value sizes from blob-crash-16k
+    let $f2_len = 7000;
+    let $f3_len = 3000;
+  }
+
+  --echo #
+  --echo # Update that grows a non-updated row past its old size, uncommitted
+  --echo #
+
+  create table t2 (f1 bigint primary key, f2 longblob, f3 longblob,
+    index(f2(10), f3(10))) engine=rocksdb;
+
+  eval insert into t2 values (1, repeat('%', $f2_len), repeat('+', 30));
+  select f1, length(f2), length(f3) from t2;
+
+  connect (con1,localhost,root,,);
+  # The uncommitted update should disappear. No committed data may be lost.
+  begin;
+  eval update t2 set f3 = repeat('[', $f3_len);
+
+  connection default;
+  disconnect con1;
+  --source include/kill_and_restart_mysqld.inc
+
+  select f1, length(f2), length(f3) from t2;
+  select f1, right(f2, 40), right(f3, 40) from t2;
+  select f1, length(f2), length(f3) from t2 force index (f2);
+  check table t2;
+
+  --echo #
+  --echo # Same update committed before the kill: it must survive
+  --echo #
+
+  eval update t2 set f3 = repeat('[', $f3_len);
+
+  --source include/kill_and_restart_mysqld.inc
+
+  select f1, length(f2), length(f3) from t2;
+  select f1, right(f2, 40), right(f3, 40) from t2;
+  select f1, length(f2), length(f3) from t2 force index (f2);
+  check table t2;
+
+  --echo #
+  --echo # Second table (former compressed-table round), keyed update
+  --echo #
+
+  create table t3 (f1 bigint primary key, f2 longblob, f3 longblob,
+    index(f2(10), f3(10))) engine=rocksdb;
+
+  eval insert into t3 values (1, repeat('%', $f2_len), repeat('+', 30));
+  select f1, length(f2), length(f3) from t3;
+
+  connect (con2,localhost,root,,);
+  begin;
+  eval update t3 set f3 = repeat(']', $f3_len) where f1 = 1;
+
+  connection default;
+  disconnect con2;
+  --source include/kill_and_restart_mysqld.inc
+
+  select f1, length(f2), length(f3) from t3;
+  select f1, right(f2, 30), right(f3, 20) from t3;
+  select f1, length(f2), length(f3) from t3 force index (f2);
+  check table t3;
+
+  DROP TABLE t2, t3;
+  dec $round;
+}

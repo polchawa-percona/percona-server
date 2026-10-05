@@ -1,0 +1,138 @@
+#
+# Bug #16963396 INNODB: USE OF LARGE EXTERNALLY-STORED FIELDS MAKES
+# CRASH RECOVERY LOSE DATA
+#
+# Value sizes from blob-crash-4k
+#
+# Update that grows a non-updated row past its old size, uncommitted
+#
+create table t2 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+insert into t2 values (1, repeat('%', 1000), repeat('+', 30));
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	1000	30
+begin;
+update t2 set f3 = repeat('[', 1000);
+# Kill and restart
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	1000	30
+select f1, right(f2, 40), right(f3, 40) from t2;
+f1	right(f2, 40)	right(f3, 40)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	++++++++++++++++++++++++++++++
+select f1, length(f2), length(f3) from t2 force index (f2);
+f1	length(f2)	length(f3)
+1	1000	30
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Same update committed before the kill: it must survive
+#
+update t2 set f3 = repeat('[', 1000);
+# Kill and restart
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	1000	1000
+select f1, right(f2, 40), right(f3, 40) from t2;
+f1	right(f2, 40)	right(f3, 40)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+select f1, length(f2), length(f3) from t2 force index (f2);
+f1	length(f2)	length(f3)
+1	1000	1000
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Second table (former compressed-table round), keyed update
+#
+create table t3 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+insert into t3 values (1, repeat('%', 1000), repeat('+', 30));
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+1	1000	30
+begin;
+update t3 set f3 = repeat(']', 1000) where f1 = 1;
+# Kill and restart
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+1	1000	30
+select f1, right(f2, 30), right(f3, 20) from t3;
+f1	right(f2, 30)	right(f3, 20)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	++++++++++++++++++++
+select f1, length(f2), length(f3) from t3 force index (f2);
+f1	length(f2)	length(f3)
+1	1000	30
+check table t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t2, t3;
+# Value sizes from blob-crash-16k
+#
+# Update that grows a non-updated row past its old size, uncommitted
+#
+create table t2 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+insert into t2 values (1, repeat('%', 7000), repeat('+', 30));
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	7000	30
+begin;
+update t2 set f3 = repeat('[', 3000);
+# Kill and restart
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	7000	30
+select f1, right(f2, 40), right(f3, 40) from t2;
+f1	right(f2, 40)	right(f3, 40)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	++++++++++++++++++++++++++++++
+select f1, length(f2), length(f3) from t2 force index (f2);
+f1	length(f2)	length(f3)
+1	7000	30
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Same update committed before the kill: it must survive
+#
+update t2 set f3 = repeat('[', 3000);
+# Kill and restart
+select f1, length(f2), length(f3) from t2;
+f1	length(f2)	length(f3)
+1	7000	3000
+select f1, right(f2, 40), right(f3, 40) from t2;
+f1	right(f2, 40)	right(f3, 40)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+select f1, length(f2), length(f3) from t2 force index (f2);
+f1	length(f2)	length(f3)
+1	7000	3000
+check table t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Second table (former compressed-table round), keyed update
+#
+create table t3 (f1 bigint primary key, f2 longblob, f3 longblob,
+index(f2(10), f3(10))) engine=rocksdb;
+insert into t3 values (1, repeat('%', 7000), repeat('+', 30));
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+1	7000	30
+begin;
+update t3 set f3 = repeat(']', 3000) where f1 = 1;
+# Kill and restart
+select f1, length(f2), length(f3) from t3;
+f1	length(f2)	length(f3)
+1	7000	30
+select f1, right(f2, 30), right(f3, 20) from t3;
+f1	right(f2, 30)	right(f3, 20)
+1	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%	++++++++++++++++++++
+select f1, length(f2), length(f3) from t3 force index (f2);
+f1	length(f2)	length(f3)
+1	7000	30
+check table t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t2, t3;

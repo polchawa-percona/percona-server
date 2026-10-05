@@ -1,0 +1,2 @@
+--transaction-isolation=READ-COMMITTED
+--rocksdb_store_row_debug_checksums=1

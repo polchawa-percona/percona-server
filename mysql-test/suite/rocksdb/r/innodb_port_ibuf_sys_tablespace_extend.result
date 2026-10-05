@@ -1,0 +1,241 @@
+CREATE DATABASE db1;
+# Create 2 tables
+CALL db1.CreateNTables('db1', 't', 2);
+
+# Create Connection objects
+
+# Insert record in each table
+INSERT INTO db1.t1
+VALUES(0, 1000 , 1, REPEAT('a', 2048), REPEAT('b', 2048));
+INSERT INTO db1.t2
+VALUES(0, 1000 , 1, REPEAT('a', 2048), REPEAT('b', 2048));
+# Wait for inserts to finish
+
+# Insert total 2^8 records in each table
+CALL db1.InsertIntoRecords('db1', 't1', 8);
+CALL db1.InsertIntoRecords('db1', 't2', 8);
+
+# Wait for insert into tables to finish
+SELECT COUNT(*) FROM db1.t1;
+COUNT(*)
+256
+SELECT COUNT(*) > 1 FROM db1.t2;
+COUNT(*) > 1
+1
+UPDATE db1.t1
+SET k = id + k , nk = k + id, c = REPEAT('a2', 512),
+pad = REPEAT('b2', 512)
+WHERE id % 2 = 0;
+UPDATE db1.t2
+SET k = id + k , nk = k + id, c = REPEAT('a2', 512),
+pad = REPEAT('b2', 512)
+WHERE id % 2 = 0;
+
+# Wait for Updates to finish
+UPDATE db1.t1
+SET k = id + k , nk = k + id, c = REPEAT('a3', 512),
+pad = REPEAT('b3', 512)
+WHERE id % 3 = 0;
+UPDATE db1.t2
+SET k = id + k , nk = k + id, c = REPEAT('a3', 512),
+pad = REPEAT('b3', 512)
+WHERE id % 3 = 0;
+
+# Wait for Updates to finish
+UPDATE db1.t1
+SET k = id + k , nk = k + id, c = REPEAT('a5', 512),
+pad = REPEAT('b5', 512)
+WHERE id % 5 = 0;
+UPDATE db1.t2
+SET k = id + k , nk = k + id, c = REPEAT('a5', 512),
+pad = REPEAT('b5', 512)
+WHERE id % 5 = 0;
+
+# Wait for Updates to finish
+
+# Delete records
+DELETE FROM db1.t1 WHERE id % 4 = 1 ORDER BY id;
+DELETE FROM db1.t2 WHERE id % 4 = 1 ORDER BY id;
+
+# Wait for Deletes to finish #1
+# Checks for db1.t1
+SELECT COUNT(*) AS deleted_rows_left FROM db1.t1 WHERE id % 4 = 1;
+deleted_rows_left
+0
+SELECT COUNT(*) AS wrong_values FROM db1.t1 WHERE
+(c, pad) <> (CASE WHEN id % 5 = 0 THEN REPEAT('a5', 512)
+WHEN id % 3 = 0 THEN REPEAT('a3', 512)
+WHEN id % 2 = 0 THEN REPEAT('a2', 512)
+ELSE REPEAT('a', 2048) END,
+CASE WHEN id % 5 = 0 THEN REPEAT('b5', 512)
+WHEN id % 3 = 0 THEN REPEAT('b3', 512)
+WHEN id % 2 = 0 THEN REPEAT('b2', 512)
+ELSE REPEAT('b', 2048) END);
+wrong_values
+0
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_k_ok FROM db1.t1 FORCE INDEX (idx_k);
+idx_k_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_knk_ok FROM db1.t1 FORCE INDEX (idx_knk);
+idx_knk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_nk_ok FROM db1.t1 FORCE INDEX (idx_nk);
+idx_nk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_c_ok FROM db1.t1 FORCE INDEX (idx_c) WHERE c >= '';
+idx_c_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_pad_ok FROM db1.t1 FORCE INDEX (idx_pad) WHERE pad >= '';
+idx_pad_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (idx_c) WHERE c = REPEAT('a5', 512)) =
+(SELECT COUNT(*) FROM db1.t1 IGNORE INDEX (idx_c) WHERE c = REPEAT('a5', 512))
+AS idx_c_lookup_ok;
+idx_c_lookup_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048)) =
+(SELECT COUNT(*) FROM db1.t1 IGNORE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048))
+AS idx_pad_lookup_ok;
+idx_pad_lookup_ok
+1
+CHECK TABLE db1.t1;
+Table	Op	Msg_type	Msg_text
+db1.t1	check	status	OK
+# Checks for db1.t2
+SELECT COUNT(*) AS deleted_rows_left FROM db1.t2 WHERE id % 4 = 1;
+deleted_rows_left
+0
+SELECT COUNT(*) AS wrong_values FROM db1.t2 WHERE
+(c, pad) <> (CASE WHEN id % 5 = 0 THEN REPEAT('a5', 512)
+WHEN id % 3 = 0 THEN REPEAT('a3', 512)
+WHEN id % 2 = 0 THEN REPEAT('a2', 512)
+ELSE REPEAT('a', 2048) END,
+CASE WHEN id % 5 = 0 THEN REPEAT('b5', 512)
+WHEN id % 3 = 0 THEN REPEAT('b3', 512)
+WHEN id % 2 = 0 THEN REPEAT('b2', 512)
+ELSE REPEAT('b', 2048) END);
+wrong_values
+0
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_k_ok FROM db1.t2 FORCE INDEX (idx_k);
+idx_k_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_knk_ok FROM db1.t2 FORCE INDEX (idx_knk);
+idx_knk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_nk_ok FROM db1.t2 FORCE INDEX (idx_nk);
+idx_nk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_c_ok FROM db1.t2 FORCE INDEX (idx_c) WHERE c >= '';
+idx_c_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_pad_ok FROM db1.t2 FORCE INDEX (idx_pad) WHERE pad >= '';
+idx_pad_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (idx_c) WHERE c = REPEAT('a5', 512)) =
+(SELECT COUNT(*) FROM db1.t2 IGNORE INDEX (idx_c) WHERE c = REPEAT('a5', 512))
+AS idx_c_lookup_ok;
+idx_c_lookup_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048)) =
+(SELECT COUNT(*) FROM db1.t2 IGNORE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048))
+AS idx_pad_lookup_ok;
+idx_pad_lookup_ok
+1
+CHECK TABLE db1.t2;
+Table	Op	Msg_type	Msg_text
+db1.t2	check	status	OK
+# Verify the data after crash recovery
+# Kill and restart
+# Checks for db1.t1
+SELECT COUNT(*) AS deleted_rows_left FROM db1.t1 WHERE id % 4 = 1;
+deleted_rows_left
+0
+SELECT COUNT(*) AS wrong_values FROM db1.t1 WHERE
+(c, pad) <> (CASE WHEN id % 5 = 0 THEN REPEAT('a5', 512)
+WHEN id % 3 = 0 THEN REPEAT('a3', 512)
+WHEN id % 2 = 0 THEN REPEAT('a2', 512)
+ELSE REPEAT('a', 2048) END,
+CASE WHEN id % 5 = 0 THEN REPEAT('b5', 512)
+WHEN id % 3 = 0 THEN REPEAT('b3', 512)
+WHEN id % 2 = 0 THEN REPEAT('b2', 512)
+ELSE REPEAT('b', 2048) END);
+wrong_values
+0
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_k_ok FROM db1.t1 FORCE INDEX (idx_k);
+idx_k_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_knk_ok FROM db1.t1 FORCE INDEX (idx_knk);
+idx_knk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_nk_ok FROM db1.t1 FORCE INDEX (idx_nk);
+idx_nk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_c_ok FROM db1.t1 FORCE INDEX (idx_c) WHERE c >= '';
+idx_c_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (PRIMARY)) AS idx_pad_ok FROM db1.t1 FORCE INDEX (idx_pad) WHERE pad >= '';
+idx_pad_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (idx_c) WHERE c = REPEAT('a5', 512)) =
+(SELECT COUNT(*) FROM db1.t1 IGNORE INDEX (idx_c) WHERE c = REPEAT('a5', 512))
+AS idx_c_lookup_ok;
+idx_c_lookup_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t1 FORCE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048)) =
+(SELECT COUNT(*) FROM db1.t1 IGNORE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048))
+AS idx_pad_lookup_ok;
+idx_pad_lookup_ok
+1
+CHECK TABLE db1.t1;
+Table	Op	Msg_type	Msg_text
+db1.t1	check	status	OK
+# Checks for db1.t2
+SELECT COUNT(*) AS deleted_rows_left FROM db1.t2 WHERE id % 4 = 1;
+deleted_rows_left
+0
+SELECT COUNT(*) AS wrong_values FROM db1.t2 WHERE
+(c, pad) <> (CASE WHEN id % 5 = 0 THEN REPEAT('a5', 512)
+WHEN id % 3 = 0 THEN REPEAT('a3', 512)
+WHEN id % 2 = 0 THEN REPEAT('a2', 512)
+ELSE REPEAT('a', 2048) END,
+CASE WHEN id % 5 = 0 THEN REPEAT('b5', 512)
+WHEN id % 3 = 0 THEN REPEAT('b3', 512)
+WHEN id % 2 = 0 THEN REPEAT('b2', 512)
+ELSE REPEAT('b', 2048) END);
+wrong_values
+0
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_k_ok FROM db1.t2 FORCE INDEX (idx_k);
+idx_k_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_knk_ok FROM db1.t2 FORCE INDEX (idx_knk);
+idx_knk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_nk_ok FROM db1.t2 FORCE INDEX (idx_nk);
+idx_nk_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_c_ok FROM db1.t2 FORCE INDEX (idx_c) WHERE c >= '';
+idx_c_ok
+1
+SELECT COUNT(*) = (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (PRIMARY)) AS idx_pad_ok FROM db1.t2 FORCE INDEX (idx_pad) WHERE pad >= '';
+idx_pad_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (idx_c) WHERE c = REPEAT('a5', 512)) =
+(SELECT COUNT(*) FROM db1.t2 IGNORE INDEX (idx_c) WHERE c = REPEAT('a5', 512))
+AS idx_c_lookup_ok;
+idx_c_lookup_ok
+1
+SELECT (SELECT COUNT(*) FROM db1.t2 FORCE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048)) =
+(SELECT COUNT(*) FROM db1.t2 IGNORE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048))
+AS idx_pad_lookup_ok;
+idx_pad_lookup_ok
+1
+CHECK TABLE db1.t2;
+Table	Op	Msg_type	Msg_text
+db1.t2	check	status	OK
+SELECT id, k FROM db1.t1 ORDER BY id LIMIT 1;
+id	k
+2	2002
+
+# Cleanup
+
+DROP DATABASE db1;

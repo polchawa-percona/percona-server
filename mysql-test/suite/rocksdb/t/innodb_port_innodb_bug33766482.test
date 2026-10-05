@@ -1,0 +1,99 @@
+#
+# Port of innodb.innodb_bug33766482 (mysql-test/suite/innodb/t/innodb_bug33766482.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - MyRocks does not support multi-valued indexes; the test checks that the
+#     original CREATE TABLE is rejected, then runs the same REPLACE/UPDATE workload on
+#     a table with a scalar functional index on the same JSON path
+#   - the memory/innodb/memory check is replaced by the same check on the MyRocks
+#     memory instruments (memory/rocksdb/%): the workload must not leave allocations
+#     behind
+#   - the --sleep calls are dropped; the index is checked against the primary key
+#     after each workload and with CHECK TABLE
+#   - the original needs a debug build only for its page-size includes; this port uses
+#     no debug features and also runs on release builds
+#
+--source include/have_rocksdb.inc
+
+--echo # Multi-valued indexes are rejected by MyRocks
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (
+  id INT UNSIGNED,
+  a JSON DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY ((CAST(JSON_EXTRACT(a,_utf8mb4'$.b') AS CHAR(255) ARRAY)))
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ;
+
+CREATE TABLE t1 (
+  id INT UNSIGNED,
+  a JSON DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY k ((CAST(JSON_EXTRACT(a,_utf8mb4'$.b') AS CHAR(255))))
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ;
+
+DELIMITER |;
+CREATE PROCEDURE fill()
+BEGIN
+  DECLARE v_i BIGINT UNSIGNED DEFAULT 0;
+  REPEAT
+    SET v_i:=v_i+1;
+    REPLACE INTO t1(id,a) VALUES(FLOOR(RAND()*100000),CONCAT('{"a":"\'{ab:a,ba:',FLOOR(RAND()*100000),',bab:baa}\'","b":"\'{a:bbb,bab:true,bb:[',FLOOR(RAND()*100000),',8,7,1,9,10,8,7,3]}\'","ba":"b","baa":[6,1,1,2,9,8,0,5,2,4]}'));
+  UNTIL v_i=200 END REPEAT;
+
+END |
+
+CREATE PROCEDURE upd()
+BEGIN
+  DECLARE v_i BIGINT UNSIGNED DEFAULT 0;
+  REPEAT
+    SET v_i:=v_i+1;
+    UPDATE t1 SET a= CONCAT('{"b":',FLOOR(RAND()*100000),',"aba":"\'{a:[a,aa,b,aab,aa,bba,baa,a],b:bba}\'","b":',FLOOR(RAND()*100000),',"bb":2}');
+  UNTIL v_i = 10 END REPEAT;
+
+END |
+
+DELIMITER ;|
+
+REPLACE INTO t1(id,a) VALUES(7,CONCAT('{"a":"\'{ab:a,ba:',FLOOR(RAND()*100000),',bab:baa}\'","b":"\'{a:bbb,bab:true,bb:[',FLOOR(RAND()*100000),',8,7,1,9,10,8,7,3]}\'","ba":"b","baa":[6,1,1,2,9,8,0,5,2,4]}'));
+UPDATE t1 SET a= CONCAT('{"b":',FLOOR(RAND()*100000),',"aba":"\'{a:[a,aa,b,aab,aa,bba,baa,a],b:bba}\'","b":',FLOOR(RAND()*100000),',"bb":2}');
+UPDATE t1 SET a= CONCAT('{"b":',FLOOR(RAND()*100000),',"aba":"\'{a:[a,aa,b,aab,aa,bba,baa,a],b:bba}\'","b":',FLOOR(RAND()*100000),',"bb":2}');
+
+let $memory_query = SELECT SUM(CURRENT_COUNT_USED) FROM performance_schema.memory_summary_global_by_event_name WHERE event_name LIKE 'memory/rocksdb/%';
+let $index_check = SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (k)) = (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS index_matches_pk;
+
+--echo # The instruments exist
+SELECT COUNT(*) > 0 FROM performance_schema.setup_instruments
+WHERE name LIKE 'memory/rocksdb/%' AND enabled = 'YES';
+
+--let $memory_before_insert= `$memory_query`
+
+CALL fill();
+
+--let $memory_after_insert= `$memory_query`
+
+--let $memory_diff = `SELECT ABS($memory_after_insert - $memory_before_insert)`
+assert($memory_diff <= 1);
+eval $index_check;
+
+--let $memory_before_update= `$memory_query`
+
+CALL upd();
+
+--let $memory_after_update= `$memory_query`
+
+--let $memory_diff = `SELECT ABS($memory_after_update - $memory_before_update)`
+assert($memory_diff <= 1);
+eval $index_check;
+
+--echo # A deterministic final UPDATE: every row is found through the index
+UPDATE t1 SET a = '{"b":42,"bb":2}';
+SELECT COUNT(*) = (SELECT COUNT(*) FROM t1) AS all_found_via_index FROM t1 FORCE INDEX (k)
+WHERE CAST(JSON_EXTRACT(a,_utf8mb4'$.b') AS CHAR(255)) = '42';
+SELECT COUNT(*) FROM t1 FORCE INDEX (k)
+WHERE CAST(JSON_EXTRACT(a,_utf8mb4'$.b') AS CHAR(255)) <> '42';
+CHECK TABLE t1;
+
+DROP PROCEDURE IF EXISTS fill;
+DROP PROCEDURE IF EXISTS upd;
+DROP TABLE t1;
