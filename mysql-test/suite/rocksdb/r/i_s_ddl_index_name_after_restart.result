@@ -1,0 +1,44 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(10), KEY kb (b), UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT, b INT, KEY kb2 (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'a');
+INSERT INTO t2 VALUES (1, 1);
+# Before the restart
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+table_name	index_name	index_type
+t1	PRIMARY	1
+t1	kb	2
+t1	uc	2
+t2	kb2	2
+t2	HIDDEN_PK_ID	3
+# restart
+# After the restart, before the tables are opened: names must be shown
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+table_name	index_name	index_type
+t1	PRIMARY	1
+t1	kb	2
+t1	uc	2
+t2	kb2	2
+t2	HIDDEN_PK_ID	3
+# Looking an index up by name must work without opening the table first
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'kb';
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+# After the tables are opened
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+table_name	index_name	index_type
+t1	PRIMARY	1
+t1	kb	2
+t1	uc	2
+t2	kb2	2
+t2	HIDDEN_PK_ID	3
+DROP TABLE t1, t2;
