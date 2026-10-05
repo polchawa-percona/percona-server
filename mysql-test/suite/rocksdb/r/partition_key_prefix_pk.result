@@ -1,0 +1,23 @@
+# CREATE TABLE with a prefix primary key part is rejected
+CREATE TABLE t1 (a VARCHAR(200), b VARCHAR(10), c VARCHAR(10),
+PRIMARY KEY (a(10), b, c(2))) ENGINE=ROCKSDB
+PARTITION BY KEY() PARTITIONS 2;
+ERROR HY000: Column 'test.t1.a' having prefix key part 'a(10)' in the PARTITION BY KEY() clause is not supported.
+CREATE TABLE t2 (a VARCHAR(200), b VARCHAR(10), PRIMARY KEY (a(2), b))
+ENGINE=ROCKSDB PARTITION BY KEY() PARTITIONS 10;
+ERROR HY000: Column 'test.t2.a' having prefix key part 'a(2)' in the PARTITION BY KEY() clause is not supported.
+# ALTER TABLE ... PARTITION BY KEY() is rejected (already correct)
+CREATE TABLE t4 (a VARCHAR(200), b VARCHAR(10), PRIMARY KEY (a(2), b))
+ENGINE=ROCKSDB;
+ALTER TABLE t4 PARTITION BY KEY() PARTITIONS 2;
+ERROR HY000: Column 'test.t4.a' having prefix key part 'a(2)' in the PARTITION BY KEY() clause is not supported.
+DROP TABLE t4;
+# Allowed: the prefix column is not in the partition key
+CREATE TABLE t5 (a VARCHAR(200), b VARCHAR(10), c VARCHAR(100),
+KEY (a), KEY (b(5))) ENGINE=ROCKSDB
+PARTITION BY KEY(c) PARTITIONS 4;
+DROP TABLE t5;
+# Allowed: prefix length equal to the column length
+CREATE TABLE t6 (a VARCHAR(10), b VARCHAR(10), PRIMARY KEY (a(10), b))
+ENGINE=ROCKSDB PARTITION BY KEY() PARTITIONS 2;
+DROP TABLE t6;

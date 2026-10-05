@@ -1,0 +1,46 @@
+#
+# Finding #28 (myrocks-notes/port-findings.md): CREATE TABLE accepts
+# PARTITION BY KEY() on a MyRocks table whose primary key has a prefix key
+# part. Since WL#16054 the server rejects prefix key parts in PARTITION BY
+# KEY() with ER_PARTITION_PREFIX_KEY_NOT_SUPPORTED, and InnoDB tables get
+# that error.
+#
+# Cause: in mysql_create_table() (sql/sql_table.cc) the check
+# dd::prefix_key_partition_exists() runs only inside the block for engines
+# with HTON_SUPPORTS_FOREIGN_KEYS. MyRocks has no foreign keys, so CREATE
+# TABLE skips it. ALTER TABLE ... PARTITION BY KEY() runs the check
+# unconditionally and rejects the same definition.
+#
+# No data problem was found: primary key uniqueness holds across
+# partitions. Expected: CREATE TABLE is rejected, as for InnoDB.
+# Exposed by main.removed_features with MyRocks as the default engine.
+#
+--source include/have_rocksdb.inc
+
+--echo # CREATE TABLE with a prefix primary key part is rejected
+--error ER_PARTITION_PREFIX_KEY_NOT_SUPPORTED
+CREATE TABLE t1 (a VARCHAR(200), b VARCHAR(10), c VARCHAR(10),
+                 PRIMARY KEY (a(10), b, c(2))) ENGINE=ROCKSDB
+  PARTITION BY KEY() PARTITIONS 2;
+
+--error ER_PARTITION_PREFIX_KEY_NOT_SUPPORTED
+CREATE TABLE t2 (a VARCHAR(200), b VARCHAR(10), PRIMARY KEY (a(2), b))
+  ENGINE=ROCKSDB PARTITION BY KEY() PARTITIONS 10;
+
+--echo # ALTER TABLE ... PARTITION BY KEY() is rejected (already correct)
+CREATE TABLE t4 (a VARCHAR(200), b VARCHAR(10), PRIMARY KEY (a(2), b))
+  ENGINE=ROCKSDB;
+--error ER_PARTITION_PREFIX_KEY_NOT_SUPPORTED
+ALTER TABLE t4 PARTITION BY KEY() PARTITIONS 2;
+DROP TABLE t4;
+
+--echo # Allowed: the prefix column is not in the partition key
+CREATE TABLE t5 (a VARCHAR(200), b VARCHAR(10), c VARCHAR(100),
+                 KEY (a), KEY (b(5))) ENGINE=ROCKSDB
+  PARTITION BY KEY(c) PARTITIONS 4;
+DROP TABLE t5;
+
+--echo # Allowed: prefix length equal to the column length
+CREATE TABLE t6 (a VARCHAR(10), b VARCHAR(10), PRIMARY KEY (a(10), b))
+  ENGINE=ROCKSDB PARTITION BY KEY() PARTITIONS 2;
+DROP TABLE t6;
