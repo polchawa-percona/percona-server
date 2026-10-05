@@ -1,0 +1,88 @@
+# Scenario: ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p2, killed at alter_before_close_temp_tables
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+INSERT INTO t1 VALUES (1, 1), (2, 2), (101, 101), (102, 102), (201, 201),
+(202, 202);
+SET DEBUG_SYNC = 'alter_before_close_temp_tables SIGNAL parked WAIT_FOR never_happens';
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p2;
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+# Kill and restart
+# The table is usable and the untouched partitions keep their rows
+SELECT id FROM t1 WHERE id < 200 ORDER BY id;
+id
+1
+2
+101
+102
+INSERT INTO t1 VALUES (50, 50), (150, 150);
+SELECT COUNT(*) FROM t1 WHERE id < 200;
+COUNT(*)
+6
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Plain DROP TABLE works and leaves no MyRocks dictionary entries
+DROP TABLE t1;
+SELECT COUNT(*) AS leftover_ddl_entries FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+leftover_ddl_entries
+0
+# The table can be re-created with the same partition names
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300),
+PARTITION p3 VALUES LESS THAN (400));
+INSERT INTO t1 VALUES (1, 1), (101, 101), (201, 201), (301, 301);
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+DROP TABLE t1;
+# Scenario: ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400)), killed at alter_before_close_temp_tables
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+INSERT INTO t1 VALUES (1, 1), (2, 2), (101, 101), (102, 102), (201, 201),
+(202, 202);
+SET DEBUG_SYNC = 'alter_before_close_temp_tables SIGNAL parked WAIT_FOR never_happens';
+ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+# Kill and restart
+# The table is usable and the untouched partitions keep their rows
+SELECT id FROM t1 WHERE id < 200 ORDER BY id;
+id
+1
+2
+101
+102
+INSERT INTO t1 VALUES (50, 50), (150, 150);
+SELECT COUNT(*) FROM t1 WHERE id < 200;
+COUNT(*)
+6
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Plain DROP TABLE works and leaves no MyRocks dictionary entries
+DROP TABLE t1;
+SELECT COUNT(*) AS leftover_ddl_entries FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+leftover_ddl_entries
+0
+# The table can be re-created with the same partition names
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300),
+PARTITION p3 VALUES LESS THAN (400));
+INSERT INTO t1 VALUES (1, 1), (101, 101), (201, 201), (301, 301);
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+DROP TABLE t1;
