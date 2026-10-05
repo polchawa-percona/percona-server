@@ -1,0 +1,34 @@
+#
+# MyRocks has no tablespaces. A table-level TABLESPACE clause is rejected with
+# ER_NOT_SUPPORTED_YET (ha_rocksdb::create), but a partition-level TABLESPACE clause is
+# accepted silently, even for a tablespace that does not exist, and is kept in
+# SHOW CREATE TABLE. This test expects the partition-level clause to be rejected the same
+# way as the table-level one.
+#
+# Found by running innodb.partition rewritten to MyRocks (see myrocks-notes/innodb-scenarios.md).
+#
+--source include/have_rocksdb.inc
+
+--echo # Table-level TABLESPACE is rejected
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB TABLESPACE `innodb_system`;
+
+--echo # Partition-level TABLESPACE must be rejected too
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2),
+                        PARTITION p2 VALUES LESS THAN (4) TABLESPACE `innodb_system`);
+
+--echo # Also for a tablespace that does not exist
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2) TABLESPACE `no_such_ts`,
+                        PARTITION p2 VALUES LESS THAN (4));
+
+--echo # And when a partition is added later
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2));
+--error ER_NOT_SUPPORTED_YET
+ALTER TABLE t1 ADD PARTITION (PARTITION p2 VALUES LESS THAN (4) TABLESPACE `innodb_system`);
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
