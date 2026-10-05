@@ -1,0 +1,135 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+call mtr.add_suppression("Cannot mark Column family .* to be dropped, because it is in use");
+
+--echo #
+--echo # Moving indexes and the primary key between column families with ALTER
+--echo # TABLE. A column family is selected only by the cfname= qualifier of an
+--echo # index comment; an index comment without it leaves the index in the
+--echo # default column family.
+--echo #
+
+CREATE TABLE t1 (
+  pk INT NOT NULL,
+  a INT NOT NULL,
+  b VARCHAR(32) NOT NULL,
+  PRIMARY KEY (pk),
+  KEY ka (a) COMMENT 'cfname=ddl5_cf_a',
+  KEY kb (b) COMMENT 'rev:ddl5_not_a_cf'
+) ENGINE=ROCKSDB;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 1000) {
+  eval INSERT INTO t1 VALUES ($i, $i % 97, CONCAT('v', LPAD($i, 6, '0')));
+  inc $i;
+}
+--enable_query_log
+
+let $check_cf = SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+let $check_data = SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+
+--echo # Initial layout: kb's comment has no cfname=, so it is in the default CF.
+eval $check_cf;
+eval $check_data;
+
+--echo # Re-creating an index under the same name with a different cfname= changes
+--echo # its comment, which MyRocks does not do in place.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=INPLACE;
+--echo # A new index in the new CF is built in place; then the old one is dropped.
+ALTER TABLE t1 ADD INDEX ka2 (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=INPLACE;
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+ALTER TABLE t1 RENAME INDEX ka2 TO ka;
+eval $check_cf;
+eval $check_data;
+SELECT a, COUNT(*) FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 10 AND 12 GROUP BY a ORDER BY a DESC;
+
+--echo # Changing only the index comment of an existing index is not possible in
+--echo # SQL; ALTER INDEX ... VISIBLE keeps the CF.
+ALTER TABLE t1 ALTER INDEX kb INVISIBLE;
+ALTER TABLE t1 ALTER INDEX kb VISIBLE;
+eval $check_cf;
+
+--echo # Move the primary key to a reverse CF. Changing the primary key is not
+--echo # supported in place; COPY works.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=rev:ddl5_cf_pk', ALGORITHM=INPLACE;
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=rev:ddl5_cf_pk', ALGORITHM=COPY;
+eval $check_cf;
+eval $check_data;
+SELECT pk FROM t1 ORDER BY pk LIMIT 3;
+SELECT pk FROM t1 ORDER BY pk DESC LIMIT 3;
+SELECT * FROM t1 WHERE pk IN (1, 500, 1000) ORDER BY pk;
+
+--echo # Move both back to normal CFs with one COPY ALTER.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=ddl5_cf_pk',
+  DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=ddl5_cf_a', ALGORITHM=COPY;
+eval $check_cf;
+eval $check_data;
+
+--echo # Restart with table validation (default rocksdb_validate_tables=1).
+--source include/restart_mysqld.inc
+SELECT COUNT(*) FROM t1;
+eval $check_cf;
+eval $check_data;
+
+--echo #
+--echo # rocksdb_no_create_column_family: ALTER into an existing CF works, ALTER
+--echo # into a new CF fails and leaves the table unchanged.
+--echo #
+--let $restart_parameters = restart: --rocksdb_no_create_column_family=1
+--source include/restart_mysqld.inc
+SELECT COUNT(*) FROM t1;
+ALTER TABLE t1 DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=COPY;
+eval $check_cf;
+--error ER_WRONG_ARGUMENTS
+ALTER TABLE t1 ADD INDEX kb2 (b) COMMENT 'cfname=ddl5_cf_new', ALGORITHM=INPLACE;
+--error ER_WRONG_ARGUMENTS
+ALTER TABLE t1 DROP INDEX kb, ADD INDEX kb (b) COMMENT 'cfname=ddl5_cf_new', ALGORITHM=COPY;
+eval $check_cf;
+eval $check_data;
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME = 'ddl5_cf_new';
+--let $restart_parameters =
+--source include/restart_mysqld.inc
+
+--echo #
+--echo # Dropping a column family: refused while an index uses it, allowed once
+--echo # a failed ALTER has left it unused.
+--echo #
+SELECT COUNT(*) FROM t1;
+--error ER_CANT_DROP_CF
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_pk';
+
+--echo # A failed ALTER creates the CF of the new index, then rolls back.
+INSERT INTO t1 VALUES (1001, 1, 'v000001');
+--replace_regex /#sql-[0-9a-f_]+/#sql-tmp/
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE INDEX ub (b) COMMENT 'cfname=ddl5_cf_failed', ALGORITHM=INPLACE;
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE INDEX ub (b) COMMENT 'cfname=ddl5_cf_failed_copy', ALGORITHM=COPY;
+DELETE FROM t1 WHERE pk = 1001;
+eval $check_cf;
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_failed_copy';
+--disable_abort_on_error
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_failed';
+--enable_abort_on_error
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+eval $check_data;
+
+--echo # The background thread removes the marked CFs without a restart.
+let $wait_timeout = 120;
+let $wait_condition = SELECT COUNT(*) = 0 FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%';
+--source include/wait_condition.inc
+
+--echo # After a restart the table is still valid and the marked CFs are gone.
+--source include/restart_mysqld.inc
+SELECT COUNT(*) FROM t1;
+eval $check_cf;
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+eval $check_data;
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
