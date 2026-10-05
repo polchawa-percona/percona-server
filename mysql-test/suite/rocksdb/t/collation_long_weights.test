@@ -1,0 +1,67 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # VARCHAR key values whose collation weight string (strnxfrm image) is
+--echo # longer than the value itself must be readable back: multi-level
+--echo # collations (latin2_czech_cs, cp1250_czech_cs) and expanding characters
+--echo # in UCA collations.
+--echo #
+
+call mtr.add_suppression("Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Will handle this collation internally as if it had a NO_PAD attribute");
+
+SET NAMES utf8mb4;
+
+--echo # Multi-level collations (Bug#29459 values from ctype_latin2_ch).
+CREATE TABLE t1 (
+  a VARCHAR(2) CHARACTER SET latin2 COLLATE latin2_czech_cs,
+  PRIMARY KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 SET a=0x5ff;
+INSERT INTO t1 SET a=0xff;
+INSERT INTO t1 SET a='ab';
+--sorted_result
+SELECT hex(a) FROM t1;
+SELECT hex(a) FROM t1 WHERE a = 0xff;
+DROP TABLE t1;
+
+CREATE TABLE t1 (
+  a VARCHAR(2) CHARACTER SET cp1250 COLLATE cp1250_czech_cs,
+  b INT,
+  PRIMARY KEY(b), KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0x5ff, 1), (0xff, 2), ('ch', 3);
+--sorted_result
+SELECT hex(a) FROM t1 FORCE INDEX (a);
+SELECT b FROM t1 FORCE INDEX (a) WHERE a = 0xff;
+DROP TABLE t1;
+
+--echo # U+FDFA has 18 primary weights (36 bytes) in utf8mb4_0900_ai_ci, but
+--echo # fits into VARCHAR(1); U+3391 has 3 weights.
+CREATE TABLE t1 (
+  a VARCHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  PRIMARY KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (_utf8mb4 0xEFB7BA), ('x');
+--sorted_result
+SELECT hex(a) FROM t1;
+SELECT hex(a) FROM t1 WHERE a = _utf8mb4 0xEFB7BA;
+DROP TABLE t1;
+
+CREATE TABLE t1 (
+  a VARCHAR(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  b INT,
+  PRIMARY KEY(b), KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (_utf8mb4 0xE38E91E38E91E38E91, 1), ('abc', 2),
+                      (_utf8mb4 0xEFB7BA, 3);
+--sorted_result
+SELECT hex(a), b FROM t1 FORCE INDEX (a);
+--sorted_result
+SELECT hex(a), b FROM t1 FORCE INDEX (PRIMARY);
+SELECT b FROM t1 FORCE INDEX (a) WHERE a = _utf8mb4 0xE38E91E38E91E38E91;
+
+--echo # The same after the data is flushed and the server restarted.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--source include/restart_mysqld.inc
+SET NAMES utf8mb4;
+--sorted_result
+SELECT hex(a), b FROM t1 FORCE INDEX (a);
+CHECK TABLE t1;
+DROP TABLE t1;

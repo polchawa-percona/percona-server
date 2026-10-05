@@ -1,0 +1,21 @@
+# Part of the suite/innodb/t/innodb-index_ucs2.test port (see
+# index_multibyte_collations_vs_innodb). Multi-level collations whose sort key for a
+# few characters is longer than the indexed prefix: the same MyRocks vs InnoDB
+# comparison as index_multibyte_collations_vs_innodb, for utf8mb4_0900_as_cs and
+# utf8mb4_0900_as_ci.
+#
+# The recorded result is the correct one (it matches InnoDB). Without the fix
+# for PS-11686, lookups through the 2-character prefix index fail with
+# "Got error 505 'Found data corruption.' from ROCKSDB".
+
+--source include/have_rocksdb.inc
+
+call mtr.add_suppression("Plugin rocksdb reported: 'Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Plugin rocksdb reported: 'Will handle this collation internally as if it had a NO_PAD attribute.'");
+
+--let $values = ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL),('😀'),('😀 '),('𝐀'),('A😀')
+--let $cs = utf8mb4
+--let $coll = utf8mb4_0900_as_cs
+--source suite/rocksdb/include/innodb_port_compare_collation.inc
+--let $coll = utf8mb4_0900_as_ci
+--source suite/rocksdb/include/innodb_port_compare_collation.inc
