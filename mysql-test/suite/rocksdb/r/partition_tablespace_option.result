@@ -1,0 +1,27 @@
+# Table-level TABLESPACE is rejected
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB TABLESPACE `innodb_system`;
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+# Partition-level TABLESPACE must be rejected too
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2),
+PARTITION p2 VALUES LESS THAN (4) TABLESPACE `innodb_system`);
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+# Also for a tablespace that does not exist
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2) TABLESPACE `no_such_ts`,
+PARTITION p2 VALUES LESS THAN (4));
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+# And when a partition is added later
+CREATE TABLE t1 (a INT NOT NULL, PRIMARY KEY (a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p1 VALUES LESS THAN (2));
+ALTER TABLE t1 ADD PARTITION (PARTITION p2 VALUES LESS THAN (4) TABLESPACE `innodb_system`);
+ERROR 42000: This version of MySQL doesn't yet support 'TABLESPACEs for the RocksDB storage engine'
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`a`)
+(PARTITION p1 VALUES LESS THAN (2) ENGINE = ROCKSDB) */
+DROP TABLE t1;
