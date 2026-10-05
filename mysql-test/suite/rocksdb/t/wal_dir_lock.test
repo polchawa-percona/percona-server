@@ -1,0 +1,45 @@
+# MyRocks locks a separate rocksdb_wal_dir with
+# <rocksdb_wal_dir>/MYROCKS_WAL_DIR_LOCK, so two instances cannot share it
+# (finding #32, see rocksdb.shared_wal_dir). A WAL directory that is the RocksDB
+# data directory is already protected by the RocksDB LOCK file and gets no extra
+# lock file. Relative paths are resolved against the server data directory.
+
+--source include/have_rocksdb.inc
+--source include/linux.inc
+
+--let $mysqld_datadir= `SELECT @@datadir`
+
+--echo # WAL directory equal to the RocksDB data directory, relative path.
+--let $restart_parameters= restart:--rocksdb-wal-dir=./.rocksdb
+--source include/restart_mysqld.inc
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1);
+--file_exists $mysqld_datadir/.rocksdb/LOCK
+--error 1
+--file_exists $mysqld_datadir/.rocksdb/MYROCKS_WAL_DIR_LOCK
+
+--echo # WAL directory equal to the RocksDB data directory, absolute path.
+--let $restart_parameters= restart:--rocksdb-wal-dir=$mysqld_datadir.rocksdb
+--replace_result $mysqld_datadir DATADIR/
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (2);
+--error 1
+--file_exists $mysqld_datadir/.rocksdb/MYROCKS_WAL_DIR_LOCK
+
+--echo # Separate WAL directory given as a relative path: it is locked.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $restart_parameters= restart:--rocksdb-wal-dir=./rdb_wal_rel
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (3);
+SELECT @@rocksdb_wal_dir;
+--file_exists $mysqld_datadir/rdb_wal_rel/MYROCKS_WAL_DIR_LOCK
+--let WAL_LOCK_FILE= $mysqld_datadir/rdb_wal_rel/MYROCKS_WAL_DIR_LOCK
+--source suite/rocksdb/include/shared_dir_probe_lock.inc
+
+--echo # Back to the default WAL directory.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $restart_parameters=
+--source include/restart_mysqld.inc
+SELECT * FROM t1;
+DROP TABLE t1;
+--force-rmdir $mysqld_datadir/rdb_wal_rel
