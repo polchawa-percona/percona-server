@@ -1,0 +1,176 @@
+#
+# Like rocksdb.alter_charset_index, for multi-level collations whose sort
+# keys can be longer than the column (latin2_czech_cs, utf8mb4_0900_as_cs,
+# utf8mb4_0900_as_ci), with a full index, a prefix index and the column in
+# the primary key. The expected result is the InnoDB result.
+#
+# Disabled: keys in these collations cannot be read back through the
+# index (error 505 'Found data corruption'), port-findings #4. With the
+# fix for #4 this test passes. The multi-column prefix index problem on
+# utf8mb4_0900_ai_ci is a separate bug (PS-11661) with its own test.
+#
+call mtr.add_suppression("Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Will handle this collation internally as if it had a NO_PAD attribute");
+# latin2_czech_cs
+CREATE TABLE t1 (
+c VARCHAR(20) CHARACTER SET latin2 COLLATE latin2_general_ci NOT NULL,
+id INT NOT NULL,
+PRIMARY KEY (c, id),
+UNIQUE KEY kid (id),
+KEY kc (c),
+KEY kp (c(3))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('a', 1), ('A', 2), ('ch', 3), ('CH', 4), ('h', 5),
+('č', 6), ('c', 7), ('ř', 8), ('r', 9), ('ž', 10), ('z', 11), ('', 12),
+('chchch', 13), ('abc  ', 14), ('abc', 15);
+INSERT INTO t1 VALUES (_latin2 0xff, 16), (_latin2 0x5ff, 17);
+ALTER TABLE t1 MODIFY c VARCHAR(20) CHARACTER SET latin2 COLLATE latin2_czech_cs NOT NULL;
+SELECT COUNT(*) AS n,
+SUM(CRC32(HEX(c))) AS crc_kid FROM t1 FORCE INDEX (kid);
+n	crc_kid
+17	38257727605
+SELECT (SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kc)) AS crc_kc,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kp)) AS crc_kp,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (PRIMARY)) AS crc_pk;
+crc_kc	crc_kp	crc_pk
+38257727605	38257727605	38257727605
+# Rows not found by an equality lookup on c through kc, kp and PRIMARY:
+SELECT
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c AND y.id = x.id)) AS miss_kc,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kp) WHERE y.c = x.c AND y.id = x.id)) AS miss_kp,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (PRIMARY) WHERE y.c = x.c AND y.id = x.id)) AS miss_pk;
+miss_kc	miss_kp	miss_pk
+0	0	0
+# Number of rows equal to each value under the new collation, by index:
+SELECT x.id, (SELECT COUNT(*) FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c) AS eq_kc,
+(SELECT COUNT(*) FROM t1 AS y IGNORE INDEX (kc, kp, PRIMARY) WHERE y.c = x.c) AS eq_scan
+FROM t1 AS x FORCE INDEX (kid) ORDER BY x.id;
+id	eq_kc	eq_scan
+1	1	1
+2	1	1
+3	1	1
+4	1	1
+5	1	1
+6	1	1
+7	1	1
+8	1	1
+9	1	1
+10	1	1
+11	1	1
+12	1	1
+13	1	1
+14	2	2
+15	2	2
+16	1	1
+17	1	1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# utf8mb4_0900_as_cs
+CREATE TABLE t1 (
+c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+id INT NOT NULL,
+PRIMARY KEY (c, id),
+UNIQUE KEY kid (id),
+KEY kc (c),
+KEY kp (c(2))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('ﬁ', 1), ('fi', 2), ('Ǆ', 3), ('DŽ', 4), ('😀', 5),
+('ß', 6), ('ss', 7), ('é', 8), ('E', 9), ('e', 10), ('abc', 11), ('ABC', 12);
+ALTER TABLE t1 MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL;
+SELECT COUNT(*) AS n,
+SUM(CRC32(HEX(c))) AS crc_kid FROM t1 FORCE INDEX (kid);
+n	crc_kid
+12	19984546458
+SELECT (SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kc)) AS crc_kc,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kp)) AS crc_kp,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (PRIMARY)) AS crc_pk;
+crc_kc	crc_kp	crc_pk
+19984546458	19984546458	19984546458
+# Rows not found by an equality lookup on c through kc, kp and PRIMARY:
+SELECT
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c AND y.id = x.id)) AS miss_kc,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kp) WHERE y.c = x.c AND y.id = x.id)) AS miss_kp,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (PRIMARY) WHERE y.c = x.c AND y.id = x.id)) AS miss_pk;
+miss_kc	miss_kp	miss_pk
+0	0	0
+# Number of rows equal to each value under the new collation, by index:
+SELECT x.id, (SELECT COUNT(*) FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c) AS eq_kc,
+(SELECT COUNT(*) FROM t1 AS y IGNORE INDEX (kc, kp, PRIMARY) WHERE y.c = x.c) AS eq_scan
+FROM t1 AS x FORCE INDEX (kid) ORDER BY x.id;
+id	eq_kc	eq_scan
+1	1	1
+2	1	1
+3	1	1
+4	1	1
+5	1	1
+6	1	1
+7	1	1
+8	1	1
+9	1	1
+10	1	1
+11	1	1
+12	1	1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# utf8mb4_0900_as_ci
+CREATE TABLE t1 (
+c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+id INT NOT NULL,
+PRIMARY KEY (c, id),
+UNIQUE KEY kid (id),
+KEY kc (c),
+KEY kp (c(2))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('ﬁ', 1), ('fi', 2), ('Ǆ', 3), ('DŽ', 4), ('😀', 5),
+('ß', 6), ('ss', 7), ('é', 8), ('E', 9), ('e', 10), ('abc', 11), ('ABC', 12);
+ALTER TABLE t1 MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci NOT NULL;
+SELECT COUNT(*) AS n,
+SUM(CRC32(HEX(c))) AS crc_kid FROM t1 FORCE INDEX (kid);
+n	crc_kid
+12	19984546458
+SELECT (SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kc)) AS crc_kc,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (kp)) AS crc_kp,
+(SELECT SUM(CRC32(HEX(c))) FROM t1 FORCE INDEX (PRIMARY)) AS crc_pk;
+crc_kc	crc_kp	crc_pk
+19984546458	19984546458	19984546458
+# Rows not found by an equality lookup on c through kc, kp and PRIMARY:
+SELECT
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c AND y.id = x.id)) AS miss_kc,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (kp) WHERE y.c = x.c AND y.id = x.id)) AS miss_kp,
+(SELECT COUNT(*) FROM t1 AS x WHERE NOT EXISTS
+(SELECT 1 FROM t1 AS y FORCE INDEX (PRIMARY) WHERE y.c = x.c AND y.id = x.id)) AS miss_pk;
+miss_kc	miss_kp	miss_pk
+0	0	0
+# Number of rows equal to each value under the new collation, by index:
+SELECT x.id, (SELECT COUNT(*) FROM t1 AS y FORCE INDEX (kc) WHERE y.c = x.c) AS eq_kc,
+(SELECT COUNT(*) FROM t1 AS y IGNORE INDEX (kc, kp, PRIMARY) WHERE y.c = x.c) AS eq_scan
+FROM t1 AS x FORCE INDEX (kid) ORDER BY x.id;
+id	eq_kc	eq_scan
+1	2	2
+2	2	2
+3	2	2
+4	2	2
+5	1	1
+6	1	1
+7	1	1
+8	1	1
+9	2	2
+10	2	2
+11	2	2
+12	2	2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
