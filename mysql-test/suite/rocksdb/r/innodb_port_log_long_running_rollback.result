@@ -1,0 +1,66 @@
+CREATE TABLE t (id INT UNSIGNED AUTO_INCREMENT NOT NULL PRIMARY KEY, val varchar(12),
+KEY kv (val)) ENGINE=ROCKSDB;
+CREATE PROCEDURE populate (size INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+REPEAT
+INSERT INTO t (val) VALUES ("test val");
+SET i = i + 1;
+UNTIL i >= size END REPEAT;
+END$
+CALL populate(400);
+# Full rollback
+START TRANSACTION;
+UPDATE t SET val = "other val";
+ROLLBACK;
+SELECT COUNT(*), SUM(val = "test val"), SUM(val = "abc"), SUM(val = "other val") FROM t;
+COUNT(*)	SUM(val = "test val")	SUM(val = "abc")	SUM(val = "other val")
+400	400	0	0
+SELECT val, COUNT(*) FROM t FORCE INDEX (kv) GROUP BY val ORDER BY val;
+val	COUNT(*)
+test val	400
+# Partial rollback
+CALL populate(200);
+START TRANSACTION;
+UPDATE t SET val = "abc" WHERE id <= 400;
+SAVEPOINT sp;
+UPDATE t SET val = "abc" WHERE id > 400;
+ROLLBACK TO SAVEPOINT sp;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+# The transaction can only be rolled back as a whole now
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+ROLLBACK;
+SELECT COUNT(*), SUM(val = "test val"), SUM(val = "abc"), SUM(val = "other val") FROM t;
+COUNT(*)	SUM(val = "test val")	SUM(val = "abc")	SUM(val = "other val")
+600	600	0	0
+SELECT val, COUNT(*) FROM t FORCE INDEX (kv) GROUP BY val ORDER BY val;
+val	COUNT(*)
+test val	600
+# Rollback of an XA transaction (known XID)
+XA START X'616263',X'646566',2;
+UPDATE t SET val = "other val";
+XA END X'616263',X'646566',2;
+XA ROLLBACK X'616263',X'646566',2;
+SELECT COUNT(*), SUM(val = "test val"), SUM(val = "abc"), SUM(val = "other val") FROM t;
+COUNT(*)	SUM(val = "test val")	SUM(val = "abc")	SUM(val = "other val")
+600	600	0	0
+SELECT val, COUNT(*) FROM t FORCE INDEX (kv) GROUP BY val ORDER BY val;
+val	COUNT(*)
+test val	600
+# Recovery of a transaction killed after the engine prepared it
+SET @@SESSION.debug="+d,crash_after_flush_engine_log";
+DELETE FROM t;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*), SUM(val = "test val"), SUM(val = "abc"), SUM(val = "other val") FROM t;
+COUNT(*)	SUM(val = "test val")	SUM(val = "abc")	SUM(val = "other val")
+600	600	0	0
+SELECT val, COUNT(*) FROM t FORCE INDEX (kv) GROUP BY val ORDER BY val;
+val	COUNT(*)
+test val	600
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+DROP PROCEDURE populate;

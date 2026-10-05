@@ -1,0 +1,91 @@
+#
+# Port of innodb.lock_trx_release_read_locks_in_x_mode
+# (mysql-test/suite/innodb/t/lock_trx_release_read_locks_in_x_mode.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - The original races InnoDB's implicit-to-explicit lock conversion against the
+#     release of read locks at XA PREPARE, using InnoDB-only sync points. MyRocks has
+#     no implicit locks, so the port keeps the observable scenario: a READ COMMITTED
+#     XA transaction that inserted into several tables and locked a row FOR UPDATE is
+#     prepared while one session per table waits FOR SHARE on its rows; every waiter
+#     must stay blocked through XA PREPARE and get the committed row after XA COMMIT
+#   - the readers lock the row by primary key (WHERE id=1). A MyRocks locking scan only
+#     locks rows it can see, and rows inserted by an uncommitted transaction are not
+#     visible, so a full-scan FOR SHARE returns at once instead of waiting
+#   - waits are detected through the processlist; waiters use a long
+#     rocksdb_lock_wait_timeout
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let MAX_FAILURES=5
+--let i=0
+while($i<=$MAX_FAILURES)
+{
+  --eval CREATE TABLE t$i (id INT PRIMARY KEY) ENGINE=ROCKSDB
+  --inc $i
+}
+INSERT INTO t0 (id) VALUES (1);
+
+--connect (c0, localhost, root,,)
+  SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  XA START 'x';
+  --let i=1
+  while($i<=$MAX_FAILURES)
+  {
+    --eval INSERT INTO t$i (id) VALUES (1);
+    --inc $i
+  }
+  SELECT * FROM t0 WHERE id=1 FOR UPDATE;
+  XA END 'x';
+
+--let i=0
+while($i<=$MAX_FAILURES)
+{
+  --connect (c1$i, localhost, root,,)
+    SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    SET SESSION rocksdb_lock_wait_timeout = 100;
+    BEGIN;
+    --send_eval SELECT * FROM t$i WHERE id=1 FOR SHARE
+  --inc $i
+}
+
+--connection default
+let $wait_condition=
+  SELECT COUNT(*) = $MAX_FAILURES + 1 FROM information_schema.processlist
+  WHERE info LIKE 'SELECT * FROM t_ WHERE id=1 FOR SHARE' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+
+--connection c0
+  XA PREPARE 'x';
+
+--connection default
+--echo # All readers are still waiting after XA PREPARE
+let $wait_condition=
+  SELECT COUNT(*) = $MAX_FAILURES + 1 FROM information_schema.processlist
+  WHERE info LIKE 'SELECT * FROM t_ WHERE id=1 FOR SHARE' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+
+--connection c0
+  XA COMMIT 'x';
+
+--disconnect c0
+--let i=0
+while($i<=$MAX_FAILURES)
+{
+  --connection c1$i
+    --reap
+    COMMIT;
+  --connection default
+  --disconnect c1$i
+  --inc $i
+}
+
+--let i=0
+while($i<=$MAX_FAILURES)
+{
+  --eval DROP TABLE t$i
+  --inc $i
+}
+
+--source include/wait_until_count_sessions.inc

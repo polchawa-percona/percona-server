@@ -1,0 +1,73 @@
+CREATE TABLE t1 (col1 INT PRIMARY KEY, col2 int) ENGINE=ROCKSDB;
+Connection: default
+# 1. UPDATE of a missing key inside a prepared XA transaction
+XA START 'lock_trx';
+SELECT * FROM t1;
+col1	col2
+UPDATE t1 SET col2 = 100 where col1 = 10;
+Connection: con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+# The key locked by the XA transaction's UPDATE is not insertable
+INSERT INTO t1 values(10, 100);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# Other keys are not blocked
+INSERT INTO t1 values(20, 200);
+Connection: default
+XA END 'lock_trx';
+XA PREPARE 'lock_trx';
+Connection: con1
+# Still locked while the transaction is prepared
+INSERT INTO t1 values(10, 100);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 values(30, 300);
+SET SESSION rocksdb_lock_wait_timeout = 50;
+INSERT INTO t1 values(10, 100);
+Connection: default
+XA COMMIT 'lock_trx';
+Connection: con1
+SELECT * FROM t1 ORDER BY col1;
+col1	col2
+10	100
+20	200
+30	300
+# 2. UPDATE of every row inside a prepared XA transaction
+Connection: default
+XA START 'lock_trx_1';
+UPDATE t1 SET col2 = col2 + 1;
+Connection: con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+# New keys are never blocked
+INSERT INTO t1 values(5, 50);
+Connection: default
+XA END 'lock_trx_1';
+XA PREPARE 'lock_trx_1';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+Connection: con1
+INSERT INTO t1 values(15, 150);
+INSERT INTO t1 values(25, 150);
+# The rows the prepared transaction changed stay locked
+UPDATE t1 SET col2 = 0 WHERE col1 = 20;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT * FROM t1 WHERE col1 = 10 FOR SHARE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# Consistent reads see the pre-XA values
+SELECT * FROM t1 ORDER BY col1;
+col1	col2
+5	50
+10	100
+15	150
+20	200
+25	150
+30	300
+Connection: default
+XA COMMIT 'lock_trx_1';
+SELECT * FROM t1 ORDER BY col1;
+col1	col2
+5	50
+10	101
+15	150
+20	201
+25	150
+30	301
+DROP TABLE t1;
