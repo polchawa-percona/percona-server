@@ -31,6 +31,12 @@ let $wait_condition = select count(*) = 2 from information_schema.processlist wh
 let $wait_condition = select variable_value >= 1 from performance_schema.global_status where variable_name='rocksdb_manual_compactions_running';
 --source include/wait_condition.inc
 
+# A statement shows up in the processlist before its compaction request is
+# queued. Wait until both requests are queued (one running, one pending), so
+# that the queue is full when con3 tries to add more.
+let $wait_condition = select sum(variable_value) = 2 from performance_schema.global_status where variable_name in ('rocksdb_manual_compactions_running', 'rocksdb_manual_compactions_pending');
+--source include/wait_condition.inc
+
 connection con3;
 --error ER_INTERNAL_ERROR
 SET GLOBAL rocksdb_compact_cf='cf1';
