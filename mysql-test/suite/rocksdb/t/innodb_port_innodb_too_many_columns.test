@@ -1,0 +1,94 @@
+#
+# Port of innodb.innodb_too_many_columns (mysql-test/suite/innodb/t/innodb_too_many_columns.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on both tables (plain and partitioned, without a primary
+#     key, so MyRocks adds a hidden one)
+#   - only the ALGORITHM=COPY round is ported: MyRocks rejects ADD COLUMN with
+#     INPLACE, and with INSTANT unless instant DDL is enabled; the algorithm
+#     results are pinned by rocksdb.alter_algorithm_matrix and the INSTANT
+#     column limit by rocksdb.innodb_port_instant_ddl_limitations
+#   - include/have_innodb_16k.inc removed
+#   - InnoDB rejects the 1018th column (its limit is 1017 user columns);
+#     MyRocks has no such engine limit and accepts it
+#   - added: a row is written to the widest table and read back, after a
+#     flush and after TRUNCATE
+#
+--source include/have_rocksdb.inc
+
+DELIMITER |;
+CREATE PROCEDURE add_columns(table_name varchar(50), algorithm varchar(10))
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  SET @sql_text = CONCAT('ALTER TABLE ', table_name, ' ');
+  while (i < 1012) do
+    SET @sql_text = CONCAT(@sql_text, ' ADD COLUMN ', CONCAT('col_', i), ' INTEGER NULL DEFAULT NULL,');
+    set i = i + 1;
+  end while;
+  SET @sql_text = CONCAT(@sql_text, 'ALGORITHM=', algorithm);
+  PREPARE stmt FROM @sql_text;
+  EXECUTE stmt;
+  DEALLOCATE PREPARE stmt;
+END|
+
+CREATE PROCEDURE create_tables()
+BEGIN
+  CREATE TABLE `test`.`TEST_TABLE` (
+    `TIMESTAMP` datetime NOT NULL,
+    `INTERVALL` int NOT NULL,
+    `IDENT_KEY` int NOT NULL,
+    `FIELD_1` double DEFAULT NULL,
+    `FIELD_2` double DEFAULT NULL,
+    `FIELD_3` double DEFAULT NULL
+  ) ENGINE=ROCKSDB;
+
+  CREATE TABLE `test`.`TEST_TABLE_PARTITIONED` (
+    `TIMESTAMP` datetime NOT NULL,
+    `INTERVALL` int NOT NULL,
+    `IDENT_KEY` int NOT NULL,
+    `FIELD_1` double DEFAULT NULL,
+    `FIELD_2` double DEFAULT NULL,
+    `FIELD_3` double DEFAULT NULL
+  ) ENGINE=ROCKSDB
+  PARTITION BY RANGE COLUMNS(`TIMESTAMP`)
+  (
+    PARTITION p20210321 VALUES LESS THAN ('2021-03-22'),
+    PARTITION p20210322 VALUES LESS THAN ('2021-03-23'),
+    PARTITION p20210323 VALUES LESS THAN MAXVALUE
+  );
+END |
+DELIMITER ;|
+
+call create_tables();
+INSERT INTO TEST_TABLE (`TIMESTAMP`, INTERVALL, IDENT_KEY) VALUES ('2021-03-21 10:00:00', 1, 1);
+INSERT INTO TEST_TABLE_PARTITIONED (`TIMESTAMP`, INTERVALL, IDENT_KEY) VALUES ('2021-03-21 10:00:00', 1, 1), ('2021-03-25 10:00:00', 2, 2);
+
+call add_columns('TEST_TABLE', 'COPY');
+call add_columns('TEST_TABLE_PARTITIONED', 'COPY');
+
+# InnoDB stops here with ER_TOO_MANY_FIELDS: its limit is 1017 user columns.
+# MyRocks has no engine column limit below the server's, so the 1018th
+# column is accepted.
+ALTER TABLE TEST_TABLE ADD I_VJ278 INTEGER NULL DEFAULT NULL, ALGORITHM=COPY;
+ALTER TABLE TEST_TABLE_PARTITIONED ADD I_VJ278 INTEGER NULL DEFAULT NULL, ALGORITHM=COPY;
+
+SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'test' AND table_name = 'TEST_TABLE';
+UPDATE TEST_TABLE SET col_1 = 1, col_500 = 500, col_1011 = 1011;
+INSERT INTO TEST_TABLE (`TIMESTAMP`, INTERVALL, IDENT_KEY, col_1011) VALUES ('2021-03-22 10:00:00', 2, 2, 2022);
+UPDATE TEST_TABLE_PARTITIONED SET col_1011 = IDENT_KEY;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT IDENT_KEY, col_1, col_500, col_1010, col_1011, I_VJ278 FROM TEST_TABLE ORDER BY IDENT_KEY;
+SELECT IDENT_KEY, col_1011 FROM TEST_TABLE_PARTITIONED ORDER BY IDENT_KEY;
+CHECK TABLE TEST_TABLE, TEST_TABLE_PARTITIONED;
+
+TRUNCATE TABLE TEST_TABLE;
+TRUNCATE TABLE TEST_TABLE_PARTITIONED;
+SELECT COUNT(*) FROM TEST_TABLE;
+SELECT COUNT(*) FROM TEST_TABLE_PARTITIONED;
+INSERT INTO TEST_TABLE (`TIMESTAMP`, INTERVALL, IDENT_KEY, col_1011) VALUES ('2021-03-23 10:00:00', 3, 3, 3033);
+SELECT IDENT_KEY, col_1011 FROM TEST_TABLE;
+
+DROP TABLE TEST_TABLE;
+DROP TABLE TEST_TABLE_PARTITIONED;
+DROP PROCEDURE add_columns;
+DROP PROCEDURE create_tables;
