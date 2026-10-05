@@ -1,0 +1,62 @@
+#
+# Prefix secondary indexes on default-collation (utf8mb4_0900_ai_ci) TEXT and
+# VARCHAR columns must store only the key prefix, and must accept values of
+# 64 KiB and more.
+#
+# Not a port: written after the InnoDB LOB port work (prefix-index scenarios
+# from innodb.partition-blob / innodb.virtual_blob) exposed port-findings #21:
+#  - values >= 64 KiB hit "Assertion len <= uint16 max" in
+#    Rdb_key_def::pack_record (rdb_datadic.cc) on a debug build;
+#  - shorter values are accepted, but each index entry keeps a full copy of the
+#    column value (make_unpack_unknown_varlength), so the index is as large as
+#    the table.
+# The expected result below is the correct behaviour; it was recorded with
+# $coll = utf8mb4_bin, which does not have the bug. The test is disabled in
+# collections/disabled.def until the bug is fixed.
+# Runs at READ COMMITTED (-master.opt) because MyRocks rejects gap locks at
+# REPEATABLE READ.
+#
+
+--source include/have_rocksdb.inc
+
+--let $coll = utf8mb4_0900_ai_ci
+
+SET SESSION cte_max_recursion_depth = 5000;
+
+--echo #
+--echo # 1. Values of 64 KiB and more in a prefix-indexed TEXT column
+--echo #
+--disable_query_log
+--eval CREATE TABLE t1 (id INT PRIMARY KEY, t LONGTEXT CHARACTER SET utf8mb4 COLLATE $coll, KEY k (t(10)), KEY k200 (t(200))) ENGINE=ROCKSDB
+--enable_query_log
+INSERT INTO t1 VALUES (1, CONCAT('first', REPEAT('a', 65536)));
+INSERT INTO t1 VALUES (2, CONCAT('second', REPEAT('ż', 100000)));
+UPDATE t1 SET t = CONCAT('first', REPEAT('b', 300000)) WHERE id = 1;
+SELECT id, LENGTH(t), LEFT(t, 6) FROM t1 FORCE INDEX(k) WHERE t LIKE 'first%' OR t LIKE 'second%' ORDER BY id;
+SELECT id, LENGTH(t) FROM t1 FORCE INDEX(k200) WHERE t LIKE 'secondżż%';
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # 2. The prefix index must be much smaller than the table
+--echo #
+--disable_query_log
+--eval CREATE TABLE t2 (id INT PRIMARY KEY, t MEDIUMTEXT CHARACTER SET utf8mb4 COLLATE $coll, KEY k (t(10))) ENGINE=ROCKSDB
+--eval CREATE TABLE t3 (id INT PRIMARY KEY, v VARCHAR(3000) CHARACTER SET utf8mb4 COLLATE $coll, KEY k (v(10))) ENGINE=ROCKSDB
+--enable_query_log
+INSERT INTO t2 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000)
+  SELECT n, CONCAT(n, REPEAT(MD5(n), 900)) FROM s;
+INSERT INTO t3 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000)
+  SELECT n, CONCAT(n, REPEAT(MD5(n), 90)) FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT d.TABLE_NAME,
+       SUM(IF(d.INDEX_NAME = 'k', m.DATA_SIZE, 0)) * 10 < SUM(IF(d.INDEX_NAME = 'PRIMARY', m.DATA_SIZE, 0)) AS prefix_index_small
+  FROM information_schema.ROCKSDB_DDL d
+  JOIN information_schema.ROCKSDB_INDEX_FILE_MAP m USING (COLUMN_FAMILY, INDEX_NUMBER)
+  WHERE d.TABLE_SCHEMA = 'test' AND d.TABLE_NAME IN ('t2', 't3')
+  GROUP BY d.TABLE_NAME ORDER BY d.TABLE_NAME;
+SELECT COUNT(*) FROM t2 FORCE INDEX(k) WHERE t LIKE '5%';
+SELECT COUNT(*) FROM t3 FORCE INDEX(k) WHERE v LIKE '5%';
+DROP TABLE t2, t3;
+
+SET SESSION cte_max_recursion_depth = DEFAULT;
