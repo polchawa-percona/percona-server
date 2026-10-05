@@ -1,0 +1,41 @@
+#
+# Port of percona_innodb.multi_delete (mysql-test/suite/percona_innodb/t/multi_delete.test)
+# to MyRocks: a multi-table DELETE on a table whose primary key has BLOB and
+# VARCHAR prefix parts.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - Runs at READ COMMITTED (-master.opt): at REPEATABLE READ MyRocks rejects
+#     the multi-table DELETE with the gap-lock error, because it reads
+#     the joined table without a full unique key
+#   - Added: the rows left after the DELETE, a second table with the same key
+#     and values longer than the prefixes, and a multi-table DELETE that keeps
+#     some rows, checked through the primary key
+#
+--source include/have_rocksdb.inc
+
+create table t1 (a int,b varchar(100) ,d blob,primary key (a,d(10), b(10))) ENGINE=ROCKSDB;
+insert into t1 values (1,'e','a'),(5,'f','5'), (3,'a','b');
+create table t2 (a int) ENGINE=ROCKSDB;
+insert into t2() values(4),(5);
+delete t1 from t1, t2 where t1.a;
+show create table t1;
+SELECT COUNT(*) FROM t1;
+drop table t1, t2;
+
+--echo # MyRocks: values longer than the prefixes, partial multi-table DELETE
+create table t1 (a int,b varchar(100) ,d blob,primary key (a,d(10), b(10))) ENGINE=ROCKSDB;
+insert into t1 values
+  (1, REPEAT('b', 50), REPEAT('d', 50)),
+  (1, CONCAT(REPEAT('c', 10), 'x'), CONCAT(REPEAT('d', 10), 'x')),
+  (2, 'short', 'short'),
+  (3, REPEAT('b', 30), REPEAT('d', 30));
+create table t2 (a int primary key) ENGINE=ROCKSDB;
+insert into t2 values (1), (3);
+--error ER_DUP_ENTRY
+insert into t1 values (1, CONCAT(REPEAT('b', 10), 'y'), CONCAT(REPEAT('d', 10), 'y'));
+delete t1 from t1, t2 where t1.a = t2.a and t1.b like 'cccccccccc%';
+SELECT a, LENGTH(b), LENGTH(d) FROM t1 ORDER BY a, LENGTH(b);
+delete t1 from t1 join t2 on t1.a = t2.a;
+SELECT a, b, d FROM t1;
+CHECK TABLE t1;
+drop table t1, t2;

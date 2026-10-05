@@ -1,0 +1,44 @@
+# Explicit primary key over the whole TINYBLOB
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, PRIMARY KEY (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+HEX(c42)	c45
+78	1
+7979	2
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+c45
+2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# UNIQUE NOT NULL over the whole TINYBLOB, promoted to primary key
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, UNIQUE (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+HEX(c42)	c45
+78	1
+7979	2
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+c45
+2
+DROP TABLE t1;
+# Same with TINYTEXT
+CREATE TABLE t1 (c42 TINYTEXT CHARACTER SET latin1 NOT NULL, c45 INT, UNIQUE (c42(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT c42, c45 FROM t1;
+c42	c45
+x	1
+yy	2
+SELECT c45 FROM t1 WHERE c42 = 'yy';
+c45
+2
+DROP TABLE t1;
+# A shorter prefix is not promoted and works today
+CREATE TABLE t1 (c42 TINYBLOB NOT NULL, c45 INT, UNIQUE (c42(100))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', 1), ('yy', 2);
+SELECT HEX(c42), c45 FROM t1;
+HEX(c42)	c45
+78	1
+7979	2
+DROP TABLE t1;
