@@ -135,6 +135,13 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.innodb_port_xa_recovery : BUG#11632 PS-11632 prepared XA lost on restart
+rocksdb.innodb_port_innodb_bug59641 : BUG#11632 PS-11632 prepared XA lost on restart
+rocksdb.innodb_port_high_prio_trx_xa : BUG#11631 PS-11631 XA crash after PREPARE+COMMIT/ROLLBACK
+rocksdb.innodb_port_lock_trx_release_read_locks_in_x_mode : BUG#11631 PS-11631 XA crash after PREPARE
+rocksdb.innodb_port_innodb_ac_non_locking_select : BUG#11631 PS-11631 XA crash after PREPARE
+rocksdb.innodb_port_implicit_to_explicit_conversion_xa : BUG#11631 PS-11631 XA crash after PREPARE
+rocksdb.innodb_port_xa_prepare_lock_release : BUG#11631 PS-11631 XA crash after PREPARE
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

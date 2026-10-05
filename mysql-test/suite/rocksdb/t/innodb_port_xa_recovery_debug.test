@@ -1,0 +1,66 @@
+#
+# Port of innodb.xa_recovery_debug (mysql-test/suite/innodb/t/xa_recovery_debug.test)
+# to MyRocks.
+# Bug#20872655 XA ROLLBACK IS NOT CRASH-SAFE
+# Changes from the original:
+#   - runs at READ COMMITTED: the UPDATEs inside the XA transactions are not on a full
+#     unique key, which the gap-lock rule rejects at REPEATABLE READ
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB's trx_xa_rollback sync point and innodb_log_checkpoint_now do not exist
+#     in MyRocks; the server is killed with the server-level debug point
+#     crash_after_xa_rollback, right after XA ROLLBACK returned
+#   - the same is done for XA COMMIT of a prepared transaction (crash_commit_after),
+#     and the data is also read through the secondary index
+#
+# Expected: a completed XA ROLLBACK or XA COMMIT is durable. After the kill the XID
+# is unknown and the table shows the rolled-back or committed state.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+# With the binary log on, the engine-side commit or rollback marker of an XA
+# transaction is not synced; after the kill the engine reports the transaction as
+# prepared and binlog-based recovery resolves it.
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+--let CURGLOB_xa_detach_on_prepare = `SELECT @@GLOBAL.xa_detach_on_prepare`
+SET GLOBAL xa_detach_on_prepare = OFF;
+CREATE TABLE t(a INT PRIMARY KEY, b INT UNIQUE) ENGINE=ROCKSDB;
+connect (con1,localhost,root);
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'zombie';
+insert into t(a) values (0);
+update t set b=a;
+SELECT COUNT(*) FROM t;
+XA END 'zombie';
+XA PREPARE 'zombie';
+SET SESSION debug = '+d,crash_after_xa_rollback';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+XA ROLLBACK 'zombie';
+connection default;
+--source include/start_mysqld.inc
+disconnect con1;
+--error ER_XAER_NOTA
+XA COMMIT 'zombie';
+SELECT COUNT(*) FROM t;
+
+--echo # A completed XA COMMIT survives a kill as well
+connect (con1,localhost,root);
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'alive';
+INSERT INTO t VALUES (1, 1), (2, 2);
+XA END 'alive';
+XA PREPARE 'alive';
+XA COMMIT 'alive';
+connection default;
+--source include/kill_and_restart_mysqld.inc
+disconnect con1;
+--error ER_XAER_NOTA
+XA ROLLBACK 'alive';
+SELECT * FROM t ORDER BY a;
+SELECT b FROM t FORCE INDEX (b) ORDER BY b;
+DROP TABLE t;
+--replace_result $CURGLOB_xa_detach_on_prepare OLD_VALUE_xa_detach_on_prepare
+--eval SET GLOBAL xa_detach_on_prepare = $CURGLOB_xa_detach_on_prepare

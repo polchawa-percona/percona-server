@@ -1,0 +1,46 @@
+CREATE TABLE t1(id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1),(3);
+# XA COMMIT
+XA START "xid0";
+INSERT INTO t1 (id) VALUES (2);
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT * FROM t1 WHERE id=2 FOR UPDATE;
+XA END "xid0";
+XA PREPARE "xid0";
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+BEGIN;
+SELECT * FROM t1 WHERE id=2 FOR UPDATE NOWAIT;
+Got one of the listed errors
+XA COMMIT "xid0";
+id
+2
+# C2 owns the row now
+SELECT * FROM t1 WHERE id=2 FOR UPDATE NOWAIT;
+Got one of the listed errors
+COMMIT;
+COMMIT;
+BEGIN;
+SELECT * FROM t1 WHERE id=2 FOR UPDATE;
+id
+2
+COMMIT;
+# XA ROLLBACK
+XA START "xid1";
+INSERT INTO t1 (id) VALUES (4);
+BEGIN;
+SELECT * FROM t1 WHERE id=4 FOR UPDATE;
+XA END "xid1";
+XA PREPARE "xid1";
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA ROLLBACK "xid1";
+id
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id
+1
+2
+3
+DROP TABLE t1;

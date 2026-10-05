@@ -1,0 +1,102 @@
+#
+# Port of the XA scenario of innodb.implicit_to_explicit_conversion
+# (mysql-test/suite/innodb/t/implicit_to_explicit_conversion.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - The original checks that InnoDB's implicit-to-explicit lock conversion cannot
+#     end with two exclusive locks on one row when the inserting transaction commits
+#     through XA PREPARE / XA COMMIT. MyRocks has no implicit locks and the InnoDB sync
+#     points do not exist; the port checks the same invariant directly: while the XA
+#     transaction is active and prepared, other sessions cannot lock the inserted row;
+#     after XA COMMIT exactly one of them gets it, and after XA ROLLBACK the row is gone
+#   - runs at READ COMMITTED: at REPEATABLE READ a MyRocks locking read of a row
+#     committed after the snapshot fails with a snapshot conflict instead of reading
+#     the new row, which is MyRocks behaviour unrelated to this scenario
+#   - waits are detected through the processlist; waiters use a long
+#     rocksdb_lock_wait_timeout; NOWAIT probes accept the lock-wait timeout MyRocks
+#     returns for NOWAIT (see rocksdb.skip_locked_nowait)
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1(id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1),(3);
+
+--connect(C1,localhost,root,,test)
+--connect(C2,localhost,root,,test)
+--connect(C3,localhost,root,,test)
+
+--echo # XA COMMIT
+--connection C1
+    XA START "xid0";
+    INSERT INTO t1 (id) VALUES (2);
+
+--connection C2
+    SET SESSION rocksdb_lock_wait_timeout = 100;
+    BEGIN;
+    --send SELECT * FROM t1 WHERE id=2 FOR UPDATE
+
+--connection default
+    let $wait_condition=
+      SELECT COUNT(*) = 1 FROM information_schema.processlist
+      WHERE info = 'SELECT * FROM t1 WHERE id=2 FOR UPDATE' AND state LIKE '%row lock%';
+    --source include/wait_condition.inc
+
+--connection C1
+    XA END "xid0";
+    XA PREPARE "xid0";
+
+--connection C3
+    BEGIN;
+    --error ER_LOCK_NOWAIT,ER_LOCK_WAIT_TIMEOUT
+    SELECT * FROM t1 WHERE id=2 FOR UPDATE NOWAIT;
+
+--connection C1
+    XA COMMIT "xid0";
+
+--connection C2
+    --reap
+--connection C3
+    --echo # C2 owns the row now
+    --error ER_LOCK_NOWAIT,ER_LOCK_WAIT_TIMEOUT
+    SELECT * FROM t1 WHERE id=2 FOR UPDATE NOWAIT;
+    COMMIT;
+--connection C2
+    COMMIT;
+--connection C3
+    BEGIN;
+    SELECT * FROM t1 WHERE id=2 FOR UPDATE;
+    COMMIT;
+
+--echo # XA ROLLBACK
+--connection C1
+    XA START "xid1";
+    INSERT INTO t1 (id) VALUES (4);
+
+--connection C2
+    BEGIN;
+    --send SELECT * FROM t1 WHERE id=4 FOR UPDATE
+
+--connection default
+    let $wait_condition=
+      SELECT COUNT(*) = 1 FROM information_schema.processlist
+      WHERE info = 'SELECT * FROM t1 WHERE id=4 FOR UPDATE' AND state LIKE '%row lock%';
+    --source include/wait_condition.inc
+
+--connection C1
+    XA END "xid1";
+    XA PREPARE "xid1";
+    XA ROLLBACK "xid1";
+
+--connection C2
+    --reap
+    COMMIT;
+
+--connection default
+SELECT * FROM t1 ORDER BY id;
+--disconnect C1
+--disconnect C2
+--disconnect C3
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
