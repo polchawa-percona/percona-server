@@ -1,0 +1,98 @@
+#
+# Port of innodb.innodb_stats (mysql-test/suite/innodb/t/innodb_stats.test)
+# to MyRocks.
+#
+# The original fills a table with different value distributions, runs ANALYZE
+# TABLE and checks the persistent statistics in mysql.innodb_index_stats
+# (n_diff_pfx01), then reopens the table and checks
+# INFORMATION_SCHEMA.STATISTICS.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB; MyRocks has no mysql.innodb_index_stats. The number of
+#     distinct values is checked through INFORMATION_SCHEMA.STATISTICS
+#     cardinality and the row count through INFORMATION_SCHEMA.TABLES, which
+#     is what the optimizer sees.
+#   - Every distribution runs with both MyRocks statistics methods: SST
+#     properties (rocksdb_table_stats_use_table_scan=OFF, the default) and a
+#     full table scan (rocksdb_table_stats_use_table_scan=ON).
+#   - SST statistics only cover flushed data, so the memtable is flushed
+#     before ANALYZE.
+#   - The expected cardinalities are InnoDB's n_diff_pfx01 values:
+#     0 1 1 1 1 2 2 3 3 5.
+#
+--source include/have_rocksdb.inc
+
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+CREATE TABLE test_innodb_stats (
+  a INT,
+  KEY a_key (a)
+) ENGINE=ROCKSDB;
+
+--let $mode = 0
+while ($mode < 2)
+{
+  eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode;
+
+  --let $n = 0
+  while ($n < 10)
+  {
+    TRUNCATE TABLE test_innodb_stats;
+    if ($n == 1)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1);
+    }
+    if ($n == 2)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (1);
+    }
+    if ($n == 3)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1);
+    }
+    if ($n == 4)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1), (1), (1), (1), (1), (1), (1), (1);
+    }
+    if ($n == 5)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (2);
+    }
+    if ($n == 6)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2);
+    }
+    if ($n == 7)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3);
+    }
+    if ($n == 8)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2), (3), (3);
+    }
+    if ($n == 9)
+    {
+      INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3), (4), (5), (1), (2), (3), (4), (5);
+    }
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    ANALYZE TABLE test_innodb_stats;
+    # Reopen the table so that the next access reads the stored statistics.
+    FLUSH TABLE test_innodb_stats;
+    SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+      FROM test_innodb_stats;
+    SELECT index_name, seq_in_index, column_name, cardinality
+      FROM information_schema.statistics
+      WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+    SELECT table_rows FROM information_schema.tables
+      WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+    --inc $n
+  }
+  --inc $mode
+}
+
+DROP TABLE test_innodb_stats;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;

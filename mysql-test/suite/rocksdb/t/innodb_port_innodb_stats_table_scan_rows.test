@@ -1,0 +1,59 @@
+#
+# Finding #40 (port-findings.md), found while porting the InnoDB persistent
+# statistics tests (innodb.innodb_stats_auto_recalc).
+#
+# With rocksdb_table_stats_use_table_scan=ON and 100% sampling, ANALYZE TABLE
+# reads every row of the table, so the row count it stores should be the
+# number of rows it saw, as InnoDB's n_rows is. Instead, MyRocks takes the
+# row count from the SST file properties plus the approximate number of
+# memtable entries, and memtable entries include deletions. After deleting
+# most rows, INFORMATION_SCHEMA.TABLES.TABLE_ROWS reports more rows than the
+# table ever had, and after a memtable flush it still reports the pre-delete
+# count until compaction.
+#
+# The test asserts the correct behaviour: after ANALYZE TABLE in table-scan
+# mode, TABLE_ROWS equals COUNT(*). It is disabled until the bug is fixed.
+#
+--source include/have_rocksdb.inc
+
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY (b)) ENGINE=ROCKSDB;
+--disable_query_log
+--let $i = 0
+while ($i < 1000)
+{
+  --inc $i
+  --eval INSERT INTO t VALUES ($i, $i % 10)
+}
+--enable_query_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+SELECT COUNT(*) FROM t;
+SELECT table_rows FROM information_schema.tables
+  WHERE table_schema = DATABASE() AND table_name = 't';
+
+DELETE FROM t WHERE a <= 900;
+
+--echo # Deleted rows are still in the memtable.
+ANALYZE TABLE t;
+SELECT COUNT(*) FROM t;
+SELECT table_rows FROM information_schema.tables
+  WHERE table_schema = DATABASE() AND table_name = 't';
+SELECT index_name, cardinality FROM information_schema.statistics
+  WHERE table_schema = DATABASE() AND table_name = 't' ORDER BY index_name;
+
+--echo # Deleted rows are in an SST file, not yet compacted.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+SELECT table_rows FROM information_schema.tables
+  WHERE table_schema = DATABASE() AND table_name = 't';
+SELECT index_name, cardinality FROM information_schema.statistics
+  WHERE table_schema = DATABASE() AND table_name = 't' ORDER BY index_name;
+
+DROP TABLE t;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;
