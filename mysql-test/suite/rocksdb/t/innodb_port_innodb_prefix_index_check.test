@@ -1,0 +1,172 @@
+#
+# Port of innodb.innodb_prefix_index_check (mysql-test/suite/innodb/t/innodb_prefix_index_check.test) to MyRocks.
+# Bug #22445211: tables that mix a full-column index and a prefix index on
+# the same column (including a virtual generated column), REPLACE into them,
+# then ADD INDEX.
+#
+# Changes from the InnoDB original:
+# - ENGINE=ROCKSDB.
+# - After each REPLACE and ADD INDEX, every secondary index is checked
+#   against a scan that does not use it. The tables have no primary key, so
+#   all columns form the row identity for the comparison.
+# - Extra cases at the end: the same index layouts with multi-byte data and
+#   values that differ only after the prefix.
+
+--source include/have_rocksdb.inc
+
+--echo #Bug #22445211   GCOLS: SIMPLE DML, FAILING ASSERTION:
+--echo #!CURSOR->INDEX->IS_COMMITTED()
+
+--echo #Create and alter table examples for virtual column for full
+--echo #column index followed by prefix index.
+
+CREATE TABLE t1(
+f1 INT DEFAULT NULL,
+f2 CHAR(2) GENERATED ALWAYS AS ('11') VIRTUAL,
+f3 INT,
+UNIQUE KEY(f1),
+UNIQUE KEY(f3,f1),
+KEY(f2,f1),
+key(f1,f2(1))
+)ENGINE=ROCKSDB;
+
+REPLACE INTO t1(f3) VALUES (1),(1);
+SELECT * FROM t1;
+
+--let $cpi_table = t1
+--let $cpi_pk = f1, f2, f3
+--let $cpi_index = f1
+--let $cpi_cols = f1
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_index = f3
+--let $cpi_cols = f3, f1
+--let $cpi_join = y.f3 = x.f3 AND y.f1 = x.f1
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_index = f2
+--let $cpi_cols = f2, f1
+--let $cpi_join = y.f2 = x.f2 AND y.f1 = x.f1
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_index = f1_2
+--let $cpi_cols = f1, f2
+--let $cpi_join = y.f1 = x.f1 AND y.f2 = x.f2
+--source suite/rocksdb/include/innodb_port_check_index.inc
+
+DROP TABLE t1;
+
+--echo #Create and alter table examples for full column index followed by prefix index.
+
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1,f2),
+KEY(f1(5)))ENGINE=ROCKSDB;
+
+REPLACE INTO t1(f2) VALUES (1),(1);
+
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+
+--let $cpi_table = t1
+--let $cpi_pk = f1, f2
+--let $cpi_index = f1
+--let $cpi_cols = f1, f2
+--let $cpi_join = y.f1 = x.f1 AND y.f2 = x.f2
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_index = f1_2
+--let $cpi_cols = f1
+--source suite/rocksdb/include/innodb_port_check_index.inc
+--let $cpi_index = f2
+--let $cpi_cols = f2, f1
+--let $cpi_join = y.f2 = x.f2 AND y.f1 = x.f1
+--source suite/rocksdb/include/innodb_port_check_index.inc
+
+DROP TABLE t1;
+
+--echo #Create and alter table examples for small prefix index followed by large
+--echo #prefix index.
+
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1(5),f2),
+KEY(f1(10)))ENGINE=ROCKSDB;
+
+REPLACE INTO t1(f2) VALUES (1),(1);
+
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+--echo #Create and alter table examples for prefix index followed by full column
+--echo #index.
+
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1(5),f2),
+KEY(f1))ENGINE=ROCKSDB;
+
+REPLACE INTO t1(f2) VALUES (1),(1);
+
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # MyRocks extension: the same index layouts with multi-byte data, where
+--echo # rows differ only after the prefix, checked against the primary key.
+--echo #
+
+--let $k = 1
+while ($k <= 3)
+{
+  if ($k == 1)
+  {
+    --let $cs = utf8mb4 COLLATE utf8mb4_0900_ai_ci
+  }
+  if ($k == 2)
+  {
+    --let $cs = utf8mb4 COLLATE utf8mb4_general_ci
+  }
+  if ($k == 3)
+  {
+    --let $cs = ucs2 COLLATE ucs2_general_ci
+  }
+  --echo # $cs
+  --eval CREATE TABLE t1 (id INT PRIMARY KEY, f1 VARCHAR(100) CHARACTER SET $cs, f2 CHAR(2), KEY k_full (f1, f2), KEY k_p5 (f1(5)), KEY k_p5f2 (f1(5), f2), KEY k_f2f1 (f2, f1)) ENGINE=ROCKSDB
+  INSERT INTO t1 VALUES
+    (1, 'ąęółżA', 'x'), (2, 'ąęółżB', 'x'), (3, 'ąęółż', 'x'), (4, 'ąęółż ', 'x'),
+    (5, 'ĄĘÓŁŻa', 'y'), (6, 'abcde', 'y'), (7, 'abcdef', 'y'), (8, 'abcdE', 'y'),
+    (9, 'ÀBCDÉF', 'z'), (10, NULL, 'z'), (11, '', 'z'), (12, 'ab', NULL);
+  REPLACE INTO t1 VALUES (2, 'ąęółżC', 'x'), (13, 'abcdefg', 'y');
+  UPDATE t1 SET f1 = CONCAT(f1, 'Q') WHERE id IN (6, 9);
+  DELETE FROM t1 WHERE id = 3;
+
+  --let $cpi_table = t1
+  --let $cpi_pk = id
+  --let $cpi_index = k_full
+  --let $cpi_cols = f1, f2
+  --let $cpi_join = y.f1 = x.f1 AND y.f2 = x.f2
+  --source suite/rocksdb/include/innodb_port_check_index.inc
+  --let $cpi_index = k_p5
+  --let $cpi_cols = f1
+  --source suite/rocksdb/include/innodb_port_check_index.inc
+  --let $cpi_index = k_p5f2
+  --let $cpi_cols = f1, f2
+  --let $cpi_join = y.f1 = x.f1 AND y.f2 = x.f2
+  --source suite/rocksdb/include/innodb_port_check_index.inc
+  --let $cpi_index = k_f2f1
+  --let $cpi_cols = f2, f1
+  --let $cpi_join = y.f2 = x.f2 AND y.f1 = x.f1
+  --source suite/rocksdb/include/innodb_port_check_index.inc
+
+  # Prefix-range lookups through each index give the same ids as a scan.
+  --let $ids_scan = `SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 IGNORE INDEX(k_full, k_p5, k_p5f2, k_f2f1) WHERE f1 LIKE 'ąęółż%' OR f1 LIKE 'abcd%'`
+  --let $ids_full = `SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX(k_full) WHERE f1 LIKE 'ąęółż%' OR f1 LIKE 'abcd%'`
+  --let $ids_p5 = `SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX(k_p5) WHERE f1 LIKE 'ąęółż%' OR f1 LIKE 'abcd%'`
+  --echo # LIKE prefix: scan $ids_scan, k_full $ids_full, k_p5 $ids_p5
+  DROP TABLE t1;
+  --inc $k
+}
