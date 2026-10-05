@@ -1,0 +1,20 @@
+CREATE TABLE t3 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL first_batch WAIT_FOR never_happens';
+INSERT INTO t3 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000) SELECT n, n FROM seq;
+SET DEBUG_SYNC = 'now WAIT_FOR first_batch';
+# Kill and restart
+SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (k)) =
+(SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) AS sk_matches_pk;
+sk_matches_pk
+1
+SELECT COUNT(*) AS index_only_rows_without_pk FROM t3 FORCE INDEX (k)
+WHERE id NOT IN (SELECT id FROM t3 IGNORE INDEX (k));
+index_only_rows_without_pk
+0
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;
