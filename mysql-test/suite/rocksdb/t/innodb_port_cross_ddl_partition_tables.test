@@ -1,0 +1,72 @@
+#
+# Port of innodb.cross_ddl_partition_tables
+# (mysql-test/suite/innodb/t/cross_ddl_partition_tables.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every table
+#   - t1 and t2 are filled with single-row INSERTs instead of INSERT ... SELECT,
+#     which MyRocks rejects at REPEATABLE READ (no gap locks)
+#   - after the expected errors, the test also checks that a new transaction
+#     reads the rebuilt table correctly
+#
+# A transaction whose snapshot predates an ALTER that rebuilds a partitioned
+# table must get ER_TABLE_DEF_CHANGED instead of reading the rebuilt table as
+# empty.
+#
+--source include/have_rocksdb.inc
+
+--connect (con1,localhost,root,,)
+--echo # Create database and tables
+CREATE DATABASE testdb;
+USE testdb;
+
+CREATE TABLE t1 ( id int ) ENGINE=ROCKSDB;
+CREATE TABLE t2 ( id int ) ENGINE=ROCKSDB;
+--echo # Fill t1 and t2 with 32 rows each.
+--disable_query_log
+--let $i = 0
+while ($i < 32)
+{
+  INSERT INTO t1 VALUES (1);
+  INSERT INTO t2 VALUES (1);
+  --inc $i
+}
+--enable_query_log
+
+CREATE TABLE t3 (
+    id INT
+) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (
+    PARTITION p0 VALUES LESS THAN (1000),
+    PARTITION p1 VALUES LESS THAN (2000),
+    PARTITION p2 VALUES LESS THAN (3000)
+);
+INSERT INTO t3 VALUES (800);
+INSERT INTO t3 VALUES (1500);
+INSERT INTO t3 VALUES (2300);
+
+BEGIN;
+SELECT COUNT(*) FROM t1;
+
+--connect (con2,localhost,root,,)
+--echo # Alter the partition table.
+ALTER TABLE testdb.t3 ADD COLUMN name varchar(10);
+
+--connection con1
+--echo # SELECT COUNT(*) must fail as the table definition is changed.
+--error ER_TABLE_DEF_CHANGED
+SELECT COUNT(*) FROM testdb.t3;
+
+--echo # SELECT * must fail as the table definition is changed.
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM testdb.t3;
+
+--echo # A new transaction sees the rebuilt table.
+COMMIT;
+SELECT COUNT(*) FROM testdb.t3;
+SELECT * FROM testdb.t3 ORDER BY id;
+
+--echo # Clean up
+--disconnect con2
+--connection default
+--disconnect con1
+DROP DATABASE testdb;

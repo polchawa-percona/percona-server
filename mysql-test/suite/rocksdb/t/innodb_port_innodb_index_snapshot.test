@@ -1,0 +1,66 @@
+#
+# Port of the "too new for this transaction" part of innodb.innodb-index
+# (mysql-test/suite/innodb/t/innodb-index.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every table
+#   - tables are filled with INSERT ... VALUES instead of INSERT ... SELECT,
+#     so the setup does not depend on the gap-lock rule
+#   - table t2i is dropped: it rebuilt the table with ALGORITHM=INPLACE
+#     (ADD PRIMARY KEY), which MyRocks does not support; t2c covers the
+#     rebuild case with ALGORITHM=COPY
+#
+# A REPEATABLE READ transaction must not read an index that was created or
+# rebuilt after its snapshot: it gets ER_TABLE_DEF_CHANGED, while the
+# unchanged primary key of an inplace-altered table stays readable.
+#
+--source include/have_rocksdb.inc
+
+connect (a,localhost,root,,);
+connect (b,localhost,root,,);
+connection a;
+CREATE TABLE t1 (a INT, b CHAR(1)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (3,'a'),(3,'b'),(1,'c'),(0,'d'),(1,'e');
+CREATE TABLE t2 (a INT, b CHAR(1)) ENGINE=ROCKSDB;
+CREATE TABLE t2c (a INT, b CHAR(1) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (3,'a'),(3,'b'),(1,'c'),(0,'d'),(1,'e');
+INSERT INTO t2c VALUES (3,'a'),(3,'b'),(1,'c'),(0,'d'),(1,'e');
+connection b;
+BEGIN;
+# This acquires a MDL lock on t1 until commit.
+--sorted_result
+SELECT * FROM t1;
+connection a;
+# This times out before of the MDL lock held by connection b.
+SET lock_wait_timeout=1;
+--error ER_LOCK_WAIT_TIMEOUT
+CREATE INDEX t1a ON t1(a);
+--enable_info
+CREATE INDEX t2a ON t2(a);
+ALTER TABLE t2c ADD PRIMARY KEY(a,b), ADD INDEX t2a(a), ALGORITHM=COPY;
+--disable_info
+connection b;
+# t2c is too new for this transaction, because it was rebuilt
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t2c;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t2c FORCE INDEX(t2a) ORDER BY a;
+# In t2, only the new index t2a is too new for this transaction.
+--sorted_result
+SELECT * FROM t2;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t2 FORCE INDEX(t2a) ORDER BY a;
+--sorted_result
+SELECT * FROM t2;
+COMMIT;
+# For a new transaction, all of t2, t2c are accessible.
+--sorted_result
+SELECT * FROM t2;
+SELECT * FROM t2 FORCE INDEX(t2a) ORDER BY a, b;
+--sorted_result
+SELECT * FROM t2c;
+SELECT * FROM t2c FORCE INDEX(t2a) ORDER BY a, b;
+connection default;
+disconnect a;
+disconnect b;
+
+DROP TABLE t1, t2, t2c;

@@ -1,0 +1,155 @@
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t_base (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_base VALUES (1);
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t3 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t4 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t4 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t5 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t5 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t6 (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t6 VALUES (1,10),(2,20),(3,30);
+#
+# 1. START TRANSACTION WITH CONSISTENT SNAPSHOT, then COPY ALTER.
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t1 ADD COLUMN name VARCHAR(10) FIRST, ALGORITHM=COPY;
+SELECT COUNT(*) FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT SUM(v) FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t1 FORCE INDEX (kv) WHERE v = 20;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t1 WHERE id = 2;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+3	60
+#
+# 2. Plain BEGIN with a first read before the COPY ALTER.
+#
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t2 FORCE, ALGORITHM=COPY;
+SELECT COUNT(*) FROM t2;
+ERROR HY000: Table definition has changed, please retry transaction
+ROLLBACK;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+3
+#
+# 3. TRUNCATE creates new indexes as well.
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+TRUNCATE TABLE t3;
+INSERT INTO t3 VALUES (4,40);
+SELECT * FROM t3;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT * FROM t3;
+id	v
+4	40
+#
+# 4. INPLACE ADD INDEX: the primary key stays readable, only the new
+#    index is too new for the transaction.
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t4 ADD INDEX kv2 (v, id), ALGORITHM=INPLACE;
+INSERT INTO t4 VALUES (4,40);
+SELECT * FROM t4 FORCE INDEX (PRIMARY) ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SELECT * FROM t4 FORCE INDEX (kv) ORDER BY v;
+id	v
+1	10
+2	20
+3	30
+SELECT * FROM t4 FORCE INDEX (kv2) ORDER BY v;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT * FROM t4 FORCE INDEX (kv2) ORDER BY v;
+id	v
+1	10
+2	20
+3	30
+4	40
+#
+# 5. Plain RENAME and instant ADD COLUMN keep the data, so the
+#    transaction can still read the table through its snapshot.
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+RENAME TABLE t5 TO t5_renamed;
+ALTER TABLE t6 ADD COLUMN extra INT, ALGORITHM=INSTANT;
+INSERT INTO t6 VALUES (4,40,400);
+SELECT * FROM t5_renamed ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SELECT * FROM t6 ORDER BY id;
+id	v	extra
+1	10	NULL
+2	20	NULL
+3	30	NULL
+COMMIT;
+SELECT * FROM t6 ORDER BY id;
+id	v	extra
+1	10	NULL
+2	20	NULL
+3	30	NULL
+4	40	400
+#
+# 6. A table created after the snapshot is too new as well.
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+CREATE TABLE t_new (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_new VALUES (1),(2);
+SELECT * FROM t_new;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT * FROM t_new ORDER BY id;
+id
+1
+2
+#
+# 7. READ COMMITTED takes a new snapshot per statement and sees the
+#    rebuilt table.
+#
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t1 DROP COLUMN name, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+3	60
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+DROP TABLE t_base, t1, t2, t3, t4, t5_renamed, t6, t_new;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;
