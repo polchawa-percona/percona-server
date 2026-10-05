@@ -1,0 +1,33 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 VALUES (1, 1), (2, 2);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+3
+# two more versions of every t1 row, kept for the open snapshot
+UPDATE t1 SET a = a + 10;
+UPDATE t1 SET a = a + 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT * FROM t1;
+pk	a
+1	21
+2	22
+3	23
+SELECT * FROM t1;
+pk	a
+1	1
+2	2
+3	3
+COMMIT;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM t2;
+pk	a
+1	1
+2	2
+DROP TABLE t1, t2;
