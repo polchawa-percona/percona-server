@@ -1,0 +1,88 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout=600;
+CREATE TABLE t1 (
+c01 INT,
+c02 INT,
+PRIMARY KEY (c01)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+(1,2),(2,4),(3,6),(4,8);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET autocommit=0;
+INSERT INTO t1 VALUES (5,10);
+SELECT * FROM t1 FOR UPDATE;
+c01	c02
+1	2
+2	4
+3	6
+4	8
+5	10
+# One write. LOCK_COUNT counts lock requests: the inserted row is locked
+# by the INSERT and again by SELECT ... FOR UPDATE, so 5 rows give 6.
+SELECT state, write_count, lock_count, timeout_sec, waiting_key,
+read_only, has_deadlock_detection
+FROM INFORMATION_SCHEMA.ROCKSDB_TRX WHERE thread_id = <con_trx_id>;
+state	write_count	lock_count	timeout_sec	waiting_key	read_only	has_deadlock_detection
+STARTED	1	6	600		0	0
+ROLLBACK;
+SET SESSION rocksdb_lock_wait_timeout = 7;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+# READ_ONLY is set for a transaction started WITH CONSISTENT SNAPSHOT
+# (not for START TRANSACTION READ ONLY). TIMEOUT_SEC and
+# HAS_DEADLOCK_DETECTION follow the session values.
+SELECT state, write_count, lock_count, timeout_sec, waiting_key,
+read_only, has_deadlock_detection
+FROM INFORMATION_SCHEMA.ROCKSDB_TRX WHERE thread_id = <con_trx_id>;
+state	write_count	lock_count	timeout_sec	waiting_key	read_only	has_deadlock_detection
+STARTED	0	0	7		1	1
+ROLLBACK;
+CREATE TABLE t0 (
+id INT PRIMARY KEY,
+thread_id BIGINT
+) ENGINE=ROCKSDB;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO t0 VALUES (1, CONNECTION_ID());
+BEGIN;
+SELECT * FROM t1 FOR SHARE;
+c01	c02
+1	2
+2	4
+3	6
+4	8
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO t0 VALUES (2, CONNECTION_ID());
+BEGIN;
+SELECT * FROM t1 FOR UPDATE;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO t0 VALUES (3, CONNECTION_ID());
+BEGIN;
+SELECT * FROM t1 FOR SHARE;
+c01	c02
+1	2
+2	4
+3	6
+4	8
+SELECT t0.id, waiting_key != '' AS is_waiting, lock_count
+FROM INFORMATION_SCHEMA.ROCKSDB_TRX
+JOIN t0 USING(thread_id)
+ORDER BY t0.id;
+id	is_waiting	lock_count
+1	0	4
+2	1	0
+3	0	4
+ROLLBACK;
+ROLLBACK;
+c01	c02
+1	2
+2	4
+3	6
+4	8
+ROLLBACK;
+DROP TABLE t1;
+DROP TABLE t0;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;

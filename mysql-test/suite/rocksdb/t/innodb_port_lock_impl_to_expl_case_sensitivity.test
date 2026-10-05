@@ -1,0 +1,67 @@
+#
+# Port of innodb.lock_impl_to_expl_case_sensitivity
+# (mysql-test/suite/innodb/t/lock_impl_to_expl_case_sensitivity.test) to
+# MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on the table
+#   - the lock list comes from INFORMATION_SCHEMA.ROCKSDB_LOCKS (via
+#     innodb_port_show_row_locks.inc) instead of performance_schema.data_locks
+#   - MyRocks has no lock_wait_will_wait sync point: con2 is known to wait
+#     when INFORMATION_SCHEMA.ROCKSDB_TRX shows a WAITING_KEY for it, so
+#     have_debug_sync.inc is not needed
+#   - rocksdb_lock_wait_timeout replaces innodb_lock_wait_timeout. It is
+#     copied into the session at connect, so it is set globally before the
+#     connections are opened
+#   - con2 runs at READ COMMITTED: at REPEATABLE READ MyRocks refuses the
+#     locking range read on the non-unique index `val` inside a transaction
+#     with the gap-lock error (1105)
+#
+# A row whose indexed value changes only in case (a -> A) under a
+# case-insensitive collation is locked by con1. con2 runs a locking read that
+# can be answered from the secondary index, but its result depends on the
+# exact bytes. con2 must wait for con1 and then see the committed value.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+SET @rocksdb_lock_wait_timeout_saved = @@global.rocksdb_lock_wait_timeout;
+SET @@global.rocksdb_lock_wait_timeout = 100000;
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  val VARCHAR(50) NOT NULL COLLATE utf8mb4_0900_ai_ci,
+  KEY(val)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (id,val) VALUES (1,"a"), (2,"a");
+
+--connect (con1, localhost, root,,)
+  BEGIN;
+  # Change the case only
+  UPDATE t1 SET val="A" WHERE id=2;
+  --let $show_locks_table = t1
+  --source suite/rocksdb/include/innodb_port_show_row_locks.inc
+
+--connect (con2, localhost, root,,)
+  --let $con2_id = `SELECT CONNECTION_ID()`
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  BEGIN;
+  # Answerable from the `val` index alone, but depends on the actual bytes, so
+  # the result depends on con1's transaction and con2 must wait.
+  --send SELECT COUNT(1) FROM t1 WHERE val="a" AND CONVERT(val,binary)="A" FOR SHARE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2_id AND waiting_key != ''
+  --source include/wait_condition.inc
+  COMMIT;
+
+--connection con2
+  # Only the row with id=2 matches
+  --reap
+  COMMIT;
+
+--connection default
+--disconnect con1
+--disconnect con2
+DROP TABLE t1;
+SET @@global.rocksdb_lock_wait_timeout = @rocksdb_lock_wait_timeout_saved;
+--source include/wait_until_count_sessions.inc
