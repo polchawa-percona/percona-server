@@ -19,6 +19,7 @@
 
 /* MySQL header files */
 #include "sql/current_thd.h"
+#include "sql/debug_sync.h"
 #include "sql/replication.h"
 
 /* MyRocks header files */
@@ -97,6 +98,7 @@ rocksdb::Status Rdb_cond_var::WaitFor(
     mutex_obj->set_unlock_action(&old_stage);
   }
 
+  if (current_thd) DEBUG_SYNC(current_thd, "rocksdb_row_lock_wait_begin");
 #endif
   bool killed = false;
 
@@ -107,6 +109,16 @@ rocksdb::Status Rdb_cond_var::WaitFor(
     if (current_thd) killed = my_core::thd_killed(current_thd);
 #endif
   } while (!killed && res == EINTR);
+
+#ifndef STANDALONE_UNITTEST
+  /*
+    A row lock waiter woken here has not been granted anything: RocksDB clears
+    its waiting state and re-checks the lock after this returns, and waits
+    again if the lock is still held by someone else.
+  */
+  if (current_thd && !res && !killed)
+    DEBUG_SYNC(current_thd, "rocksdb_row_lock_wait_woken");
+#endif
 
   if (res || killed) {
     return rocksdb::Status::TimedOut();

@@ -1,0 +1,171 @@
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1);
+#
+# Scenario 1: con1 S granted, con2 X waiting, con1 asks for X.
+# The upgrade is granted to the only shared holder: no deadlock.
+#
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+id
+1
+COMMIT;
+id
+1
+COMMIT;
+#
+# Scenario 2: con1 X on id=1, con2 S waiting, con1 inserts id=0.
+# InnoDB: deadlock (the insert intention lock waits behind con2).
+# MyRocks: no gap locks, the insert succeeds.
+#
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	X	
+INSERT INTO t1 VALUES (0);
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	X	
+con1	X	
+ROLLBACK;
+id
+1
+COMMIT;
+#
+# Scenario 3: con1 S, con2 S, con3 X waiting, con1 inserts id=0.
+# InnoDB: con3 is the deadlock victim. MyRocks: no conflict; con3 gets
+# its lock when both shared holders are gone.
+#
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	S	
+con2	S	
+INSERT INTO t1 VALUES (0);
+COMMIT;
+ROLLBACK;
+id
+1
+COMMIT;
+#
+# Scenario 4: con1 S, con2 S, con3 X waiting, con1 asks for X. con1
+# waits for con2 (the other shared holder); when con2 commits, con1 gets
+# its exclusive lock before con3, and con3 gets it after con1 commits.
+# con1 runs with rocksdb_deadlock_detect=OFF: with it ON, con1's request
+# fails with a false ER_LOCK_DEADLOCK (finding 58, tested separately in
+# rocksdb.lock_upgrade_false_deadlock).
+#
+SET SESSION rocksdb_deadlock_detect = OFF;
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	S	waiting
+con2	S	
+COMMIT;
+id
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	X	
+COMMIT;
+id
+1
+COMMIT;
+SET SESSION rocksdb_deadlock_detect = ON;
+#
+# Scenario 5: con1 S, con2 X waiting, con3 X waiting, con1 asks for X.
+# The upgrade is granted to the only shared holder.
+#
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+id
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	X	
+COMMIT;
+# One of the two waiters gets the lock; MyRocks does not grant waiting
+# requests in arrival order, so either may be first.
+id
+1
+COMMIT;
+id
+1
+COMMIT;
+#
+# Scenario 6: con1 S granted, con2 X waiting, con3 asks for S.
+# MyRocks grants con3's shared lock at once (InnoDB queues it behind
+# con2), so con2 waits for both readers.
+#
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con1	S	
+con3	S	
+COMMIT;
+# con2 still waits for con3.
+# con1's COMMIT wakes con2, which re-checks the lock and waits again.
+# While it re-checks, ROCKSDB_TRX briefly shows it as not waiting, so
+# wait for the stable state instead of reading it once (shown
+# step by step in rocksdb.row_lock_waiter_recheck).
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode	state
+con3	S	
+COMMIT;
+id
+1
+COMMIT;
+SELECT * FROM t1;
+id
+1
+DROP TABLE t1;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;

@@ -1,0 +1,68 @@
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+CREATE TABLE t1 (
+column1 int NOT NULL
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (80);
+CREATE TABLE t2 (
+column1 int DEFAULT NULL,
+column2 double DEFAULT NULL,
+column3 text,
+column4 double DEFAULT NULL
+) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES
+(77,76.1,'abc',NULL),
+(81,NULL,'abcd',86.71),
+(83,95.58,'abcde',67.74);
+CREATE TABLE t3 (
+column1 int DEFAULT NULL,
+x text
+) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES
+(76,''),
+(82,'');
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+START TRANSACTION;
+update t2 set column1 = 125;
+START TRANSACTION;
+update t3 set x = case when exists ( select ref_2.column2 as c0 from t2 as ref_2 window w_cc03ob as ( partition by ref_2.column3 order by ref_2.column4 desc)) then null else 24 end where exists (select distinct * from t1);
+# c0's UPDATE did not wait for c1's locks on t2.
+update t2 set column1 = 122;
+update t3 set column1 = 123;
+# c1 waits for c0's locks on t3; there is no cycle.
+COMMIT;
+COMMIT;
+#
+# Scenario 2: the original bug was an assertion when the deadlock is
+# detected for a lock request made inside a subquery. With an explicit
+# FOR SHARE in the subquery, c0's subquery request closes the cycle and
+# c0 is the victim.
+#
+START TRANSACTION;
+SELECT COUNT(*) FROM t3 FOR UPDATE;
+COUNT(*)
+2
+START TRANSACTION;
+update t2 set column1 = 130;
+update t3 set column1 = 131;
+update t1 set column1 = 81 where exists (select * from t2 where column1 = 130 for share);
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+# The deadlock rolled back c0's whole transaction, so c1 continues.
+COMMIT;
+SELECT * FROM t2 ORDER BY column3;
+column1	column2	column3	column4
+130	76.1	abc	NULL
+130	NULL	abcd	86.71
+130	95.58	abcde	67.74
+SELECT * FROM t3 ORDER BY column1;
+column1	x
+131	NULL
+131	NULL
+drop table t1;
+drop table t2;
+drop table t3;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
