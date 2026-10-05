@@ -1,0 +1,12 @@
+[unsafe_alter_off]
+rocksdb_allow_unsafe_alter=0
+
+[unsafe_alter_on]
+rocksdb_allow_unsafe_alter=1
+
+[unsafe_alter_on_delete_range]
+rocksdb_allow_unsafe_alter=1
+rocksdb_enable_delete_range_for_drop_index=1
+rocksdb_compaction_sequential_deletes=100
+rocksdb_compaction_sequential_deletes_window=200
+rocksdb_max_background_jobs=8
