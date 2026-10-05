@@ -1,0 +1,211 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# MyRocks REPEATABLE READ is snapshot isolation. Every row a transaction
+# locks for a write or a locking read is validated against the
+# transaction's snapshot: if another transaction committed a change to the
+# row after the snapshot was taken, the statement fails with
+# ER_LOCK_DEADLOCK (first committer wins). InnoDB instead locks and works
+# on the newest committed version.
+#
+# This test runs the same cases on MyRocks and InnoDB, for every kind of
+# statement that locks a row:
+#   - UPDATE, DELETE, REPLACE, INSERT ... ON DUPLICATE KEY UPDATE,
+#     SELECT ... FOR UPDATE, SELECT ... FOR SHARE, multi-table UPDATE, and
+#     an UPDATE that changes only a secondary key column;
+#   - INSERT of a primary key that another transaction inserted, or
+#     deleted, after the snapshot (MyRocks: ER_LOCK_DEADLOCK in both cases;
+#     InnoDB: ER_DUP_ENTRY, and success);
+#   - INSERT of a unique secondary key value inserted, or freed, after the
+#     snapshot (both engines check unique secondary keys against the
+#     latest data);
+#   - an UPDATE through a nullable secondary key of rows changed after the
+#     snapshot (refused by the gap-lock rule in a multi-statement MyRocks
+#     transaction);
+#   - autocommit statements: a single-statement UPDATE that waits for a
+#     row lock while another transaction changes and commits that row.
+#     MyRocks retries the statement with a new snapshot only when the
+#     conflict is on the first row it reads; on any later row the
+#     statement fails with ER_LOCK_DEADLOCK although it is autocommit.
+#     InnoDB always succeeds.
+#
+# The test runs under each write policy (see the .combinations file).
+#
+
+call mtr.add_suppression("Got error 522 when reading table");
+
+--let $i = 0
+while ($i < 2)
+{
+  --let $engine = ROCKSDB
+  if ($i == 1)
+  {
+    --let $engine = InnoDB
+  }
+  --echo
+  --echo ########################################################################
+  --echo # Engine: $engine
+  --echo ########################################################################
+
+  --connection default
+  eval CREATE TABLE t (id INT PRIMARY KEY, k INT, u INT, v INT,
+                       KEY kk (k), UNIQUE KEY uu (u)) ENGINE=$engine;
+  INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+  CREATE TABLE o (id INT PRIMARY KEY, w INT) ENGINE=InnoDB;
+  INSERT INTO o VALUES (1,1);
+
+  --connect (con1,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  SET SESSION rocksdb_lock_wait_timeout = 10;
+  SET SESSION innodb_lock_wait_timeout = 10;
+  --let $con1_id = `SELECT CONNECTION_ID()`
+  --connect (con2,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  SET SESSION rocksdb_lock_wait_timeout = 10;
+  SET SESSION innodb_lock_wait_timeout = 10;
+
+  --echo
+  --echo # Row changed after the snapshot, then locked by con1.
+  --let $rr_change = UPDATE t SET v = v + 100 WHERE id = 2
+  --let $rr_stmt = UPDATE t SET v = v + 1 WHERE id = 2
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = DELETE FROM t WHERE id = 2
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = REPLACE INTO t VALUES (2, 20, 2, 22)
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = INSERT INTO t VALUES (2, 20, 2, 22) ON DUPLICATE KEY UPDATE v = 222
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = SELECT v FROM t WHERE id = 2 FOR UPDATE
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = SELECT v FROM t WHERE id = 2 FOR SHARE
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --let $rr_stmt = UPDATE t, o SET t.v = t.v + o.w WHERE t.id = 2 AND o.id = 1
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+
+  --echo
+  --echo # Only a secondary key column changed after the snapshot.
+  --let $rr_change = UPDATE t SET k = k + 1 WHERE id = 3
+  --let $rr_stmt = UPDATE t SET k = 99 WHERE id = 3
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+
+  --echo
+  --echo # A row of another, unchanged primary key is not affected.
+  --let $rr_change = UPDATE t SET v = v + 100 WHERE id = 2
+  --let $rr_stmt = UPDATE t SET v = v + 1 WHERE id = 4
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+
+  --echo
+  --echo # INSERT of a primary key inserted after the snapshot.
+  --let $rr_change = INSERT INTO t VALUES (6, 60, 6, 6)
+  --let $rr_stmt = INSERT INTO t VALUES (6, 61, 61, 61)
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --echo # INSERT of a primary key deleted after the snapshot.
+  --let $rr_change = DELETE FROM t WHERE id = 5
+  --let $rr_stmt = INSERT INTO t VALUES (5, 51, 51, 51)
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+
+  --echo
+  --echo # INSERT of a unique secondary key value inserted after the snapshot.
+  --let $rr_change = INSERT INTO t VALUES (6, 60, 7, 6)
+  --let $rr_stmt = INSERT INTO t VALUES (8, 80, 7, 8)
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+  --echo # INSERT of a unique secondary key value freed after the snapshot.
+  --let $rr_change = UPDATE t SET u = 55 WHERE id = 5
+  --let $rr_stmt = INSERT INTO t VALUES (9, 90, 5, 9)
+  --source suite/rocksdb/include/rr_snapshot_case.inc
+
+  --echo
+  --echo # Autocommit range UPDATE; the conflicting row is the first row read.
+  --connection con2
+  BEGIN;
+  UPDATE t SET v = v + 1000 WHERE id = 1;
+  --connection con1
+  --send UPDATE t SET v = v + 1 WHERE k >= 10
+  --connection default
+  --source suite/rocksdb/include/rr_snapshot_wait_con1.inc
+  --connection con2
+  COMMIT;
+  --connection con1
+  --error 0,ER_LOCK_DEADLOCK,ER_LOCK_WAIT_TIMEOUT
+  --reap
+  --source suite/rocksdb/include/rr_snapshot_outcome.inc
+  --connection default
+  SELECT id, v FROM t ORDER BY id;
+  DELETE FROM t;
+  INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+  --echo # Autocommit range UPDATE; the conflicting row is not the first row read.
+  --connection con2
+  BEGIN;
+  UPDATE t SET v = v + 1000 WHERE id = 4;
+  --connection con1
+  --send UPDATE t SET v = v + 1 WHERE k >= 10
+  --connection default
+  --source suite/rocksdb/include/rr_snapshot_wait_con1.inc
+  --connection con2
+  COMMIT;
+  --connection con1
+  --error 0,ER_LOCK_DEADLOCK,ER_LOCK_WAIT_TIMEOUT
+  --reap
+  --source suite/rocksdb/include/rr_snapshot_outcome.inc
+  --connection default
+  SELECT id, v FROM t ORDER BY id;
+  DELETE FROM t;
+  INSERT INTO t VALUES (1,10,1,1),(2,20,2,2),(3,30,3,3),(4,40,4,4),(5,50,5,5);
+
+  --echo # Autocommit UPDATE by a primary key IN list; the second key conflicts.
+  --connection con2
+  BEGIN;
+  UPDATE t SET v = v + 1000 WHERE id = 3;
+  --connection con1
+  --send UPDATE t SET v = v + 1 WHERE id IN (2, 3)
+  --connection default
+  --source suite/rocksdb/include/rr_snapshot_wait_con1.inc
+  --connection con2
+  COMMIT;
+  --connection con1
+  --error 0,ER_LOCK_DEADLOCK,ER_LOCK_WAIT_TIMEOUT
+  --reap
+  --source suite/rocksdb/include/rr_snapshot_outcome.inc
+  --connection default
+  SELECT id, v FROM t ORDER BY id;
+
+  --echo
+  --echo # UPDATE through a nullable secondary key of rows another transaction
+  --echo # changed and inserted after the snapshot (innodb.innodb_bug14007649).
+  --echo # The range lock on a non-unique key inside a multi-statement
+  --echo # transaction is refused by the MyRocks gap-lock rule; InnoDB updates
+  --echo # the newest committed rows.
+  --connection default
+  eval CREATE TABLE t3 (rowid INT, f1 INT, f2 INT, KEY i1 (f1, f2), KEY i2 (f2))
+       ENGINE=$engine;
+  INSERT INTO t3 (rowid, f1, f2) VALUES (1, 1, 10), (2, 1, NULL);
+  --echo # (BEGIN and a read: a MyRocks transaction started WITH CONSISTENT
+  --echo # SNAPSHOT is read-only, see cons_snapshot_repeatable_read.)
+  --connection con1
+  BEGIN;
+  SELECT COUNT(*) FROM t3;
+  --connection con2
+  UPDATE t3 SET f2 = 4 WHERE f1 = 1 AND f2 IS NULL;
+  INSERT INTO t3 VALUES (3, 1, NULL);
+  --connection con1
+  SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+  --error 0,ER_UNKNOWN_ERROR
+  UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+  --source suite/rocksdb/include/rr_snapshot_outcome.inc
+  SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+  COMMIT;
+  --echo # As an autocommit statement it runs on a new snapshot.
+  UPDATE t3 SET f2 = 6 WHERE f1 = 1 AND f2 IS NULL;
+  SELECT rowid, f1, f2 FROM t3 ORDER BY rowid;
+  --connection default
+  DROP TABLE t3;
+
+  --disconnect con1
+  --disconnect con2
+  DROP TABLE t, o;
+  --inc $i
+}
+
+--source include/wait_until_count_sessions.inc
