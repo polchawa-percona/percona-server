@@ -1,0 +1,56 @@
+#
+# Rows loaded with rocksdb_bulk_load=1 are written to SST files and ingested
+# only when the session sets rocksdb_bulk_load=0 (or switches tables or
+# disconnects); the INSERT and a COMMIT return success before that. A COPY
+# ALTER of the table from another session in this window rebuilds the table
+# under new index ids, and the later ingest silently loses the rows: SET
+# rocksdb_bulk_load=0 succeeds, but the table does not contain them.
+#
+# Correct result: either the loaded rows are in the table after the ingest,
+# or the ingest fails with an error. The check below accepts both.
+#
+--source include/have_rocksdb.inc
+
+connect (bulk,localhost,root,,);
+connect (ddl,localhost,root,,);
+
+--echo # 1. Autocommit INSERTs with bulk load, COPY ALTER, then the ingest.
+connection default;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+connection bulk;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11),(12,12);
+connection ddl;
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+connection bulk;
+--error 0,ER_UNKNOWN_ERROR,ER_KEYS_OUT_OF_ORDER,ER_OVERLAPPING_KEYS
+SET SESSION rocksdb_bulk_load = 0;
+--let $ingest_errno = $mysql_errno
+connection default;
+--disable_query_log
+eval SELECT ($ingest_errno <> 0 OR COUNT(*) = 4) AS loaded_rows_kept_or_error FROM tb;
+--enable_query_log
+DROP TABLE tb;
+
+--echo # 2. The same with an explicit transaction around the bulk load.
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+connection bulk;
+SET SESSION rocksdb_bulk_load = 1;
+BEGIN;
+INSERT INTO tb VALUES (10,10),(11,11);
+COMMIT;
+connection ddl;
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+connection bulk;
+--error 0,ER_UNKNOWN_ERROR,ER_KEYS_OUT_OF_ORDER,ER_OVERLAPPING_KEYS
+SET SESSION rocksdb_bulk_load = 0;
+--let $ingest_errno = $mysql_errno
+connection default;
+--disable_query_log
+eval SELECT ($ingest_errno <> 0 OR COUNT(*) = 2) AS loaded_rows_kept_or_error FROM tb;
+--enable_query_log
+DROP TABLE tb;
+
+disconnect bulk;
+disconnect ddl;
