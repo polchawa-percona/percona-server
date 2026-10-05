@@ -1,0 +1,176 @@
+#
+# Port of innodb.instant_rename_column
+# (mysql-test/suite/innodb/t/instant_rename_column.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of InnoDB
+#   - every ALTER ... ALGORITHM=INSTANT goes through
+#     include/innodb_port_instant_alter.inc, which records whether MyRocks
+#     accepts INSTANT
+#   - where InnoDB rejects an ALTER with ER_ALTER_OPERATION_NOT_SUPPORTED_REASON,
+#     MyRocks rejects it with ER_ALTER_OPERATION_NOT_SUPPORTED (no reason)
+#   - not ported: scenario 5 (columns referenced by foreign keys; MyRocks has no
+#     foreign keys, see rocksdb.unsupported_foreign_keys) and scenario 6
+#     (DISCARD TABLESPACE and INNODB_TABLES; see rocksdb.unsupported_tablespace_ops)
+#   - an ALTER ... ALGORITHM=INSTANT that MyRocks rejects runs with the default algorithm
+#     (include/innodb_port_instant_alter.inc), so the renames that follow still run
+#   - scenario 7: MyRocks accepts the InnoDB system column names (DB_ROW_ID,
+#     DB_TRX_ID, DB_ROLL_PTR) as user column names; InnoDB rejects them
+#
+--source include/have_rocksdb.inc
+
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+
+--echo # Scenario 1 : Rename a column
+
+CREATE TABLE t1 (c1 INT, c2 INT, c3 INT AS (c1 + 10) VIRTUAL) ENGINE=ROCKSDB;
+INSERT INTO t1(c1, c2) VALUES (1,11);
+INSERT INTO t1(c1, c2) VALUES (2,22);
+INSERT INTO t1(c1, c2) VALUES (3,33);
+INSERT INTO t1(c1, c2) VALUES (4,44);
+INSERT INTO t1(c1, c2) VALUES (5,55);
+SELECT * FROM t1;
+
+--let $alter = ALTER TABLE t1 RENAME COLUMN c2 TO c22
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1;
+
+CREATE TABLE tpart (c1 INT, c2 INT, c3 INT AS (c1 + 10) VIRTUAL) ENGINE=ROCKSDB
+  PARTITION BY RANGE (c1) (
+    PARTITION tpart1 VALUES LESS THAN (10),
+    PARTITION tpart2 VALUES LESS THAN (100));
+
+--error ER_DEPENDENT_BY_GENERATED_COLUMN
+ALTER TABLE tpart RENAME COLUMN c1 TO c22, ALGORITHM=INSTANT;
+
+--let $alter = ALTER TABLE tpart RENAME COLUMN c2 TO c22
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+
+--echo # Scenario 2 : Rename an INSTANT ADD column
+--let $alter = ALTER TABLE t1 ADD COLUMN c4 INT
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--let $alter = ALTER TABLE t1 RENAME COLUMN c4 to c44
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1;
+
+--let $alter = ALTER TABLE tpart ADD COLUMN c4 INT
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--let $alter = ALTER TABLE tpart RENAME COLUMN c4 TO c44
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM tpart;
+
+--echo # Scenario 3 : Rename a VIRTUAL column
+--let $alter = ALTER TABLE t1 CHANGE c3 c33 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1;
+
+--let $alter = ALTER TABLE tpart CHANGE c3 c33 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM tpart;
+
+--echo # Scenario 4 : Rename an INSTANT ADD VIRTUAL column
+--let $alter = ALTER TABLE t1 add COLUMN (c5 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL)
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1;
+--let $alter = ALTER TABLE t1 change c5 c55 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1;
+
+--let $alter = ALTER TABLE tpart ADD COLUMN (c5 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL)
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM tpart;
+--let $alter = ALTER TABLE tpart CHANGE c5 c55 INT GENERATED ALWAYS AS (c1 + 10) VIRTUAL
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM tpart;
+
+DROP TABLE t1;
+DROP TABLE tpart;
+
+--echo # Scenario 7: Try to rename a column to an internal column name
+--echo # DB_ROW_ID, DB_TRX_ID and DB_ROLL_PTR are InnoDB system column names;
+--echo # MyRocks has no such columns and accepts them as user column names.
+CREATE TABLE t1 (c1 INT, c2 INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 2);
+ALTER TABLE t1 RENAME COLUMN c1 TO DB_ROW_ID;
+ALTER TABLE t1 RENAME COLUMN DB_ROW_ID TO DB_TRX_ID;
+ALTER TABLE t1 RENAME COLUMN DB_TRX_ID TO DB_ROLL_PTR;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo # Scenario 8: Rename SET and ENUM type columns
+CREATE TABLE tenum (c1 INT, c2 ENUM('a','b')) ENGINE=ROCKSDB;
+INSERT INTO tenum VALUES (1, 'a');
+--let $alter = ALTER TABLE tenum RENAME COLUMN c2 TO c22
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--let $alter = ALTER TABLE tenum CHANGE c22 c2 ENUM ('a','b','c')
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE tenum CHANGE c2 c22 ENUM ('a','b'), ALGORITHM=INSTANT;
+DROP TABLE tenum;
+
+CREATE TABLE tset (c1 INT, c2 SET('a','b')) ENGINE=ROCKSDB;
+INSERT INTO tset VALUES (1, 'a');
+--let $alter = ALTER TABLE tset RENAME COLUMN c2 TO c22
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--let $alter = ALTER TABLE tset CHANGE c22 c2 SET ('a','b','c')
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE tset CHANGE c2 c22 SET ('a','b'), ALGORITHM=INSTANT;
+DROP TABLE tset;
+
+--echo # Scenario 9: CHANGE column cannot use INSTANT algorithm if
+--echo # it involves definition change
+CREATE TABLE tchange (c1 INT, c2 INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE tchange CHANGE c2 c2 DOUBLE, ALGORITHM=INSTANT;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE tchange CHANGE c2 c2 DOUBLE, ALGORITHM=INPLACE;
+ALTER TABLE tchange CHANGE c2 c22 DOUBLE, ALGORITHM=COPY;
+SHOW CREATE TABLE tchange;
+--let $alter = ALTER TABLE tchange CHANGE c22 c2 DOUBLE
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SHOW CREATE TABLE tchange;
+DROP TABLE tchange;
+
+--echo # Scenario 10: INSTANT RENAME WITH INSTANT ADD
+# [c1, c2, c3, c4]
+Create table t1 (c1 int KEY, c2 int, c3 int, c4 int) ENGINE=ROCKSDB;
+desc t1;
+# INSTANT ADD column with rename
+# [c1, c2, c3, c4] => [c1, c22, c3, c4, c5]
+--let $alter = alter table t1 add column c5 int , rename column c2 to c22
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+desc t1;
+
+# INSTANT ADD virtual column with rename
+# Not allowed yet.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+alter table t1 add column v1 int as (c1+1), add column v2 int as (c1+2) virtual, rename column c3 to c33, algorithm=instant;
+
+# INSTANT ADD virtual column
+# [c1, c22, c3, c4, c5] => [c1, c22, c3, c4, c5, v1, v2]
+--let $alter = alter table t1 add column v1 int as (c1+1), add column v2 int as (c1+2) virtual
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+desc t1;
+
+# INSTANT DROP virtual column
+# Drop virtual column in between. This will change the order of virtual column.
+# Not allowed.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+alter table t1 drop column v1, algorithm=instant;
+
+# INSTANT DROP virtual column
+# [c1, c22, c3, c4, c5, v1, v2] => [c1, c22, c3, c4, c5, v1]
+--let $alter = alter table t1 drop column v2
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+desc t1;
+
+# INSTANT DROP virtual column with rename
+# Not allowed.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+alter table t1 drop column v1, rename column c22 to c222, algorithm=instant;
+
+DROP TABLE t1;
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;

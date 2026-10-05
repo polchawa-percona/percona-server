@@ -1,0 +1,172 @@
+#
+# Port of innodb.instant_ddl_limitations
+# (mysql-test/suite/innodb/t/instant_ddl_limitations.test) and of
+# innodb.instant_max_column_crash (column-count limit) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of InnoDB
+#   - not ported: scenario 1 (ROW_FORMAT=COMPRESSED, InnoDB only), scenario 2
+#     (spatial types, unsupported in MyRocks), scenario 3 (temporary tables, out of
+#     scope for MyRocks), scenario 4 (ALTER of mysql.* tables, which are InnoDB
+#     tables) and scenario 5 (FULLTEXT, unsupported in MyRocks)
+#   - scenario 6 (INSTANT with keys) keeps the InnoDB statements; the result
+#     records the MyRocks errors
+#   - scenario 7 (InnoDB MAX_ROW_VERSION=64) is replaced by what limits instant
+#     ADD COLUMN in MyRocks: there is no row version counter, but a column can
+#     only be added instantly while the null-bit bytes of a row stay the same
+#     (ha_rocksdb::rocksdb_support_instant). 64 NOT NULL columns are added
+#     instantly, then nullable columns until the null bitmap grows past one byte.
+#     Rows of every version are read, updated, deleted, and read again after
+#     a restart and a manual compaction
+#   - scenario 8 (from instant_max_column_crash): instant ADD COLUMN up to the
+#     server column limit (4096 columns) instead of InnoDB's 1017
+#   - InnoDB metadata dumps (INNODB_TABLES) replaced by the MyRocks DD metadata
+#     (include/innodb_port_print_instant_metadata.inc), so the test needs a debug
+#     build
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+# The restarts below reset the variable to its startup value, so it is not
+# restored at the end.
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+--echo #
+--echo # Scenario 6:
+--echo # INSTANT ADD/DROP column with key
+--echo #
+CREATE TABLE t1 (c1 INT, c2 INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c3 INT KEY, ALGORITHM=INSTANT;
+DROP TABLE t1;
+
+CREATE TABLE t1 (c1 INT KEY, c2 INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP COLUMN c1, ALGORITHM=INSTANT;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP COLUMN c1, ADD PRIMARY KEY (c2), ALGORITHM=INSTANT;
+DROP TABLE t1;
+
+CREATE TABLE t1 (c1 INT KEY, c2 INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c3 INT UNIQUE KEY, ALGORITHM=INSTANT;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c3 INT, ADD INDEX idx (c3), ALGORITHM=INSTANT;
+DROP TABLE t1;
+
+CREATE TABLE t1 (c1 INT KEY, c2 INT, INDEX idx(c2)) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INSTANT;
+DROP TABLE t1;
+
+--echo #
+--echo # Scenario 7:
+--echo # Many instant ADD COLUMNs, and the null bitmap limit of MyRocks
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, c1 INT, k INT NOT NULL DEFAULT 0, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t1 (id, c1) VALUES (1, 1);
+
+--echo # 64 instant ADD COLUMNs of NOT NULL columns, one row written per version
+--disable_query_log
+let $counter=2;
+while ($counter<=65)
+{
+  eval ALTER TABLE t1 ADD COLUMN c$counter INT NOT NULL DEFAULT $counter, ALGORITHM=INSTANT;
+  eval INSERT INTO t1 (id, c1, c$counter) VALUES ($counter, $counter, -$counter);
+  inc $counter;
+}
+--enable_query_log
+
+--let $table_name=t1
+--source suite/rocksdb/include/innodb_port_print_instant_metadata.inc
+
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65) FROM t1;
+SELECT id, c1, c2, c3, c64, c65 FROM t1 WHERE id IN (1, 2, 3, 64, 65) ORDER BY id;
+
+--echo # Update and delete rows written before different ADD COLUMNs
+UPDATE t1 SET c65 = 0, k = id WHERE id IN (1, 33);
+UPDATE t1 SET c2 = 0 WHERE id = 64;
+DELETE FROM t1 WHERE id IN (2, 40);
+SELECT id, c1, c2, c33, c65, k FROM t1 WHERE id IN (1, 33, 64) ORDER BY id;
+SELECT id, k FROM t1 FORCE INDEX (k) WHERE k > 0 ORDER BY k;
+
+--echo # The table has one nullable column (c1). Nullable columns can be added
+--echo # instantly while the row's null bitmap stays one byte (8 columns)
+--disable_query_log
+let $counter=1;
+while ($counter<=7)
+{
+  eval ALTER TABLE t1 ADD COLUMN n$counter INT DEFAULT $counter, ALGORITHM=INSTANT;
+  inc $counter;
+}
+--enable_query_log
+
+--echo # The 9th nullable column needs a second null-bit byte: not instant
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN n8 INT, ALGORITHM=INSTANT;
+
+--echo # Without ALGORITHM the ADD COLUMN rebuilds the table
+ALTER TABLE t1 ADD COLUMN n8 INT;
+
+--echo # The rebuild cleared the instant metadata
+--let $table_name=t1
+--source suite/rocksdb/include/innodb_port_print_instant_metadata.inc
+
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65), SUM(n1), SUM(n7), COUNT(n8) FROM t1;
+
+--echo # Instant columns again after the rebuild, then restart and compaction
+ALTER TABLE t1 ADD COLUMN c66 INT NOT NULL DEFAULT 66, ALGORITHM=INSTANT;
+INSERT INTO t1 (id, c1, c66) VALUES (100, 100, 6600);
+--source include/restart_mysqld.inc
+# A restart resets the variable to its default.
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65), SUM(n1), SUM(n7), COUNT(n8), SUM(c66) FROM t1;
+SELECT id, c1, c2, c65, n1, n8, c66 FROM t1 WHERE id IN (1, 64, 65, 100) ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Scenario 8 (from instant_max_column_crash):
+--echo # Instant ADD COLUMN up to the server limit of 4096 columns
+--echo #
+--disable_query_log
+DELIMITER |;
+CREATE PROCEDURE create_table(table_name varchar(50), n_cols INT)
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  SET @sql_text = CONCAT('CREATE TABLE ', table_name, ' (');
+  WHILE (i <= n_cols) DO
+    SET @sql_text = CONCAT(@sql_text, CONCAT('col_', i), ' INTEGER NOT NULL DEFAULT 0');
+    set i = i + 1;
+    IF (i <= n_cols) THEN
+      SET @sql_text = CONCAT(@sql_text, ', ');
+    END IF;
+  END WHILE;
+  SET @sql_text = CONCAT(@sql_text, ") ENGINE=ROCKSDB");
+  PREPARE stmt FROM @sql_text;
+  EXECUTE stmt;
+  DEALLOCATE PREPARE stmt;
+END|
+DELIMITER ;|
+--enable_query_log
+
+--echo # Create table with 4094 columns
+call create_table("tb1", 4094);
+INSERT INTO tb1 (col_1, col_4094) VALUES (1, 1);
+
+ALTER TABLE tb1 ADD COLUMN col_4095 INT NOT NULL DEFAULT 4095, ALGORITHM=INSTANT;
+INSERT INTO tb1 (col_1, col_4094, col_4095) VALUES (2, 2, 2);
+ALTER TABLE tb1 ADD COLUMN col_4096 INT NOT NULL DEFAULT 4096, ALGORITHM=INSTANT;
+INSERT INTO tb1 (col_1, col_4094, col_4095, col_4096) VALUES (3, 3, 3, 3);
+
+--echo # The 4097th column exceeds the server limit
+--error ER_TOO_MANY_FIELDS
+ALTER TABLE tb1 ADD COLUMN col_4097 INT, ALGORITHM=INSTANT;
+
+SELECT col_1, col_4094, col_4095, col_4096 FROM tb1 ORDER BY col_1;
+--source include/restart_mysqld.inc
+SELECT col_1, col_4094, col_4095, col_4096 FROM tb1 ORDER BY col_1;
+DROP TABLE tb1;
+DROP PROCEDURE create_table;
+
