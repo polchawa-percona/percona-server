@@ -1,0 +1,24 @@
+#
+# Finding #45 (myrocks-notes/port-findings.md): a secondary index with two
+# prefix key parts, the first on a CHAR column, the second on a VARCHAR, with
+# a utf8mb4_0900_ai_ci collation. An equality lookup through the index fails
+# with "Got error 505 'Found data corruption.' from ROCKSDB"
+# (HA_ERR_ROCKSDB_CORRUPT_DATA), and CHECK TABLE reports the healthy table as
+# corrupt ("index scan error 505" in the error log). A full scan of the same
+# index returns the right rows. Indexes with only the CHAR prefix, or with
+# utf8mb4_bin, or on a VARCHAR first column, work.
+#
+# Found while porting innodb.lob_recovery (rocksdb.innodb_port_lob_recovery).
+# The expected result was recorded with InnoDB. This test is disabled in
+# collections/disabled.def until #45 is fixed.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT NOT NULL, b VARCHAR(198) NOT NULL, c CHAR(94) DEFAULT NULL,
+  KEY k_cb (c(56), b(56)))
+  ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT INTO t1 VALUES (1, 'b1', 'c1'), (2, 'b2', 'c2'), (3, 'b3', NULL);
+SELECT a, b, c FROM t1 FORCE INDEX (k_cb) ORDER BY c, b;
+SELECT a FROM t1 FORCE INDEX (k_cb) WHERE c = 'c2' AND b = 'b2';
+CHECK TABLE t1;
+DROP TABLE t1;

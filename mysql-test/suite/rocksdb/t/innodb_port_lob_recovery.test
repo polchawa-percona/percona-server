@@ -1,0 +1,138 @@
+#
+# Port of innodb.lob_recovery (mysql-test/suite/innodb/t/lob_recovery.test) to
+# MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB.
+#   - The table with a 1 MB generated LONGBLOB expression also gets a row, so
+#     that the large generated value is written, read back after the kill and
+#     restart, and then dropped.
+#   - ibstd_02: index `c` keeps only its first key part, `c`(56): with the
+#     second part, `b`(56), lookups through the index fail with error 505 and
+#     CHECK TABLE reports the table as corrupt (port-findings.md #45, test
+#     rocksdb.check_table_char_prefix_0900).
+#   - ibstd_02: DESC key parts (rejected by MyRocks), the TABLESPACE clause,
+#     STATS_PERSISTENT and ENCRYPTION are removed. The geometry column is
+#     dropped because MyRocks has no spatial support. Instant ADD COLUMN is
+#     enabled with rocksdb_enable_instant_ddl_for_append_column, and the LOB
+#     columns are added at the end of the table, as MyRocks requires for
+#     ALGORITHM=INSTANT. Rows are inserted before and after the instant ADDs
+#     and read back after a kill and restart.
+#   - The 1024-partition cases ran in the InnoDB system tablespace
+#     (innodb_file_per_table=OFF); that setting is removed. After the kill and
+#     restart, the test checks that no MyRocks dictionary entries are left for
+#     the dropped, renamed or truncated partitioned tables.
+#   - No debug features are used, so the test also runs on release builds.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+
+--echo #
+--echo # Bug #33454557 Innodb asserts due to corruption in the fsp layer while
+--echo # running MTR tests
+--echo #
+
+set @s:=concat("CREATE TABLE t(id INT PRIMARY KEY, a LONGBLOB GENERATED ALWAYS AS
+('",REPEAT("a",1024*1024),"') STORED) ENGINE=ROCKSDB;");
+PREPARE r FROM @s;
+EXECUTE r;
+DEALLOCATE PREPARE r;
+INSERT INTO t (id) VALUES (1), (2);
+
+set @s:=concat("CREATE TABLE t2(w INT, A INT GENERATED ALWAYS
+AS('",REPEAT("\\0",1024*1024),"') STORED) ENGINE=ROCKSDB;");
+PREPARE r FROM @s;
+EXECUTE r;
+DEALLOCATE PREPARE r;
+DROP TABLE t2;
+
+--source include/kill_and_restart_mysqld.inc
+
+SELECT id, LENGTH(a), MD5(a) FROM t ORDER BY id;
+CHECK TABLE t;
+DROP TABLE t;
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+CREATE TABLE `ibstd_02` (
+  `a` int NOT NULL,
+  `d` int NOT NULL,
+  `b` varchar(198) NOT NULL,
+  `c` char(94) DEFAULT NULL,
+  `nc02614` blob,
+  `nc07663` decimal(10,0) NOT NULL,
+  `nc08713` mediumtext,
+  `nc04074` mediumtext NOT NULL,
+  `nc09146` tinytext NOT NULL,
+  KEY `d` (`d`),
+  KEY `a` (`a`),
+  KEY `b` (`b`(10),`a`,`d`),
+  KEY `c` (`c`(56)),
+  KEY `b_2` (`b`(5),`c`(10),`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO ibstd_02 (a, d, b, c, nc02614, nc07663, nc08713, nc04074, nc09146)
+  VALUES (1, 1, 'b1', 'c1', REPEAT('p', 65000), 1, REPEAT('q', 300000),
+          REPEAT('r', 100000), 't1');
+
+alter table ibstd_02 add column nc09053 blob not null, algorithm=instant;
+alter table ibstd_02 add column nc03118 mediumtext, algorithm=instant;
+alter table ibstd_02 add column nc08926 tinytext, algorithm=instant, lock=default;
+alter table ibstd_02 add column nc09010 double default '73563844.85182579', algorithm=instant;
+alter table ibstd_02 add column nc07017 decimal not null, algorithm=instant, lock=default;
+alter table ibstd_02 add column nc07007 tinytext not null, algorithm=instant;
+alter table ibstd_02 add column nc08086 blob, algorithm=instant;
+
+INSERT INTO ibstd_02 (a, d, b, c, nc02614, nc07663, nc08713, nc04074, nc09146,
+                      nc09053, nc03118, nc07017, nc07007, nc08086)
+  VALUES (2, 2, 'b2', 'c2', REPEAT('p', 10), 2, NULL, REPEAT('s', 200000), 't2',
+          REPEAT('u', 65535), REPEAT('v', 500000), 7, 'w', REPEAT('x', 40000));
+
+--source include/kill_and_restart_mysqld.inc
+
+SELECT a, LENGTH(nc02614), LENGTH(nc08713), LENGTH(nc04074), nc09146,
+       LENGTH(nc09053), LENGTH(nc03118), nc08926, nc09010, nc07017, nc07007,
+       LENGTH(nc08086)
+  FROM ibstd_02 ORDER BY a;
+SELECT a FROM ibstd_02 FORCE INDEX (b) ORDER BY a;
+CHECK TABLE ibstd_02;
+drop table ibstd_02;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+
+--source include/kill_and_restart_mysqld.inc
+
+--echo # Case 1 : Test create and drop large number of partitions.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+DROP TABLE t1;
+
+--echo # Case 2 : Test create, rename and drop large number of partitions.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+INSERT INTO t1 VALUES (1), (2), (1023), (1024);
+RENAME TABLE t1 TO t2;
+DROP TABLE t2;
+
+--echo # Case 3 : Test create, truncate and drop large number of partitions.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+INSERT INTO t1 VALUES (1), (2), (1023), (1024);
+TRUNCATE TABLE t1;
+SELECT COUNT(*) FROM t1;
+DROP TABLE t1;
+
+--echo # Case 4 : A partitioned table kept across the kill.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+INSERT INTO t1 VALUES (1), (2), (1023), (1024);
+
+--source include/kill_and_restart_mysqld.inc
+
+SELECT a FROM t1 ORDER BY a;
+--echo # Only t1's 1024 partitions are left in the MyRocks dictionary.
+SELECT COUNT(*), COUNT(DISTINCT partition_name) FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' AND table_name = 't1';
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' AND table_name <> 't1';
+DROP TABLE t1;
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test';

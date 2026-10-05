@@ -1,0 +1,1 @@
+--rocksdb-write-policy=write_unprepared --rocksdb-write-batch-flush-threshold=1

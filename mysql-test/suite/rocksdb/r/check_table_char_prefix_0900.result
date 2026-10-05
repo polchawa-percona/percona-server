@@ -1,0 +1,16 @@
+CREATE TABLE t1 (a INT NOT NULL, b VARCHAR(198) NOT NULL, c CHAR(94) DEFAULT NULL,
+KEY k_cb (c(56), b(56)))
+ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT INTO t1 VALUES (1, 'b1', 'c1'), (2, 'b2', 'c2'), (3, 'b3', NULL);
+SELECT a, b, c FROM t1 FORCE INDEX (k_cb) ORDER BY c, b;
+a	b	c
+3	b3	NULL
+1	b1	c1
+2	b2	c2
+SELECT a FROM t1 FORCE INDEX (k_cb) WHERE c = 'c2' AND b = 'b2';
+a
+2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
