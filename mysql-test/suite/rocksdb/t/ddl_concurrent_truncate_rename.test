@@ -1,0 +1,93 @@
+#
+# Concurrent TRUNCATE TABLE, TRUNCATE PARTITION and RENAME TABLE on MyRocks.
+#
+# ddl_concurrent_truncate_rename.py runs, from many connections at once,
+# TRUNCATE of random tables, RENAME swaps inside a schema, RENAME moves to
+# another schema and back, TRUNCATE PARTITION, DML on all tables, readers
+# comparing primary and secondary key counts, memtable flushes, manual
+# compactions and drop-index thread wake-ups. The tables are spread over two
+# column families and a small write buffer makes every SST file hold keys of
+# many tables and of indexes being dropped.
+#
+# Each table has an "owner" column whose DEFAULT identifies the table, so a
+# row that becomes visible through another table is detected. After the load
+# the script checks owners, primary vs secondary key counts, CHECK TABLE and
+# that INFORMATION_SCHEMA.ROCKSDB_DDL names exactly the server's tables. This
+# test then waits for the dropped indexes to be reclaimed, checks that no SST
+# data of an index unknown to MyRocks remains after a full compaction, and
+# restarts the server with table validation.
+#
+# The .combinations file runs it with the drop-index thread, with
+# rocksdb_enable_delete_range_for_drop_index (DeleteRange instead of the
+# drop-index thread) and with table-scan statistics, whose background
+# recalculation queue holds table names that TRUNCATE and RENAME change.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/big_test.inc
+
+--disable_query_log
+call mtr.add_suppression("Begin filtering dropped index");
+call mtr.add_suppression("Finished filtering dropped index");
+--enable_query_log
+
+--exec python3 $MYSQL_TEST_DIR/suite/rocksdb/t/ddl_concurrent_truncate_rename.py --socket=$MASTER_MYSOCK --iterations=150 --seed=7 --stats=$MYSQLTEST_VARDIR/tmp/ddl_concurrent_truncate_rename.stats
+
+--echo # Reclaim every dropped index and compact both column families.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+let $wait_timeout = 300;
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cf_cc2';
+
+--echo # No SST holds rows of an index that MyRocks no longer knows.
+SELECT COUNT(*) AS orphan_index_rows
+  FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+ WHERE f.NUM_ROWS > 0
+   AND f.COLUMN_FAMILY IN (SELECT DISTINCT COLUMN_FAMILY
+                             FROM information_schema.ROCKSDB_DDL
+                            WHERE TABLE_SCHEMA = 'd1')
+   AND f.INDEX_NUMBER NOT IN (SELECT INDEX_NUMBER
+                                FROM information_schema.ROCKSDB_DDL);
+
+--echo # Rows per table and their identities, before the restart.
+let $i = 0;
+while ($i < 6)
+{
+  eval SELECT 't$i' AS tbl, COUNT(DISTINCT owner) AS owners,
+       (SELECT COUNT(*) FROM d1.t$i FORCE INDEX(PRIMARY)) =
+       (SELECT COUNT(*) FROM d1.t$i FORCE INDEX(sk)) AS pk_eq_sk
+       FROM d1.t$i HAVING owners <= 1;
+  inc $i;
+}
+let $sig_query = SELECT GROUP_CONCAT(tbl, ':', n, ':', IFNULL(s, 0) ORDER BY tbl)
+  FROM (SELECT 't0' AS tbl, COUNT(*) AS n, SUM(id) AS s FROM d1.t0 UNION ALL
+        SELECT 't1', COUNT(*), SUM(id) FROM d1.t1 UNION ALL
+        SELECT 't2', COUNT(*), SUM(id) FROM d1.t2 UNION ALL
+        SELECT 't3', COUNT(*), SUM(id) FROM d1.t3 UNION ALL
+        SELECT 't4', COUNT(*), SUM(id) FROM d1.t4 UNION ALL
+        SELECT 't5', COUNT(*), SUM(id) FROM d1.t5 UNION ALL
+        SELECT 'p', COUNT(*), SUM(id) FROM d1.p) x;
+let $sig_before = `$sig_query`;
+
+--echo # Restart with table validation; every table must survive unchanged.
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+
+let $sig_after = `$sig_query`;
+if ($sig_before != $sig_after)
+{
+  --echo before: $sig_before
+  --echo after:  $sig_after
+  --die Table contents changed across the restart
+}
+--echo # Row counts and id sums are unchanged after the restart.
+SELECT COUNT(*) = 6 AS same_tables
+  FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA = 'd1' AND TABLE_NAME LIKE 't_' AND ENGINE = 'ROCKSDB';
+
+DROP DATABASE d1;
+DROP DATABASE d2;
+--let $restart_parameters =

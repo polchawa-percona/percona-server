@@ -1,0 +1,10 @@
+[drop_index_thread]
+loose-rocksdb_enable_delete_range_for_drop_index=OFF
+
+[delete_range]
+loose-rocksdb_enable_delete_range_for_drop_index=ON
+
+[table_scan_stats]
+loose-rocksdb_enable_delete_range_for_drop_index=OFF
+loose-rocksdb_table_stats_use_table_scan=ON
+loose-rocksdb_stats_recalc_rate=10
