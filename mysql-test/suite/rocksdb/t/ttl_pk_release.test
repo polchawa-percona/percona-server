@@ -1,0 +1,143 @@
+#
+# Release-build variant of the TTL primary-key tests (ttl_primary, ttl_primary_read_filtering,
+# ttl_primary_with_partitions, ttl_rows_examined). Those need the debug-only
+# rocksdb_debug_ttl_* variables to fake the clock. This test uses real time only, so it runs
+# on debug and release builds alike, and checks invariants rather than exact interleavings:
+#   - expired rows are invisible to reads and DML while read filtering is on,
+#   - they stay stored until compaction, which removes exactly the expired rows,
+#   - rows that are not expired, or were rewritten, survive compaction,
+#   - a snapshot taken before expiry keeps seeing the rows, and compaction does not remove
+#     rows such a snapshot can still see,
+#   - updating a row without ttl_col keeps its original TTL timestamp (by design: the
+#     converter copies the old timestamp on update, rdb_converter.cc),
+#   - per-partition TTL applies only to the partitions that declare it.
+#
+--source include/have_rocksdb.inc
+
+SET @orig_read_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+
+--echo #
+--echo # 1. Explicit ttl_col, one variant per column type
+--echo #
+--let $coltype = BIGINT UNSIGNED
+--let $past = UNIX_TIMESTAMP() - 7200
+--let $now = UNIX_TIMESTAMP()
+--source suite/rocksdb/include/ttl_release_expire_col.inc
+
+--let $coltype = TIMESTAMP
+--let $past = NOW() - INTERVAL 7200 SECOND
+--let $now = NOW()
+--source suite/rocksdb/include/ttl_release_expire_col.inc
+
+--let $coltype = TIMESTAMP(6)
+--let $past = NOW(6) - INTERVAL 7200 SECOND
+--let $now = NOW(6)
+--source suite/rocksdb/include/ttl_release_expire_col.inc
+
+--echo #
+--echo # 2. No ttl_col: the row timestamp is the write time (real clock)
+--echo #
+CREATE TABLE t2 (a INT PRIMARY KEY, v INT) ENGINE=ROCKSDB COMMENT='ttl_duration=10;';
+CREATE TABLE t3 (a INT PRIMARY KEY, v INT) ENGINE=ROCKSDB COMMENT='ttl_duration=86400;';
+SET @t0 = UNIX_TIMESTAMP();
+INSERT INTO t2 VALUES (1, 0), (2, 0), (3, 0), (4, 0);
+INSERT INTO t3 VALUES (1, 0), (2, 0);
+
+--connect (con1,localhost,root,,test)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t2;
+
+--connection default
+--echo # Wait until 5 s after the insert, then update row 1. Without ttl_col the update keeps
+--echo # the original TTL timestamp, so row 1 still expires 10 s after the insert.
+--let $wait_timeout = 60
+--let $wait_condition = SELECT UNIX_TIMESTAMP() >= @t0 + 5
+--source include/wait_condition.inc
+UPDATE t2 SET v = 1 WHERE a = 1;
+SELECT ROW_COUNT();
+
+--echo # Wait until 12 s after the insert: all rows have expired, including the updated one
+--let $wait_condition = SELECT UNIX_TIMESTAMP() >= @t0 + 12
+--source include/wait_condition.inc
+SELECT a, v FROM t2 ORDER BY a;
+SELECT COUNT(*) FROM t3;
+
+--echo # The older snapshot still sees all four rows, as they were when it was taken
+--connection con1
+SELECT a, v FROM t2 ORDER BY a;
+
+--echo # Compaction must not remove rows that the open snapshot can still see
+--connection default
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--connection con1
+SELECT a, v FROM t2 ORDER BY a;
+COMMIT;
+--disconnect con1
+
+--connection default
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT COUNT(*) FROM t2;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+
+--echo # With the snapshot gone, compaction removes the expired rows
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a, v FROM t2 ORDER BY a;
+SELECT COUNT(*) FROM t3;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t2, t3;
+
+--echo #
+--echo # 3. Per-partition TTL, with and without per-partition column families
+--echo #
+CREATE TABLE t4 (
+  a INT NOT NULL,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (a)
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p2_ttl_duration=86400;custom_p2_ttl_col=ts;'
+PARTITION BY LIST (a) (
+  PARTITION custom_p0 VALUES IN (1, 4, 7),
+  PARTITION custom_p1 VALUES IN (2, 5, 8),
+  PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t4 SELECT seq, UNIX_TIMESTAMP() - 7200
+  FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+        UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+--echo # Only p0 (duration 1 h) has expired; p1 has no TTL, p2 lasts a day
+SELECT a FROM t4 ORDER BY a;
+SELECT a FROM t4 PARTITION (custom_p0) ORDER BY a;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t4 ORDER BY a;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t4;
+
+CREATE TABLE t5 (
+  a INT NOT NULL,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (a) COMMENT 'custom_p0_cfname=ttl_rel_p0;custom_p1_cfname=ttl_rel_p1;custom_p2_cfname=ttl_rel_p2'
+) ENGINE=ROCKSDB
+COMMENT='custom_p0_ttl_duration=3600;custom_p0_ttl_col=ts;custom_p1_ttl_duration=86400;custom_p1_ttl_col=ts;'
+PARTITION BY LIST (a) (
+  PARTITION custom_p0 VALUES IN (1, 4, 7),
+  PARTITION custom_p1 VALUES IN (2, 5, 8),
+  PARTITION custom_p2 VALUES IN (3, 6, 9)
+);
+INSERT INTO t5 SELECT seq, UNIX_TIMESTAMP() - 7200
+  FROM (SELECT 1 seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+        UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) s;
+SELECT a FROM t5 ORDER BY a;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p0';
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p1';
+SET GLOBAL rocksdb_compact_cf = 'ttl_rel_p2';
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT a FROM t5 ORDER BY a;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 1;
+DROP TABLE t5;
+
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @orig_read_filtering;
