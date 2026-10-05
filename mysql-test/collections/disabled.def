@@ -135,6 +135,8 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.sst_partitioner_multi_version : BUG#0 PS-11725 SST partitioner assert
+rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest error message
 rocksdb.innodb_port_ddl_kill : BUG#0 PS-11635 killed ADD INDEX reports 8012, not 1317
 rocksdb.inplace_sk_build_after_kill : BUG#0 PS-11658 next ADD INDEX fails after a kill
 
