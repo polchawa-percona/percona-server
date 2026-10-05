@@ -1,0 +1,144 @@
+#
+# Port of innodb.histogram-debug (mysql-test/suite/innodb/t/histogram-debug.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on every CREATE TABLE
+#   - MyRocks does not implement handler::sample_init()/sample_next(), so
+#     histograms are built with the generic handler sampling: a full table
+#     scan (rnd_next) that keeps each row with probability
+#     sampling_percentage, using a random generator seeded with the sampling
+#     seed. InnoDB samples whole B-tree leaf pages with its parallel reader.
+#     The recorded histograms therefore differ from InnoDB's, but they are
+#     deterministic for a given seed and table contents, which is what the
+#     test checks.
+#   - InnoDB-only parts removed: INFORMATION_SCHEMA.INNODB_METRICS sampling
+#     counters, innodb_limit_optimistic_insert_debug (page shapes), and the
+#     InnoDB parallel-reader error injections
+#     (parallel_reader_histogram_induce_error, simulate_sample_read_error,
+#     parallel_read_buffering_print). ALTER TABLE ... DISCARD TABLESPACE is
+#     rejected by MyRocks (covered by rocksdb.unsupported_tablespace_ops).
+#   - Runs at READ COMMITTED: INSERT ... SELECT from the same table is a
+#     locking read that the MyRocks gap-lock rule rejects at REPEATABLE READ.
+#   - Each table is flushed to SST files and analyzed before
+#     sample_read_sample_half, which stops after half of stats.records
+#     rows: the memtable row estimate is not exact.
+#   - Added: forced sampling while another transaction has uncommitted
+#     rows in the table, and while the rows are still in the memtable versus
+#     flushed to SST files (the sample must be the same).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+# sample_read_sample_half keeps a static counter in the server, so the case
+# works only once per server start: restart the server after this test.
+--source include/force_restart.inc
+
+--echo #
+--echo # Sampling on an empty table
+--echo #
+
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+DROP TABLE t1;
+
+--echo #
+--echo # Small table with forced sampling (sampling_percentage = 50, seed 1)
+--echo #
+
+SET DEBUG='+d,histogram_force_sampling';
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10), (20), (30), (40), (50), (60), (70), (80), (90), (100);
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+
+--echo # The same seed and the same rows give the same sample
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+
+--echo # ... also after the rows are flushed from the memtable to SST files
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+
+--echo # ... and while another transaction has uncommitted rows in the table
+connect (con1,localhost,root,,);
+BEGIN;
+INSERT INTO t1 VALUES (1000), (2000), (3000);
+connection default;
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+connection con1;
+ROLLBACK;
+disconnect con1;
+connection default;
+DROP TABLE t1;
+SET DEBUG='-d,histogram_force_sampling';
+
+--echo #
+--echo # Small table without sampling (sampling_percentage = 100)
+--echo #
+
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10), (20), (30), (40), (50);
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'a';
+DROP TABLE t1;
+
+--echo #
+--echo # Larger dataset, without and with forced sampling
+--echo #
+
+CREATE TABLE t1 (col1 DOUBLE) ENGINE=ROCKSDB;
+INSERT INTO t1 SELECT RAND(1);
+INSERT INTO t1 SELECT RAND(2) FROM t1;
+INSERT INTO t1 SELECT RAND(3) FROM t1;
+INSERT INTO t1 SELECT RAND(4) FROM t1;
+INSERT INTO t1 SELECT RAND(5) FROM t1;
+INSERT INTO t1 SELECT RAND(6) FROM t1;
+INSERT INTO t1 SELECT RAND(7) FROM t1;
+INSERT INTO t1 SELECT RAND(8) FROM t1;
+INSERT INTO t1 SELECT RAND(9) FROM t1;
+INSERT INTO t1 SELECT RAND(10) FROM t1;
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON col1 WITH 5 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'col1';
+
+SET DEBUG='+d,histogram_force_sampling';
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON col1 WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_EXTRACT(histogram, '$."sampling-rate"') AS sampling_rate, JSON_LENGTH(histogram, '$.buckets') AS buckets, JSON_EXTRACT(histogram, '$."histogram-type"') AS type FROM information_schema.column_statistics WHERE COLUMN_NAME = 'col1';
+SET DEBUG='-d,histogram_force_sampling';
+DROP TABLE t1;
+
+--echo #
+--echo # Partitioned table
+--echo #
+
+CREATE TABLE p (col1 INT PRIMARY KEY, col2 INT, col3 INT) ENGINE=ROCKSDB
+               PARTITION BY KEY (col1) PARTITIONS 4;
+INSERT INTO p VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+ANALYZE TABLE p UPDATE HISTOGRAM ON col2 WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'col2';
+
+SET DEBUG='+d,histogram_force_sampling';
+INSERT INTO p SELECT seq, seq % 7, seq FROM (WITH RECURSIVE s(seq) AS (SELECT 4 UNION ALL SELECT seq + 1 FROM s WHERE seq < 200) SELECT seq FROM s) AS x;
+ANALYZE TABLE p UPDATE HISTOGRAM ON col2 WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'col2';
+SET DEBUG='-d,histogram_force_sampling';
+DROP TABLE p;
+
+--echo #
+--echo # RAPID use case: stop sampling after half of the records
+--echo #
+
+CREATE TABLE t1 (id int) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--disable_result_log
+ANALYZE TABLE t1;
+--enable_result_log
+
+SET DEBUG = "+d,sample_read_sample_half";
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON id WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, JSON_REMOVE(histogram, '$."last-updated"') FROM information_schema.column_statistics WHERE COLUMN_NAME = 'id';
+SET DEBUG = "-d,sample_read_sample_half";
+
+DROP TABLE t1;
