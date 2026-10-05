@@ -1,0 +1,1068 @@
+CREATE TABLE test.mlog (
+id INT AUTO_INCREMENT PRIMARY KEY,
+run VARCHAR(20), ptype VARCHAR(20), step VARCHAR(40),
+cnt INT, crc BIGINT, pk_ab BIGINT, sk_ab BIGINT, sk_cnt INT, parts TEXT
+) ENGINE=InnoDB;
+CREATE PROCEDURE test.ddl3_parts(IN t VARCHAR(64), OUT res TEXT)
+BEGIN
+DECLARE done INT DEFAULT 0;
+DECLARE pn VARCHAR(64);
+DECLARE cur CURSOR FOR
+SELECT COALESCE(SUBPARTITION_NAME, PARTITION_NAME)
+FROM information_schema.PARTITIONS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = t AND PARTITION_NAME IS NOT NULL
+ORDER BY PARTITION_ORDINAL_POSITION, SUBPARTITION_ORDINAL_POSITION;
+DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+SET res = '';
+OPEN cur;
+l: LOOP
+FETCH cur INTO pn;
+IF done THEN LEAVE l; END IF;
+SET @q = CONCAT('SELECT COUNT(*) INTO @n FROM test.', t, ' PARTITION (', pn, ')');
+PREPARE s FROM @q;
+EXECUTE s;
+DEALLOCATE PREPARE s;
+SET res = CONCAT(res, pn, ':', @n, ' ');
+END LOOP;
+CLOSE cur;
+IF res = '' THEN SET res = '(not partitioned)'; END IF;
+END|
+#
+# Part 1: operation matrix
+#
+# Server started without rocksdb_allow_unsafe_alter.
+SELECT @@rocksdb_allow_unsafe_alter;
+@@rocksdb_allow_unsafe_alter
+0
+
+######## engine InnoDB, mode 0
+
+#### RANGE
+CREATE TABLE tr (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30), PARTITION p3 VALUES LESS THAN (40));
+INSERT INTO tr WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE tr ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+INSERT INTO tr VALUES (41, 41 MOD 7, 'v41'), (45, 45 MOD 7, 'v45'), (48, 48 MOD 7, 'v48');
+step	row_count	sk_matches_pk	parts
+add	42	1	p0:9 p1:10 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	42	1	p01:19 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p4 INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION p4b VALUES LESS THAN (50));
+step	row_count	sk_matches_pk	parts
+reorganize_split	42	1	p01:19 p2:10 p3:10 p4a:1 p4b:2 
+ALTER TABLE tr TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	32	1	p01:19 p2:0 p3:10 p4a:1 p4b:2 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE tr DROP PARTITION p4b;
+step	row_count	sk_matches_pk	parts
+drop_last	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr REBUILD PARTITION p01;
+step	row_count	sk_matches_pk	parts
+rebuild	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tr CHECK PARTITION p01, p2;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+ALTER TABLE tr OPTIMIZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	optimize	note	Table does not support optimize on partitions. All partitions will be rebuilt and analyzed.
+x	optimize	status	OK
+ALTER TABLE tr REPAIR PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	repair	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr REORGANIZE PARTITION p4a INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION pmax VALUES LESS THAN MAXVALUE);
+INSERT INTO tr VALUES (1000, 1000 MOD 7, 'v1000');
+step	row_count	sk_matches_pk	parts
+add_maxvalue	31	1	p01:19 p2:0 p3:10 p4a:1 pmax:1 
+# EXCHANGE PARTITION: MyRocks rejects it (ER_PARTITION_MGMT_ON_NONPARTITIONED),
+# InnoDB swaps the rows. The exchange is done twice so that both engines
+# continue from the same data.
+CREATE TABLE tx (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b)) ENGINE=InnoDB;
+INSERT INTO tx VALUES (21, 0, 'x21'), (22, 1, 'x22');
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+SELECT * FROM tr PARTITION (p2) ORDER BY a;
+a	b	c
+21	0	x21
+22	1	x22
+SELECT * FROM tx ORDER BY a;
+a	b	c
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+DROP TABLE tx;
+step	row_count	sk_matches_pk	parts
+exchange	31	1	p01:19 p2:0 p3:10 p4a:1 pmax:1 
+ALTER TABLE tr REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	31	1	(not partitioned)
+DROP TABLE tr;
+
+#### LIST
+CREATE TABLE tl (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY LIST (a DIV 10)
+(PARTITION l0 VALUES IN (0), PARTITION l1 VALUES IN (1),
+PARTITION l2 VALUES IN (2), PARTITION l3 VALUES IN (3));
+INSERT INTO tl WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	l0:9 l1:10 l2:10 l3:10 
+ALTER TABLE tl ADD PARTITION (PARTITION l4 VALUES IN (4, 5));
+INSERT INTO tl VALUES (41, 41 MOD 7, 'v41'), (52, 52 MOD 7, 'v52');
+step	row_count	sk_matches_pk	parts
+add	41	1	l0:9 l1:10 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l0, l1 INTO (PARTITION l01 VALUES IN (0, 1));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	l01:19 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l4 INTO
+(PARTITION l4 VALUES IN (4), PARTITION l5 VALUES IN (5));
+step	row_count	sk_matches_pk	parts
+reorganize_split	41	1	l01:19 l2:10 l3:10 l4:1 l5:1 
+ALTER TABLE tl TRUNCATE PARTITION l2;
+step	row_count	sk_matches_pk	parts
+truncate	31	1	l01:19 l2:0 l3:10 l4:1 l5:1 
+# Drop a LIST partition: no remaining partition accepts its rows.
+ALTER TABLE tl DROP PARTITION l3;
+step	row_count	sk_matches_pk	parts
+drop	21	1	l01:19 l2:0 l4:1 l5:1 
+ALTER TABLE tl REBUILD PARTITION l01, l5;
+ALTER TABLE tl ANALYZE PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tl CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	21	1	l01:19 l2:0 l4:1 l5:1 
+DROP TABLE tl;
+
+#### HASH
+CREATE TABLE th (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY HASH (a) PARTITIONS 4;
+INSERT INTO th WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE th ADD PARTITION PARTITIONS 2;
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:6 p1:7 p2:7 p3:7 p4:6 p5:6 
+ALTER TABLE th COALESCE PARTITION 3;
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:13 p1:13 p2:13 
+ALTER TABLE th TRUNCATE PARTITION p1;
+step	row_count	sk_matches_pk	parts
+truncate	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REBUILD PARTITION p0;
+ALTER TABLE th OPTIMIZE PARTITION p0;
+Table	Op	Msg_type	Msg_text
+x	optimize	note	Table does not support optimize on partitions. All partitions will be rebuilt and analyzed.
+x	optimize	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	26	1	(not partitioned)
+DROP TABLE th;
+
+#### KEY
+CREATE TABLE tk (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY KEY (a) PARTITIONS 3;
+INSERT INTO tk WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk ADD PARTITION PARTITIONS 2;
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:0 p1:19 p2:0 p3:0 p4:20 
+ALTER TABLE tk COALESCE PARTITION 2;
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	25	1	p0:12 p1:13 p2:0 
+ALTER TABLE tk PARTITION BY LINEAR KEY (a) PARTITIONS 4;
+step	row_count	sk_matches_pk	parts
+repartition_linear_key	25	1	p0:7 p1:6 p2:6 p3:6 
+DROP TABLE tk;
+
+#### RANGE with HASH subpartitions
+CREATE TABLE ts (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY RANGE (a) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (40));
+INSERT INTO ts WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 
+ALTER TABLE ts ADD PARTITION (PARTITION p3 VALUES LESS THAN (50));
+INSERT INTO ts VALUES (42, 0, 'v42'), (47, 5, 'v47');
+step	row_count	sk_matches_pk	parts
+add	41	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	p01sp0:9 p01sp1:10 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p01sp1;
+step	row_count	sk_matches_pk	parts
+truncate_subpartition	31	1	p01sp0:9 p01sp1:0 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate_partition	11	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 p3sp0:1 p3sp1:1 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE ts DROP PARTITION p3;
+step	row_count	sk_matches_pk	parts
+drop_last	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+ALTER TABLE ts ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE ts CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+DROP TABLE ts;
+
+######## engine ROCKSDB, mode 0
+
+#### RANGE
+CREATE TABLE tr (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30), PARTITION p3 VALUES LESS THAN (40));
+INSERT INTO tr WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE tr ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO tr VALUES (41, 41 MOD 7, 'v41'), (45, 45 MOD 7, 'v45'), (48, 48 MOD 7, 'v48');
+step	row_count	sk_matches_pk	parts
+add	42	1	p0:9 p1:10 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	42	1	p01:19 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p4 INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION p4b VALUES LESS THAN (50));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_split	42	1	p01:19 p2:10 p3:10 p4a:1 p4b:2 
+ALTER TABLE tr TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	32	1	p01:19 p2:0 p3:10 p4a:1 p4b:2 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE tr DROP PARTITION p4b;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+drop_last	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr REBUILD PARTITION p01;
+step	row_count	sk_matches_pk	parts
+rebuild	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tr CHECK PARTITION p01, p2;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+ALTER TABLE tr OPTIMIZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	optimize	status	OK
+ALTER TABLE tr REPAIR PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	repair	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	30	1	p01:19 p2:0 p3:10 p4a:1 
+ALTER TABLE tr REORGANIZE PARTITION p4a INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION pmax VALUES LESS THAN MAXVALUE);
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO tr VALUES (1000, 1000 MOD 7, 'v1000');
+step	row_count	sk_matches_pk	parts
+add_maxvalue	31	1	p01:19 p2:0 p3:10 p4a:1 pmax:1 
+# EXCHANGE PARTITION: MyRocks rejects it (ER_PARTITION_MGMT_ON_NONPARTITIONED),
+# InnoDB swaps the rows. The exchange is done twice so that both engines
+# continue from the same data.
+CREATE TABLE tx (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO tx VALUES (21, 0, 'x21'), (22, 1, 'x22');
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+ERROR HY000: Partition management on a not partitioned table is not possible
+SELECT * FROM tr PARTITION (p2) ORDER BY a;
+a	b	c
+SELECT * FROM tx ORDER BY a;
+a	b	c
+21	0	x21
+22	1	x22
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+ERROR HY000: Partition management on a not partitioned table is not possible
+DROP TABLE tx;
+step	row_count	sk_matches_pk	parts
+exchange	31	1	p01:19 p2:0 p3:10 p4a:1 pmax:1 
+ALTER TABLE tr REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	31	1	(not partitioned)
+DROP TABLE tr;
+
+#### LIST
+CREATE TABLE tl (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY LIST (a DIV 10)
+(PARTITION l0 VALUES IN (0), PARTITION l1 VALUES IN (1),
+PARTITION l2 VALUES IN (2), PARTITION l3 VALUES IN (3));
+INSERT INTO tl WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	l0:9 l1:10 l2:10 l3:10 
+ALTER TABLE tl ADD PARTITION (PARTITION l4 VALUES IN (4, 5));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO tl VALUES (41, 41 MOD 7, 'v41'), (52, 52 MOD 7, 'v52');
+step	row_count	sk_matches_pk	parts
+add	41	1	l0:9 l1:10 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l0, l1 INTO (PARTITION l01 VALUES IN (0, 1));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	l01:19 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l4 INTO
+(PARTITION l4 VALUES IN (4), PARTITION l5 VALUES IN (5));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_split	41	1	l01:19 l2:10 l3:10 l4:1 l5:1 
+ALTER TABLE tl TRUNCATE PARTITION l2;
+step	row_count	sk_matches_pk	parts
+truncate	31	1	l01:19 l2:0 l3:10 l4:1 l5:1 
+# Drop a LIST partition: no remaining partition accepts its rows.
+ALTER TABLE tl DROP PARTITION l3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+drop	21	1	l01:19 l2:0 l4:1 l5:1 
+ALTER TABLE tl REBUILD PARTITION l01, l5;
+ALTER TABLE tl ANALYZE PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tl CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	21	1	l01:19 l2:0 l4:1 l5:1 
+DROP TABLE tl;
+
+#### HASH
+CREATE TABLE th (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 4;
+INSERT INTO th WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE th ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:6 p1:7 p2:7 p3:7 p4:6 p5:6 
+ALTER TABLE th COALESCE PARTITION 3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:13 p1:13 p2:13 
+ALTER TABLE th TRUNCATE PARTITION p1;
+step	row_count	sk_matches_pk	parts
+truncate	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REBUILD PARTITION p0;
+ALTER TABLE th OPTIMIZE PARTITION p0;
+Table	Op	Msg_type	Msg_text
+x	optimize	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	26	1	(not partitioned)
+DROP TABLE th;
+
+#### KEY
+CREATE TABLE tk (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 3;
+INSERT INTO tk WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:0 p1:19 p2:0 p3:0 p4:20 
+ALTER TABLE tk COALESCE PARTITION 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	25	1	p0:12 p1:13 p2:0 
+ALTER TABLE tk PARTITION BY LINEAR KEY (a) PARTITIONS 4;
+step	row_count	sk_matches_pk	parts
+repartition_linear_key	25	1	p0:7 p1:6 p2:6 p3:6 
+DROP TABLE tk;
+
+#### RANGE with HASH subpartitions
+CREATE TABLE ts (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (40));
+INSERT INTO ts WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 
+ALTER TABLE ts ADD PARTITION (PARTITION p3 VALUES LESS THAN (50));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO ts VALUES (42, 0, 'v42'), (47, 5, 'v47');
+step	row_count	sk_matches_pk	parts
+add	41	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	p01sp0:9 p01sp1:10 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p01sp1;
+step	row_count	sk_matches_pk	parts
+truncate_subpartition	31	1	p01sp0:9 p01sp1:0 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate_partition	11	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 p3sp0:1 p3sp1:1 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE ts DROP PARTITION p3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+drop_last	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+ALTER TABLE ts ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE ts CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+DROP TABLE ts;
+
+######## engine InnoDB, mode 1
+
+#### RANGE
+CREATE TABLE tr (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30), PARTITION p3 VALUES LESS THAN (40));
+INSERT INTO tr WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE tr ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+INSERT INTO tr VALUES (41, 41 MOD 7, 'v41'), (45, 45 MOD 7, 'v45'), (48, 48 MOD 7, 'v48');
+step	row_count	sk_matches_pk	parts
+add	42	1	p0:9 p1:10 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	42	1	p01:19 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p4 INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION p4b VALUES LESS THAN (50));
+step	row_count	sk_matches_pk	parts
+reorganize_split	42	1	p01:19 p2:10 p3:10 p4a:1 p4b:2 
+ALTER TABLE tr TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	32	1	p01:19 p2:0 p3:10 p4a:1 p4b:2 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE tr DROP PARTITION p4b;
+step	row_count	sk_matches_pk	parts
+drop_last	30	1	p01:19 p2:0 p3:10 p4a:1 
+# Drop a middle partition: the next partition would accept its rows.
+ALTER TABLE tr DROP PARTITION p3;
+step	row_count	sk_matches_pk	parts
+drop_middle	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr REBUILD PARTITION p01;
+step	row_count	sk_matches_pk	parts
+rebuild	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tr CHECK PARTITION p01, p2;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+ALTER TABLE tr OPTIMIZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	optimize	note	Table does not support optimize on partitions. All partitions will be rebuilt and analyzed.
+x	optimize	status	OK
+ALTER TABLE tr REPAIR PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	repair	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr REORGANIZE PARTITION p4a INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION pmax VALUES LESS THAN MAXVALUE);
+INSERT INTO tr VALUES (1000, 1000 MOD 7, 'v1000');
+step	row_count	sk_matches_pk	parts
+add_maxvalue	21	1	p01:19 p2:0 p4a:1 pmax:1 
+# EXCHANGE PARTITION: MyRocks rejects it (ER_PARTITION_MGMT_ON_NONPARTITIONED),
+# InnoDB swaps the rows. The exchange is done twice so that both engines
+# continue from the same data.
+CREATE TABLE tx (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b)) ENGINE=InnoDB;
+INSERT INTO tx VALUES (21, 0, 'x21'), (22, 1, 'x22');
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+SELECT * FROM tr PARTITION (p2) ORDER BY a;
+a	b	c
+21	0	x21
+22	1	x22
+SELECT * FROM tx ORDER BY a;
+a	b	c
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+DROP TABLE tx;
+step	row_count	sk_matches_pk	parts
+exchange	21	1	p01:19 p2:0 p4a:1 pmax:1 
+ALTER TABLE tr REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	21	1	(not partitioned)
+DROP TABLE tr;
+
+#### LIST
+CREATE TABLE tl (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY LIST (a DIV 10)
+(PARTITION l0 VALUES IN (0), PARTITION l1 VALUES IN (1),
+PARTITION l2 VALUES IN (2), PARTITION l3 VALUES IN (3));
+INSERT INTO tl WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	l0:9 l1:10 l2:10 l3:10 
+ALTER TABLE tl ADD PARTITION (PARTITION l4 VALUES IN (4, 5));
+INSERT INTO tl VALUES (41, 41 MOD 7, 'v41'), (52, 52 MOD 7, 'v52');
+step	row_count	sk_matches_pk	parts
+add	41	1	l0:9 l1:10 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l0, l1 INTO (PARTITION l01 VALUES IN (0, 1));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	l01:19 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l4 INTO
+(PARTITION l4 VALUES IN (4), PARTITION l5 VALUES IN (5));
+step	row_count	sk_matches_pk	parts
+reorganize_split	41	1	l01:19 l2:10 l3:10 l4:1 l5:1 
+ALTER TABLE tl TRUNCATE PARTITION l2;
+step	row_count	sk_matches_pk	parts
+truncate	31	1	l01:19 l2:0 l3:10 l4:1 l5:1 
+# Drop a LIST partition: no remaining partition accepts its rows.
+ALTER TABLE tl DROP PARTITION l3;
+step	row_count	sk_matches_pk	parts
+drop	21	1	l01:19 l2:0 l4:1 l5:1 
+ALTER TABLE tl REBUILD PARTITION l01, l5;
+ALTER TABLE tl ANALYZE PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tl CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	21	1	l01:19 l2:0 l4:1 l5:1 
+DROP TABLE tl;
+
+#### HASH
+CREATE TABLE th (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY HASH (a) PARTITIONS 4;
+INSERT INTO th WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE th ADD PARTITION PARTITIONS 2;
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:6 p1:7 p2:7 p3:7 p4:6 p5:6 
+ALTER TABLE th COALESCE PARTITION 3;
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:13 p1:13 p2:13 
+ALTER TABLE th TRUNCATE PARTITION p1;
+step	row_count	sk_matches_pk	parts
+truncate	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REBUILD PARTITION p0;
+ALTER TABLE th OPTIMIZE PARTITION p0;
+Table	Op	Msg_type	Msg_text
+x	optimize	note	Table does not support optimize on partitions. All partitions will be rebuilt and analyzed.
+x	optimize	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	26	1	(not partitioned)
+DROP TABLE th;
+
+#### KEY
+CREATE TABLE tk (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY KEY (a) PARTITIONS 3;
+INSERT INTO tk WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk ADD PARTITION PARTITIONS 2;
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:0 p1:19 p2:0 p3:0 p4:20 
+ALTER TABLE tk COALESCE PARTITION 2;
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	25	1	p0:12 p1:13 p2:0 
+ALTER TABLE tk PARTITION BY LINEAR KEY (a) PARTITIONS 4;
+step	row_count	sk_matches_pk	parts
+repartition_linear_key	25	1	p0:7 p1:6 p2:6 p3:6 
+DROP TABLE tk;
+
+#### RANGE with HASH subpartitions
+CREATE TABLE ts (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=InnoDB PARTITION BY RANGE (a) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (40));
+INSERT INTO ts WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 
+ALTER TABLE ts ADD PARTITION (PARTITION p3 VALUES LESS THAN (50));
+INSERT INTO ts VALUES (42, 0, 'v42'), (47, 5, 'v47');
+step	row_count	sk_matches_pk	parts
+add	41	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	p01sp0:9 p01sp1:10 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p01sp1;
+step	row_count	sk_matches_pk	parts
+truncate_subpartition	31	1	p01sp0:9 p01sp1:0 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate_partition	11	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 p3sp0:1 p3sp1:1 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE ts DROP PARTITION p3;
+step	row_count	sk_matches_pk	parts
+drop_last	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+ALTER TABLE ts ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE ts CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+DROP TABLE ts;
+# restart: --rocksdb_allow_unsafe_alter=1
+SELECT @@rocksdb_allow_unsafe_alter;
+@@rocksdb_allow_unsafe_alter
+1
+
+######## engine ROCKSDB, mode 1
+
+#### RANGE
+CREATE TABLE tr (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30), PARTITION p3 VALUES LESS THAN (40));
+INSERT INTO tr WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE tr ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+INSERT INTO tr VALUES (41, 41 MOD 7, 'v41'), (45, 45 MOD 7, 'v45'), (48, 48 MOD 7, 'v48');
+step	row_count	sk_matches_pk	parts
+add	42	1	p0:9 p1:10 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	42	1	p01:19 p2:10 p3:10 p4:3 
+ALTER TABLE tr REORGANIZE PARTITION p4 INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION p4b VALUES LESS THAN (50));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_split	42	1	p01:19 p2:10 p3:10 p4a:1 p4b:2 
+ALTER TABLE tr TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	32	1	p01:19 p2:0 p3:10 p4a:1 p4b:2 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE tr DROP PARTITION p4b;
+step	row_count	sk_matches_pk	parts
+drop_last	30	1	p01:19 p2:0 p3:10 p4a:1 
+# Drop a middle partition: the next partition would accept its rows.
+ALTER TABLE tr DROP PARTITION p3;
+step	row_count	sk_matches_pk	parts
+drop_middle	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr REBUILD PARTITION p01;
+step	row_count	sk_matches_pk	parts
+rebuild	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tr CHECK PARTITION p01, p2;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+ALTER TABLE tr OPTIMIZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	optimize	status	OK
+ALTER TABLE tr REPAIR PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	repair	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	20	1	p01:19 p2:0 p4a:1 
+ALTER TABLE tr REORGANIZE PARTITION p4a INTO
+(PARTITION p4a VALUES LESS THAN (45), PARTITION pmax VALUES LESS THAN MAXVALUE);
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO tr VALUES (1000, 1000 MOD 7, 'v1000');
+step	row_count	sk_matches_pk	parts
+add_maxvalue	21	1	p01:19 p2:0 p4a:1 pmax:1 
+# EXCHANGE PARTITION: MyRocks rejects it (ER_PARTITION_MGMT_ON_NONPARTITIONED),
+# InnoDB swaps the rows. The exchange is done twice so that both engines
+# continue from the same data.
+CREATE TABLE tx (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO tx VALUES (21, 0, 'x21'), (22, 1, 'x22');
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+ERROR HY000: Partition management on a not partitioned table is not possible
+SELECT * FROM tr PARTITION (p2) ORDER BY a;
+a	b	c
+SELECT * FROM tx ORDER BY a;
+a	b	c
+21	0	x21
+22	1	x22
+ALTER TABLE tr EXCHANGE PARTITION p2 WITH TABLE tx;
+ERROR HY000: Partition management on a not partitioned table is not possible
+DROP TABLE tx;
+step	row_count	sk_matches_pk	parts
+exchange	21	1	p01:19 p2:0 p4a:1 pmax:1 
+ALTER TABLE tr REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	21	1	(not partitioned)
+DROP TABLE tr;
+
+#### LIST
+CREATE TABLE tl (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY LIST (a DIV 10)
+(PARTITION l0 VALUES IN (0), PARTITION l1 VALUES IN (1),
+PARTITION l2 VALUES IN (2), PARTITION l3 VALUES IN (3));
+INSERT INTO tl WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	l0:9 l1:10 l2:10 l3:10 
+ALTER TABLE tl ADD PARTITION (PARTITION l4 VALUES IN (4, 5));
+INSERT INTO tl VALUES (41, 41 MOD 7, 'v41'), (52, 52 MOD 7, 'v52');
+step	row_count	sk_matches_pk	parts
+add	41	1	l0:9 l1:10 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l0, l1 INTO (PARTITION l01 VALUES IN (0, 1));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	l01:19 l2:10 l3:10 l4:2 
+ALTER TABLE tl REORGANIZE PARTITION l4 INTO
+(PARTITION l4 VALUES IN (4), PARTITION l5 VALUES IN (5));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_split	41	1	l01:19 l2:10 l3:10 l4:1 l5:1 
+ALTER TABLE tl TRUNCATE PARTITION l2;
+step	row_count	sk_matches_pk	parts
+truncate	31	1	l01:19 l2:0 l3:10 l4:1 l5:1 
+# Drop a LIST partition: no remaining partition accepts its rows.
+ALTER TABLE tl DROP PARTITION l3;
+step	row_count	sk_matches_pk	parts
+drop	21	1	l01:19 l2:0 l4:1 l5:1 
+ALTER TABLE tl REBUILD PARTITION l01, l5;
+ALTER TABLE tl ANALYZE PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE tl CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	21	1	l01:19 l2:0 l4:1 l5:1 
+DROP TABLE tl;
+
+#### HASH
+CREATE TABLE th (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 4;
+INSERT INTO th WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:9 p1:10 p2:10 p3:10 
+ALTER TABLE th ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:6 p1:7 p2:7 p3:7 p4:6 p5:6 
+ALTER TABLE th COALESCE PARTITION 3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:13 p1:13 p2:13 
+ALTER TABLE th TRUNCATE PARTITION p1;
+step	row_count	sk_matches_pk	parts
+truncate	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REBUILD PARTITION p0;
+ALTER TABLE th OPTIMIZE PARTITION p0;
+Table	Op	Msg_type	Msg_text
+x	optimize	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	26	1	p0:13 p1:0 p2:13 
+ALTER TABLE th REMOVE PARTITIONING;
+step	row_count	sk_matches_pk	parts
+remove_partitioning	26	1	(not partitioned)
+DROP TABLE th;
+
+#### KEY
+CREATE TABLE tk (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 3;
+INSERT INTO tk WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+add	39	1	p0:0 p1:19 p2:0 p3:0 p4:20 
+ALTER TABLE tk COALESCE PARTITION 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+coalesce	39	1	p0:12 p1:13 p2:14 
+ALTER TABLE tk TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate	25	1	p0:12 p1:13 p2:0 
+ALTER TABLE tk PARTITION BY LINEAR KEY (a) PARTITIONS 4;
+step	row_count	sk_matches_pk	parts
+repartition_linear_key	25	1	p0:7 p1:6 p2:6 p3:6 
+DROP TABLE tk;
+
+#### RANGE with HASH subpartitions
+CREATE TABLE ts (a INT NOT NULL, b INT, c VARCHAR(20), PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (40));
+INSERT INTO ts WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 39)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+step	row_count	sk_matches_pk	parts
+create	39	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 
+ALTER TABLE ts ADD PARTITION (PARTITION p3 VALUES LESS THAN (50));
+INSERT INTO ts VALUES (42, 0, 'v42'), (47, 5, 'v47');
+step	row_count	sk_matches_pk	parts
+add	41	1	p0sp0:4 p0sp1:5 p1sp0:5 p1sp1:5 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+step	row_count	sk_matches_pk	parts
+reorganize_merge	41	1	p01sp0:9 p01sp1:10 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p01sp1;
+step	row_count	sk_matches_pk	parts
+truncate_subpartition	31	1	p01sp0:9 p01sp1:0 p2sp0:10 p2sp1:10 p3sp0:1 p3sp1:1 
+ALTER TABLE ts TRUNCATE PARTITION p2;
+step	row_count	sk_matches_pk	parts
+truncate_partition	11	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 p3sp0:1 p3sp1:1 
+# Drop the last partition: no remaining partition accepts its rows.
+ALTER TABLE ts DROP PARTITION p3;
+step	row_count	sk_matches_pk	parts
+drop_last	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+ALTER TABLE ts ANALYZE PARTITION p01;
+Table	Op	Msg_type	Msg_text
+x	analyze	status	OK
+ALTER TABLE ts CHECK PARTITION ALL;
+Table	Op	Msg_type	Msg_text
+x	check	status	OK
+step	row_count	sk_matches_pk	parts
+maintenance	9	1	p01sp0:9 p01sp1:0 p2sp0:0 p2sp1:0 
+DROP TABLE ts;
+
+# Every MyRocks step must match the same step on InnoDB: row count,
+# checksum of all columns and per-partition distribution. Empty result
+# expected.
+SELECT r.run, r.ptype, r.step, i.cnt AS innodb_rows, r.cnt AS rocksdb_rows,
+i.parts AS innodb_parts, r.parts AS rocksdb_parts
+FROM test.mlog r
+JOIN test.mlog i
+ON i.run = CONCAT('InnoDB/', SUBSTRING_INDEX(r.run, '/', -1))
+AND i.ptype = r.ptype AND i.step = r.step
+WHERE r.run LIKE 'ROCKSDB/%'
+   AND (i.cnt <> r.cnt OR NOT (i.crc <=> r.crc) OR i.parts <> r.parts);
+run	ptype	step	innodb_rows	rocksdb_rows	innodb_parts	rocksdb_parts
+# Number of compared steps per run (all MyRocks steps have an InnoDB pair).
+SELECT r.run, COUNT(*) AS steps, COUNT(i.id) AS compared
+FROM test.mlog r
+LEFT JOIN test.mlog i
+ON i.run = CONCAT('InnoDB/', SUBSTRING_INDEX(r.run, '/', -1))
+AND i.ptype = r.ptype AND i.step = r.step
+WHERE r.run LIKE 'ROCKSDB/%'
+ GROUP BY r.run ORDER BY r.run;
+run	steps	compared
+ROCKSDB/0	36	36
+ROCKSDB/1	37	37
+# Secondary index inconsistent with the primary key. Empty result expected.
+SELECT run, ptype, step FROM test.mlog WHERE NOT (sk_cnt = cnt AND sk_ab <=> pk_ab);
+run	ptype	step
+#
+# Part 2: per-partition column families and TTL across ADD and
+# REORGANIZE PARTITION
+#
+
+SELECT @@rocksdb_allow_unsafe_alter;
+@@rocksdb_allow_unsafe_alter
+1
+CREATE TABLE tc (a INT NOT NULL, b INT, c VARCHAR(20),
+PRIMARY KEY (a) COMMENT 'p0_cfname=ddl3_cf_p0;p1_cfname=ddl3_cf_p1;p4_cfname=rev:ddl3_cf_p4',
+KEY kb (b))
+ENGINE=ROCKSDB COMMENT 'p0_ttl_duration=100;p1_ttl_duration=200;p4_ttl_duration=400'
+    PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30));
+INSERT INTO tc WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 29)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+# After CREATE: p0, p1 in their own column families with TTL; p2 default.
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+# ADD PARTITION p4 (named in the comments) and p5 (not named).
+ALTER TABLE tc ADD PARTITION (PARTITION p4 VALUES LESS THAN (40), PARTITION p5 VALUES LESS THAN (50));
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+# REORGANIZE p0, p1 INTO p01: the new name has no qualifier.
+ALTER TABLE tc REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p01	kb	default	0
+p01	PRIMARY	default	0
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+# REORGANIZE p01 back INTO p0, p1: the qualifiers apply again.
+ALTER TABLE tc REORGANIZE PARTITION p01 INTO
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+SELECT COUNT(*), SUM(a) FROM tc;
+COUNT(*)	SUM(a)
+29	435
+SELECT COUNT(*), SUM(a) FROM tc FORCE INDEX (kb);
+COUNT(*)	SUM(a)
+29	435
+DROP TABLE tc;
+# restart
+
+SELECT @@rocksdb_allow_unsafe_alter;
+@@rocksdb_allow_unsafe_alter
+0
+CREATE TABLE tc (a INT NOT NULL, b INT, c VARCHAR(20),
+PRIMARY KEY (a) COMMENT 'p0_cfname=ddl3_cf_p0;p1_cfname=ddl3_cf_p1;p4_cfname=rev:ddl3_cf_p4',
+KEY kb (b))
+ENGINE=ROCKSDB COMMENT 'p0_ttl_duration=100;p1_ttl_duration=200;p4_ttl_duration=400'
+    PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN (30));
+INSERT INTO tc WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 29)
+SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+# After CREATE: p0, p1 in their own column families with TTL; p2 default.
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+# ADD PARTITION p4 (named in the comments) and p5 (not named).
+ALTER TABLE tc ADD PARTITION (PARTITION p4 VALUES LESS THAN (40), PARTITION p5 VALUES LESS THAN (50));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+# REORGANIZE p0, p1 INTO p01: the new name has no qualifier.
+ALTER TABLE tc REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p01	kb	default	0
+p01	PRIMARY	default	0
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+# REORGANIZE p01 back INTO p0, p1: the qualifiers apply again.
+ALTER TABLE tc REORGANIZE PARTITION p01 INTO
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME	CF	TTL_DURATION
+p0	kb	default	100
+p0	PRIMARY	ddl3_cf_p0	100
+p1	kb	default	200
+p1	PRIMARY	ddl3_cf_p1	200
+p2	kb	default	0
+p2	PRIMARY	default	0
+p4	kb	default	400
+p4	PRIMARY	rev:ddl3_cf_p4	400
+p5	kb	default	0
+p5	PRIMARY	default	0
+SELECT COUNT(*), SUM(a) FROM tc;
+COUNT(*)	SUM(a)
+29	435
+SELECT COUNT(*), SUM(a) FROM tc FORCE INDEX (kb);
+COUNT(*)	SUM(a)
+29	435
+DROP TABLE tc;
+DROP PROCEDURE test.ddl3_parts;
+DROP TABLE test.mlog;
