@@ -1,0 +1,30 @@
+#
+# PS-11711: CREATE TABLE ... SELECT window left by the fix for PS-11627.
+#
+# A transaction whose snapshot is older than a DDL statement that wrote a
+# table's data must fail with ER_TABLE_DEF_CHANGED when it reads that table,
+# instead of reading it as empty. For CREATE TABLE ... SELECT, MyRocks marks
+# the new table when it is created, before its rows are committed. A reader
+# whose snapshot is taken between those two points, and who then reads the
+# new table, sees it empty without an error. InnoDB marks the index with the
+# creating transaction and returns ER_TABLE_DEF_CHANGED.
+#
+# The expected result is the correct behaviour (the error, as on InnoDB).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+
+--connect (con_ctas,localhost,root,,)
+--connect (con_reader,localhost,root,,)
+
+--echo # InnoDB, for reference
+--let $engine = InnoDB
+--source suite/rocksdb/include/consistent_snapshot_ctas.inc
+
+--echo # MyRocks
+--let $engine = ROCKSDB
+--source suite/rocksdb/include/consistent_snapshot_ctas.inc
+
+--disconnect con_ctas
+--disconnect con_reader
+--connection default
