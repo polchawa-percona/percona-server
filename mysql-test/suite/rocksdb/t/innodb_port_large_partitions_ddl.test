@@ -1,0 +1,134 @@
+#
+# Port of innodb.large_partitions_ddl
+# (mysql-test/suite/innodb/t/large_partitions_ddl.test) to MyRocks.
+# Bug#31365127 DROP A PARTITION RESULT IN OOM
+#
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB.
+#   - The innodb_file_per_table variants (cases 1-3 vs 4-6) are merged:
+#     MyRocks has no tablespaces, so they would be the same test. Cases 1-3
+#     are kept once each: CREATE/DROP, CREATE/RENAME/DROP and
+#     CREATE/TRUNCATE/DROP of a table with 1024 HASH partitions.
+#   - Instead of the InnoDB tablespace layout, the MyRocks dictionary is
+#     checked: every partition owns its own index ids, so the number of
+#     INFORMATION_SCHEMA.ROCKSDB_DDL entries is (partitions x indexes), and
+#     after DROP, RENAME and TRUNCATE no old entry may remain. At the end the
+#     background drop-index thread must finish reclaiming all dropped indexes.
+#   - Added on the 1024-partition table: rows in every partition read through
+#     the primary and the secondary key, and a restart with
+#     rocksdb_validate_tables=1, so startup loads and validates 1024
+#     partitions.
+#   - Added on a 128-partition table (1024 would exceed the test timeout on
+#     debug builds: every partition is built and ingested separately, about
+#     65 ms per partition on a release build): INPLACE ADD and DROP INDEX,
+#     ADD and COALESCE PARTITION, and DROP PARTITION of the last RANGE
+#     partition (its rows must be removed). DROP PARTITION of a partition whose
+#     rows another partition would accept keeps the rows today (PS-11634);
+#     the disabled tests rocksdb.innodb_port_partition_autoinc_drop and
+#     rocksdb.innodb_port_partition_blob_drop_partition cover that case.
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/not_valgrind.inc
+
+SET SESSION cte_max_recursion_depth = 20000;
+--let $ddl_count = SELECT TABLE_NAME, COUNT(*) AS ddl_entries FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' GROUP BY TABLE_NAME ORDER BY TABLE_NAME
+
+--echo # Case 1: create and drop 1024 partitions.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+--eval $ddl_count
+DROP TABLE t1;
+--eval $ddl_count
+
+--echo # Case 2: create, rename and drop 1024 partitions.
+CREATE TABLE t1(a INT NOT NULL, PRIMARY KEY(a)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 1024;
+RENAME TABLE t1 TO t2;
+--eval $ddl_count
+DROP TABLE t2;
+--eval $ddl_count
+
+--echo # Case 3: create, truncate and drop 1024 partitions (with rows).
+CREATE TABLE t1(a INT NOT NULL, b INT NOT NULL, PRIMARY KEY(a), KEY kb(b))
+ENGINE=ROCKSDB PARTITION BY HASH(a) PARTITIONS 1024;
+INSERT INTO t1 SELECT seq, seq % 97 FROM (WITH RECURSIVE s(seq) AS
+  (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 4096) SELECT seq FROM s) x;
+--eval $ddl_count
+SELECT COUNT(*), SUM(a), SUM(b) FROM t1;
+SELECT COUNT(*), SUM(b) FROM t1 FORCE INDEX (kb) WHERE b >= 0;
+# HASH(a) puts exactly 4 of the 4096 rows into each of the 1024 partitions.
+SELECT COUNT(*) AS partitions_with_4_rows FROM
+  (SELECT a % 1024 AS p, COUNT(*) AS c FROM t1 GROUP BY p) x WHERE c = 4;
+
+--echo # Restart with table validation: startup loads 1024 partitions.
+--let $restart_parameters = restart:--rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $restart_parameters =
+SET SESSION cte_max_recursion_depth = 20000;
+--eval $ddl_count
+SELECT COUNT(*), SUM(a), SUM(b) FROM t1;
+SELECT COUNT(*), SUM(b) FROM t1 FORCE INDEX (kb) WHERE b >= 0;
+SELECT a, b FROM t1 WHERE a = 4000;
+SELECT COUNT(*) FROM t1 WHERE b = 3;
+
+TRUNCATE TABLE t1;
+SELECT COUNT(*) FROM t1;
+--eval $ddl_count
+DROP TABLE t1;
+--eval $ddl_count
+
+--echo # 128 HASH partitions: INPLACE ADD/DROP INDEX, ADD/COALESCE PARTITION.
+CREATE TABLE t1(a INT NOT NULL, b INT NOT NULL, c VARCHAR(32),
+  PRIMARY KEY(a), KEY kb(b)) ENGINE=ROCKSDB
+PARTITION BY HASH(a) PARTITIONS 128;
+INSERT INTO t1 SELECT seq, seq % 97, CONCAT('row', seq) FROM (WITH RECURSIVE s(seq) AS
+  (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 4096) SELECT seq FROM s) x;
+ALTER TABLE t1 ADD INDEX kc(c), ALGORITHM=INPLACE;
+--eval $ddl_count
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c LIKE 'row%';
+SELECT a, b, c FROM t1 FORCE INDEX (kc) WHERE c = 'row4000';
+ALTER TABLE t1 DROP INDEX kb, ALGORITHM=INPLACE;
+--eval $ddl_count
+SELECT COUNT(*), SUM(a), SUM(b) FROM t1;
+ALTER TABLE t1 ADD PARTITION PARTITIONS 4;
+SELECT COUNT(*) AS partitions FROM information_schema.PARTITIONS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--eval $ddl_count
+SELECT COUNT(*), SUM(a), SUM(b) FROM t1;
+ALTER TABLE t1 COALESCE PARTITION 4;
+SELECT COUNT(*) AS partitions FROM information_schema.PARTITIONS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--eval $ddl_count
+SELECT COUNT(*), SUM(a), SUM(b) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c LIKE 'row%';
+DROP TABLE t1;
+
+--echo # 128 RANGE partitions: DROP PARTITION of the last one removes its rows.
+--disable_query_log
+let $parts = PARTITION p0 VALUES LESS THAN (32);
+let $i = 1;
+while ($i < 128)
+{
+  let $hi = `SELECT ($i + 1) * 32`;
+  let $parts = $parts, PARTITION p$i VALUES LESS THAN ($hi);
+  inc $i;
+}
+eval CREATE TABLE t1(a INT NOT NULL, b INT NOT NULL, PRIMARY KEY(a), KEY kb(b))
+  ENGINE=ROCKSDB PARTITION BY RANGE(a) ($parts);
+--enable_query_log
+INSERT INTO t1 SELECT seq, seq % 13 FROM (WITH RECURSIVE s(seq) AS
+  (SELECT 0 UNION ALL SELECT seq + 1 FROM s WHERE seq < 4095) SELECT seq FROM s) x;
+SELECT COUNT(*), MIN(a), MAX(a) FROM t1;
+ALTER TABLE t1 DROP PARTITION p127;
+SELECT COUNT(*), MIN(a), MAX(a) FROM t1;
+SELECT COUNT(*), MAX(a) FROM t1 FORCE INDEX (kb) WHERE b >= 0;
+SELECT COUNT(*) AS partitions FROM information_schema.PARTITIONS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--eval $ddl_count
+DROP TABLE t1;
+--eval $ddl_count
+
+--echo # The drop-index thread reclaims every dropped index.
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+--source suite/rocksdb/include/drop_table_sync.inc
