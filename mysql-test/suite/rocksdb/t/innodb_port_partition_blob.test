@@ -1,0 +1,123 @@
+#
+# Port of innodb.partition-blob (mysql-test/suite/innodb/t/partition-blob.test)
+# to MyRocks, merged with innodb.tinytext-groupby and two prefix-index sections.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - partition-blob: the Bug#28491099 DROP PARTITION step moved to
+#     rocksdb.innodb_port_partition_blob_drop_partition (disabled, port-findings
+#     #16); the rest is kept, with data checks added
+#   - tinytext-groupby: 3,000 rows instead of ~100,000 so it is not a big test
+#   - added: prefix indexes on LONGBLOB and utf8mb4 LONGTEXT stay consistent
+#     after LOB updates and deletes, and a unique prefix index on a BLOB.
+#     rocksdb.type_blob_indexes / type_text_indexes cover key types, not this.
+#     utf8mb4 values stay below 64 KiB because of port-findings #21
+#     (rocksdb.lob_prefix_index_long_values covers that case)
+#   - runs at READ COMMITTED (-master.opt) because MyRocks rejects gap locks at
+#     REPEATABLE READ
+#
+
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # 1. Prefix indexes on LONGBLOB and utf8mb4 LONGTEXT after updates.
+--echo #    The utf8mb4 values stay below 64 KiB: longer values crash a debug
+--echo #    server (port-findings #21); rocksdb.lob_prefix_index_long_values covers
+--echo #    that case.
+--echo #
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  b LONGBLOB,
+  t LONGTEXT CHARACTER SET utf8mb4,
+  KEY kb (b(20)),
+  KEY kt (t(10)),
+  KEY kbt (b(4), t(4))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+  (1, CONCAT('alpha-', REPEAT('1', 100000)), CONCAT('źdźbło-', REPEAT('ą', 20000))),
+  (2, CONCAT('beta--', REPEAT('2', 100000)), CONCAT('żółw---', REPEAT('ę', 20000))),
+  (3, CONCAT('gamma-', REPEAT('3', 100000)), CONCAT('ćma----', REPEAT('ó', 20000)));
+UPDATE t1 SET b = CONCAT('delta-', REPEAT('4', 200000)) WHERE id = 2;
+UPDATE t1 SET t = CONCAT('źdźbło2', REPEAT('ł', 25000)) WHERE id = 3;
+SELECT id, LEFT(b, 6), LENGTH(b) FROM t1 FORCE INDEX(kb) WHERE b LIKE 'beta%' OR b LIKE 'delta%';
+SELECT id, LEFT(t, 7), CHAR_LENGTH(t) FROM t1 FORCE INDEX(kt) WHERE t LIKE 'źdźbło%' ORDER BY id;
+SELECT id FROM t1 FORCE INDEX(kbt) WHERE b LIKE 'gamm%' AND t LIKE 'źdźb%';
+SELECT COUNT(*) FROM t1 FORCE INDEX(kb) WHERE b >= '';
+SELECT COUNT(*) FROM t1 FORCE INDEX(kt) WHERE t >= '';
+DELETE FROM t1 WHERE id = 1;
+SELECT COUNT(*) FROM t1 FORCE INDEX(kb) WHERE b LIKE 'alpha%';
+SELECT COUNT(*) FROM t1 FORCE INDEX(kt) WHERE t LIKE 'źdźbło-%';
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # 2. Unique prefix index on a BLOB: duplicates are detected on the prefix
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, b BLOB, UNIQUE KEY ub (b(8))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, CONCAT('prefix01', REPEAT('x', 60000)));
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (2, CONCAT('prefix01', REPEAT('y', 60000)));
+INSERT INTO t1 VALUES (2, CONCAT('prefix02', REPEAT('y', 60000)));
+--error ER_DUP_ENTRY
+UPDATE t1 SET b = CONCAT('prefix01', 'other') WHERE id = 2;
+SELECT id, LEFT(b, 8), LENGTH(b) FROM t1 ORDER BY id;
+DROP TABLE t1;
+
+--echo #
+--echo # 3. Partitioned tables with TEXT (partition-blob)
+--echo #
+CREATE TABLE t1 (f1 INT NOT NULL, f2 TEXT, PRIMARY KEY(f1)) ENGINE=ROCKSDB
+  PARTITION BY KEY() PARTITIONS 4;
+INSERT INTO t1 VALUES (42, 'Testing MySQL databases is a cool '),
+  (2, REPEAT('Testing MySQL databases is a cool ', 1900)),
+  (4, 'Testing MySQL databases is a cool ');
+SELECT f1, LENGTH(f2), LEFT(f2, 20) FROM t1 ORDER BY f1;
+UPDATE t1 SET f2 = REPEAT('z', 65535) WHERE f1 = 42;
+SELECT f1, LENGTH(f2), LEFT(f2, 3) FROM t1 ORDER BY f1;
+DROP TABLE t1;
+
+--echo # Correlated subquery with a LOB column
+CREATE TABLE t1 (f1 INT, f2 TEXT, f3 INT, PRIMARY KEY(f1)) ENGINE=ROCKSDB
+  PARTITION BY HASH(f1) PARTITIONS 1;
+INSERT INTO t1 VALUES (1, '1', 3), (2, '2', 2), (3, '3', 2);
+SELECT DISTINCT f3 FROM t1 HAVING (SELECT 1 FROM t1 HAVING f3 LIMIT 1) ORDER BY f3;
+SELECT f1, (SELECT MAX(f2) FROM t1 AS i WHERE i.f3 = o.f3) AS m FROM t1 AS o ORDER BY f1;
+DROP TABLE t1;
+
+--echo # ADD COLUMN on a RANGE-partitioned table with a TEXT NOT NULL column.
+--echo # (The Bug#28491099 step that drops a partition in between is in
+--echo # rocksdb.innodb_port_partition_blob_drop_partition, disabled until
+--echo # port-findings #16 is fixed.)
+SET sql_mode = '';
+CREATE TABLE t1 (a INT, b TEXT NOT NULL) ENGINE=ROCKSDB PARTITION BY RANGE(a)
+  (PARTITION p0 VALUES LESS THAN (6), PARTITION p1 VALUES LESS THAN (9),
+   PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1(a) VALUES (0);
+INSERT INTO t1 VALUES (7, REPEAT('b', 65535));
+ALTER TABLE t1 ADD COLUMN c DATE NOT NULL;
+ALTER TABLE t1 ADD COLUMN d DATE NOT NULL;
+SELECT a, LENGTH(b), c, d FROM t1 ORDER BY a;
+DROP TABLE t1;
+SET sql_mode = DEFAULT;
+
+--echo #
+--echo # 4. GROUP BY on TINYTEXT vs VARCHAR, in-memory and on-disk temporary
+--echo #    tables (tinytext-groupby)
+--echo #
+SET SESSION cte_max_recursion_depth = 5000;
+CREATE TABLE t1 (id SERIAL PRIMARY KEY, a VARCHAR(100), b VARCHAR(100)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id SERIAL PRIMARY KEY, a VARCHAR(100), b TINYTEXT) ENGINE=ROCKSDB;
+INSERT INTO t1 (a, b)
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 3000)
+  SELECT 'a', IF(n % 3 = 0, '746d847beb7e', CONCAT('k', n % 7)) FROM s;
+INSERT INTO t2 (a, b) SELECT a, b FROM t1 ORDER BY id;
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t2;
+SET big_tables = 1;
+SELECT b, COUNT(*) FROM t1 GROUP BY b ORDER BY b;
+SELECT b, COUNT(*) FROM t2 GROUP BY b ORDER BY b;
+SET big_tables = 0;
+SELECT b, COUNT(*) FROM t1 GROUP BY b ORDER BY b;
+SELECT b, COUNT(*) FROM t2 GROUP BY b ORDER BY b;
+DROP TABLE t1, t2;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+

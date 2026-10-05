@@ -1,0 +1,198 @@
+#
+# 1. Full update of a LOB, then rollback (blob_update_rollback)
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 BLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('-', 32000));
+START TRANSACTION;
+UPDATE t1 SET f2 = REPEAT('+', 64000) WHERE f1 = 1;
+SELECT f1, LENGTH(f2), LEFT(f2, 3), RIGHT(f2, 3) FROM t1;
+f1	LENGTH(f2)	LEFT(f2, 3)	RIGHT(f2, 3)
+1	64000	+++	+++
+ROLLBACK;
+SELECT f1, LENGTH(f2), LEFT(f2, 3), RIGHT(f2, 3), CRC32(f2) = CRC32(REPEAT('-', 32000)) AS same FROM t1;
+f1	LENGTH(f2)	LEFT(f2, 3)	RIGHT(f2, 3)	same
+1	32000	---	---	1
+START TRANSACTION;
+UPDATE t1 SET f2 = REPEAT('+', 64000) WHERE f1 = 1;
+COMMIT;
+SELECT f1, LENGTH(f2), LEFT(f2, 3), RIGHT(f2, 3), CRC32(f2) = CRC32(REPEAT('+', 64000)) AS same FROM t1;
+f1	LENGTH(f2)	LEFT(f2, 3)	RIGHT(f2, 3)	same
+1	64000	+++	+++	1
+DROP TABLE t1;
+#
+# 2. Two LONGBLOBs and an indexed virtual column over one of them (lob_update)
+#
+CREATE TABLE tb (id INT PRIMARY KEY, t1 LONGBLOB, t2 LONGBLOB,
+v1 CHAR(2) AS (SUBSTR(t1, 2, 2)) VIRTUAL, INDEX(id, v1)) ENGINE=ROCKSDB;
+INSERT INTO tb (id, t1, t2) VALUES (1, REPEAT('x', 100000), REPEAT('y', 100000));
+UPDATE tb SET t1 = REPEAT('y', 100000), t2 = REPEAT('x', 100000) WHERE id = 1;
+SELECT id, LENGTH(t1), LENGTH(t2), LEFT(t1, 2), LEFT(t2, 2), v1 FROM tb;
+id	LENGTH(t1)	LENGTH(t2)	LEFT(t1, 2)	LEFT(t2, 2)	v1
+1	100000	100000	yy	xx	yy
+SELECT id, v1 FROM tb FORCE INDEX(id) WHERE id = 1;
+id	v1
+1	yy
+UPDATE tb SET t1 = 'a' WHERE id = 1;
+SELECT id, LENGTH(t1), LENGTH(t2), t1, v1 FROM tb;
+id	LENGTH(t1)	LENGTH(t2)	t1	v1
+1	1	100000	a	
+SELECT id, v1 FROM tb FORCE INDEX(id) WHERE id = 1;
+id	v1
+1	
+CHECK TABLE tb;
+Table	Op	Msg_type	Msg_text
+test.tb	check	status	OK
+DROP TABLE tb;
+#
+# 3. Rollback of a 6 MB value inserted in one transaction (lob_big_rollback)
+#
+CREATE TABLE t1 (id INT PRIMARY KEY NOT NULL, val LONGTEXT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (2, 'keep');
+BEGIN;
+INSERT INTO t1 VALUES (1, REPEAT('a', 6000000));
+UPDATE t1 SET val = REPEAT('b', 6000000) WHERE id = 2;
+SELECT id, LENGTH(val), LEFT(val, 1) FROM t1 ORDER BY id;
+id	LENGTH(val)	LEFT(val, 1)
+1	6000000	a
+2	6000000	b
+ROLLBACK;
+SELECT id, LENGTH(val), val FROM t1 ORDER BY id;
+id	LENGTH(val)	val
+2	4	keep
+BEGIN;
+INSERT INTO t1 VALUES (1, REPEAT('a', 6000000));
+COMMIT;
+SELECT id, LENGTH(val), CRC32(val) = CRC32(REPEAT('a', 6000000)) AS same FROM t1 ORDER BY id;
+id	LENGTH(val)	same
+1	6000000	1
+2	4	0
+DROP TABLE t1;
+#
+# 4. Binary file content round trip (lob_insert)
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 LONGBLOB) ENGINE=ROCKSDB;
+f1	LENGTH(f2)	same
+1	215566	1
+DROP TABLE t1;
+#
+# 5. Hidden primary key table: insert, rollback (lob_insert_noindex)
+#
+CREATE TABLE t1 (f1 INT, f2 LONGBLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('+', 1048576));
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, REPEAT('~', 1048576));
+SELECT f1, LENGTH(f2), RIGHT(f2, 10) FROM t1 ORDER BY f1;
+f1	LENGTH(f2)	RIGHT(f2, 10)
+1	1048576	++++++++++
+2	1048576	~~~~~~~~~~
+ROLLBACK;
+SELECT f1, LENGTH(f2), RIGHT(f2, 10) FROM t1 ORDER BY f1;
+f1	LENGTH(f2)	RIGHT(f2, 10)
+1	1048576	++++++++++
+INSERT INTO t1 VALUES (2, REPEAT('~', 1048576));
+UPDATE t1 SET f2 = REPEAT('=', 2097152) WHERE f1 = 1;
+SELECT f1, LENGTH(f2), RIGHT(f2, 10) FROM t1 ORDER BY f1;
+f1	LENGTH(f2)	RIGHT(f2, 10)
+1	2097152	==========
+2	1048576	~~~~~~~~~~
+DROP TABLE t1;
+#
+# 6. Primary key update moves a row with a LOB (blob-update-debug)
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 BLOB, KEY k2 (f2(10))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, CONCAT('row1-', REPEAT('*', 50000)));
+UPDATE t1 SET f1 = 3;
+SELECT f1, LENGTH(f2), SUBSTRING(f2, 1, 10) FROM t1;
+f1	LENGTH(f2)	SUBSTRING(f2, 1, 10)
+3	50005	row1-*****
+SELECT f1, SUBSTRING(f2, 1, 10) FROM t1 FORCE INDEX(k2) WHERE f2 LIKE 'row1%';
+f1	SUBSTRING(f2, 1, 10)
+3	row1-*****
+SELECT COUNT(*) FROM t1 WHERE f1 = 1;
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# 7. Statement rollback: a multi-row LOB update that fails on a duplicate
+#    key changes nothing
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, u INT, b LONGBLOB, UNIQUE KEY (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, REPEAT('a', 70000)), (2, 2, REPEAT('b', 70000)), (3, 3, REPEAT('c', 70000));
+BEGIN;
+UPDATE t1 SET b = REPEAT('x', 90000) WHERE id = 1;
+UPDATE t1 SET b = REPEAT('z', 90000), u = 2 WHERE id >= 1;
+ERROR 23000: Duplicate entry '2' for key 't1.u'
+SELECT id, u, LENGTH(b), LEFT(b, 1) FROM t1 ORDER BY id;
+id	u	LENGTH(b)	LEFT(b, 1)
+1	1	90000	x
+2	2	70000	b
+3	3	70000	c
+COMMIT;
+SELECT id, u, LENGTH(b), LEFT(b, 1) FROM t1 ORDER BY id;
+id	u	LENGTH(b)	LEFT(b, 1)
+1	1	90000	x
+2	2	70000	b
+3	3	70000	c
+DROP TABLE t1;
+#
+# 8. Savepoints: rolling back to a savepoint after a LOB write is not
+#    supported by MyRocks; the transaction must be rolled back and keep
+#    nothing
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, b LONGBLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('a', 50000));
+BEGIN;
+SAVEPOINT s0;
+SELECT id, LENGTH(b) FROM t1;
+id	LENGTH(b)
+1	50000
+ROLLBACK TO SAVEPOINT s0;
+UPDATE t1 SET b = REPEAT('b', 60000) WHERE id = 1;
+SAVEPOINT s1;
+UPDATE t1 SET b = REPEAT('c', 70000) WHERE id = 1;
+ROLLBACK TO SAVEPOINT s1;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+ROLLBACK;
+SELECT id, LENGTH(b), LEFT(b, 1) FROM t1;
+id	LENGTH(b)	LEFT(b, 1)
+1	50000	a
+DROP TABLE t1;
+#
+# 9. Generated column over a BLOB, prefix index added by ALTER (virtual_blob)
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 BLOB, f3 BLOB GENERATED ALWAYS AS (f2)) ENGINE=ROCKSDB;
+INSERT INTO t1 (f1, f2) VALUES (1, REPEAT('&', 50000)), (2, CONCAT('key2', REPEAT('#', 40000)));
+ALTER TABLE t1 ADD INDEX i1 (f3(200));
+SELECT f1, LENGTH(f3) FROM t1 FORCE INDEX(i1) WHERE f3 LIKE 'key2%';
+f1	LENGTH(f3)
+2	40004
+UPDATE t1 SET f2 = CONCAT('key3', REPEAT('#', 40000)) WHERE f1 = 2;
+SELECT f1, LENGTH(f3) FROM t1 FORCE INDEX(i1) WHERE f3 LIKE 'key2%';
+f1	LENGTH(f3)
+SELECT f1, LENGTH(f3), LEFT(f3, 4) FROM t1 FORCE INDEX(i1) WHERE f3 LIKE 'key3%';
+f1	LENGTH(f3)	LEFT(f3, 4)
+2	40004	key3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# 10. Committed LOBs survive a server kill and restart (lob-format)
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 LONGBLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('+', 40000)), (2, REPEAT('~', 400000));
+UPDATE t1 SET f2 = REPEAT('!', 4000000) WHERE f1 = 2;
+# Kill and restart
+SELECT f1, LENGTH(f2), RIGHT(f2, 5) FROM t1 ORDER BY f1;
+f1	LENGTH(f2)	RIGHT(f2, 5)
+1	40000	+++++
+2	4000000	!!!!!
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

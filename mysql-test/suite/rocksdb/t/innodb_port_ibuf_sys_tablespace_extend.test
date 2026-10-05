@@ -1,0 +1,267 @@
+#
+# Port of innodb.ibuf_sys_tablespace_extend
+# (mysql-test/suite/innodb/t/ibuf_sys_tablespace_extend.test) to MyRocks.
+# Only the behavioural core is ported: concurrent inserts, updates and deletes of large
+# rows on tables with long prefix indexes, followed by crash recovery.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - everything specific to the InnoDB change buffer and system tablespace is dropped:
+#     the fresh data directory, innodb_change_buffering*, innodb_disable_background_merge,
+#     the ib_redo_log_system_tablespace_expansion debug keyword and its error-log
+#     message, the system tablespace size checks, the page-cleaner stop and the
+#     --innodb_buffer_pool_size option
+#   - checks added before and after the kill: every row has the values written by the
+#     last UPDATE that matched it, the deleted rows are gone, every secondary index has
+#     the same rows as the primary key, the prefix indexes find the updated values, and
+#     CHECK TABLE verifies the tables
+#   - runs at READ COMMITTED because MyRocks rejects gap locks at REPEATABLE READ
+#     (INSERT ... SELECT reads another table)
+#   - not a big test any more; no debug features are used, so the test also runs on
+#     release builds
+#
+--source include/have_rocksdb.inc
+--source include/not_crashrep.inc
+--source include/count_sessions.inc
+
+CREATE DATABASE db1;
+
+--disable_query_log
+
+--DELIMITER //
+
+CREATE PROCEDURE db1.CreateNTables(IN dbName VARCHAR(255),
+            IN tableNamePrefix VARCHAR(255), IN COUNT INT)
+BEGIN
+    DECLARE i INT DEFAULT 1;
+    DECLARE fullTableName VARCHAR(255);
+
+    WHILE i <= COUNT DO
+        SET fullTableName := CONCAT(dbName, '.', tableNamePrefix, i);
+        -- Create table
+        SET @sql := CONCAT(
+        'CREATE TABLE ', fullTableName, ' (',
+        '`id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,',
+        '`k` BIGINT UNSIGNED NOT NULL DEFAULT ''0'',',
+        '`nk` INT NOT NULL DEFAULT ''0'',',
+        '`c` VARCHAR(2048),',
+        '`pad` VARCHAR(2048),',
+        'PRIMARY KEY (`id`),',
+        'KEY `idx_k` (`k`),',
+        'KEY `idx_knk` (`nk`, `k`),',
+        'KEY `idx_nk` (`nk`),',
+        'KEY `idx_c` (`c`(512)),',
+        'KEY `idx_pad` (`pad`(512))',
+        ') ENGINE=ROCKSDB ',
+        'DEFAULT CHARSET=ascii COLLATE=ascii_bin;'
+        );
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        SET i = i + 1;
+    END WHILE;
+END //
+
+
+CREATE PROCEDURE db1.InsertIntoRecords (IN schemaName VARCHAR(255),
+            IN tableName VARCHAR(255), IN two_to_power INT)
+BEGIN
+  DECLARE fullTableName VARCHAR(255);
+  SET fullTableName := CONCAT(schemaName, '.', tableName);
+  SET @stm := CONCAT('INSERT INTO ', fullTableName , ' (k, nk, c, pad)',
+                     ' SELECT 2000, nk, c, pad FROM db1.t1');
+  PREPARE stmt FROM @stm;
+  SET @idx := two_to_power;
+  WHILE (@idx > 0) DO
+    EXECUTE stmt;
+    SET @idx := @idx - 1;
+  END WHILE;
+  DEALLOCATE PREPARE stmt;
+END //
+
+--DELIMITER ;
+
+--enable_query_log
+let $max_connections=2;
+--echo # Create $max_connections tables
+eval CALL db1.CreateNTables('db1', 't', $max_connections);
+
+--echo
+--echo # Create Connection objects
+let $counter = 1;
+while($counter <= $max_connections){
+  connect (con_$counter, localhost, root,,);
+  inc $counter;
+}
+
+--echo
+--echo # Insert record in each table
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval INSERT INTO db1.t$counter
+     VALUES(0, 1000 , 1, REPEAT('a', 2048), REPEAT('b', 2048));
+  inc $counter;
+}
+
+--echo # Wait for inserts to finish
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+--echo
+--echo # Insert total 2^8 records in each table
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval CALL db1.InsertIntoRecords('db1', 't$counter', 8);
+  inc $counter;
+}
+
+--echo
+--echo # Wait for insert into tables to finish
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+connection default;
+SELECT COUNT(*) FROM db1.t1;
+SELECT COUNT(*) > 1 FROM db1.t2;
+
+# Update the records with id divisible by 2
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval UPDATE db1.t$counter
+            SET k = id + k , nk = k + id, c = REPEAT('a2', 512),
+                pad = REPEAT('b2', 512)
+            WHERE id % 2 = 0;
+  inc $counter;
+}
+
+--echo
+--echo # Wait for Updates to finish
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+# Update the records with id divisible by 3
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval UPDATE db1.t$counter
+            SET k = id + k , nk = k + id, c = REPEAT('a3', 512),
+                pad = REPEAT('b3', 512)
+            WHERE id % 3 = 0;
+  inc $counter;
+}
+
+--echo
+--echo # Wait for Updates to finish
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+# Update the records with id divisible by 5
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval UPDATE db1.t$counter
+            SET k = id + k , nk = k + id, c = REPEAT('a5', 512),
+                pad = REPEAT('b5', 512)
+            WHERE id % 5 = 0;
+  inc $counter;
+}
+
+--echo
+--echo # Wait for Updates to finish
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+--echo
+--echo # Delete records
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  send_eval DELETE FROM db1.t$counter WHERE id % 4 = 1 ORDER BY id;
+  inc $counter;
+}
+
+--echo
+--echo # Wait for Deletes to finish #1
+let $counter = 1;
+while($counter <= $max_connections){
+  connection con_$counter;
+  reap;
+  inc $counter;
+}
+
+connection default;
+
+let $check_round = 2;
+while ($check_round)
+{
+  if ($check_round == 1)
+  {
+    --echo # Verify the data after crash recovery
+    --source include/kill_and_restart_mysqld.inc
+  }
+  let $counter = 1;
+  while($counter <= $max_connections){
+    --echo # Checks for db1.t$counter
+    eval SELECT COUNT(*) AS deleted_rows_left FROM db1.t$counter WHERE id % 4 = 1;
+    eval SELECT COUNT(*) AS wrong_values FROM db1.t$counter WHERE
+      (c, pad) <> (CASE WHEN id % 5 = 0 THEN REPEAT('a5', 512)
+                        WHEN id % 3 = 0 THEN REPEAT('a3', 512)
+                        WHEN id % 2 = 0 THEN REPEAT('a2', 512)
+                        ELSE REPEAT('a', 2048) END,
+                   CASE WHEN id % 5 = 0 THEN REPEAT('b5', 512)
+                        WHEN id % 3 = 0 THEN REPEAT('b3', 512)
+                        WHEN id % 2 = 0 THEN REPEAT('b2', 512)
+                        ELSE REPEAT('b', 2048) END);
+    let $pk_count = (SELECT COUNT(*) FROM db1.t$counter FORCE INDEX (PRIMARY));
+    eval SELECT COUNT(*) = $pk_count AS idx_k_ok FROM db1.t$counter FORCE INDEX (idx_k);
+    eval SELECT COUNT(*) = $pk_count AS idx_knk_ok FROM db1.t$counter FORCE INDEX (idx_knk);
+    eval SELECT COUNT(*) = $pk_count AS idx_nk_ok FROM db1.t$counter FORCE INDEX (idx_nk);
+    eval SELECT COUNT(*) = $pk_count AS idx_c_ok FROM db1.t$counter FORCE INDEX (idx_c) WHERE c >= '';
+    eval SELECT COUNT(*) = $pk_count AS idx_pad_ok FROM db1.t$counter FORCE INDEX (idx_pad) WHERE pad >= '';
+    eval SELECT (SELECT COUNT(*) FROM db1.t$counter FORCE INDEX (idx_c) WHERE c = REPEAT('a5', 512)) =
+                (SELECT COUNT(*) FROM db1.t$counter IGNORE INDEX (idx_c) WHERE c = REPEAT('a5', 512))
+                AS idx_c_lookup_ok;
+    eval SELECT (SELECT COUNT(*) FROM db1.t$counter FORCE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048)) =
+                (SELECT COUNT(*) FROM db1.t$counter IGNORE INDEX (idx_pad) WHERE pad = REPEAT('b', 2048))
+                AS idx_pad_lookup_ok;
+    eval CHECK TABLE db1.t$counter;
+    inc $counter;
+  }
+  dec $check_round;
+}
+
+SELECT id, k FROM db1.t1 ORDER BY id LIMIT 1;
+
+--echo
+--echo # Cleanup
+--echo
+
+let $counter = 1;
+while($counter <= $max_connections){
+  disconnect con_$counter;
+  inc $counter;
+}
+DROP DATABASE db1;
+--source include/wait_until_count_sessions.inc

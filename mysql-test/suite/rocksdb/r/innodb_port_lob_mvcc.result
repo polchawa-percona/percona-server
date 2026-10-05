@@ -1,0 +1,159 @@
+CREATE TABLE t1 (
+pk INT PRIMARY KEY,
+k INT NOT NULL,
+b LONGBLOB,
+j JSON,
+vy INT AS (JSON_UNQUOTE(j->'$.Year')) VIRTUAL,
+vh VARCHAR(40) AS (JSON_UNQUOTE(j->'$.hash')) VIRTUAL,
+KEY k_k (k),
+KEY k_vy (vy),
+KEY k_vh (vh),
+KEY k_b (b(16))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (pk, k, b, j) VALUES
+(1, 10, REPEAT('a', 300000),
+JSON_OBJECT('Year', 2000, 'hash', 'h1', 'pad', REPEAT('x', 100000))),
+(2, 20, REPEAT('b', 300000),
+JSON_OBJECT('Year', 2001, 'hash', 'h2', 'pad', REPEAT('y', 100000))),
+(3, 30, REPEAT('c', 300000),
+JSON_OBJECT('Year', 2002, 'hash', 'h3', 'pad', REPEAT('z', 100000)));
+#
+# 1. REPEATABLE READ snapshot vs concurrent LOB and JSON changes
+#
+# [default] take a consistent snapshot
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'$.pad') AS padlen FROM t1 ORDER BY pk;
+pk	k	LENGTH(b)	LEFT(b, 1)	CRC32(b)	vy	vh	padlen
+1	10	300000	a	4098814559	2000	h1	100000
+2	20	300000	b	3066241476	2001	h2	100000
+3	30	300000	c	2293788493	2002	h3	100000
+SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy BETWEEN 1990 AND 2100 ORDER BY vy, pk;
+pk	vy
+1	2000
+2	2001
+3	2002
+# [con1] change LOBs: full BLOB update, partial JSON update, delete, insert
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('n', 400000) WHERE pk = 1;
+UPDATE t1 SET j = JSON_SET(j, '$.Year', 2010) WHERE pk = 2;
+UPDATE t1 SET j = JSON_REPLACE(j, '$.pad', REPEAT('q', 50000), '$.hash', 'h2new') WHERE pk = 2;
+DELETE FROM t1 WHERE pk = 3;
+INSERT INTO t1 (pk, k, b, j) VALUES (4, 40, REPEAT('d', 200000), JSON_OBJECT('Year', 2003, 'hash', 'h4'));
+# [con1] own changes are visible to con1
+SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'$.pad') AS padlen FROM t1 ORDER BY pk;
+pk	k	LENGTH(b)	LEFT(b, 1)	CRC32(b)	vy	vh	padlen
+1	10	400000	n	1117977234	2000	h1	100000
+2	20	300000	b	3066241476	2010	h2new	50000
+4	40	200000	d	4129953052	2003	h4	NULL
+# [default] uncommitted changes are invisible
+SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'$.pad') AS padlen FROM t1 ORDER BY pk;
+pk	k	LENGTH(b)	LEFT(b, 1)	CRC32(b)	vy	vh	padlen
+1	10	300000	a	4098814559	2000	h1	100000
+2	20	300000	b	3066241476	2001	h2	100000
+3	30	300000	c	2293788493	2002	h3	100000
+COMMIT;
+# [default] committed changes are still invisible to the old snapshot,
+#           also through the secondary and generated-column indexes
+SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'$.pad') AS padlen FROM t1 ORDER BY pk;
+pk	k	LENGTH(b)	LEFT(b, 1)	CRC32(b)	vy	vh	padlen
+1	10	300000	a	4098814559	2000	h1	100000
+2	20	300000	b	3066241476	2001	h2	100000
+3	30	300000	c	2293788493	2002	h3	100000
+SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy BETWEEN 1990 AND 2100 ORDER BY vy, pk;
+pk	vy
+1	2000
+2	2001
+3	2002
+SELECT pk, LEFT(b, 1) FROM t1 FORCE INDEX(k_b) WHERE b LIKE 'b%' OR b LIKE 'n%' ORDER BY pk;
+pk	LEFT(b, 1)
+2	b
+SELECT pk FROM t1 FORCE INDEX(k_vh) WHERE vh IN ('h2', 'h2new') ORDER BY pk;
+pk
+2
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+3	900000
+COMMIT;
+# [default] new snapshot sees the committed state
+SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'$.pad') AS padlen FROM t1 ORDER BY pk;
+pk	k	LENGTH(b)	LEFT(b, 1)	CRC32(b)	vy	vh	padlen
+1	10	400000	n	1117977234	2000	h1	100000
+2	20	300000	b	3066241476	2010	h2new	50000
+4	40	200000	d	4129953052	2003	h4	NULL
+SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy BETWEEN 1990 AND 2100 ORDER BY vy, pk;
+pk	vy
+1	2000
+4	2003
+2	2010
+SELECT pk, LEFT(b, 1) FROM t1 FORCE INDEX(k_b) WHERE b LIKE 'b%' OR b LIKE 'n%' ORDER BY pk;
+pk	LEFT(b, 1)
+1	n
+2	b
+SELECT pk, vh FROM t1 FORCE INDEX(k_vh) WHERE vh IN ('h2', 'h2new') ORDER BY pk;
+pk	vh
+2	h2new
+#
+# 2. READ COMMITTED reader: sees each commit, never uncommitted data
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+SELECT pk, LENGTH(b), LEFT(b, 1) FROM t1 WHERE pk = 1;
+pk	LENGTH(b)	LEFT(b, 1)
+1	400000	n
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('r', 500000), j = JSON_SET(j, '$.Year', 2020) WHERE pk = 1;
+SELECT pk, LENGTH(b), LEFT(b, 1), vy FROM t1 WHERE pk = 1;
+pk	LENGTH(b)	LEFT(b, 1)	vy
+1	400000	n	2000
+COMMIT;
+SELECT pk, LENGTH(b), LEFT(b, 1), vy FROM t1 WHERE pk = 1;
+pk	LENGTH(b)	LEFT(b, 1)	vy
+1	500000	r	2020
+SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy = 2020;
+pk	vy
+1	2020
+COMMIT;
+SET SESSION transaction_isolation = DEFAULT;
+#
+# 3. Snapshot vs a rolled-back LOB update
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+pk	LENGTH(b)	CRC32(b)
+2	300000	3066241476
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('s', 700000) WHERE pk = 2;
+ROLLBACK;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+pk	LENGTH(b)	CRC32(b)
+2	300000	3066241476
+COMMIT;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+pk	LENGTH(b)	CRC32(b)
+2	300000	3066241476
+#
+# 4. Write conflict: a REPEATABLE READ transaction that read an old LOB
+#    version cannot overwrite a newer committed version.
+#    (MyRocks rejects writes inside START TRANSACTION WITH CONSISTENT
+#    SNAPSHOT, so the snapshot is taken by the first read after BEGIN.)
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t1 SET b = REPEAT('u', 100) WHERE pk = 4;
+ERROR HY000: Can't execute updates when you started a transaction with START TRANSACTION WITH CONSISTENT [ROCKSDB] SNAPSHOT.
+ROLLBACK;
+BEGIN;
+SELECT pk, LENGTH(b) FROM t1 WHERE pk = 4;
+pk	LENGTH(b)
+4	200000
+UPDATE t1 SET b = REPEAT('t', 100) WHERE pk = 4;
+UPDATE t1 SET b = REPEAT('u', 100) WHERE pk = 4;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT pk, LENGTH(b), LEFT(b, 1) FROM t1 WHERE pk = 4;
+pk	LENGTH(b)	LEFT(b, 1)
+4	100	t
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
