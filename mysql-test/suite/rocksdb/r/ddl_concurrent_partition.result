@@ -1,0 +1,216 @@
+CREATE TABLE seq (a INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE ddl_retries (who VARCHAR(20), q TEXT, err INT) ENGINE=InnoDB;
+INSERT INTO seq WITH RECURSIVE s(a) AS (SELECT 0 UNION ALL SELECT a + 1 FROM s WHERE a < 499) SELECT a FROM s;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+CREATE TABLE t2 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+CREATE TABLE t3 (a INT, b INT, c VARCHAR(64),
+PRIMARY KEY (a) COMMENT 'p0_cfname=cf_part_shared;p1_cfname=cf_t3_p1;p2_cfname=rev:cf_t3_p2',
+KEY kb (b) COMMENT 'p0_cfname=cf_part_shared_sk')
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+CREATE TABLE t4 (a INT, b INT, c VARCHAR(64),
+PRIMARY KEY (a) COMMENT 'p0_cfname=cf_part_shared;p1_cfname=cf_t4_p1;p3_cfname=cf_t4_p3',
+KEY kb (b) COMMENT 'p0_cfname=cf_part_shared_sk')
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+CREATE TABLE t5 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300));
+CREATE TABLE h1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 4;
+INSERT INTO t1 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t2 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t3 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t4 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t5 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO h1 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 400;
+CREATE PROCEDURE run_stmt(who VARCHAR(20), q TEXT)
+BEGIN
+DECLARE done INT DEFAULT 0;
+DECLARE tries INT DEFAULT 0;
+DECLARE err INT DEFAULT 0;
+DECLARE CONTINUE HANDLER FOR 1213 SET err = 1213;
+DECLARE CONTINUE HANDLER FOR 1205 SET err = 1205;
+DECLARE CONTINUE HANDLER FOR 1615 SET err = 1615;
+SET @rs = q;
+WHILE done = 0 DO
+SET err = 0;
+PREPARE rst FROM @rs;
+EXECUTE rst;
+DEALLOCATE PREPARE rst;
+IF err = 0 THEN
+SET done = 1;
+ELSE
+INSERT INTO ddl_retries VALUES (who, q, err);
+SET tries = tries + 1;
+IF tries > 50 THEN
+SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'too many retries';
+END IF;
+END IF;
+END WHILE;
+END|
+CREATE PROCEDURE range_loop(tbl VARCHAR(10), n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+SET @s = CONCAT('ALTER TABLE ', tbl,
+' ADD PARTITION (PARTITION p3 VALUES LESS THAN (400))');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('INSERT INTO ', tbl,
+' SELECT a, a, REPEAT(''y'', 64) FROM seq WHERE a >= 300 AND a < 400');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('ALTER TABLE ', tbl, ' REORGANIZE PARTITION p2, p3 INTO',
+' (PARTITION p2 VALUES LESS THAN (300),',
+'  PARTITION p3 VALUES LESS THAN (400))');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('ALTER TABLE ', tbl, ' TRUNCATE PARTITION p3');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('INSERT INTO ', tbl,
+' SELECT a, a, REPEAT(''z'', 64) FROM seq WHERE a >= 300 AND a < 350');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('UPDATE ', tbl, ' SET b = b + 1 WHERE a < 300');
+CALL run_stmt(tbl, @s);
+SET @s = CONCAT('ALTER TABLE ', tbl, ' DROP PARTITION p3');
+CALL run_stmt(tbl, @s);
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE hash_loop(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+CALL run_stmt('h1', 'ALTER TABLE h1 ADD PARTITION PARTITIONS 3');
+CALL run_stmt('h1', 'UPDATE h1 SET b = b + 1');
+CALL run_stmt('h1', 'ALTER TABLE h1 COALESCE PARTITION 3');
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE t5_truncate_loop(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+CALL run_stmt('t5_truncate', 'ALTER TABLE t5 TRUNCATE PARTITION p1');
+CALL run_stmt('t5_truncate', 'INSERT INTO t5 SELECT a, a, REPEAT(''w'', 64) FROM seq WHERE a >= 100 AND a < 200');
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE t5_rebuild_loop(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+CALL run_stmt('t5_rebuild', 'ALTER TABLE t5 REBUILD PARTITION p0');
+CALL run_stmt('t5_rebuild', 'ANALYZE TABLE t5');
+CALL run_stmt('t5_rebuild', 'UPDATE t5 SET b = b + 1 WHERE a >= 200 AND a < 300');
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE flush_compact_loop(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cf_part_shared';
+SET GLOBAL rocksdb_compact_cf = 'cf_part_shared_sk';
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+DO SLEEP(0.2);
+SET i = i + 1;
+END WHILE;
+END|
+# Start all loops.
+CALL range_loop('t1', 15);
+CALL range_loop('t2', 15);
+CALL range_loop('t3', 15);
+CALL range_loop('t4', 15);
+CALL hash_loop(15);
+CALL t5_truncate_loop(15);
+CALL t5_rebuild_loop(15);
+CALL flush_compact_loop(15 * 4);
+# Contents through the primary key and through the secondary index.
+t1: count and SUM(b) as expected
+t2: count and SUM(b) as expected
+t3: count and SUM(b) as expected
+t4: count and SUM(b) as expected
+t5: count and SUM(b) as expected
+h1: count and SUM(b) as expected
+# Rows outside the range of their partition (expect none).
+t1: partitions p0,p1,p2, misplaced rows 0
+t2: partitions p0,p1,p2, misplaced rows 0
+t3: partitions p0,p1,p2, misplaced rows 0
+t4: partitions p0,p1,p2, misplaced rows 0
+t5: partitions p0,p1,p2, misplaced rows 0
+h1: 4 partitions, rows out of range 0
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+test.t4	check	status	OK
+test.t5	check	status	OK
+test.h1	check	status	OK
+# Wait for the drop-index thread, then compact every column family.
+# Index data in SST files that belongs to no index (expect 0).
+orphan index entries in SST files: 0
+# MyRocks indexes per table (one per partition per index).
+TABLE_NAME	COUNT(*)
+h1	8
+t1	6
+t2	6
+t3	6
+t4	6
+t5	6
+# Restart with table validation and check again.
+# restart: --rocksdb_validate_tables=1
+# Contents through the primary key and through the secondary index.
+t1: count and SUM(b) as expected
+t2: count and SUM(b) as expected
+t3: count and SUM(b) as expected
+t4: count and SUM(b) as expected
+t5: count and SUM(b) as expected
+h1: count and SUM(b) as expected
+# Rows outside the range of their partition (expect none).
+t1: partitions p0,p1,p2, misplaced rows 0
+t2: partitions p0,p1,p2, misplaced rows 0
+t3: partitions p0,p1,p2, misplaced rows 0
+t4: partitions p0,p1,p2, misplaced rows 0
+t5: partitions p0,p1,p2, misplaced rows 0
+h1: 4 partitions, rows out of range 0
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+test.t4	check	status	OK
+test.t5	check	status	OK
+test.h1	check	status	OK
+# Wait for the drop-index thread, then compact every column family.
+# Index data in SST files that belongs to no index (expect 0).
+orphan index entries in SST files: 0
+# MyRocks indexes per table (one per partition per index).
+TABLE_NAME	COUNT(*)
+h1	8
+t1	6
+t2	6
+t3	6
+t4	6
+t5	6
+DROP PROCEDURE run_stmt;
+DROP PROCEDURE range_loop;
+DROP PROCEDURE hash_loop;
+DROP PROCEDURE t5_truncate_loop;
+DROP PROCEDURE t5_rebuild_loop;
+DROP PROCEDURE flush_compact_loop;
+# Statement retries (deadlock / lock wait timeout) are in the log only.
+DROP TABLE t1, t2, t3, t4, t5, h1, seq, ddl_retries;

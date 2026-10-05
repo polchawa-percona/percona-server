@@ -1,0 +1,254 @@
+#
+# Partition DDL on MyRocks tables run concurrently from several sessions.
+#
+# Every MyRocks partition is a separate set of MyRocks indexes, and partitions
+# of different tables usually share a column family, so their keys sit in the
+# same SST files. Partition DDL creates and drops many index ids at once: the
+# background drop-index thread then removes the dropped ranges with
+# DeleteFilesInRange plus CompactRange while other partitions are being
+# written, flushed and compacted. This test runs:
+#
+#   - four sessions, each looping ADD / REORGANIZE / TRUNCATE / DROP PARTITION
+#     with DML on its own RANGE table: two tables in the default column
+#     family, two with per-partition column families that partly share names;
+#   - one session looping ADD PARTITIONS / COALESCE PARTITION on a HASH table;
+#   - two sessions on one table: TRUNCATE PARTITION plus re-insert of one
+#     partition against REBUILD and ANALYZE of others, plus DML;
+#   - one session flushing memtables and compacting the column families.
+#
+# The final contents are deterministic per table. Afterwards the test checks
+# the rows and their placement in partitions, that every secondary index
+# agrees with the primary key, that no data of a dropped index is left after
+# the drop-index thread and a full compaction, and that a restart with table
+# validation is clean.
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/count_sessions.inc
+
+--let $iterations = 15
+
+CREATE TABLE seq (a INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE ddl_retries (who VARCHAR(20), q TEXT, err INT) ENGINE=InnoDB;
+INSERT INTO seq WITH RECURSIVE s(a) AS (SELECT 0 UNION ALL SELECT a + 1 FROM s WHERE a < 499) SELECT a FROM s;
+
+let $ranges = PARTITION BY RANGE (a)
+  (PARTITION p0 VALUES LESS THAN (100),
+   PARTITION p1 VALUES LESS THAN (200),
+   PARTITION p2 VALUES LESS THAN (300));
+
+eval CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+  ENGINE=ROCKSDB $ranges;
+eval CREATE TABLE t2 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+  ENGINE=ROCKSDB $ranges;
+# Per-partition column families; t3 and t4 share cf_part_shared for p0.
+eval CREATE TABLE t3 (a INT, b INT, c VARCHAR(64),
+  PRIMARY KEY (a) COMMENT 'p0_cfname=cf_part_shared;p1_cfname=cf_t3_p1;p2_cfname=rev:cf_t3_p2',
+  KEY kb (b) COMMENT 'p0_cfname=cf_part_shared_sk')
+  ENGINE=ROCKSDB $ranges;
+eval CREATE TABLE t4 (a INT, b INT, c VARCHAR(64),
+  PRIMARY KEY (a) COMMENT 'p0_cfname=cf_part_shared;p1_cfname=cf_t4_p1;p3_cfname=cf_t4_p3',
+  KEY kb (b) COMMENT 'p0_cfname=cf_part_shared_sk')
+  ENGINE=ROCKSDB $ranges;
+eval CREATE TABLE t5 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+  ENGINE=ROCKSDB $ranges;
+CREATE TABLE h1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b))
+  ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 4;
+
+INSERT INTO t1 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t2 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t3 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t4 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO t5 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 300;
+INSERT INTO h1 SELECT a, a, REPEAT('x', 64) FROM seq WHERE a < 400;
+
+delimiter |;
+# Runs one statement, retrying it on a deadlock or lock wait timeout. MDL
+# deadlocks between the DDL sessions on the shared table t5 are expected and
+# also happen with InnoDB; the retries are logged in ddl_retries.
+CREATE PROCEDURE run_stmt(who VARCHAR(20), q TEXT)
+BEGIN
+  DECLARE done INT DEFAULT 0;
+  DECLARE tries INT DEFAULT 0;
+  DECLARE err INT DEFAULT 0;
+  DECLARE CONTINUE HANDLER FOR 1213 SET err = 1213;
+  DECLARE CONTINUE HANDLER FOR 1205 SET err = 1205;
+  DECLARE CONTINUE HANDLER FOR 1615 SET err = 1615;
+  SET @rs = q;
+  WHILE done = 0 DO
+    SET err = 0;
+    PREPARE rst FROM @rs;
+    EXECUTE rst;
+    DEALLOCATE PREPARE rst;
+    IF err = 0 THEN
+      SET done = 1;
+    ELSE
+      INSERT INTO ddl_retries VALUES (who, q, err);
+      SET tries = tries + 1;
+      IF tries > 50 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'too many retries';
+      END IF;
+    END IF;
+  END WHILE;
+END|
+
+# One iteration on a RANGE table leaves it as it was, except that column b of
+# rows 0..299 grows by one.
+CREATE PROCEDURE range_loop(tbl VARCHAR(10), n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    SET @s = CONCAT('ALTER TABLE ', tbl,
+                    ' ADD PARTITION (PARTITION p3 VALUES LESS THAN (400))');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('INSERT INTO ', tbl,
+                    ' SELECT a, a, REPEAT(''y'', 64) FROM seq WHERE a >= 300 AND a < 400');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('ALTER TABLE ', tbl, ' REORGANIZE PARTITION p2, p3 INTO',
+                    ' (PARTITION p2 VALUES LESS THAN (300),',
+                    '  PARTITION p3 VALUES LESS THAN (400))');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('ALTER TABLE ', tbl, ' TRUNCATE PARTITION p3');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('INSERT INTO ', tbl,
+                    ' SELECT a, a, REPEAT(''z'', 64) FROM seq WHERE a >= 300 AND a < 350');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('UPDATE ', tbl, ' SET b = b + 1 WHERE a < 300');
+    CALL run_stmt(tbl, @s);
+    SET @s = CONCAT('ALTER TABLE ', tbl, ' DROP PARTITION p3');
+    CALL run_stmt(tbl, @s);
+    SET i = i + 1;
+  END WHILE;
+END|
+
+# One iteration on the HASH table leaves it as it was, except that column b
+# of every row grows by one.
+CREATE PROCEDURE hash_loop(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    CALL run_stmt('h1', 'ALTER TABLE h1 ADD PARTITION PARTITIONS 3');
+    CALL run_stmt('h1', 'UPDATE h1 SET b = b + 1');
+    CALL run_stmt('h1', 'ALTER TABLE h1 COALESCE PARTITION 3');
+    SET i = i + 1;
+  END WHILE;
+END|
+
+# t5: truncate and refill p1 while another session rebuilds p0 and analyzes.
+CREATE PROCEDURE t5_truncate_loop(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    CALL run_stmt('t5_truncate', 'ALTER TABLE t5 TRUNCATE PARTITION p1');
+    CALL run_stmt('t5_truncate', 'INSERT INTO t5 SELECT a, a, REPEAT(''w'', 64) FROM seq WHERE a >= 100 AND a < 200');
+    SET i = i + 1;
+  END WHILE;
+END|
+
+CREATE PROCEDURE t5_rebuild_loop(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    CALL run_stmt('t5_rebuild', 'ALTER TABLE t5 REBUILD PARTITION p0');
+    CALL run_stmt('t5_rebuild', 'ANALYZE TABLE t5');
+    CALL run_stmt('t5_rebuild', 'UPDATE t5 SET b = b + 1 WHERE a >= 200 AND a < 300');
+    SET i = i + 1;
+  END WHILE;
+END|
+
+CREATE PROCEDURE flush_compact_loop(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    SET GLOBAL rocksdb_compact_cf = 'default';
+    SET GLOBAL rocksdb_compact_cf = 'cf_part_shared';
+    SET GLOBAL rocksdb_compact_cf = 'cf_part_shared_sk';
+    SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+    DO SLEEP(0.2);
+    SET i = i + 1;
+  END WHILE;
+END|
+delimiter ;|
+
+--connect (con1,localhost,root,,)
+--connect (con2,localhost,root,,)
+--connect (con3,localhost,root,,)
+--connect (con4,localhost,root,,)
+--connect (con5,localhost,root,,)
+--connect (con6,localhost,root,,)
+--connect (con7,localhost,root,,)
+--connect (con8,localhost,root,,)
+
+--echo # Start all loops.
+--disable_result_log
+--connection con1
+--send_eval CALL range_loop('t1', $iterations)
+--connection con2
+--send_eval CALL range_loop('t2', $iterations)
+--connection con3
+--send_eval CALL range_loop('t3', $iterations)
+--connection con4
+--send_eval CALL range_loop('t4', $iterations)
+--connection con5
+--send_eval CALL hash_loop($iterations)
+--connection con6
+--send_eval CALL t5_truncate_loop($iterations)
+--connection con7
+--send_eval CALL t5_rebuild_loop($iterations)
+--connection con8
+--send_eval CALL flush_compact_loop($iterations * 4)
+
+--disable_warnings
+--connection con1
+--reap
+--connection con2
+--reap
+--connection con3
+--reap
+--connection con4
+--reap
+--connection con5
+--reap
+--connection con6
+--reap
+--connection con7
+--reap
+--connection con8
+--reap
+--enable_warnings
+--enable_result_log
+
+--connection default
+--disconnect con1
+--disconnect con2
+--disconnect con3
+--disconnect con4
+--disconnect con5
+--disconnect con6
+--disconnect con7
+--disconnect con8
+--source include/wait_until_count_sessions.inc
+
+--let $check_restart = 0
+--source suite/rocksdb/include/ddl_concurrent_partition_check.inc
+
+--echo # Restart with table validation and check again.
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $check_restart = 1
+--source suite/rocksdb/include/ddl_concurrent_partition_check.inc
+
+DROP PROCEDURE run_stmt;
+DROP PROCEDURE range_loop;
+DROP PROCEDURE hash_loop;
+DROP PROCEDURE t5_truncate_loop;
+DROP PROCEDURE t5_rebuild_loop;
+DROP PROCEDURE flush_compact_loop;
+--echo # Statement retries (deadlock / lock wait timeout) are in the log only.
+--disable_query_log
+--let $retry_file = $MYSQLTEST_VARDIR/tmp/ddl_retries.txt
+--error 0,1086
+--eval SELECT who, err, COUNT(*), MIN(q) FROM ddl_retries GROUP BY who, err INTO OUTFILE '$retry_file'
+--enable_query_log
+DROP TABLE t1, t2, t3, t4, t5, h1, seq, ddl_retries;
