@@ -1,0 +1,29 @@
+#
+# PS-11688:
+# XA transactions on MyRocks tables with the binary log off and an explicit
+# GTID_NEXT. After an injected XA commit failure, the server hits the InnoDB
+# assertion clone0repl.cc:234 (!set_explicit ||
+# thd->is_attachable_transaction_active()) in
+# Clone_persist_gtid::check_gtid_commit. Without the XA crash fix (PS-11631)
+# the test crashes earlier, in Rdb_transaction_impl::set_lock_timeout.
+#
+# This is main.gtid_next_xa_binlog_off with MyRocks as the default engine,
+# so the table t1 created by common/binlog/gtid_next_xa.inc is a MyRocks
+# table. Expected: the same result as with InnoDB (no crash, no assertion,
+# no extra warnings on XA PREPARE).
+#
+--source include/have_rocksdb.inc
+
+# The include opens its own connections; they pick up the global default.
+# (An -master.opt --default-storage-engine=rocksdb makes MTR skip the test.)
+--disable_query_log
+SET @save_default_engine = @@global.default_storage_engine;
+SET GLOBAL default_storage_engine = ROCKSDB;
+--enable_query_log
+
+--let $rpl_skip_log_bin=1
+--source common/binlog/gtid_next_xa.inc
+
+--disable_query_log
+SET GLOBAL default_storage_engine = @save_default_engine;
+--enable_query_log
