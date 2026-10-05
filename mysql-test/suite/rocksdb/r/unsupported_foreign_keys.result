@@ -1,0 +1,53 @@
+CREATE TABLE rp (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE ip (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO rp VALUES (1);
+INSERT INTO ip VALUES (1);
+# InnoDB child referencing a MyRocks parent.
+# The server reports that it cannot open the parent, which is misleading:
+# the parent exists, but its engine cannot hold the constraint.
+CREATE TABLE ic (id INT PRIMARY KEY, p INT,
+FOREIGN KEY (p) REFERENCES rp(id)) ENGINE=InnoDB;
+ERROR HY000: Failed to open the referenced table 'rp'
+CREATE TABLE ic (id INT PRIMARY KEY, p INT) ENGINE=InnoDB;
+ALTER TABLE ic ADD FOREIGN KEY (p) REFERENCES rp(id);
+ERROR HY000: Failed to open the referenced table 'rp'
+DROP TABLE ic;
+# MyRocks child referencing an InnoDB parent
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+FOREIGN KEY (p) REFERENCES ip(id)) ENGINE=ROCKSDB;
+ERROR 42000: This version of MySQL doesn't yet support 'FOREIGN KEY for the RocksDB storage engine'
+# Referential actions and foreign_key_checks=0 do not change this
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+CONSTRAINT fk1 FOREIGN KEY (p) REFERENCES rp(id)
+ON DELETE CASCADE ON UPDATE SET NULL) ENGINE=ROCKSDB;
+ERROR 42000: This version of MySQL doesn't yet support 'FOREIGN KEY for the RocksDB storage engine'
+SET SESSION foreign_key_checks = 0;
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+FOREIGN KEY (p) REFERENCES rp(id)) ENGINE=ROCKSDB;
+ERROR 42000: This version of MySQL doesn't yet support 'FOREIGN KEY for the RocksDB storage engine'
+SET SESSION foreign_key_checks = 1;
+# InnoDB tables in a foreign key relationship cannot move to MyRocks
+CREATE TABLE ic (id INT PRIMARY KEY, p INT,
+FOREIGN KEY (p) REFERENCES ip(id)) ENGINE=InnoDB;
+ALTER TABLE ic ENGINE=ROCKSDB;
+ERROR HY000: Cannot change table's storage engine because the table participates in a foreign key constraint.
+ALTER TABLE ip ENGINE=ROCKSDB;
+ERROR HY000: Cannot change table's storage engine because the table participates in a foreign key constraint.
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES
+WHERE TABLE_SCHEMA='test' ORDER BY TABLE_NAME;
+TABLE_NAME	ENGINE
+ic	InnoDB
+ip	InnoDB
+rp	ROCKSDB
+# CREATE TABLE ... LIKE an InnoDB child does not copy the constraint
+CREATE TABLE rl LIKE ic;
+ALTER TABLE rl ENGINE=ROCKSDB;
+SHOW CREATE TABLE rl;
+Table	Create Table
+rl	CREATE TABLE `rl` (
+  `id` int NOT NULL,
+  `p` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `p` (`p`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE rl, ic, ip, rp;
