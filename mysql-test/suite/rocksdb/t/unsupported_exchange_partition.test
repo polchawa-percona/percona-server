@@ -1,0 +1,42 @@
+#
+# MyRocks negative test: ALTER TABLE ... EXCHANGE PARTITION.
+# The misleading error is reported as PS-11699.
+#
+# Statements are taken from the InnoDB suite (innodb.partition_autoinc,
+# innodb.ddl_crash_alter_partition), rewritten to ENGINE=ROCKSDB.
+#
+# MyRocks does not set HA_CAN_EXCHANGE_PARTITION. The server then reports
+# ER_PARTITION_MGMT_ON_NONPARTITIONED ("Partition management on a not
+# partitioned table is not possible"), even though the table is partitioned
+# (sql/sql_partition_admin.cc, check_exchange_partition()). The error text is
+# misleading; this test pins the current error and checks that no data moved.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE tp (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+  PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10),
+                          PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO tp VALUES (1, 1), (20, 20);
+CREATE TABLE tn (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO tn VALUES (5, 5);
+
+--error ER_PARTITION_MGMT_ON_NONPARTITIONED
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE tn;
+--error ER_PARTITION_MGMT_ON_NONPARTITIONED
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE tn WITHOUT VALIDATION;
+--error ER_PARTITION_MGMT_ON_NONPARTITIONED
+ALTER TABLE tp EXCHANGE PARTITION p1 WITH TABLE tn WITH VALIDATION;
+
+--echo # With an InnoDB table on the other side
+CREATE TABLE ti (a INT PRIMARY KEY, b INT) ENGINE=InnoDB;
+INSERT INTO ti VALUES (6, 6);
+--error ER_PARTITION_MGMT_ON_NONPARTITIONED
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE ti;
+
+--echo # Nothing moved
+SELECT * FROM tp ORDER BY a;
+SELECT * FROM tn ORDER BY a;
+SELECT * FROM ti ORDER BY a;
+
+DROP TABLE tp, tn, ti;

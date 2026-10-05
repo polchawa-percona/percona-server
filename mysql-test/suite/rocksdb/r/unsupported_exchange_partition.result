@@ -1,0 +1,29 @@
+CREATE TABLE tp (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO tp VALUES (1, 1), (20, 20);
+CREATE TABLE tn (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO tn VALUES (5, 5);
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE tn;
+ERROR HY000: Partition management on a not partitioned table is not possible
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE tn WITHOUT VALIDATION;
+ERROR HY000: Partition management on a not partitioned table is not possible
+ALTER TABLE tp EXCHANGE PARTITION p1 WITH TABLE tn WITH VALIDATION;
+ERROR HY000: Partition management on a not partitioned table is not possible
+# With an InnoDB table on the other side
+CREATE TABLE ti (a INT PRIMARY KEY, b INT) ENGINE=InnoDB;
+INSERT INTO ti VALUES (6, 6);
+ALTER TABLE tp EXCHANGE PARTITION p0 WITH TABLE ti;
+ERROR HY000: Partition management on a not partitioned table is not possible
+# Nothing moved
+SELECT * FROM tp ORDER BY a;
+a	b
+1	1
+20	20
+SELECT * FROM tn ORDER BY a;
+a	b
+5	5
+SELECT * FROM ti ORDER BY a;
+a	b
+6	6
+DROP TABLE tp, tn, ti;
