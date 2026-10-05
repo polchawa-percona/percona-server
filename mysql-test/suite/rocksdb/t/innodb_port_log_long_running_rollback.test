@@ -1,0 +1,84 @@
+#
+# Port of innodb.log_long_running_rollback
+# (mysql-test/suite/innodb/t/log_long_running_rollback.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - The original checks InnoDB's "long rollback" error-log messages
+#     (ER_IB_LONG_ROLLBACK*, log_long_rollback debug point). MyRocks has no such
+#     messages, so the port checks the data each rollback must produce instead:
+#     full rollback, rollback to a savepoint, rollback of an idle XA transaction with
+#     a binary XID, and recovery of a transaction killed after the engine prepared it
+#     but before the binlog was written (crash_after_flush_engine_log)
+#   - row counts and checksums replace the error-log queries
+#   - MyRocks does not support ROLLBACK TO SAVEPOINT after rows were modified
+#     (ER_ROLLBACK_TO_SAVEPOINT, see rocksdb.insert); the partial-rollback
+#     step asserts that error and that the whole transaction is then rolled back
+#   - runs at READ COMMITTED: the multi-row UPDATEs inside transactions are rejected
+#     by the gap-lock rule at REPEATABLE READ
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+--source include/not_crashrep.inc
+
+CREATE TABLE t (id INT UNSIGNED AUTO_INCREMENT NOT NULL PRIMARY KEY, val varchar(12),
+                KEY kv (val)) ENGINE=ROCKSDB;
+
+DELIMITER $;
+CREATE PROCEDURE populate (size INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  REPEAT
+    INSERT INTO t (val) VALUES ("test val");
+    SET i = i + 1;
+  UNTIL i >= size END REPEAT;
+END$
+DELIMITER ;$
+
+let $state= SELECT COUNT(*), SUM(val = "test val"), SUM(val = "abc"), SUM(val = "other val") FROM t;
+let $state_sk= SELECT val, COUNT(*) FROM t FORCE INDEX (kv) GROUP BY val ORDER BY val;
+
+CALL populate(400);
+
+--echo # Full rollback
+START TRANSACTION;
+UPDATE t SET val = "other val";
+ROLLBACK;
+--eval $state
+--eval $state_sk
+
+--echo # Partial rollback
+CALL populate(200);
+START TRANSACTION;
+UPDATE t SET val = "abc" WHERE id <= 400;
+SAVEPOINT sp;
+UPDATE t SET val = "abc" WHERE id > 400;
+--error ER_ROLLBACK_TO_SAVEPOINT
+ROLLBACK TO SAVEPOINT sp;
+--echo # The transaction can only be rolled back as a whole now
+--error ER_ROLLBACK_ONLY
+COMMIT;
+ROLLBACK;
+--eval $state
+--eval $state_sk
+
+--echo # Rollback of an XA transaction (known XID)
+XA START X'616263',X'646566',2;
+UPDATE t SET val = "other val";
+XA END X'616263',X'646566',2;
+XA ROLLBACK X'616263',X'646566',2;
+--eval $state
+--eval $state_sk
+
+--echo # Recovery of a transaction killed after the engine prepared it
+SET @@SESSION.debug="+d,crash_after_flush_engine_log";
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+DELETE FROM t;
+--source include/start_mysqld.inc
+--eval $state
+--eval $state_sk
+CHECK TABLE t;
+
+DROP TABLE t;
+DROP PROCEDURE populate;

@@ -1,0 +1,45 @@
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+SET GLOBAL xa_detach_on_prepare = OFF;
+CREATE TABLE t(a INT PRIMARY KEY, b INT UNIQUE) ENGINE=ROCKSDB;
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'zombie';
+insert into t(a) values (0);
+update t set b=a;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+1
+XA END 'zombie';
+XA PREPARE 'zombie';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+SET SESSION debug = '+d,crash_after_xa_rollback';
+XA ROLLBACK 'zombie';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+XA COMMIT 'zombie';
+ERROR XAE04: XAER_NOTA: Unknown XID
+SELECT COUNT(*) FROM t;
+COUNT(*)
+0
+# A completed XA COMMIT survives a kill as well
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'alive';
+INSERT INTO t VALUES (1, 1), (2, 2);
+XA END 'alive';
+XA PREPARE 'alive';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA COMMIT 'alive';
+# Kill and restart
+XA ROLLBACK 'alive';
+ERROR XAE04: XAER_NOTA: Unknown XID
+SELECT * FROM t ORDER BY a;
+a	b
+1	1
+2	2
+SELECT b FROM t FORCE INDEX (b) ORDER BY b;
+b
+1
+2
+DROP TABLE t;
+SET GLOBAL xa_detach_on_prepare = OLD_VALUE_xa_detach_on_prepare;
