@@ -1,0 +1,44 @@
+create table bug53290 (x bigint) ENGINE=ROCKSDB;
+insert into bug53290 () values (),(),(),(),(),(),(),(),(),(),(),();
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+alter table bug53290 add unique index `idx` (x);
+#
+# MyRocks: the same index over 98304 equal non-NULL values fails.
+#
+alter table bug53290 drop index `idx`;
+update bug53290 set x = 1;
+select count(*), count(distinct x) from bug53290;
+count(*)	count(distinct x)
+98304	1
+alter table bug53290 add unique index `idx` (x), algorithm=inplace;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+alter table bug53290 add unique index `idx` (x), algorithm=copy;
+ERROR 23000: Duplicate entry '1' for key 'bug53290.idx'
+show create table bug53290;
+Table	Create Table
+bug53290	CREATE TABLE `bug53290` (
+  `x` bigint DEFAULT NULL
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+select count(*), count(distinct x) from bug53290;
+count(*)	count(distinct x)
+98304	1
+check table bug53290;
+Table	Op	Msg_type	Msg_text
+test.bug53290	check	status	OK
+insert into bug53290 values (2);
+select count(*) from bug53290 where x = 2;
+count(*)
+1
+drop table bug53290;

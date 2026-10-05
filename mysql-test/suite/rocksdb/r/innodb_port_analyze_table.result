@@ -1,0 +1,51 @@
+CREATE PROCEDURE populate_t1(IN n INT)
+BEGIN
+DECLARE i int DEFAULT 1;
+START TRANSACTION;
+WHILE (i <= n) DO
+INSERT INTO t1 VALUES (i, i, CONCAT('a', i));
+SET i = i + 1;
+END WHILE;
+COMMIT;
+END|
+CREATE TABLE t1(
+class   INT,
+id      INT,
+title   VARCHAR(100)
+) ENGINE=ROCKSDB;
+SELECT @@global.rocksdb_max_row_locks;
+@@global.rocksdb_max_row_locks
+1048576
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000000
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+# The row estimate is within 10% of the real row count.
+SELECT TABLE_ROWS BETWEEN 900000 AND 1100000 AS estimate_ok
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+estimate_ok
+1
+DROP TABLE t1;
+#
+# One row lock more than rocksdb_max_row_locks: the transaction fails and
+# leaves the table unchanged.
+#
+CREATE TABLE t1(
+class   INT,
+id      INT,
+title   VARCHAR(100)
+) ENGINE=ROCKSDB;
+SET SESSION rocksdb_max_row_locks = 1000;
+CALL populate_t1(1001);
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+ROLLBACK;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+DROP TABLE t1;
+DROP PROCEDURE populate_t1;

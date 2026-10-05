@@ -1,0 +1,52 @@
+#
+# Port of innodb.innodb_bug53290 (mysql-test/suite/innodb/t/innodb_bug53290.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB
+#   - Runs at READ COMMITTED (-master.opt): MyRocks refuses INSERT ... SELECT from the
+#     same table at REPEATABLE READ (gap-lock rule)
+#   - The original builds a UNIQUE index over 98304 NULL values, which must succeed
+#     (NULLs never collide). A second part makes all values equal and checks that the
+#     same index build fails with ER_DUP_ENTRY and leaves the table unchanged and
+#     usable. A UNIQUE index on a table without a primary key (hidden PK) cannot be
+#     built INPLACE on MyRocks, so the build is a COPY ALTER; INPLACE is pinned as
+#     rejected
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+
+create table bug53290 (x bigint) ENGINE=ROCKSDB;
+
+insert into bug53290 () values (),(),(),(),(),(),(),(),(),(),(),();
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+insert into bug53290 select * from bug53290;
+
+alter table bug53290 add unique index `idx` (x);
+
+--echo #
+--echo # MyRocks: the same index over 98304 equal non-NULL values fails.
+--echo #
+alter table bug53290 drop index `idx`;
+update bug53290 set x = 1;
+select count(*), count(distinct x) from bug53290;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+alter table bug53290 add unique index `idx` (x), algorithm=inplace;
+--error ER_DUP_ENTRY
+alter table bug53290 add unique index `idx` (x), algorithm=copy;
+show create table bug53290;
+select count(*), count(distinct x) from bug53290;
+check table bug53290;
+insert into bug53290 values (2);
+select count(*) from bug53290 where x = 2;
+
+drop table bug53290;
