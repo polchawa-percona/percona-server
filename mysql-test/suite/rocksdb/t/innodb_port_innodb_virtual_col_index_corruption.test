@@ -1,0 +1,66 @@
+#
+# Port of innodb.innodb_virtual_col_index_corruption
+# (mysql-test/suite/innodb/t/innodb_virtual_col_index_corruption.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; STATS_PERSISTENT and
+#     innodb_file_per_table removed
+#   - MyRocks keys store the collation weight of a virtual column and recover
+#     the value from unpack info; 'SS' and _latin1 0xdf ('ß') have the same
+#     latin1_german2_ci weight but different bytes. Added: the same checks after
+#     a memtable flush and compaction (where the delete marker of 'SS' and the
+#     new 'ß' entry are merged), after a restart, a covering-index scan, and an
+#     UPDATE back to 'SS'
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE `t1` (
+  `a` int NOT NULL AUTO_INCREMENT,
+  `b` varchar(2) CHARACTER SET latin1 COLLATE latin1_german2_ci DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d2` VARCHAR(2) GENERATED ALWAYS AS (UPPER(b)) VIRTUAL,
+  `d` varchar(2) CHARACTER SET latin1 COLLATE latin1_german2_ci  GENERATED ALWAYS AS (b) VIRTUAL,
+  PRIMARY KEY (`a`),
+  KEY `d` (`d`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=4096 DEFAULT CHARSET=utf8mb3 COLLATE=utf8_general_ci;
+INSERT INTO t1 VALUES(1,'SS',1, default,default);
+
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+
+# In german collation 'ß' and 'SS' are same as per collation
+# but they are different in binary. The secondary index entry for the new
+# row has the same key as the deleted 'SS' entry.
+
+DELETE FROM t1 WHERE a=1;
+INSERT INTO t1 VALUES(1,_latin1 0xdf,1, default, default);
+
+# We expect same output from the secondary index on virtual col and from clustered index
+# for field d.
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+
+--echo # Covering scan of the secondary index and lookups by both spellings
+SELECT HEX(d) FROM t1 FORCE INDEX (d);
+SELECT a FROM t1 FORCE INDEX (d) WHERE d = 'SS';
+SELECT a FROM t1 FORCE INDEX (d) WHERE d = _latin1 0xdf;
+
+--echo # After flush and compaction
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+SELECT HEX(d) FROM t1 FORCE INDEX (d);
+
+--echo # After a restart
+--source include/restart_mysqld.inc
+SELECT HEX(d),a FROM t1 USE INDEX (d) WHERE a = 1;
+SELECT HEX(d),a FROM t1 WHERE a = 1;
+
+--echo # UPDATE back to 'SS' and a second row with the other spelling
+UPDATE t1 SET b = 'SS' WHERE a = 1;
+INSERT INTO t1 (a, b, c) VALUES (2, _latin1 0xdf, 2);
+SELECT HEX(d), a FROM t1 FORCE INDEX (d) ORDER BY a;
+SELECT HEX(d), a FROM t1 IGNORE INDEX (d) ORDER BY a;
+CHECK TABLE t1;
+
+DROP TABLE t1;

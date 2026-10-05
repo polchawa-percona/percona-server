@@ -1,0 +1,35 @@
+#
+# Port of percona_innodb.bug72665 (mysql-test/suite/percona_innodb/t/bug72665.test)
+# to MyRocks (http://bugs.mysql.com/bug.php?id=72665: ALTER TABLE asserted in
+# InnoDB when a UNIQUE prefix index on a TEXT column became a full-column
+# NOT NULL key).
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - Added rows before the ALTER, and checks that the rows are still found
+#     through both unique keys afterwards (MyRocks has a hidden primary key here,
+#     and the ALTER changes which key InnoDB would promote to primary)
+#   - Disabled until port-findings.md #57 is fixed: the UNIQUE NOT NULL key
+#     c42(255) covers the whole TINYBLOB, the server promotes it to the primary
+#     key, and every read of the table crashes the server. Expected results
+#     are those of InnoDB.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1(c42 tinyblob not null, c45 TEXT, unique(c42 (255)), unique(c45 (255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', ''), ('y', NULL);
+
+--error 1265
+ALTER TABLE t1 MODIFY c45 SET('') NOT NULL;
+DELETE FROM t1 WHERE c45 IS NULL;
+
+ALTER TABLE t1 MODIFY c45 SET('') NOT NULL;
+
+SHOW CREATE TABLE t1;
+
+SELECT c42, HEX(c45) FROM t1 FORCE INDEX (c42) WHERE c42 = 'x';
+SELECT c42, HEX(c45) FROM t1 FORCE INDEX (c45) WHERE c45 = '';
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES ('z', '');
+CHECK TABLE t1;
+
+DROP TABLE t1;
