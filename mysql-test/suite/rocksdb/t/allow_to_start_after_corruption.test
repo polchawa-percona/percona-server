@@ -56,9 +56,11 @@ select * from t1;
 --echo #  Test restart failure. The server is shutdown at this point.
 --echo #
 
+# MyRocks is a dynamic plugin, so it must be loaded explicitly. The server
+# finds the corruption marker during MyRocks initialization and exits with 0.
+--echo # Start mysqld with MyRocks loaded, expecting it to exit
 --error 0
---echo $MYSQLD_CMD --log-error=$LOG $ROCKSDB_OPT $ROCKSDB_LOAD_ADD_PATH
---exec $MYSQLD_CMD --log-error=$LOG $ROCKSDB_OPT $ROCKSDB_LOAD_ADD_PATH
+--exec $MYSQLD_CMD --log-error=$LOG $ROCKSDB_OPT '$ROCKSDB_LOAD'
 --let SEARCH_PATTERN=The server will exit normally and stop restart attempts
 --source include/search_pattern.inc
 --remove_file $LOG
