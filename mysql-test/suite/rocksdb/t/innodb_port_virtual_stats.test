@@ -1,0 +1,71 @@
+#
+# Port of innodb.virtual_stats
+# (mysql-test/suite/innodb/t/virtual_stats.test) to MyRocks.
+#
+# Bug#22469660: InnoDB did not update the index statistics when adding or
+# dropping a virtual column together with indexes.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB. MyRocks cannot add or drop a virtual column with
+#     ALGORITHM=INPLACE, so the ALTER statements use the default algorithm.
+#   - mysql.innodb_index_stats does not exist. After each ALTER the test
+#     lists the indexes MyRocks keeps for the table
+#     (INFORMATION_SCHEMA.ROCKSDB_DDL) and their statistics
+#     (INFORMATION_SCHEMA.STATISTICS cardinality after ANALYZE TABLE). The
+#     memtable is flushed before ANALYZE so that the statistics are exact.
+#
+--source include/have_rocksdb.inc
+
+--let $save_sampling_pct = `SELECT @@global.rocksdb_table_stats_sampling_pct`
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+--let $check_ddl = SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name
+--let $check_stats = SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index
+
+CREATE TABLE t (
+  a INT,
+  b INT,
+  c INT GENERATED ALWAYS AS(a+b),
+  d INT GENERATED ALWAYS AS(a+b+b),
+  KEY idxa (a),
+  KEY vidxcd (c, d)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t (a,b) VALUES (1, 2);
+
+--let $n = 0
+while ($n < 6)
+{
+  if ($n == 1)
+  {
+    --error ER_ALTER_OPERATION_NOT_SUPPORTED
+    ALTER TABLE t ADD COLUMN e INT GENERATED ALWAYS AS(a+a+b), ADD INDEX idxb (b), ALGORITHM=INPLACE;
+    ALTER TABLE t ADD COLUMN e INT GENERATED ALWAYS AS(a+a+b), ADD INDEX idxb (b);
+  }
+  if ($n == 2)
+  {
+    ALTER TABLE t DROP COLUMN c, DROP INDEX idxa;
+  }
+  if ($n == 3)
+  {
+    ALTER TABLE t ADD INDEX vidxe (e), ALGORITHM=INPLACE;
+  }
+  if ($n == 4)
+  {
+    ALTER TABLE t ADD COLUMN f INT GENERATED ALWAYS AS(a + a), ADD INDEX vidxf (f);
+  }
+  if ($n == 5)
+  {
+    ALTER TABLE t DROP INDEX vidxcd;
+  }
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  ANALYZE TABLE t;
+  --eval $check_ddl
+  --eval $check_stats
+  --inc $n
+}
+
+DROP TABLE t;
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_sampling_pct = $save_sampling_pct
+--enable_query_log

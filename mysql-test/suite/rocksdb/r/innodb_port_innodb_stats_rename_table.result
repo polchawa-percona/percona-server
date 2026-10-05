@@ -1,0 +1,121 @@
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+CREATE DATABASE stats_db2;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 0;
+# A different table leaves statistics behind under the new name.
+CREATE TABLE stats_rename_new (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB;
+INSERT INTO stats_rename_new VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5),
+(6, 6), (7, 7), (8, 8);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE stats_rename_new;
+Table	Op	Msg_type	Msg_text
+test.stats_rename_new	analyze	status	OK
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_new	kb	b	8
+test	stats_rename_new	PRIMARY	a	8
+DROP TABLE stats_rename_new;
+CREATE TABLE stats_rename_old (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB;
+INSERT INTO stats_rename_old VALUES (1, 1), (2, 1), (3, 2), (4, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE stats_rename_old;
+Table	Op	Msg_type	Msg_text
+test.stats_rename_old	analyze	status	OK
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_old	kb	b	2
+test	stats_rename_old	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+test	stats_rename_old	4
+RENAME TABLE stats_rename_old TO stats_rename_new;
+# The renamed table keeps its own statistics.
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_new	kb	b	2
+test	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+test	stats_rename_new	4
+RENAME TABLE stats_rename_new TO stats_db2.stats_rename_new;
+# Also after a rename to another schema.
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+stats_db2	stats_rename_new	kb	b	2
+stats_db2	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+stats_db2	stats_rename_new	4
+# And after a restart.
+# restart
+SET GLOBAL rocksdb_table_stats_use_table_scan = 0;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+stats_db2	stats_rename_new	kb	b	2
+stats_db2	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+stats_db2	stats_rename_new	4
+DROP TABLE stats_db2.stats_rename_new;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 1;
+# A different table leaves statistics behind under the new name.
+CREATE TABLE stats_rename_new (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB;
+INSERT INTO stats_rename_new VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5),
+(6, 6), (7, 7), (8, 8);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE stats_rename_new;
+Table	Op	Msg_type	Msg_text
+test.stats_rename_new	analyze	status	OK
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_new	kb	b	8
+test	stats_rename_new	PRIMARY	a	8
+DROP TABLE stats_rename_new;
+CREATE TABLE stats_rename_old (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+ENGINE=ROCKSDB;
+INSERT INTO stats_rename_old VALUES (1, 1), (2, 1), (3, 2), (4, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE stats_rename_old;
+Table	Op	Msg_type	Msg_text
+test.stats_rename_old	analyze	status	OK
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_old	kb	b	2
+test	stats_rename_old	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+test	stats_rename_old	4
+RENAME TABLE stats_rename_old TO stats_rename_new;
+# The renamed table keeps its own statistics.
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+test	stats_rename_new	kb	b	2
+test	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+test	stats_rename_new	4
+RENAME TABLE stats_rename_new TO stats_db2.stats_rename_new;
+# Also after a rename to another schema.
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+stats_db2	stats_rename_new	kb	b	2
+stats_db2	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+stats_db2	stats_rename_new	4
+# And after a restart.
+# restart
+SET GLOBAL rocksdb_table_stats_use_table_scan = 1;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	COLUMN_NAME	CARDINALITY
+stats_db2	stats_rename_new	kb	b	2
+stats_db2	stats_rename_new	PRIMARY	a	4
+SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name;
+TABLE_SCHEMA	TABLE_NAME	TABLE_ROWS
+stats_db2	stats_rename_new	4
+DROP TABLE stats_db2.stats_rename_new;
+DROP DATABASE stats_db2;

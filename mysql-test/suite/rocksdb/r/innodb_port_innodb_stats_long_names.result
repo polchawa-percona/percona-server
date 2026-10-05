@@ -1,0 +1,79 @@
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 0;
+CREATE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+(a INT, b INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+SUBPARTITION BY HASH(b)
+(
+PARTITION p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES LESS THAN (100)
+(
+SUBPARTITION
+p1s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+SUBPARTITION
+p1s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+),
+PARTITION p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES LESS THAN (200)
+(
+SUBPARTITION
+p2s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+SUBPARTITION
+p2s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+)
+);
+INSERT INTO t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES (1, 1), (150, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;
+Table	Op	Msg_type	Msg_text
+test.t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	analyze	status	OK
+SELECT partition_name, subpartition_name, table_rows
+FROM information_schema.partitions
+WHERE table_schema = DATABASE() AND table_name LIKE 't_cde%'
+    ORDER BY partition_name, subpartition_name;
+PARTITION_NAME	SUBPARTITION_NAME	TABLE_ROWS
+p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p1s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	0
+p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p1s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	1
+p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p2s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	1
+p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p2s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	0
+DROP TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 1;
+CREATE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+(a INT, b INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+SUBPARTITION BY HASH(b)
+(
+PARTITION p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES LESS THAN (100)
+(
+SUBPARTITION
+p1s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+SUBPARTITION
+p1s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+),
+PARTITION p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES LESS THAN (200)
+(
+SUBPARTITION
+p2s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+SUBPARTITION
+p2s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+)
+);
+INSERT INTO t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+VALUES (1, 1), (150, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;
+Table	Op	Msg_type	Msg_text
+test.t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	analyze	status	OK
+SELECT partition_name, subpartition_name, table_rows
+FROM information_schema.partitions
+WHERE table_schema = DATABASE() AND table_name LIKE 't_cde%'
+    ORDER BY partition_name, subpartition_name;
+PARTITION_NAME	SUBPARTITION_NAME	TABLE_ROWS
+p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p1s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	0
+p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p1s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	1
+p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p2s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	1
+p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	p2s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd	0
+DROP TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;

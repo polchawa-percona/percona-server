@@ -1,0 +1,102 @@
+# Test setup.
+CREATE TABLE t1 (
+c1 INT PRIMARY KEY,
+c2 VARCHAR(50),
+c3 VARCHAR(50),
+c4 VARCHAR(50)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (c1, c2, c3, c4)
+VALUES
+(1, 'AAA_2', 'AAA_3', 'AAA_4'),
+(2, 'BBB_2', 'BBB_3', 'BBB_4'),
+(3, 'CCC_2', 'CCC_3', 'CCC_4'),
+(4, 'DDD_2', 'DDD_3', 'DDD_4'),
+(5, 'EEE_2', 'EEE_3', 'EEE_4');
+# Start test.
+ALTER TABLE t1 CONVERT TO CHARACTER SET 'utf8mb4',ALGORITHM=COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 ADD COLUMN c5 VARCHAR(15), ALGORITHM = COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 DROP COLUMN c5, ALGORITHM = COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 ADD COLUMN c5 VARCHAR(15), ALGORITHM = COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 DROP COLUMN c5, ALGORITHM = COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (c4), ALGORITHM=COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (c1), ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (c1), ALGORITHM=COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 ADD COLUMN c5 VARCHAR(15);
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+ALTER TABLE t1 DROP COLUMN c5, ALGORITHM = COPY;
+SELECT t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' AND s.index_name = 'PRIMARY';
+has_rows	has_cardinality
+1	1
+CREATE TABLE t2 (
+c1 INT PRIMARY KEY,
+c2 VARCHAR(50),
+c3 VARCHAR(50),
+c4 VARCHAR(50)
+) ENGINE=ROCKSDB PARTITION BY RANGE (c1) (
+PARTITION p1 VALUES LESS THAN (6),
+PARTITION p2 VALUES LESS THAN (11),
+PARTITION p3 VALUES LESS THAN (16),
+PARTITION p4 VALUES LESS THAN (21)
+);
+INSERT INTO t2 (c1, c2, c3, c4)
+VALUES
+(1, 'AAA_2', 'AAA_3', 'AAA_4'),
+(2, 'BBB_2', 'BBB_3', 'BBB_4'),
+(3, 'CCC_2', 'CCC_3', 'CCC_4'),
+(4, 'DDD_2', 'DDD_3', 'DDD_4'),
+(5, 'EEE_2', 'EEE_3', 'EEE_4'),
+(6, 'FFF_2', 'DDD_3', 'DDD_4'),
+(7, 'GGG_2', 'DDD_3', 'DDD_4'),
+(8, 'HHH_2', 'DDD_3', 'DDD_4'),
+(9, 'III_2', 'DDD_3', 'DDD_4'),
+(10, 'JJJ_2', 'DDD_3', 'DDD_4'),
+(13, 'KKK_2', 'DDD_3', 'DDD_4'),
+(20, 'LLL_2', 'DDD_3', 'DDD_4');
+ALTER TABLE t2 CONVERT TO CHARACTER SET 'utf8mb4',ALGORITHM=COPY;
+SELECT partition_name, table_rows > 0 AS has_rows FROM information_schema.partitions WHERE table_schema = DATABASE() AND table_name = 't2' ORDER BY partition_name;
+PARTITION_NAME	has_rows
+p1	1
+p2	1
+p3	1
+p4	1
+ALTER TABLE t2 ADD COLUMN c5 VARCHAR(15), ALGORITHM = COPY;
+SELECT partition_name, table_rows > 0 AS has_rows FROM information_schema.partitions WHERE table_schema = DATABASE() AND table_name = 't2' ORDER BY partition_name;
+PARTITION_NAME	has_rows
+p1	1
+p2	1
+p3	1
+p4	1
+ALTER TABLE t2 DROP COLUMN c5, ALGORITHM = COPY;
+SELECT partition_name, table_rows > 0 AS has_rows FROM information_schema.partitions WHERE table_schema = DATABASE() AND table_name = 't2' ORDER BY partition_name;
+PARTITION_NAME	has_rows
+p1	1
+p2	1
+p3	1
+p4	1
+# Test Cleanup.
+DROP TABLE t1;
+DROP TABLE t2;
