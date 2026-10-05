@@ -1,0 +1,119 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# What a MyRocks row lock waiter does when a lock holder releases the lock
+# but another transaction still holds a conflicting lock.
+#
+# InnoDB grants a released lock directly to the queued waiter, so a waiter is
+# either waiting or holds the lock. RocksDB's point lock manager does not
+# grant locks to waiters. A release wakes every waiter on the lock stripe;
+# each woken waiter clears its waiting state (ROCKSDB_TRX.WAITING_KEY),
+# re-checks the lock and, if the lock is still held, sets its waiting state
+# again and goes back to sleep. Between clearing and setting it, ROCKSDB_TRX
+# shows the waiter as not waiting although it holds nothing. A test that
+# reads WAITING_KEY once right after a release can therefore see 0 waiters.
+#
+# The window itself is inside the RocksDB library, with no hook that MyRocks
+# code can reach. This test stops the waiter at the MyRocks debug sync point
+# "rocksdb_row_lock_wait_woken", right after the wake-up and before the
+# re-check, and uses "rocksdb_row_lock_wait_begin" (reached each time the
+# waiter goes to sleep, after its waiting state is set) to know that it
+# waits again.
+#
+# Setup (scenario 6 of rocksdb.innodb_port_avoid_deadlock_with_blocked):
+# con1 holds S, con2 waits for X, con3 gets S at once, con1 commits.
+#
+
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1);
+
+--let $i = 2
+while ($i)
+{
+  if ($i == 2)
+  {
+    --echo # rocksdb_deadlock_detect=OFF
+    --let $detect = OFF
+  }
+  if ($i == 1)
+  {
+    --echo # rocksdb_deadlock_detect=ON
+    --let $detect = ON
+  }
+
+  --connect (con1,localhost,root,,)
+  --eval SET SESSION rocksdb_deadlock_detect = $detect
+  --let $con1 = `SELECT CONNECTION_ID()`
+  --connect (con2,localhost,root,,)
+  --eval SET SESSION rocksdb_deadlock_detect = $detect
+  --let $con2 = `SELECT CONNECTION_ID()`
+  --connect (con3,localhost,root,,)
+  --eval SET SESSION rocksdb_deadlock_detect = $detect
+  --let $con3 = `SELECT CONNECTION_ID()`
+
+  --let $show_locks = SELECT CASE t.thread_id WHEN $con1 THEN 'con1' WHEN $con2 THEN 'con2' WHEN $con3 THEN 'con3' END AS conn, l.mode FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode
+  --let $con2_waiting = SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+
+  --connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+  --connection con2
+  SET DEBUG_SYNC = 'rocksdb_row_lock_wait_begin SIGNAL con2_sleeps EXECUTE 2';
+  SET DEBUG_SYNC = 'rocksdb_row_lock_wait_woken SIGNAL con2_woken WAIT_FOR con2_recheck';
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+  --connection default
+  SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+  --replace_result $con2 CON2
+  --eval $con2_waiting
+
+  --connection con3
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+
+  --connection con1
+  COMMIT;
+
+  --connection default
+  --echo # con1's COMMIT wakes con2 although con3 still holds S.
+  SET DEBUG_SYNC = 'now WAIT_FOR con2_woken';
+  --echo # con2 is stopped before its re-check; it still shows as waiting.
+  --echo # (ROCKSDB_LOCKS cannot be read here: con2 holds the lock stripe.)
+  --replace_result $con2 CON2
+  --eval $con2_waiting
+  --echo # Let con2 re-check: con3's S lock blocks it, so it waits again.
+  SET DEBUG_SYNC = 'now SIGNAL con2_recheck';
+  SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+  --replace_result $con2 CON2
+  --eval $con2_waiting
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+
+  --connection con3
+  COMMIT;
+
+  --connection con2
+  --reap
+  COMMIT;
+
+  --connection default
+  --disconnect con1
+  --disconnect con2
+  --disconnect con3
+  SET DEBUG_SYNC = 'RESET';
+  --dec $i
+}
+
+SELECT * FROM t1;
+DROP TABLE t1;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc

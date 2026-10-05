@@ -1,0 +1,227 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# Port of innodb.innodb_replace to MyRocks.
+# Bug#11759688 52020: InnoDB can still deadlock on just INSERT...ON
+# DUPLICATE KEY, and Bug#22884631: REPLACE on a table with several unique
+# indexes.
+#
+# Changes from the InnoDB original:
+#   - ENGINE=ROCKSDB, with the suite's lock wait timeout raised to 30 s.
+#   - MyRocks checks a duplicate primary key with an exclusive lock on the
+#     existing row (get_for_update), where InnoDB takes a shared lock. So a
+#     failed INSERT of a duplicate keeps an exclusive lock on that row until
+#     its transaction ends, and the default session's LOCK IN SHARE MODE
+#     waits where InnoDB's does not. The later INSERT ... ON DUPLICATE KEY
+#     UPDATE in the same transaction already holds the exclusive lock, so the
+#     lock upgrade InnoDB's bug was about cannot happen.
+#   - InnoDB's "lock_wait_will_wait" debug sync point does not exist in
+#     MyRocks; a session is known to wait when ROCKSDB_TRX shows a WAITING_KEY.
+#   - The TEMPORARY TABLE case is run on a normal table (MyRocks temporary
+#     tables are out of scope).
+#   - The Bug#22884631 part pauses at the MyRocks point
+#     rocksdb.after_unique_pk_check instead of InnoDB's ib_after_row_insert.
+#
+
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+--let $default_id = `SELECT CONNECTION_ID()`
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(3,1);
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+connection con1;
+
+BEGIN;
+SET DEBUG_SYNC='write_row_noreplace SIGNAL insert1 WAIT_FOR select1';
+--send
+INSERT INTO t1 VALUES(3,2);
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert1';
+--echo # con1's failed INSERT holds an exclusive lock on (3,1): this waits.
+--send
+SELECT * FROM t1 LOCK IN SHARE MODE;
+
+connection con2;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select1';
+
+connection con1;
+--error ER_DUP_ENTRY
+reap;
+--echo # con1 already holds the exclusive lock: no upgrade, no deadlock.
+INSERT INTO t1 VALUES(3,3) ON DUPLICATE KEY UPDATE b=b+10;
+COMMIT;
+
+connection default;
+reap;
+connection con1;
+
+SET DEBUG_SYNC='write_row_replace SIGNAL insert2 WAIT_FOR select2';
+--send
+REPLACE INTO t1 VALUES(3,4);
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert2';
+SELECT * FROM t1;
+--send
+SELECT * FROM t1 LOCK IN SHARE MODE;
+
+connection con2;
+# The SELECT is blocked by con1's exclusive lock.
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select2';
+
+connection con1;
+reap;
+
+connection default;
+reap;
+
+connection con1;
+SET DEBUG_SYNC='write_row_replace SIGNAL insert3 WAIT_FOR select3';
+--send
+INSERT INTO t1 VALUES(3,5) ON DUPLICATE KEY UPDATE b=b+20;
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert3';
+--send
+SELECT b FROM t1 LOCK IN SHARE MODE;
+
+connection con2;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select3';
+
+connection default;
+reap;
+
+connection con1;
+reap;
+SET DEBUG_SYNC='write_row_noreplace SIGNAL insert4 WAIT_FOR select4';
+--send
+LOAD DATA INFILE '../../std_data/loaddata5.dat' INTO TABLE t1 FIELDS TERMINATED BY '' ENCLOSED BY '' (a, b);
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert4';
+--echo # The failed LOAD DATA holds an exclusive lock on row 3: both wait.
+--send
+SELECT b FROM t1 WHERE a=3 LOCK IN SHARE MODE;
+
+connection con2;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select4';
+
+connection default;
+reap;
+
+connection con1;
+--error ER_DUP_ENTRY
+reap;
+SET DEBUG_SYNC='write_row_noreplace SIGNAL insert5 WAIT_FOR select5';
+--send
+LOAD DATA INFILE '../../std_data/loaddata5.dat' IGNORE INTO TABLE t1 FIELDS TERMINATED BY '' ENCLOSED BY '' (a, b);
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert5';
+SELECT * FROM t1;
+--send
+SELECT * FROM t1 WHERE a=3 FOR UPDATE;
+
+connection con2;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select5';
+
+connection con1;
+reap;
+connection default;
+reap;
+
+connection con1;
+SET DEBUG_SYNC='write_row_replace SIGNAL insert6 WAIT_FOR select6';
+--send
+LOAD DATA INFILE '../../std_data/loaddata5.dat' REPLACE INTO TABLE t1 FIELDS TERMINATED BY '' ENCLOSED BY '' (a, b);
+
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR insert6';
+SELECT * FROM t1;
+--send
+SELECT a,b FROM t1 LOCK IN SHARE MODE;
+
+connection con2;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $default_id AND waiting_key != ''
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL select6';
+
+connection con1;
+reap;
+connection default;
+reap;
+
+disconnect con1;
+disconnect con2;
+
+connection default;
+SET DEBUG_SYNC='RESET';
+DROP TABLE t1;
+
+--echo # REPLACE on a table with several unique indexes (the original runs
+--echo # it on a TEMPORARY table).
+START TRANSACTION;
+CREATE TABLE t1 (a INT, b CHAR(10), d VARCHAR(100), c INT, UNIQUE INDEX(a), UNIQUE INDEX(b), UNIQUE INDEX(d)) ENGINE = ROCKSDB;
+INSERT INTO t1 VALUES(2, 'abcde', 'qwerty', 200);
+REPLACE INTO t1 VALUES(2, 'QWERTY', 'ZXCVBB', 300);
+SELECT * FROM t1;
+COMMIT;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#22884631 FAILING ASSERTION: TRX->DUPLICATES == 0
+--echo #
+--connect (con1,localhost,root,,)
+--connect (con2,localhost,root,,)
+
+CREATE TABLE t1(a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2(a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1);
+INSERT INTO t2 VALUES(2);
+
+--echo # Connection con1
+connection con1;
+INSERT INTO t1 VALUES(3);
+SET DEBUG_SYNC = 'RESET';
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL replace_paused WAIT_FOR go_ahead';
+--send REPLACE INTO t2 VALUES(3)
+
+--echo # Connection con2
+connection con2;
+SET DEBUG_SYNC = 'now WAIT_FOR replace_paused';
+--error ER_WRONG_VALUE_COUNT_ON_ROW
+INSERT INTO t1 VALUES(70, 80);
+SET DEBUG_SYNC= 'now SIGNAL go_ahead';
+
+--echo # Connection con1
+connection con1;
+--reap
+SELECT * FROM t2;
+DROP TABLE t1;
+DROP TABLE t2;
+
+SET DEBUG_SYNC= 'RESET';
+
+disconnect con1;
+disconnect con2;
+connection default;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc
