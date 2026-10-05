@@ -1,0 +1,9 @@
+[default]
+
+[small_merge]
+rocksdb-merge-buf-size=4096
+rocksdb-merge-combine-read-size=1048576
+rocksdb-merge-tmp-file-removal-delay-ms=1
+
+[delete_range]
+rocksdb-enable-delete-range-for-drop-index=ON
