@@ -1,0 +1,43 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Issue #143: rocksdb_commit_in_the_middle with ROLLBACK
+--echo # (split from rocksdb.rocksdb)
+--echo #
+# MyRocks disables commit-in-the-middle under write_unprepared
+# (ha_rocksdb.cc, commit_in_the_middle()), so these results only apply to
+# the other write policies.
+if (`SELECT @@global.rocksdb_write_policy = 'write_unprepared'`)
+{
+  --skip commit-in-the-middle is disabled under write_unprepared
+}
+
+CREATE TABLE t1 (id int primary key, value int) engine=RocksDB;
+SET @save_rocksdb_bulk_load_size= @@rocksdb_bulk_load_size;
+SET unique_checks=1;
+SET rocksdb_commit_in_the_middle=1;
+SET rocksdb_bulk_load_size=10;
+BEGIN;
+INSERT INTO t1 (id) VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
+  (11),(12),(13),(14),(15),(16),(17),(18),(19);
+ROLLBACK;
+SELECT * FROM t1;
+INSERT INTO t1 (id) VALUES (11),(12),(13),(14),(15);
+# MyRocks does not support gap locks in REPEATABLE-READ mode, this part of the
+# test does not require RR ISO to complete, so lets temporarily alter the ISO
+# to RC
+set @orig_tx_iso=@@session.transaction_isolation;
+set session transaction_isolation='READ-COMMITTED';
+BEGIN;
+
+UPDATE t1 SET value=100;
+ROLLBACK;
+SELECT * FROM t1;
+BEGIN;
+DELETE FROM t1;
+ROLLBACK;
+SELECT * FROM t1;
+set session transaction_isolation=@orig_tx_iso;
+SET rocksdb_commit_in_the_middle=0;
+SET rocksdb_bulk_load_size= @save_rocksdb_bulk_load_size;
+DROP TABLE t1;

@@ -57,14 +57,22 @@ AND STAT_TYPE in ('INTERNAL_KEY_SKIPPED_COUNT', 'INTERNAL_DELETE_SKIPPED_COUNT')
 # Statistics for multi-statement transactions cannot be attributed to
 # individual tables but should show up in global perf context stats
 
+# Under write_unprepared, flush every write before commit so the per-table
+# attribution checked below does not depend on the server-wide threshold.
+let $wup = `SELECT @@global.rocksdb_write_policy = 'write_unprepared'`;
+if ($wup)
+{
+  --disable_query_log
+  SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  --enable_query_log
+}
 BEGIN;
 INSERT INTO t2 VALUES (1), (2);
 INSERT INTO t2 VALUES (3), (4);
 COMMIT;
 
 # For write unprepared, writes can happen before commit, meaning some IOs can
-# be attributed to specific statements/tables.
-let $wup = `SELECT @@global.rocksdb_write_policy = 'write_unprepared'`;
+# be attributed to specific statements/tables ($wup is set above).
 --disable_query_log
 if ($wup) {
   SELECT COUNT(*) from INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT
