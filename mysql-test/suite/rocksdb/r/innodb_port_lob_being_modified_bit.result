@@ -1,0 +1,82 @@
+#
+# lob-being-modified-bit: flush and compaction while a large write is
+# paused, then commit and kill.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, f1 LONGBLOB, KEY k_f1 (f1(20)))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('x', 1024*16*4));
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT LEFT(f1, 40), RIGHT(f1, 40), LENGTH(f1) FROM t1;
+LEFT(f1, 40)	RIGHT(f1, 40)	LENGTH(f1)
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	65536
+START TRANSACTION;
+INSERT INTO t1 VALUES (3, REPEAT('w', 1024*16*4));
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL go_flush WAIT_FOR go_insert';
+INSERT INTO t1 VALUES (2, REPEAT('y', 1024*16*4));
+SET DEBUG_SYNC = 'now WAIT_FOR go_flush';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL go_insert';
+COMMIT;
+# Kill and restart
+SELECT id, LEFT(f1, 40), RIGHT(f1, 40), LENGTH(f1) FROM t1 ORDER BY id;
+id	LEFT(f1, 40)	RIGHT(f1, 40)	LENGTH(f1)
+1	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	65536
+2	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy	65536
+3	wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww	wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww	65536
+SELECT id FROM t1 FORCE INDEX (k_f1) ORDER BY id;
+id
+1
+2
+3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# zlob_insert_by_update: a deleted large row is compacted away while a
+# new, larger row with the same key is being written; the server is
+# killed before that write commits.
+#
+CREATE TABLE t1 (f1 INT PRIMARY KEY, f2 LONGBLOB, KEY k_f2 (f2(20)))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('x', 64*1024));
+DELETE FROM t1 WHERE f1 = 1;
+START TRANSACTION;
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL do_purge WAIT_FOR continue_insert';
+INSERT INTO t1 VALUES (1, REPEAT('y', 128*1024));
+SET DEBUG_SYNC = 'now WAIT_FOR do_purge';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# Kill and restart
+# Neither the deleted row nor the uncommitted one is visible.
+SELECT f1, LENGTH(f2) FROM t1;
+f1	LENGTH(f2)
+SELECT COUNT(*) FROM t1 FORCE INDEX (k_f2);
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same write, this time committed before the kill.
+START TRANSACTION;
+SET DEBUG_SYNC = 'rocksdb.after_unique_pk_check SIGNAL do_purge WAIT_FOR continue_insert';
+INSERT INTO t1 VALUES (1, REPEAT('y', 128*1024));
+SET DEBUG_SYNC = 'now WAIT_FOR do_purge';
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL continue_insert';
+COMMIT;
+# Kill and restart
+SELECT f1, LEFT(f2, 10), LENGTH(f2) FROM t1;
+f1	LEFT(f2, 10)	LENGTH(f2)
+1	yyyyyyyyyy	131072
+SELECT f1 FROM t1 FORCE INDEX (k_f2) WHERE f2 LIKE 'y%';
+f1
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

@@ -1,0 +1,125 @@
+CREATE TABLE t_json (id INT PRIMARY KEY, j1 JSON) ENGINE=ROCKSDB;
+CREATE TABLE t_blob (f1 INT PRIMARY KEY, f2 LONGBLOB, KEY k_f2 (f2(50)))
+ENGINE=ROCKSDB;
+SET @doc = CONCAT('["Sven", "', REPEAT('abcdefghijklmnopqrstuvwxyz1234', 4000),
+'", "', REPEAT('a', 200), '"]');
+INSERT INTO t_json VALUES (1, @doc);
+INSERT INTO t_blob VALUES (1, REPEAT('+', 40000)), (2, REPEAT('x', 6*1024*1024)),
+(3, '3');
+#
+# Kill with the transaction still open
+#
+START TRANSACTION;
+INSERT INTO t_json VALUES (2, @doc2);
+UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', REPEAT('c', 200)) WHERE id = 1;
+INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024)), (11, REPEAT('b', 70000));
+UPDATE t_blob SET f2 = REPEAT('-', 50000) WHERE f1 = 1;
+INSERT INTO t_blob VALUES (12, REPEAT('y', 6*1024*1024));
+UPDATE t_blob SET f2 = REPEAT('z', 6*1024*1024) WHERE f1 = 3;
+DELETE FROM t_blob WHERE f1 = 2;
+# Kill and restart
+# The recovered data equals the committed data.
+SELECT id, LENGTH(j1), MD5(j1), JSON_EXTRACT(j1, '$[0]'),
+JSON_LENGTH(j1) FROM t_json ORDER BY id;
+id	LENGTH(j1)	MD5(j1)	JSON_EXTRACT(j1, '$[0]')	JSON_LENGTH(j1)
+1	120216	2bad0522f10b549960c91a9fe57e783d	"Sven"	3
+SELECT f1, LENGTH(f2), MD5(f2) FROM t_blob ORDER BY f1;
+f1	LENGTH(f2)	MD5(f2)
+1	40000	39b7fe8e7c354867312bc288c88cca8b
+2	6291456	3349dc700140d7f86a078484278075a9
+3	1	eccbc87e4b5ce2fe28308fd9f2a7baf3
+SELECT COUNT(*) FROM t_blob FORCE INDEX (k_f2) WHERE f2 IS NOT NULL;
+COUNT(*)
+3
+SELECT f1 FROM t_blob FORCE INDEX (k_f2) WHERE f2 LIKE '+%';
+f1
+1
+CHECK TABLE t_json, t_blob;
+Table	Op	Msg_type	Msg_text
+test.t_json	check	status	OK
+test.t_blob	check	status	OK
+#
+# Kill while ROLLBACK is running
+#
+START TRANSACTION;
+INSERT INTO t_json VALUES (2, @doc2);
+UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', REPEAT('c', 200)) WHERE id = 1;
+INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024)), (11, REPEAT('b', 70000));
+UPDATE t_blob SET f2 = REPEAT('-', 50000) WHERE f1 = 1;
+INSERT INTO t_blob VALUES (12, REPEAT('y', 6*1024*1024));
+UPDATE t_blob SET f2 = REPEAT('z', 6*1024*1024) WHERE f1 = 3;
+DELETE FROM t_blob WHERE f1 = 2;
+ROLLBACK;
+# Kill and restart
+# The recovered data equals the committed data.
+SELECT id, LENGTH(j1), MD5(j1), JSON_EXTRACT(j1, '$[0]'),
+JSON_LENGTH(j1) FROM t_json ORDER BY id;
+id	LENGTH(j1)	MD5(j1)	JSON_EXTRACT(j1, '$[0]')	JSON_LENGTH(j1)
+1	120216	2bad0522f10b549960c91a9fe57e783d	"Sven"	3
+SELECT f1, LENGTH(f2), MD5(f2) FROM t_blob ORDER BY f1;
+f1	LENGTH(f2)	MD5(f2)
+1	40000	39b7fe8e7c354867312bc288c88cca8b
+2	6291456	3349dc700140d7f86a078484278075a9
+3	1	eccbc87e4b5ce2fe28308fd9f2a7baf3
+SELECT COUNT(*) FROM t_blob FORCE INDEX (k_f2) WHERE f2 IS NOT NULL;
+COUNT(*)
+3
+SELECT f1 FROM t_blob FORCE INDEX (k_f2) WHERE f2 LIKE '+%';
+f1
+1
+CHECK TABLE t_json, t_blob;
+Table	Op	Msg_type	Msg_text
+test.t_json	check	status	OK
+test.t_blob	check	status	OK
+#
+# Kill right after ROLLBACK returned
+#
+START TRANSACTION;
+INSERT INTO t_json VALUES (2, @doc2);
+UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', REPEAT('c', 200)) WHERE id = 1;
+INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024)), (11, REPEAT('b', 70000));
+UPDATE t_blob SET f2 = REPEAT('-', 50000) WHERE f1 = 1;
+INSERT INTO t_blob VALUES (12, REPEAT('y', 6*1024*1024));
+UPDATE t_blob SET f2 = REPEAT('z', 6*1024*1024) WHERE f1 = 3;
+DELETE FROM t_blob WHERE f1 = 2;
+ROLLBACK;
+# Kill and restart
+# The recovered data equals the committed data.
+SELECT id, LENGTH(j1), MD5(j1), JSON_EXTRACT(j1, '$[0]'),
+JSON_LENGTH(j1) FROM t_json ORDER BY id;
+id	LENGTH(j1)	MD5(j1)	JSON_EXTRACT(j1, '$[0]')	JSON_LENGTH(j1)
+1	120216	2bad0522f10b549960c91a9fe57e783d	"Sven"	3
+SELECT f1, LENGTH(f2), MD5(f2) FROM t_blob ORDER BY f1;
+f1	LENGTH(f2)	MD5(f2)
+1	40000	39b7fe8e7c354867312bc288c88cca8b
+2	6291456	3349dc700140d7f86a078484278075a9
+3	1	eccbc87e4b5ce2fe28308fd9f2a7baf3
+SELECT COUNT(*) FROM t_blob FORCE INDEX (k_f2) WHERE f2 IS NOT NULL;
+COUNT(*)
+3
+SELECT f1 FROM t_blob FORCE INDEX (k_f2) WHERE f2 LIKE '+%';
+f1
+1
+CHECK TABLE t_json, t_blob;
+Table	Op	Msg_type	Msg_text
+test.t_json	check	status	OK
+test.t_blob	check	status	OK
+#
+# The tables are still writable after the crashes.
+#
+INSERT INTO t_blob VALUES (10, REPEAT('a', 1024*1024));
+UPDATE t_json SET j1 = JSON_REPLACE(j1, '$[2]', 'd') WHERE id = 1;
+SELECT f1, LENGTH(f2) FROM t_blob ORDER BY f1;
+f1	LENGTH(f2)
+1	40000
+2	6291456
+3	1
+10	1048576
+SELECT JSON_EXTRACT(j1, '$[2]') FROM t_json;
+JSON_EXTRACT(j1, '$[2]')
+"d"
+CHECK TABLE t_json, t_blob;
+Table	Op	Msg_type	Msg_text
+test.t_json	check	status	OK
+test.t_blob	check	status	OK
+DROP TABLE t_json, t_blob;
