@@ -1,0 +1,105 @@
+#
+# Port of innodb.innodb_stats_auto_recalc_ddl
+# (mysql-test/suite/innodb/t/innodb_stats_auto_recalc_ddl.test) to MyRocks.
+#
+# The original checks that the statistics of a table are recalculated in the
+# background after ALTER TABLE ... ADD INDEX and ... DROP INDEX, without
+# ANALYZE TABLE.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB, with rocksdb_table_stats_use_table_scan=ON (the MyRocks
+#     mode with background recalculation, see
+#     innodb_port_innodb_stats_auto_recalc) and 100% sampling.
+#   - The recalculation thresholds are set to InnoDB's auto-recalc rule (10%
+#     of the rows, no minimum count), as in
+#     innodb_port_innodb_stats_auto_recalc. With the MyRocks default of 100
+#     changed rows, two inserted rows never trigger a recalculation. MyRocks
+#     itself queues a recalculation after ADD INDEX, but not after DROP
+#     INDEX, which does not change the remaining indexes.
+#   - ANALYZE TABLE right after CREATE TABLE records the time of the last
+#     recalculation, so the recalculation queued by the inserts cannot run
+#     before the ALTER. The ALTER replaces the table definition, and the
+#     queued recalculation then runs on the altered table.
+#   - mysql.innodb_index_stats does not exist. The test waits for the
+#     INFORMATION_SCHEMA.STATISTICS cardinality of every index; the table is
+#     reopened with FLUSH TABLE so that the handler picks up new statistics.
+#
+--source include/have_rocksdb.inc
+
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SET @save_threshold_count = @@global.rocksdb_table_stats_recalc_threshold_count;
+SET @save_threshold_pct = @@global.rocksdb_table_stats_recalc_threshold_pct;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 0;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 10;
+
+--let $check_stats = SELECT index_name, column_name, cardinality FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'arddl' ORDER BY index_name, seq_in_index
+
+CREATE TABLE arddl (a INT, b INT, PRIMARY KEY (a)) ENGINE=ROCKSDB;
+ANALYZE TABLE arddl;
+INSERT INTO arddl VALUES (1, 10);
+INSERT INTO arddl VALUES (2, 10);
+ALTER TABLE arddl ADD INDEX (b);
+
+--echo # Wait for the background recalculation after ADD INDEX.
+--let $wait_cond = SELECT COUNT(*) = 2 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'arddl' AND ((index_name = 'PRIMARY' AND cardinality = 2) OR (index_name = 'b' AND cardinality = 1))
+--let $tries = 60
+--let $done = 0
+--disable_query_log
+while (!$done)
+{
+  FLUSH TABLE arddl;
+  --let $done = `$wait_cond`
+  if (!$done)
+  {
+    --dec $tries
+    if (!$tries)
+    {
+      --eval $check_stats
+      --die Statistics were not recalculated after ADD INDEX
+    }
+    --sleep 1
+  }
+}
+--enable_query_log
+--eval $check_stats
+
+DROP TABLE arddl;
+
+CREATE TABLE arddl (a INT, b INT, PRIMARY KEY (a), KEY (b)) ENGINE=ROCKSDB;
+ANALYZE TABLE arddl;
+INSERT INTO arddl VALUES (3, 10);
+INSERT INTO arddl VALUES (4, 10);
+ALTER TABLE arddl DROP INDEX b;
+
+--echo # Wait for the background recalculation after DROP INDEX.
+--let $wait_cond = SELECT COUNT(*) = 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'arddl' AND index_name = 'PRIMARY' AND cardinality = 2
+--let $tries = 60
+--let $done = 0
+--disable_query_log
+while (!$done)
+{
+  FLUSH TABLE arddl;
+  --let $done = `$wait_cond`
+  if (!$done)
+  {
+    --dec $tries
+    if (!$tries)
+    {
+      --eval $check_stats
+      --die Statistics were not recalculated after DROP INDEX
+    }
+    --sleep 1
+  }
+}
+--enable_query_log
+--eval $check_stats
+
+DROP TABLE arddl;
+
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = @save_threshold_count;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = @save_threshold_pct;
