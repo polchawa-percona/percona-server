@@ -1,0 +1,22 @@
+#
+# Port of innodb.innodb_bug35220 (mysql-test/suite/innodb/t/innodb_bug35220.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB
+#
+--source include/have_rocksdb.inc
+
+#
+# Bug#35220 ALTER TABLE too picky on reserved word "foreign"
+# http://bugs.mysql.com/35220
+#
+
+
+SET default_storage_ENGINE=ROCKSDB;
+
+# we care only that the following SQL commands do not produce errors
+-- disable_query_log
+-- disable_result_log
+
+CREATE TABLE bug35220 (foreign_col INT, dummy_cant_delete_all_columns INT) ENGINE=ROCKSDB;
+ALTER TABLE bug35220 DROP foreign_col;
+DROP TABLE bug35220;

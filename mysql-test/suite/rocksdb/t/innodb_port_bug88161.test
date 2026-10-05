@@ -1,0 +1,23 @@
+#
+# Port of percona_innodb.bug88161 (mysql-test/suite/percona_innodb/t/bug88161.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB
+#   - rows are inserted before the TRUNCATE, and the table is checked after it
+#
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # TRUNCATE inside LOCK TABLES t1 WRITE, t1 AS b READ
+--echo # (InnoDB: Assertion failure: row0mysql.cc:4430)
+--echo #
+CREATE TABLE t1(a int,b text,KEY (a)) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+INSERT INTO t1 VALUES (1, 'a'), (2, 'b');
+LOCK TABLES t1 WRITE,t1 b READ;
+TRUNCATE TABLE t1;
+UNLOCK TABLES;
+SELECT COUNT(*) FROM t1;
+INSERT INTO t1 VALUES (3, 'c');
+SELECT * FROM t1;
+SELECT a FROM t1 FORCE INDEX (a) WHERE a = 3;
+DROP TABLE t1;

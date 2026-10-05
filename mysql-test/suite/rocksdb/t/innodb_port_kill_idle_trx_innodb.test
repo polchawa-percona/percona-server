@@ -1,0 +1,17 @@
+#
+# Port of percona_innodb.kill_idle_trx_innodb
+# (mysql-test/suite/percona_innodb/t/kill_idle_trx_innodb.test) to MyRocks.
+# Changes from the original:
+#   - default_storage_engine=ROCKSDB instead of InnoDB; the shared include
+#     creates its table with the default engine
+#   - runs at READ COMMITTED (-master.opt): the include locks a table without
+#     a unique key with SELECT ... FOR UPDATE inside a transaction, which
+#     MyRocks rejects at REPEATABLE READ (gap-lock rule)
+#   - MyRocks reads rocksdb_lock_wait_timeout at connect; the suite value (1 s)
+#     is enough, because the killed transaction releases its row locks
+#
+--source include/have_rocksdb.inc
+
+SET default_storage_engine=ROCKSDB;
+--source suite/percona_innodb/include/percona_kill_idle_trx.inc
+SET default_storage_engine=default;

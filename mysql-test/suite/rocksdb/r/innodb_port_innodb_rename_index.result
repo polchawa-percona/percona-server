@@ -1,0 +1,1097 @@
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t RENAME INDEX i1 TO GEN_CLUST_INDEX;
+ALTER TABLE t RENAME INDEX GEN_CLUST_INDEX TO i1;
+ALTER TABLE t RENAME INDEX i1 TO i1;
+ALTER TABLE t RENAME INDEX aa TO aa;
+ERROR 42000: Key 'aa' doesn't exist in table 't'
+# combination: aaaa
+ALTER TABLE t ADD INDEX i4(f), DROP INDEX i4, RENAME INDEX i4 TO i4;
+ERROR 42000: Key 'i4' doesn't exist in table 't'
+# combination: aabb
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX aa, RENAME INDEX i2 TO i2;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX aa, RENAME INDEX bb TO bb;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i1, RENAME INDEX bb TO bb;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i1, RENAME INDEX i2 TO i2;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `i1` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i1	f	1
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i1	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: abcc
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX bb, RENAME INDEX cc TO cc;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX bb, RENAME INDEX i3 TO i3;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX cc TO cc;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX i3 TO i3;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i1` (`b`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `aa` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	aa	f	1
+t	i1	b	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+aa	2
+i1	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: abaa
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i1, RENAME INDEX aa TO aa;
+ERROR 42000: Key 'aa' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX i1 TO i1;
+ERROR 42000: Duplicate key name 'i1'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX bb, RENAME INDEX i1 TO i1;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX bb, RENAME INDEX aa TO aa;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+# combination: baaa
+ALTER TABLE t ADD INDEX i2(f), DROP INDEX i1, RENAME INDEX i1 TO i1;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX bb(f), DROP INDEX i1, RENAME INDEX i1 TO i1;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i2(f), DROP INDEX aa, RENAME INDEX aa TO aa;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX bb(f), DROP INDEX aa, RENAME INDEX aa TO aa;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), RENAME INDEX aa TO bb;
+ERROR 42000: Key 'aa' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), RENAME INDEX bb TO aa;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), RENAME INDEX i2 TO aa;
+ERROR 42000: Duplicate key name 'aa'
+ALTER TABLE t ADD INDEX i1(f), RENAME INDEX i1 TO bb;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `bb` (`b`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `i1` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	bb	b	1
+t	i1	f	1
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+bb	2
+i1	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: abba
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX i2 TO i1;
+ERROR 42000: Key 'i2' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX i2 TO aa;
+ERROR 42000: Key 'i2' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX bb, RENAME INDEX bb TO i1;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX bb, RENAME INDEX bb TO aa;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+# combination: cabc
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i1, RENAME INDEX i2 TO i3;
+ERROR 42000: Duplicate key name 'i3'
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX aa, RENAME INDEX i2 TO i3;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i1, RENAME INDEX bb TO i3;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX aa, RENAME INDEX bb TO i3;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX i1, RENAME INDEX i2 TO cc;
+ERROR 42000: Duplicate key name 'cc'
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX aa, RENAME INDEX i2 TO cc;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX i1, RENAME INDEX bb TO cc;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX aa, RENAME INDEX bb TO cc;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t DROP INDEX i1, RENAME INDEX i1 TO bb;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t DROP INDEX aa, RENAME INDEX i2 TO aa;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t DROP INDEX aa, RENAME INDEX aa TO i2;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t DROP INDEX i1, RENAME INDEX i4 TO i1;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i1` (`e`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i1	e	1
+t	i2	c	1
+t	i3	d	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i1	2
+i2	2
+i3	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: accb
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i3, RENAME INDEX i3 TO i2;
+ERROR 42000: Key 'i3' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i3, RENAME INDEX i3 TO bb;
+ERROR 42000: Key 'i3' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX cc, RENAME INDEX cc TO i2;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX cc, RENAME INDEX cc TO bb;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX cc, RENAME INDEX cc TO i2;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX cc, RENAME INDEX cc TO bb;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+# combination: aaab
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i1, RENAME INDEX i1 TO i2;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i1, RENAME INDEX i1 TO bb;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i1, RENAME INDEX i1 TO i2;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX aa, RENAME INDEX aa TO bb;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+# combination: abcd
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX cc TO i4;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX cc TO dd;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX cc TO i4;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX cc TO dd;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX i3 TO i4;
+ERROR 42000: Duplicate key name 'i4'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX i3 TO dd;
+ERROR 42000: Duplicate key name 'i1'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX i3 TO i4;
+ERROR 42000: Duplicate key name 'i4'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX i3 TO dd;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i1` (`b`),
+  KEY `dd` (`d`),
+  KEY `i4` (`e`),
+  KEY `aa` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	aa	f	1
+t	dd	d	1
+t	i1	b	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+aa	2
+dd	2
+i1	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: abab
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i2, RENAME INDEX i1 TO i2;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i2` (`b`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `i1` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i1	f	1
+t	i2	b	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i1	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX bb, RENAME INDEX i1 TO bb;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i2, RENAME INDEX aa TO i2;
+ERROR 42000: Key 'aa' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX bb, RENAME INDEX aa TO bb;
+ERROR 42000: Can't DROP 'bb'; check that column/key exists
+# combination: acbc
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX cc, RENAME INDEX i2 TO cc;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX cc, RENAME INDEX i2 TO cc;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX cc, RENAME INDEX bb TO cc;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX cc, RENAME INDEX bb TO cc;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i3, RENAME INDEX bb TO i3;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i3, RENAME INDEX bb TO i3;
+ERROR 42000: Key 'bb' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1(f), DROP INDEX i3, RENAME INDEX i2 TO i3;
+ERROR 42000: Duplicate key name 'i1'
+ALTER TABLE t ADD INDEX aa(f), DROP INDEX i3, RENAME INDEX i2 TO i3;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i1` (`b`),
+  KEY `i3` (`c`),
+  KEY `i4` (`e`),
+  KEY `aa` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	aa	f	1
+t	i1	b	1
+t	i3	c	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+aa	2
+i1	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: cacb
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX i1, RENAME INDEX cc TO i2;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX aa, RENAME INDEX cc TO i2;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX aa, RENAME INDEX cc TO bb;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX i1, RENAME INDEX cc TO bb;
+ERROR 42000: Key 'cc' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i1, RENAME INDEX i3 TO i2;
+ERROR 42000: Duplicate key name 'i2'
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX aa, RENAME INDEX i3 TO i2;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX aa, RENAME INDEX i3 TO bb;
+ERROR 42000: Can't DROP 'aa'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i1, RENAME INDEX i3 TO bb;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i2` (`c`),
+  KEY `bb` (`d`),
+  KEY `i4` (`e`),
+  KEY `i3` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	bb	d	1
+t	i2	c	1
+t	i3	f	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+bb	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+# combination: ccab
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX cc, RENAME INDEX i1 TO i2;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX cc, RENAME INDEX i1 TO bb;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX cc, RENAME INDEX aa TO i2;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX cc(f), DROP INDEX cc, RENAME INDEX aa TO bb;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX cc, RENAME INDEX aa TO i2;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX cc, RENAME INDEX aa TO bb;
+ERROR 42000: Can't DROP 'cc'; check that column/key exists
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i3, RENAME INDEX i1 TO i2;
+ERROR 42000: Duplicate key name 'i2'
+ALTER TABLE t ADD INDEX i3(f), DROP INDEX i3, RENAME INDEX i1 TO bb;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `bb` (`b`),
+  KEY `i2` (`c`),
+  KEY `i4` (`e`),
+  KEY `i3` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	bb	b	1
+t	i2	c	1
+t	i3	f	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+bb	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t RENAME INDEX i1 TO x;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `x` (`b`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+t	x	b	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+x	2
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t RENAME INDEX i1 TO i2;
+ERROR 42000: Duplicate key name 'i2'
+ALTER TABLE t RENAME INDEX foo TO i1;
+ERROR 42000: Key 'foo' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i9 (f), RENAME INDEX i1 TO i8;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i8` (`b`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `i9` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	i8	b	1
+t	i9	f	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i2	2
+i3	2
+i4	2
+i8	2
+i9	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t ADD INDEX i1 (f), RENAME INDEX i1 TO i9;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i9` (`b`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`),
+  KEY `i1` (`f`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i1	f	1
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	i9	b	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i1	2
+i2	2
+i3	2
+i4	2
+i9	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT,
+d INT,
+e INT,
+f INT,
+PRIMARY KEY (a),
+INDEX i1 (b),
+INDEX i2 (c),
+INDEX i3 (d),
+INDEX i4 (e)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET a = 1;
+ALTER TABLE t ADD INDEX foo (f), RENAME INDEX i1 TO foo;
+ERROR 42000: Duplicate key name 'foo'
+ALTER TABLE t ADD INDEX i1 (f), RENAME INDEX i1 TO foo, DROP INDEX i1;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t ADD INDEX i1 (f), RENAME INDEX i1 TO foo, DROP INDEX foo;
+ERROR 42000: Can't DROP 'foo'; check that column/key exists
+ALTER TABLE t ADD INDEX foo (f), RENAME INDEX foo TO bar, DROP INDEX foo;
+ERROR 42000: Can't DROP 'foo'; check that column/key exists
+ALTER TABLE t RENAME INDEX i1 TO x, RENAME INDEX i2 TO x;
+ERROR 42000: Duplicate key name 'x'
+ALTER TABLE t RENAME INDEX i1 TO x, RENAME INDEX i1 TO y;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+ALTER TABLE t RENAME INDEX i1 TO x, RENAME INDEX i1 TO x;
+ERROR 42000: Key 'i1' doesn't exist in table 't'
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `e` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `i1` (`b`),
+  KEY `i2` (`c`),
+  KEY `i3` (`d`),
+  KEY `i4` (`e`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i1	b	1
+t	i2	c	1
+t	i3	d	1
+t	i4	e	1
+t	PRIMARY	a	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i1	2
+i2	2
+i3	2
+i4	2
+PRIMARY	1
+DROP TABLE t;
+CREATE TABLE t (
+c1 INT NOT NULL,
+c2 INT NOT NULL,
+c3 INT,
+c4 INT,
+PRIMARY KEY (c1),
+INDEX i1 (c3),
+INDEX i2 (c4)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET c1=1, c2=2;
+ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (c2), RENAME INDEX i1 TO x;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` int DEFAULT NULL,
+  `c4` int DEFAULT NULL,
+  PRIMARY KEY (`c2`),
+  KEY `x` (`c3`),
+  KEY `i2` (`c4`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i2	c4	1
+t	PRIMARY	c2	1
+t	x	c3	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i2	2
+PRIMARY	1
+x	2
+ALTER TABLE t RENAME INDEX i2 TO y, ROW_FORMAT=REDUNDANT;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` int DEFAULT NULL,
+  `c4` int DEFAULT NULL,
+  PRIMARY KEY (`c2`),
+  KEY `x` (`c3`),
+  KEY `y` (`c4`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=REDUNDANT
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	PRIMARY	c2	1
+t	x	c3	1
+t	y	c4	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+PRIMARY	1
+x	2
+y	2
+DROP TABLE t;
+CREATE TABLE t (
+c1 INT NOT NULL,
+c2 INT,
+c3 INT,
+INDEX i1 (c2),
+INDEX i2 (c3)
+) ENGINE=ROCKSDB;
+INSERT INTO t SET c1=1;
+ALTER TABLE t ADD PRIMARY KEY (c1), RENAME INDEX i1 TO x;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `c1` int NOT NULL,
+  `c2` int DEFAULT NULL,
+  `c3` int DEFAULT NULL,
+  PRIMARY KEY (`c1`),
+  KEY `x` (`c2`),
+  KEY `i2` (`c3`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT
+s.table_name AS table_name,
+s.index_name AS index_name,
+s.column_name AS column_name,
+(SELECT COUNT(*) FROM information_schema.rocksdb_ddl d
+WHERE d.table_schema = s.table_schema AND d.table_name = s.table_name
+AND d.index_name = s.index_name) AS in_rocksdb_ddl
+FROM information_schema.statistics s
+WHERE s.table_schema = 'test' AND s.table_name = 't'
+ORDER BY 1, 2, 3;
+table_name	index_name	column_name	in_rocksdb_ddl
+t	i2	c3	1
+t	PRIMARY	c1	1
+t	x	c2	1
+SELECT index_name, index_type
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't'
+ORDER BY 1, 2;
+index_name	index_type
+i2	2
+PRIMARY	1
+x	2
+DROP TABLE t;
+CREATE TABLE t (a INT, INDEX iiiii (a)) ENGINE=ROCKSDB;
+INSERT INTO t SET a=NULL;
+ALTER TABLE t RENAME INDEX iiiii TO i;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+ALTER TABLE t RENAME INDEX i TO iiiii;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+ALTER TABLE t RENAME INDEX iiiii TO i;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+ALTER TABLE t RENAME INDEX i TO iiiii;
+affected rows: 1
+info: Records: 1  Duplicates: 0  Warnings: 0
+DROP TABLE t;
