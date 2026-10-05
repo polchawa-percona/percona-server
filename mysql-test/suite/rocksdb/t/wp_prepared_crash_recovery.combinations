@@ -1,0 +1,5 @@
+[write_committed]
+rocksdb-write-policy=write_committed
+
+[write_prepared]
+rocksdb-write-policy=write_prepared

@@ -1,0 +1,80 @@
+# write_unprepared with rocksdb_write_batch_flush_threshold > 0: a
+# transaction that wrote batches into the database but never prepared must
+# leave no trace after a server kill, while committed transactions survive.
+# Single open transaction per round, no debug points, so the test runs on
+# release builds too. Write-policy plan, step 3 (write_unprepared).
+#
+# A partial transaction can become visible after a kill under concurrent
+# load with this policy; that was traced to the RocksDB library and is not
+# covered here. This test does not reproduce it.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 2000) SELECT n FROM s) x;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 SELECT n, 1, n FROM seq WHERE n <= 100;
+
+--let $round= 1
+while ($round <= 3)
+{
+  --echo #
+  --echo # Round $round
+  --echo #
+  connect (con1,localhost,root,,);
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  if ($round == 1)
+  {
+    --echo # Flushed inserts, never prepared
+    SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  }
+  if ($round == 2)
+  {
+    --echo # Flushed inserts, updates and deletes of committed rows
+    SET SESSION rocksdb_write_batch_flush_threshold = 4096;
+  }
+  if ($round == 3)
+  {
+    --echo # Flushed writes, then a failed statement rolled back
+    SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  }
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+  BEGIN;
+  eval INSERT INTO t1 SELECT n + 1000 * $round, 2, n + 1000 * $round FROM seq WHERE n <= 900;
+  if ($round == 2)
+  {
+    UPDATE t1 SET v = 99 WHERE id = 5;
+    UPDATE t1 SET v = 99 WHERE id = 6;
+    DELETE FROM t1 WHERE id = 7;
+  }
+  if ($round == 3)
+  {
+    --error ER_DUP_ENTRY
+    INSERT INTO t1 VALUES (99001, 3, 99001), (99002, 3, 99002), (99003, 3, 50);
+  }
+  --let $wup_check= 1
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+
+  connection default;
+  --echo # Committed by another session while con1 is open
+  eval INSERT INTO t1 VALUES (50000 + $round, 7, 50000 + $round);
+  --source include/kill_and_restart_mysqld.inc
+  disconnect con1;
+
+  --echo # After recovery: committed rows only
+  SELECT COUNT(*), SUM(v) FROM t1;
+  SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+  SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+  SELECT COUNT(*) FROM t1 WHERE id > 1000 AND id < 50000;
+  SELECT id, v FROM t1 WHERE id IN (5, 6, 7) ORDER BY id;
+  CHECK TABLE t1;
+  --echo # The values the dead transaction wrote are free
+  eval INSERT INTO t1 VALUES (1000 * $round + 1, 4, 1000 * $round + 1);
+  eval DELETE FROM t1 WHERE id = 1000 * $round + 1;
+  --inc $round
+}
+
+DROP TABLE t1, seq;

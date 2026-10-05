@@ -1,0 +1,41 @@
+#
+# Write-policy step 3: crash recovery with a prepared but uncommitted MyRocks
+# transaction (binlog 2PC).
+#
+# Under write_prepared, MyRocks writes a transaction's rows into the memtable
+# and WAL at PREPARE. After a crash, recovery must decide per the binlog:
+#   - crash after the engines prepared, before the binlog write
+#     (crash_commit_after_prepare): the transaction is not in the binlog and
+#     must be rolled back, leaving no row, index entry or unique key behind;
+#   - crash after the binlog write, before the engine commit
+#     (crash_commit_after_log): the transaction is in the binlog and must be
+#     committed in full;
+#   - crash before the prepare (crash_commit_before): nothing must remain.
+# Each round checks all access paths, CHECK TABLE and unique keys.
+#
+# The test runs under write_committed as the reference and under
+# write_prepared (see the .combinations file). Both must give the same result.
+# A release-capable, kill-based check of the same invariants under load is
+# rocksdb.crash_2pc_release (release variant R3).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+
+--let $crash_point= crash_commit_after_prepare
+--let $expect_label= prepared, not in the binlog: rolled back, old state
+--source suite/rocksdb/include/wp_crash_round.inc
+
+--let $crash_point= crash_commit_after_log
+--let $expect_label= in the binlog: committed, new state
+--source suite/rocksdb/include/wp_crash_round.inc
+
+--let $crash_point= crash_commit_before
+--let $expect_label= crashed before prepare: old state
+--source suite/rocksdb/include/wp_crash_round.inc
+
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_kept_after_restart;
+DROP TABLE t1;

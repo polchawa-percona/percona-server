@@ -1,0 +1,103 @@
+#
+# Write-policy step 3: XA transactions in the PREPARED state.
+#
+# Under write_prepared, XA PREPARE writes the transaction's rows into the
+# database; XA COMMIT / XA ROLLBACK later decide their fate, possibly from
+# another session. This test checks, with xa_detach_on_prepare=ON (default):
+#   - while an XA transaction is prepared, other sessions see none of its rows
+#     through any access path, and its row locks are held;
+#   - XA ROLLBACK from another session removes all its effects, including
+#     secondary and unique index entries;
+#   - XA COMMIT from another session makes all of it visible at once, while a
+#     snapshot taken while it was prepared keeps seeing the old state.
+#
+# Disabled until the XA fix for PS-11631 is merged:
+# without it the server crashes on the first statement after XA COMMIT or
+# XA ROLLBACK. Warning 1031 on XA PREPARE comes from PS-11632 (missing
+# "prepared in TC" hooks) and is covered by rocksdb.xa_prepared_restart, so it
+# is not checked here.
+#
+# The test runs under write_committed as the reference and under
+# write_prepared (see the .combinations file). Both must give the same result.
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/count_sessions.inc
+
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(20) NOT NULL,
+  UNIQUE KEY ua (a),
+  KEY kb (b)
+) ENGINE=ROCKSDB;
+
+--let $round= 1
+while ($round <= 2)
+{
+  DELETE FROM t1;
+  INSERT INTO t1 VALUES (1,10,'r01'),(2,20,'r02'),(3,30,'r03'),(4,40,'r04'),
+                        (5,50,'r05'),(6,60,'r06'),(7,70,'r07'),(8,80,'r08'),
+                        (9,90,'r09'),(10,100,'r10');
+
+  connect (xa_con, localhost, root,,);
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  XA START 'wp1';
+  INSERT INTO t1 VALUES (11,110,'r11'),(12,120,'r12'),(13,130,'r13');
+  UPDATE t1 SET b = CONCAT(b, 'x') WHERE pk <= 3;
+  UPDATE t1 SET a = a + 1000 WHERE pk = 3;
+  DELETE FROM t1 WHERE pk IN (9, 10);
+  XA END 'wp1';
+  --disable_warnings
+  XA PREPARE 'wp1';
+  --enable_warnings
+  disconnect xa_con;
+
+  connection default;
+  --source include/wait_until_count_sessions.inc
+  XA RECOVER;
+
+  connect (rr_during, localhost, root,,);
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  --let $wp_label= snapshot taken while the XA transaction is prepared: old state
+  --source suite/rocksdb/include/wp_show_state.inc
+
+  connection default;
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  BEGIN;
+  --error ER_LOCK_WAIT_TIMEOUT
+  SELECT pk FROM t1 WHERE pk = 11 FOR UPDATE;
+  --error ER_LOCK_WAIT_TIMEOUT
+  INSERT INTO t1 VALUES (99, 110, 'dup_a');
+  ROLLBACK;
+
+  if ($round == 1)
+  {
+    --echo # Round 1: XA ROLLBACK from another session.
+    XA ROLLBACK 'wp1';
+    --let $wp_label= after XA ROLLBACK: old state
+  }
+  if ($round == 2)
+  {
+    --echo # Round 2: XA COMMIT from another session.
+    XA COMMIT 'wp1';
+    --let $wp_label= after XA COMMIT: new state
+  }
+  XA RECOVER;
+  --source suite/rocksdb/include/wp_show_state.inc
+  CHECK TABLE t1;
+
+  connection rr_during;
+  --let $wp_label= snapshot taken while prepared, after the decision: still old state
+  --source suite/rocksdb/include/wp_show_state.inc
+  COMMIT;
+  disconnect rr_during;
+  connection default;
+  --inc $round
+}
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

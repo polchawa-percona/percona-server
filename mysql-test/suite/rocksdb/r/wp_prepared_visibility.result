@@ -1,0 +1,355 @@
+# Policy check: this test must run under the policy of its combination.
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+policy_ok
+1
+CREATE TABLE t1 (
+pk INT PRIMARY KEY,
+a INT NOT NULL,
+b VARCHAR(20) NOT NULL,
+UNIQUE KEY ua (a),
+KEY kb (b)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,'r01'),(2,20,'r02'),(3,30,'r03'),(4,40,'r04'),
+(5,50,'r05'),(6,60,'r06'),(7,70,'r07'),(8,80,'r08'),
+(9,90,'r09'),(10,100,'r10');
+# Snapshot taken before the writer prepares.
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+10
+# The writer changes rows and is parked after its MyRocks PREPARE.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO t1 VALUES (11,110,'r11'),(12,120,'r12'),(13,130,'r13');
+UPDATE t1 SET b = CONCAT(b, 'x') WHERE pk <= 3;
+UPDATE t1 SET a = a + 1000 WHERE pk = 3;
+DELETE FROM t1 WHERE pk IN (9, 10);
+SET DEBUG_SYNC = 'rocksdb.prepared SIGNAL parked WAIT_FOR go';
+COMMIT;
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+# Snapshot taken while the writer is prepared but not committed.
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+# REPEATABLE READ snapshot taken while prepared: old state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+# READ COMMITTED while prepared: old state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+# REPEATABLE READ snapshot taken before prepare: old state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+# Locking reads and conflicting writes wait for the prepared row locks.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT pk FROM t1 WHERE pk = 11 FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT pk FROM t1 WHERE pk = 2 FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 VALUES (99, 110, 'dup_a');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 VALUES (11, 999, 'dup_pk');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+# Let the writer commit.
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# READ COMMITTED after commit: new state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+11	72	1720
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01x
+2	20	r02x
+3	1030	r03x
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+11	110	r11
+12	120	r12
+13	130	r13
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01x
+2	r02x
+3	r03x
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+11	r11
+12	r12
+13	r13
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+11	110
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+11	110	r11
+12	120	r12
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02x
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+11	r11
+# REPEATABLE READ snapshot taken before prepare, after commit: still old state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+COMMIT;
+# REPEATABLE READ snapshot taken while prepared, after commit: still old state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+# new REPEATABLE READ snapshot after commit: new state
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+11	72	1720
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01x
+2	20	r02x
+3	1030	r03x
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+11	110	r11
+12	120	r12
+13	130	r13
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01x
+2	r02x
+3	r03x
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+11	r11
+12	r12
+13	r13
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+11	110
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+11	110	r11
+12	120	r12
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02x
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+11	r11
+COMMIT;
+# The unique key of a committed row is enforced again; deleted keys are free.
+INSERT INTO t1 VALUES (99, 110, 'dup_a');
+ERROR 23000: Duplicate entry '110' for key 't1.ua'
+INSERT INTO t1 VALUES (9, 90, 'r09_again');
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

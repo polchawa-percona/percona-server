@@ -1,0 +1,144 @@
+# write_unprepared with rocksdb_write_batch_flush_threshold > 0 writes the
+# transaction's batch into the database before PREPARE. Rolling back must
+# remove those already-written rows from the primary key and every secondary
+# index. Statement rollback inside a transaction must undo only the failing
+# statement's flushed writes. Write-policy plan, step 3 (write_unprepared).
+#
+# Flushing only happens while the transaction has no open MyRocks iterator,
+# so the statements below insert VALUES lists, select from InnoDB, or update
+# single rows by primary key. See write_unprepared_scan_no_flush for
+# scanning statements.
+
+--source include/have_rocksdb.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 2000) SELECT n FROM s) x;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u VARCHAR(20), KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (100000, -1, 'keep');
+
+--echo #
+--echo # 1. Large transaction flushed several times, then ROLLBACK
+--echo #
+--let $i= 0
+while ($i < 2)
+{
+  if ($i == 0)
+  {
+    SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  }
+  if ($i == 1)
+  {
+    SET SESSION rocksdb_write_batch_flush_threshold = 4096;
+  }
+  SELECT @@rocksdb_write_batch_flush_threshold;
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+  BEGIN;
+  INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq;
+  UPDATE t1 SET v = -2 WHERE id = 100000;
+  INSERT INTO t1 VALUES (5001, 5001, 'u5001'), (5002, 5002, 'u5002');
+  DELETE FROM t1 WHERE id = 1;
+  --let $wup_check= 1
+  --source suite/rocksdb/include/write_unprepared_flushed.inc
+  SELECT COUNT(*) FROM t1;
+  ROLLBACK;
+  SELECT COUNT(*), SUM(v) FROM t1;
+  SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+  SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+  SELECT * FROM t1 FORCE INDEX (ku) WHERE u = 'u1';
+  --inc $i
+}
+CHECK TABLE t1;
+
+--echo # Values written and rolled back are free again
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 10;
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+DELETE FROM t1 WHERE id <= 10;
+
+--echo #
+--echo # 2. Disconnect with flushed writes: implicit rollback
+--echo #
+connect (con1,localhost,root,,);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 500;
+disconnect con1;
+connection default;
+--let $wait_condition= SELECT COUNT(*) = 1 FROM t1
+--source include/wait_condition.inc
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+
+--echo #
+--echo # 3. Statement rollback undoes only the failing statement
+--echo #
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 100;
+--echo # Fails on its last row, after writing rows 101-300
+--error ER_DUP_ENTRY
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n BETWEEN 101 AND 300 UNION ALL SELECT 1, 0, 'x';
+--echo # Fails on the unique secondary key
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (400, 400, 'u400'), (401, 401, 'u401'), (402, 402, 'u50');
+UPDATE t1 SET v = v + 1000 WHERE id = 5;
+--let $wup_check= 1
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t1;
+COMMIT;
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t1;
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+SELECT COUNT(*) FROM t1 WHERE id BETWEEN 101 AND 402;
+CHECK TABLE t1;
+
+--echo #
+--echo # 4. Statement rollback after a lock wait timeout
+--echo #
+connect (con2,localhost,root,,);
+BEGIN;
+SELECT * FROM t1 WHERE id = 50 FOR UPDATE;
+connection default;
+BEGIN;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n BETWEEN 1001 AND 1300;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET v = -50 WHERE id = 50;
+INSERT INTO t1 VALUES (1301, 1301, 'u1301');
+COMMIT;
+connection con2;
+ROLLBACK;
+disconnect con2;
+connection default;
+SELECT COUNT(*), SUM(v) FROM t1;
+SELECT v FROM t1 WHERE id = 50;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+DELETE FROM t1 WHERE id <> 100000;
+
+--echo #
+--echo # 5. Explicit savepoints: MyRocks rejects ROLLBACK TO SAVEPOINT after
+--echo #    writes and marks the transaction rollback-only
+--echo #
+BEGIN;
+SAVEPOINT a;
+--echo # No writes yet: allowed
+ROLLBACK TO SAVEPOINT a;
+INSERT INTO t1 SELECT n, n, CONCAT('u', n) FROM seq WHERE n <= 300;
+SAVEPOINT b;
+INSERT INTO t1 VALUES (301, 301, 'u301');
+--error ER_ROLLBACK_TO_SAVEPOINT
+ROLLBACK TO SAVEPOINT b;
+--error ER_ROLLBACK_ONLY
+COMMIT;
+ROLLBACK;
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+
+DROP TABLE t1, seq;
