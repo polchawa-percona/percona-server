@@ -1,0 +1,87 @@
+CREATE TABLE t1(a int not null,key(a,a)) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+ERROR 42S21: Duplicate column name 'a'
+CREATE TABLE t1(a int,b text,key(b(768))) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+DROP TABLE t1;
+CREATE TABLE t1(a int not null,b text) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+INSERT INTO t1 VALUES (1,''),(2,''),(3,''),(4,''),(5,''),(6,''),(7,'');
+CREATE INDEX t1aa ON t1(a,a);
+ERROR 42S21: Duplicate column name 'a'
+CREATE INDEX t1b ON t1(b(768));
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` text,
+  KEY `t1b` (`b`(768))
+) ENGINE=ROCKSDB DEFAULT CHARSET=latin1 ROW_FORMAT=COMPACT
+SELECT * FROM t1;
+a	b
+1	
+2	
+3	
+4	
+5	
+6	
+7	
+DROP TABLE t1;
+CREATE TABLE t2(a int primary key, b text) ENGINE=ROCKSDB DEFAULT CHARSET=latin1
+ROW_FORMAT=COMPACT;
+INSERT INTO t2 VALUES (1,''),(2,''),(3,''),(4,''),(5,''),(6,''),(7,'');
+CREATE INDEX t2aa ON t2(a,a);
+ERROR 42S21: Duplicate column name 'a'
+CREATE INDEX t2b ON t2(b(768));
+SELECT * FROM t2;
+a	b
+1	
+2	
+3	
+4	
+5	
+6	
+7	
+DROP TABLE t2;
+#
+# MyRocks limits: 3072 bytes per key part and per key.
+#
+CREATE TABLE t3 (a INT PRIMARY KEY, b TEXT, KEY kb (b(3072))) ENGINE=ROCKSDB CHARSET latin1;
+CREATE INDEX kb2 ON t3 (b(3073));
+ERROR 42000: Specified key was too long; max key length is 3072 bytes
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(3073))) ENGINE=ROCKSDB CHARSET latin1;
+ERROR 42000: Specified key was too long; max key length is 3072 bytes
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(769))) ENGINE=ROCKSDB CHARSET utf8mb4;
+ERROR 42000: Specified key was too long; max key length is 3072 bytes
+CREATE TABLE t4 (a INT PRIMARY KEY, b TEXT, KEY kb (b(768))) ENGINE=ROCKSDB CHARSET utf8mb4;
+CREATE TABLE t5 (a VARCHAR(2000), b VARCHAR(2000), KEY kab (a, b)) ENGINE=ROCKSDB CHARSET latin1;
+ERROR 42000: Specified key was too long; max key length is 3072 bytes
+INSERT INTO t3 VALUES (1, REPEAT('a', 3072)), (2, CONCAT(REPEAT('a', 3071), 'b')),
+(3, CONCAT(REPEAT('a', 3072), 'tail')), (4, REPEAT('a', 4000));
+INSERT INTO t4 VALUES (1, REPEAT('ą', 768)), (2, CONCAT(REPEAT('ą', 767), 'ę')),
+(3, CONCAT(REPEAT('ą', 768), 'tail')), (4, REPEAT('😀', 800));
+SELECT a, LENGTH(b) FROM t3 FORCE INDEX (kb) WHERE b = REPEAT('a', 3072);
+a	LENGTH(b)
+1	3072
+SELECT a, LENGTH(b) FROM t3 FORCE INDEX (kb) WHERE b LIKE CONCAT(REPEAT('a', 3071), '%') ORDER BY a;
+a	LENGTH(b)
+1	3072
+2	3072
+3	3076
+4	4000
+SELECT a, CHAR_LENGTH(b) FROM t4 FORCE INDEX (kb) WHERE b = REPEAT('ą', 768);
+a	CHAR_LENGTH(b)
+1	768
+SELECT a, CHAR_LENGTH(b) FROM t4 FORCE INDEX (kb) WHERE b LIKE CONCAT(REPEAT('ą', 767), '%') ORDER BY a;
+a	CHAR_LENGTH(b)
+1	768
+2	768
+3	772
+# t3.kb: index scan matches primary key scan
+# t3.kb: equality lookups match (4 pairs)
+# t4.kb: index scan matches primary key scan
+# t4.kb: equality lookups match (4 pairs)
+CHECK TABLE t3, t4;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+test.t4	check	status	OK
+DROP TABLE t3, t4;
