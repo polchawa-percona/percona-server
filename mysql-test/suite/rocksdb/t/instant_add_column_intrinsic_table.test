@@ -1,6 +1,5 @@
 --source include/have_rocksdb.inc
 --source include/have_binlog_format_row.inc
---source suite/rocksdb/include/have_write_committed.inc
 
 # Change ISOLATION LEVEL because Using Gap Lock without full unique key in multi-table or multi-statement transactions is not allowed
 SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;

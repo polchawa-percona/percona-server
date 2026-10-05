@@ -50,6 +50,14 @@ begin;
 insert into t values (2);
 
 connect (con3,localhost,root,,);
+# Under write_unprepared, flush every write before commit, so the statement
+# rollback below writes rollback batches whatever the server-wide threshold is.
+if (`SELECT @@global.rocksdb_write_policy = 'write_unprepared'`)
+{
+  --disable_query_log
+  SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  --enable_query_log
+}
 begin;
 insert into t values (3);
 
@@ -77,7 +85,8 @@ rollback;
 
 # In repeatable read, rollbacks in write unprepared confuses the snapshot
 # validation logic into thinking that a write has happened, because it sees
-# the rollback writes in the DB.
+# the rollback writes in the DB (con3 flushes every write under
+# write_unprepared, see above).
 let $snapshot_conflict = `SELECT @@global.rocksdb_write_policy = 'write_unprepared' and @@session.transaction_isolation = 'repeatable-read'`;
 connection con2;
 --disable_result_log
