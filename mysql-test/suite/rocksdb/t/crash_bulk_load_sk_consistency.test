@@ -1,0 +1,47 @@
+# Crash in the middle of a bulk-load statement on a table with a
+# secondary index (rocksdb_bulk_load_allow_sk = OFF, the default).
+#
+# Primary key rows go to a temporary SST file that is ingested only when
+# the bulk load finishes. Secondary key entries go through the normal
+# write batch, which is committed every rocksdb_bulk_load_size writes
+# (bulk load implies commit-in-the-middle). If the server dies after
+# such an internal commit, the secondary index keeps entries for rows
+# that the primary key never got.
+#
+# Expected (correct) behaviour: the secondary index agrees with the
+# primary key after recovery and CHECK TABLE is OK.
+# Actual behaviour at the time of writing: 1000 secondary index entries,
+# 0 primary key rows, CHECK TABLE reports Corrupt, and index-only reads
+# return rows that do not exist. See myrocks-notes/port-findings.md,
+# "Crash/durability findings".
+
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+call mtr.add_suppression("CHECKTABLE t3");
+--enable_query_log
+
+CREATE TABLE t3 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+
+--connect (con_bulk, localhost, root,,)
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL first_batch WAIT_FOR never_happens';
+--send INSERT INTO t3 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000) SELECT n, n FROM seq
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR first_batch';
+--source include/kill_and_restart_mysqld.inc
+--disconnect con_bulk
+--connection default
+
+SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (k)) =
+       (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) AS sk_matches_pk;
+SELECT COUNT(*) AS index_only_rows_without_pk FROM t3 FORCE INDEX (k)
+  WHERE id NOT IN (SELECT id FROM t3 IGNORE INDEX (k));
+CHECK TABLE t3;
+
+DROP TABLE t3;
