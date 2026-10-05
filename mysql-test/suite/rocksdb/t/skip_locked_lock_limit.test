@@ -1,0 +1,62 @@
+#
+# PS-11712: SKIP LOCKED hides
+# row-read errors.
+#
+# ha_rocksdb::should_skip_locked_record() tests
+#   rc == HA_ERR_LOCK_WAIT_TIMEOUT || rc == HA_ERR_LOCK_DEADLOCK ||
+#   HA_ERR_ROCKSDB_STATUS_BUSY
+# The last operand is a non-zero constant, so under SKIP LOCKED every error
+# returned while locking a row is treated as "row is locked, skip it".
+#
+# A deterministic error on that path is the rocksdb_max_row_locks limit:
+# GetForUpdate() returns Status::Aborted(kLockLimit). Without SKIP LOCKED the
+# statement fails with the lock-limit error. With SKIP LOCKED it must fail in
+# the same way, because no row was locked by another transaction; the bug
+# returns a truncated result set without any error instead.
+#
+--source include/have_rocksdb.inc
+
+# READ COMMITTED: at REPEATABLE READ, MyRocks rejects these range locking
+# reads inside a transaction with the gap-lock error before any row is read.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(10,10);
+
+SET SESSION rocksdb_max_row_locks = 5;
+
+--echo # Without SKIP LOCKED: the lock limit is reported.
+BEGIN;
+--error ER_GET_ERRMSG
+SELECT * FROM t1 FOR UPDATE;
+ROLLBACK;
+
+--echo # With SKIP LOCKED: the same error must be reported, not hidden.
+BEGIN;
+--error ER_GET_ERRMSG
+SELECT * FROM t1 FOR UPDATE SKIP LOCKED;
+ROLLBACK;
+
+--echo # Same for a secondary-key driven locking read.
+ALTER TABLE t1 ADD KEY k (v);
+BEGIN;
+--error ER_GET_ERRMSG
+SELECT * FROM t1 FORCE INDEX (k) WHERE v > 0 FOR UPDATE SKIP LOCKED;
+ROLLBACK;
+
+--echo # SKIP LOCKED still skips rows that are really locked.
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+--connect (con1, localhost, root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+--connection default
+BEGIN;
+SELECT id FROM t1 FOR UPDATE SKIP LOCKED;
+ROLLBACK;
+--connection con1
+ROLLBACK;
+--disconnect con1
+--connection default
+
+DROP TABLE t1;
