@@ -1,0 +1,38 @@
+#
+# Finding #27 (myrocks-notes/port-findings.md): after a server restart,
+# INFORMATION_SCHEMA.ROCKSDB_DDL shows an empty INDEX_NAME for every index of
+# a table that has not been opened since the restart. Rdb_key_def::setup()
+# fills in the name lazily, on the first open of the table.
+#
+# This test asserts the correct behaviour (index names are always shown) and
+# is disabled until the bug is fixed.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(10), KEY kb (b), UNIQUE KEY uc (c)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT, b INT, KEY kb2 (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'a');
+INSERT INTO t2 VALUES (1, 1);
+
+--echo # Before the restart
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+
+--source include/restart_mysqld.inc
+
+--echo # After the restart, before the tables are opened: names must be shown
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+
+--echo # Looking an index up by name must work without opening the table first
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'kb';
+
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t2;
+
+--echo # After the tables are opened
+SELECT table_name, index_name, index_type FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' ORDER BY table_name, index_type, index_name;
+
+DROP TABLE t1, t2;
