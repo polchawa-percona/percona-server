@@ -1,0 +1,154 @@
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE PROCEDURE alter_loop(tn VARCHAR(10), iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < iters DO
+SET @s = CONCAT('ALTER TABLE ', tn, ' ADD COLUMN x', CONNECTION_ID(), '_', i, ' INT DEFAULT ', i, ', ALGORITHM=INSTANT');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' DROP COLUMN x', CONNECTION_ID(), '_', i, ', ALGORITHM=COPY');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' FORCE, ALGORITHM=COPY');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE dml_loop(tn VARCHAR(10), iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < iters DO
+SET @s = CONCAT('UPDATE ', tn, ' SET c = c + 1 WHERE id = ', 1 + (i * 37) % 20000);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE read_loop(tn VARCHAR(10), iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE CONTINUE HANDLER FOR 1412 SET @def_changed = IFNULL(@def_changed,0) + 1;
+CREATE TEMPORARY TABLE IF NOT EXISTS rl_bad (it INT, cnt BIGINT, cnt_a BIGINT) ENGINE=InnoDB;
+WHILE i < iters DO
+SET @s = CONCAT('SELECT COUNT(*), SUM(id) INTO @cnt, @sid FROM ', tn);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('SELECT COUNT(*) INTO @cnta FROM ', tn, ' FORCE INDEX(ka)');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+IF @cnt <> 20000 OR @cnta <> 20000 OR @sid <> 200010000 THEN
+INSERT INTO rl_bad VALUES (i, @cnt, @cnta);
+END IF;
+SET i = i + 1;
+END WHILE;
+SELECT COUNT(*) AS bad_reads FROM rl_bad;
+DROP TEMPORARY TABLE rl_bad;
+END|
+CREATE PROCEDURE chaos_loop(iters INT, do_pause INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < iters DO
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+IF i % 3 = 0 THEN SET GLOBAL rocksdb_compact_cf = 'default'; END IF;
+IF do_pause = 1 AND i % 4 = 1 THEN
+SET GLOBAL rocksdb_pause_background_work = ON;
+DO SLEEP(2);
+SET GLOBAL rocksdb_pause_background_work = OFF;
+END IF;
+DO SLEEP(0.5);
+SET i = i + 1;
+END WHILE;
+END|
+CALL alter_loop('t1', 8);
+CALL alter_loop('t2', 8);
+CALL alter_loop('t3', 8);
+CALL alter_loop('t4', 8);
+CALL dml_loop('t5', 3000);
+CALL dml_loop('t6', 3000);
+CALL read_loop('t1', 400);
+CALL chaos_loop(40, 1);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT SUM(c) INTO @snap_c FROM t6;
+bad_reads
+0
+SELECT SUM(c) = @snap_c AS old_snapshot_of_t6_unchanged FROM t6;
+old_snapshot_of_t6_unchanged
+1
+COMMIT;
+# Checks
+SELECT '1' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t1 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t1 FORCE INDEX(kb)) kb FROM t1;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+1	20000	200010000	9931950	20000	20000
+SELECT '2' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t2 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t2 FORCE INDEX(kb)) kb FROM t2;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+2	20000	200010000	9931950	20000	20000
+SELECT '3' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t3 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t3 FORCE INDEX(kb)) kb FROM t3;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+3	20000	200010000	9931950	20000	20000
+SELECT '4' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t4 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t4 FORCE INDEX(kb)) kb FROM t4;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+4	20000	200010000	9931950	20000	20000
+SELECT '5' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t5 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t5 FORCE INDEX(kb)) kb FROM t5;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+5	20000	200010000	9931950	20000	20000
+SELECT '6' t, COUNT(*), SUM(id), SUM(a), (SELECT COUNT(*) FROM t6 FORCE INDEX(ka)) ka, (SELECT COUNT(*) FROM t6 FORCE INDEX(kb)) kb FROM t6;
+t	COUNT(*)	SUM(id)	SUM(a)	ka	kb
+6	20000	200010000	9931950	20000	20000
+SELECT SUM(c) - 200010000 AS t5_updates FROM t5;
+t5_updates
+3000
+SELECT SUM(c) - 200010000 AS t6_updates FROM t6;
+t6_updates
+3000
+SELECT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%';
+TABLE_NAME
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+SELECT COUNT(*) AS drop_ongoing FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+drop_ongoing
+0
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) AS orphan_sst_index_entries FROM (SELECT DISTINCT INDEX_NUMBER FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE COLUMN_FAMILY = 0) m WHERE INDEX_NUMBER NOT IN (SELECT INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+orphan_sst_index_entries
+0
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+# restart
+SELECT '1' t, COUNT(*), SUM(id) FROM t1;
+t	COUNT(*)	SUM(id)
+1	20000	200010000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT '2' t, COUNT(*), SUM(id) FROM t2;
+t	COUNT(*)	SUM(id)
+2	20000	200010000
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+SELECT '3' t, COUNT(*), SUM(id) FROM t3;
+t	COUNT(*)	SUM(id)
+3	20000	200010000
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+SELECT '4' t, COUNT(*), SUM(id) FROM t4;
+t	COUNT(*)	SUM(id)
+4	20000	200010000
+CHECK TABLE t4;
+Table	Op	Msg_type	Msg_text
+test.t4	check	status	OK
+SELECT '5' t, COUNT(*), SUM(id) FROM t5;
+t	COUNT(*)	SUM(id)
+5	20000	200010000
+CHECK TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	check	status	OK
+SELECT '6' t, COUNT(*), SUM(id) FROM t6;
+t	COUNT(*)	SUM(id)
+6	20000	200010000
+CHECK TABLE t6;
+Table	Op	Msg_type	Msg_text
+test.t6	check	status	OK
+DROP PROCEDURE alter_loop;
+DROP PROCEDURE dml_loop;
+DROP PROCEDURE read_loop;
+DROP PROCEDURE chaos_loop;
+SET GLOBAL rocksdb_pause_background_work = OFF;
+DROP TABLE t1, t2, t3, t4, t5, t6;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
