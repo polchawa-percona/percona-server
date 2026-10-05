@@ -134,7 +134,7 @@ const std::string DEFAULT_TMP_SYSTEM_CF_NAME("__tmp_system__");
 const std::string PER_INDEX_CF_NAME("$per_index_cf");
 static const std::string DEFAULT_SK_CF_NAME("default_sk");
 const std::string TRUNCATE_TABLE_PREFIX("#truncate_tmp#");
-static const std::string TMP_SCHEMA_NAME("#sqltmp");
+const std::string TMP_SCHEMA_NAME("#sqltmp");
 
 static std::vector<std::string> rdb_tables_to_recalc;
 
