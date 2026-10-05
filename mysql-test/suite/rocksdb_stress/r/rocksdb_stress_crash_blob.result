@@ -1,0 +1,39 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(id INT AUTO_INCREMENT PRIMARY KEY,
+msg_prefix VARCHAR(255),
+msg longtext,
+msg_length int,
+msg_checksum varchar(128),
+KEY msg_i(msg_prefix))
+ENGINE=ROCKSDB;
+CREATE TABLE errors (msg TEXT) ENGINE=ROCKSDB;
+Wait for reconnect
+Kill replica
+include/rpl/restart_server.inc [server_number=2]
+include/rpl/start_replica.inc
+Checksum master
+STOP REPLICA;
+START REPLICA;
+Checksum slave
+Wait for reconnect
+Kill replica
+include/rpl/restart_server.inc [server_number=2]
+include/rpl/start_replica.inc
+Checksum master
+STOP REPLICA;
+START REPLICA;
+Checksum slave
+DROP TABLE t1;
+DROP TABLE errors;
+STOP REPLICA;
+START REPLICA;
+include/rpl/stop_replica.inc
+include/rpl/start_replica.inc
+include/rpl/stop_replica.inc
+include/rpl/reconnect.inc
+include/rpl/deinit.inc
