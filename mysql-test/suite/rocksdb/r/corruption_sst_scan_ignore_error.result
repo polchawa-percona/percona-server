@@ -1,0 +1,47 @@
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t1 (
+pk INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(200),
+PRIMARY KEY (pk) COMMENT 'cfname=cf_corrupt_pk',
+KEY ka (a) COMMENT 'cfname=cf_corrupt_sk'
+) ENGINE=ROCKSDB;
+INSERT INTO t1
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000)
+SELECT n, n, REPEAT('x', 100) FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_sk';
+# restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+call mtr.add_suppression("data corruption detected");
+call mtr.add_suppression("block checksum mismatch");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Status: Corruption");
+call mtr.add_suppression("There was corruption detected in the RocksDB data files");
+call mtr.add_suppression("to mark rocksdb as corrupted");
+call mtr.add_suppression("Got error .* from storage engine");
+call mtr.add_suppression("Got error 511 when reading table");
+# Full primary-key scan.
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+# Range scans that start in or cross the damaged block.
+SELECT COUNT(*) FROM t1 WHERE pk BETWEEN 1 AND 10 AND LENGTH(b) > 0;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE pk < 4000 AND LENGTH(b) > 0;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+# Reverse scan that reaches the damaged block.
+SELECT pk FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk DESC LIMIT 1 OFFSET 4999;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+# Locking range read and range writes.
+SELECT pk FROM t1 WHERE pk BETWEEN 1 AND 3 FOR UPDATE SKIP LOCKED;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+DELETE FROM t1 WHERE pk < 100;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+UPDATE t1 SET b = 'y' WHERE pk < 100;
+ERROR HY000: Got error 2 'Corruption: block checksum mismatch: stored ... computed ...' from ROCKSDB
+# Repair: restore the SST file and remove the marker.
+# restart
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)	SUM(LENGTH(b))
+5000	12502500	500000
+DROP TABLE t1;

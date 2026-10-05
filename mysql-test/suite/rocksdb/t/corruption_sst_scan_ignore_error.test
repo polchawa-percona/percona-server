@@ -1,0 +1,103 @@
+#
+# Finding #25 (myrocks-notes/port-findings.md): with
+# rocksdb_io_error_action=IGNORE_ERROR, a scan that reaches a corrupted SST
+# block silently ends instead of failing. A full scan of a table whose first
+# data block is damaged returns no rows, a DELETE of a range in that block
+# "succeeds" without deleting anything, and range scans are truncated.
+#
+# Cause: is_valid_iterator() (ha_rocksdb.cc) handles a Corruption or IOError
+# status by calling rdb_handle_io_error(), which with IGNORE_ERROR only logs,
+# and then returns false. The callers in rdb_iterator.cc map false to
+# HA_ERR_END_OF_FILE, so the error becomes "no more rows". Point reads take a
+# different path and do return the error (see corruption_sst_data_block).
+#
+# This test asserts the correct behaviour: every statement that needs the
+# damaged block fails with the corruption error. It is disabled in
+# collections/disabled.def until the bug is fixed.
+#
+# Release-capable (no debug build needed); part of release item R8.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+--let $sst_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE t1 (
+  pk INT NOT NULL,
+  a INT NOT NULL,
+  b VARCHAR(200),
+  PRIMARY KEY (pk) COMMENT 'cfname=cf_corrupt_pk',
+  KEY ka (a) COMMENT 'cfname=cf_corrupt_sk'
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000)
+  SELECT n, n, REPEAT('x', 100) FROM s;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_sk';
+
+--let $pk_sst = `SELECT f.SST_NAME FROM information_schema.rocksdb_index_file_map f JOIN information_schema.rocksdb_ddl d ON f.COLUMN_FAMILY = d.COLUMN_FAMILY AND f.INDEX_NUMBER = d.INDEX_NUMBER WHERE d.TABLE_NAME = 't1' AND d.INDEX_NAME = 'PRIMARY'`
+--let $sst = $sst_dir/$pk_sst
+
+--source include/shutdown_mysqld.inc
+--copy_file $sst $MYSQLTEST_VARDIR/tmp/corruption_sst_scan_ignore_error.bak
+--let $corrupt_sst = $sst
+--let $corrupt_where = data_first
+--source suite/rocksdb/include/corrupt_sst_block.inc
+--let $restart_parameters = restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+--source include/start_mysqld.inc
+
+call mtr.add_suppression("data corruption detected");
+call mtr.add_suppression("block checksum mismatch");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Status: Corruption");
+call mtr.add_suppression("There was corruption detected in the RocksDB data files");
+call mtr.add_suppression("to mark rocksdb as corrupted");
+call mtr.add_suppression("Got error .* from storage engine");
+call mtr.add_suppression("Got error 511 when reading table");
+
+--echo # Full primary-key scan.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+
+--echo # Range scans that start in or cross the damaged block.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT COUNT(*) FROM t1 WHERE pk BETWEEN 1 AND 10 AND LENGTH(b) > 0;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE pk < 4000 AND LENGTH(b) > 0;
+
+--echo # Reverse scan that reaches the damaged block.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk DESC LIMIT 1 OFFSET 4999;
+
+--echo # Locking range read and range writes.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 WHERE pk BETWEEN 1 AND 3 FOR UPDATE SKIP LOCKED;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+DELETE FROM t1 WHERE pk < 100;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+UPDATE t1 SET b = 'y' WHERE pk < 100;
+
+--echo # Repair: restore the SST file and remove the marker.
+--let $restart_parameters =
+--source include/shutdown_mysqld.inc
+--remove_file $sst
+--move_file $MYSQLTEST_VARDIR/tmp/corruption_sst_scan_ignore_error.bak $sst
+--error 0,1
+--remove_file $sst_dir/ROCKSDB_CORRUPTED
+--source include/start_mysqld.inc
+
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+
+DROP TABLE t1;
