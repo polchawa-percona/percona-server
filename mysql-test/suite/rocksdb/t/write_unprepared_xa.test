@@ -1,0 +1,132 @@
+# XA transactions under write_unprepared with batches flushed before
+# PREPARE. write_unprepared names the RocksDB transaction when it registers
+# (rocksdb_register_tx), not at PREPARE, and its flushed batches must be
+# committed or rolled back by XID. Write-policy plan, step 3
+# (write_unprepared).
+#
+# Needs the XA fix for PS-11631 (MyRocks lacks
+# replace_native_transaction_in_thd, so the next statement after XA COMMIT
+# or XA ROLLBACK crashes); disabled until that fix is merged. Prepared XA
+# transactions surviving a restart is PS-11632, covered by
+# rocksdb.xa_prepared_restart; the Warning 1031 every XA PREPARE on MyRocks
+# returns comes from the same gap, so warnings are off around XA PREPARE.
+
+--source include/have_rocksdb.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) x;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+--echo #
+--echo # 1. XA COMMIT of a transaction whose batches were flushed
+--echo #
+connection con1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+XA START 'x1';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n <= 500;
+UPDATE t1 SET v = -1 WHERE id = 1;
+--let $wup_check= 1
+--source suite/rocksdb/include/write_unprepared_flushed.inc
+XA END 'x1';
+--disable_warnings
+XA PREPARE 'x1';
+--enable_warnings
+connection con2;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SELECT COUNT(*) FROM t1;
+XA RECOVER;
+connection con1;
+XA COMMIT 'x1';
+SELECT COUNT(*), SUM(v) FROM t1;
+connection con2;
+SELECT COUNT(*), SUM(v) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+
+--echo #
+--echo # 2. XA ROLLBACK after PREPARE removes the flushed rows
+--echo #
+connection con1;
+XA START 'x2';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 1000;
+DELETE FROM t1 WHERE id = 2;
+XA END 'x2';
+--disable_warnings
+XA PREPARE 'x2';
+--enable_warnings
+XA ROLLBACK 'x2';
+SELECT COUNT(*), SUM(v) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+
+--echo #
+--echo # 3. XA ROLLBACK before PREPARE (rollback of an unprepared XA)
+--echo #
+XA START 'x3';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 700;
+XA END 'x3';
+XA ROLLBACK 'x3';
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # 4. One-phase XA COMMIT
+--echo #
+XA START 'x4';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 600;
+XA END 'x4';
+XA COMMIT 'x4' ONE PHASE;
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # 5. Prepared by one session, committed by another
+--echo #
+XA START 'x5';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 601 AND 800;
+XA END 'x5';
+--disable_warnings
+XA PREPARE 'x5';
+--enable_warnings
+disconnect con1;
+connection con2;
+XA RECOVER;
+--echo # Still invisible, and its unique values are locked
+SELECT COUNT(*) FROM t1;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (601, 0, 99999);
+XA COMMIT 'x5';
+SELECT COUNT(*), SUM(v) FROM t1;
+
+--echo #
+--echo # 6. Several XA transactions on one connection, then a normal one
+--echo #
+let $i= 1;
+while ($i <= 3)
+{
+  eval XA START 'y$i';
+  eval INSERT INTO t1 VALUES (2000 + $i, 1, 2000 + $i);
+  eval XA END 'y$i';
+  --disable_warnings
+  eval XA PREPARE 'y$i';
+  --enable_warnings
+  eval XA COMMIT 'y$i';
+  inc $i;
+}
+BEGIN;
+INSERT INTO t1 VALUES (3000, 1, 3000);
+COMMIT;
+SELECT COUNT(*) FROM t1 WHERE id > 2000;
+
+connection default;
+disconnect con2;
+SELECT COUNT(*), SUM(v), SUM(u) FROM t1;
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+SELECT COUNT(*), SUM(u) FROM t1 FORCE INDEX (ku);
+CHECK TABLE t1;
+DROP TABLE t1, seq;

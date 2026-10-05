@@ -1,0 +1,176 @@
+SELECT @@rocksdb_write_policy;
+@@rocksdb_write_policy
+write_unprepared
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) x;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, c CHAR(10),
+KEY kv (v), UNIQUE KEY ku (u), KEY kvc (v, c)) ENGINE=ROCKSDB;
+CREATE TABLE r1 (id INT PRIMARY KEY, v INT, KEY kv (v) COMMENT 'rev:cf_rev') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0, 0, 0, 'base');
+#
+# 1. Own flushed rows through every access path
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 SELECT n, n % 100, n, CONCAT('c', n) FROM seq;
+INSERT INTO r1 SELECT n, n FROM seq WHERE n <= 300;
+UPDATE t1 SET v = 1000, c = 'upd' WHERE id = 7;
+DELETE FROM t1 WHERE id = 8;
+# Keys written to the database before COMMIT: yes
+# Primary key: point, range, full scan, both directions
+SELECT * FROM t1 WHERE id = 7;
+id	v	u	c
+7	1000	7	upd
+SELECT * FROM t1 WHERE id = 8;
+id	v	u	c
+SELECT COUNT(*), SUM(v), MIN(id), MAX(id) FROM t1;
+COUNT(*)	SUM(v)	MIN(id)	MAX(id)
+1000	50485	0	1000
+SELECT id FROM t1 WHERE id BETWEEN 5 AND 10 ORDER BY id;
+id
+5
+6
+7
+9
+10
+SELECT id FROM t1 WHERE id BETWEEN 5 AND 10 ORDER BY id DESC;
+id
+10
+9
+7
+6
+5
+# Secondary index, covering index, unique index
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv) WHERE v = 7;
+COUNT(*)
+9
+SELECT id, c FROM t1 FORCE INDEX (kv) WHERE v = 1000;
+id	c
+7	upd
+SELECT v, c FROM t1 FORCE INDEX (kvc) WHERE v = 1000;
+v	c
+1000	upd
+SELECT COUNT(*) FROM t1 FORCE INDEX (kvc) WHERE v BETWEEN 10 AND 19;
+COUNT(*)
+100
+SELECT id FROM t1 FORCE INDEX (ku) WHERE u = 500;
+id
+500
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u BETWEEN 100 AND 199;
+COUNT(*)
+100
+# Reverse column family
+SELECT id FROM r1 FORCE INDEX (kv) WHERE v BETWEEN 10 AND 14 ORDER BY v DESC;
+id
+14
+13
+12
+11
+10
+SELECT COUNT(*) FROM r1 FORCE INDEX (kv);
+COUNT(*)
+300
+# Index-only aggregate and MIN/MAX
+SELECT MIN(v), MAX(v) FROM t1;
+MIN(v)	MAX(v)
+0	1000
+SELECT MAX(u) FROM t1;
+MAX(u)
+1000
+#
+# 2. Other sessions do not see the flushed rows
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+1
+SELECT * FROM t1 WHERE id = 7;
+id	v	u	c
+SELECT COUNT(*) FROM r1;
+COUNT(*)
+0
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+#
+# 3. Unique checks against the transaction's own flushed rows
+#
+INSERT INTO t1 VALUES (500, 1, 1, 'dup pk');
+ERROR 23000: Duplicate entry '500' for key 't1.PRIMARY'
+INSERT INTO t1 VALUES (5000, 1, 500, 'dup u');
+ERROR 23000: Duplicate entry '500' for key 't1.ku'
+UPDATE t1 SET u = 600 WHERE id = 601;
+ERROR 23000: Duplicate entry '600' for key 't1.ku'
+# A deleted own row frees its values
+INSERT INTO t1 VALUES (8, 8, 8, 'again');
+SELECT * FROM t1 WHERE id = 8;
+id	v	u	c
+8	8	8	again
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1001
+#
+# 4. Unique checks against a concurrent transaction's flushed rows
+#
+COMMIT;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# Conflicts with con1's uncommitted primary key and unique value
+INSERT INTO t1 VALUES (500, 1, 99999, 'con2');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 VALUES (99999, 1, 500, 'con2');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# No conflict: allowed
+INSERT INTO t1 VALUES (2000, 1, 2000, 'con2');
+COMMIT;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1001
+# con1 committed: the values are now taken
+INSERT INTO t1 VALUES (500, 1, 99999, 'con2');
+ERROR 23000: Duplicate entry '500' for key 't1.PRIMARY'
+INSERT INTO t1 VALUES (99999, 1, 500, 'con2');
+ERROR 23000: Duplicate entry '500' for key 't1.ku'
+COMMIT;
+#
+# 5. A concurrent transaction rolls back: its flushed values are free
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO t1 SELECT n + 10000, n, n + 10000, 'tmp' FROM seq WHERE n <= 200;
+BEGIN;
+INSERT INTO t1 VALUES (10001, 1, 1, 'con2');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+INSERT INTO t1 VALUES (10001, 1, 10001, 'con2');
+COMMIT;
+SELECT COUNT(*), SUM(v), SUM(u) FROM t1;
+COUNT(*)	SUM(v)	SUM(u)
+1003	50495	512501
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+COUNT(*)	SUM(v)
+1003	50495
+SELECT COUNT(*), SUM(u) FROM t1 FORCE INDEX (ku);
+COUNT(*)	SUM(u)
+1003	512501
+SELECT COUNT(*) FROM r1;
+COUNT(*)
+300
+SELECT COUNT(*) FROM r1 FORCE INDEX (kv);
+COUNT(*)
+300
+CHECK TABLE t1, r1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.r1	check	status	OK
+DROP TABLE t1, r1, seq;
