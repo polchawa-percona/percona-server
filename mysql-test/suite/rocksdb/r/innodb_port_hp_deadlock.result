@@ -1,0 +1,69 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+# SCENARIO 1
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+CREATE TABLE t2 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (0);
+BEGIN;
+DELETE FROM t2 WHERE c1 = 0;
+BEGIN;
+DELETE FROM t1 WHERE c1 = 0;
+DELETE FROM t2 WHERE c1 = 0;
+BEGIN;
+DELETE FROM t1 WHERE c1 = 0;
+COMMIT;
+SELECT ROW_COUNT() AS con3_deleted;
+con3_deleted
+0
+COMMIT;
+SELECT ROW_COUNT() AS con1_deleted;
+con1_deleted
+0
+COMMIT;
+SELECT COUNT(*) AS t1_rows FROM t1;
+t1_rows
+0
+SELECT COUNT(*) AS t2_rows FROM t2;
+t2_rows
+0
+DROP TABLE t1;
+DROP TABLE t2;
+# SCENARIO 2
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+CREATE TABLE t2 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (0);
+BEGIN;
+DELETE FROM t2 WHERE c1 = 0;
+BEGIN;
+DELETE FROM t1 WHERE c1 = 0;
+DELETE FROM t2 WHERE c1 = 0;
+BEGIN;
+DELETE FROM t1 WHERE c1 = 0;
+# con2 asks for t1's row, held by con3, which waits for con2
+DELETE FROM t1 WHERE c1 = 0;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT ROW_COUNT() AS con3_deleted;
+con3_deleted
+1
+COMMIT;
+SELECT ROW_COUNT() AS con1_deleted;
+con1_deleted
+0
+COMMIT;
+SELECT COUNT(*) AS t1_rows FROM t1;
+t1_rows
+0
+SELECT COUNT(*) AS t2_rows FROM t2;
+t2_rows
+0
+DROP TABLE t1;
+DROP TABLE t2;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;

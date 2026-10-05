@@ -1,0 +1,118 @@
+#
+# Port of innodb.undetected_deadlock (mysql-test/suite/innodb/t/undetected_deadlock.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - innodb_lock_wait_timeout -> rocksdb_lock_wait_timeout; rocksdb_deadlock_detect=ON
+#     (MyRocks deadlock detection is OFF by default)
+#   - the original builds the cycle from gap and insert-intention locks, which MyRocks does
+#     not have: in MyRocks a locking read of a missing key locks that key, so the InnoDB step
+#     "con3 obtains a GRANTED gap lock" would wait. The port keeps the property under test --
+#     a deadlock cycle that only forms after a waiting lock is granted must be detected, not
+#     left to time out -- and builds it with point locks:
+#       1. con1 locks the missing key id=2
+#       2. con2 locks id=4
+#       3. con2 runs a statement that locks id=2 (waits for con1) and then id=3
+#       4. con3 locks id=3, then waits for id=4 (held by con2): con3 -> con2 -> con1
+#       5. con1 updates id=3's neighbour row and commits; con2 gets id=2 and asks for id=3,
+#          held by con3, closing the cycle con2 -> con3 -> con2
+#     The deadlock must be reported to one of them as ER_LOCK_DEADLOCK, and the other must
+#     succeed; ER_LOCK_WAIT_TIMEOUT would mean the cycle went undetected
+#   - show_locks() (performance_schema.data_locks) is not used: MyRocks locks are not
+#     reported there; waits are detected with INFORMATION_SCHEMA.ROCKSDB_TRX
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # Bug #29882690  UNDETECTED DEADLOCK WITH GAP AND INSERT INTENTION LOCKS
+--echo #                IS POSSIBLE
+--echo #
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+# Make sure that transactions will not finish prematurely
+SET GLOBAL rocksdb_lock_wait_timeout = 20;
+SET SESSION rocksdb_lock_wait_timeout = 20;
+
+  CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, val VARCHAR(200)) ENGINE=ROCKSDB;
+  INSERT INTO t1 (id,val) VALUES (1, "a"),     (3, "c"), (4, "d");
+
+  --connect (con1, localhost, root,,)
+    BEGIN;
+
+  --connect (con2, localhost, root,,)
+    --let $con2_id= `SELECT CONNECTION_ID()`
+    BEGIN;
+
+  --connect (con3, localhost, root,,)
+    --let $con3_id= `SELECT CONNECTION_ID()`
+    BEGIN;
+
+  --echo # 1. con1 locks the missing key id=2
+  --connection con1
+    SELECT * FROM t1 WHERE id=2 FOR UPDATE;
+
+  --echo # 2. con2 locks row id=4
+  --connection con2
+    SELECT * FROM t1 WHERE id=4 FOR UPDATE;
+
+  --echo # 3. con2 locks id=2 (waits for con1), and would then lock id=3
+  --connection con2
+    --send UPDATE t1 SET val = CONCAT(val, "2") WHERE id IN (2, 3)
+
+  --connection default
+    --let $wait_conn_id= $con2_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+
+  --echo # 4. con3 locks id=3, then waits for id=4 held by con2
+  --connection con3
+    SELECT * FROM t1 WHERE id=3 FOR UPDATE;
+    --send SELECT * FROM t1 WHERE id=4 FOR UPDATE
+
+  --connection default
+    --let $wait_conn_id= $con3_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+
+  --echo # 5. con1 updates another row and commits; con2 now asks for id=3 (held by con3)
+  --connection con1
+    UPDATE t1 SET val="cccccccccccccccc" WHERE id=1;
+    COMMIT;
+
+  # The cycle con2 -> con3 -> con2 must be broken by deadlock detection. Which of the two is
+  # chosen as the victim is not specified, so each side accepts success or a deadlock, and
+  # exactly one deadlock must have happened. A lock wait timeout fails the test.
+  --connection con2
+    --error 0,ER_LOCK_DEADLOCK
+    --reap
+    --let $con2_errno= $mysql_errno
+    ROLLBACK;
+
+  --connection con3
+    --error 0,ER_LOCK_DEADLOCK
+    --reap
+    --let $con3_errno= $mysql_errno
+    ROLLBACK;
+
+  --connection default
+  --let $deadlocks= 0
+  if ($con2_errno == 1213) {
+    --inc $deadlocks
+  }
+  if ($con3_errno == 1213) {
+    --inc $deadlocks
+  }
+  --echo # Deadlocks reported (expected 1): $deadlocks
+
+  --disconnect con1
+  --disconnect con2
+  --disconnect con3
+
+  SELECT * FROM t1 ORDER BY id;
+  DROP TABLE t1;
+
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+--source include/wait_until_count_sessions.inc

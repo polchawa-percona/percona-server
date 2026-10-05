@@ -1,0 +1,67 @@
+#
+# Port of the ALTER TABLE t2 part of innodb.select_count_perf
+# (mysql-test/suite/innodb/t/select_count_perf.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - only the "make all indexes in t2 obsolete to the active repeatable read transaction"
+#     part: the rest is in innodb_port_select_count_perf
+#   - the setup INSERT ... SELECT runs at READ COMMITTED (gap-lock rule at REPEATABLE READ)
+#   - the ALTER runs in a second connection while the default connection holds a
+#     REPEATABLE READ snapshot (in the original, a still-open REPEATABLE READ transaction of
+#     the default connection holds the snapshot while con1 runs the ALTER)
+#   - checks that the table is readable with all rows after the transaction ends
+#
+# Disabled until port-findings.md #8 is fixed: MyRocks returns an empty table instead of
+# ER_TABLE_DEF_CHANGED.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (
+	c1 INT AUTO_INCREMENT PRIMARY KEY,
+	c2 INT,
+	c3 INT,
+	c4 INT,
+	INDEX k2(c2)
+) ENGINE=ROCKSDB;
+let $1=10;
+while ($1 > 0) {
+  INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+  dec $1;
+}
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 (SELECT * FROM t1);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+--echo #
+--echo # Default connection: REPEATABLE READ transaction with a snapshot.
+--echo #
+BEGIN;
+SELECT COUNT(*) FROM t1;
+UPDATE t1 SET c2 = c2 * 3 WHERE c1 = 1;
+
+--echo #
+--echo # Make all indexes in t2 obsolete to the active repeatable read transaction
+--echo # in the default connection.
+--echo #
+connect (con1,localhost,root,,);
+ALTER TABLE t2 row_format=redundant;
+SELECT COUNT(*) FROM t2;
+
+--echo #
+--echo # Table t2 has been altered to a new row format.
+--echo # The index should not be useable.
+--echo #
+connection default;
+--error ER_TABLE_DEF_CHANGED
+SELECT COUNT(*) FROM t2;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t2;
+
+COMMIT;
+SELECT COUNT(*) FROM t2;
+SELECT COUNT(*) FROM t2 FORCE INDEX(k2);
+CHECK TABLE t2;
+
+disconnect con1;
+DROP TABLE t1, t2;

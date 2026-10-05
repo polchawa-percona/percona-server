@@ -1,0 +1,84 @@
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+#
+# Bug #23755664 DEADLOCK WITH 3 CONCURRENT DELETES BY UNIQUE KEY
+#
+# SCENARIO 1: three sessions delete the same row by its unique secondary key
+CREATE TABLE `t`(
+`id` INT,
+`a` INT DEFAULT NULL,
+PRIMARY KEY(`id`),
+UNIQUE KEY `u`(`a`)
+) ENGINE=ROCKSDB;
+INSERT INTO t (`id`,`a`) VALUES
+(1,1),
+(2,9999),
+(3,10000);
+BEGIN;
+DELETE FROM t WHERE a = 9999;
+DELETE FROM t WHERE a = 9999;
+DELETE FROM t WHERE a = 9999;
+COMMIT;
+SELECT ROW_COUNT() AS holder_deleted;
+holder_deleted
+0
+SELECT ROW_COUNT() AS waiter_deleted;
+waiter_deleted
+0
+SELECT * FROM t ORDER BY id;
+id	a
+1	1
+3	10000
+DROP TABLE `t`;
+# SCENARIO 2: the holder re-locks rows it already holds while the waiter waits
+# Isolation level: REPEATABLE READ
+CREATE TABLE `t`(
+`id` INT NOT NULL PRIMARY KEY
+) ENGINE=ROCKSDB;
+INSERT INTO t (`id`) VALUES (1), (2);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT id FROM t WHERE id=1 FOR UPDATE;
+id
+1
+SELECT id FROM t WHERE id=2 FOR UPDATE;
+id
+2
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT id FROM t WHERE id = 1 FOR UPDATE;
+# A locking full scan in a multi-statement transaction is rejected at RR.
+SELECT * FROM t FOR UPDATE;
+ERROR HY000: Using Gap Lock without full unique key in multi-table or multi-statement transactions is not allowed. You need to either rewrite queries to use all unique key columns in WHERE equal conditions, or rewrite to single-table, single-statement transaction.  Query: <query>
+COMMIT;
+id
+1
+DROP TABLE `t`;
+# Isolation level: READ COMMITTED
+CREATE TABLE `t`(
+`id` INT NOT NULL PRIMARY KEY
+) ENGINE=ROCKSDB;
+INSERT INTO t (`id`) VALUES (1), (2);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT id FROM t WHERE id=1 FOR UPDATE;
+id
+1
+SELECT id FROM t WHERE id=2 FOR UPDATE;
+id
+2
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SELECT id FROM t WHERE id = 1 FOR UPDATE;
+SELECT * FROM t FOR UPDATE;
+id
+1
+2
+COMMIT;
+id
+1
+DROP TABLE `t`;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;

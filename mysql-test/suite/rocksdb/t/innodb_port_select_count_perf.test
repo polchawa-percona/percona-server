@@ -1,0 +1,434 @@
+#
+# Port of innodb.select_count_perf (mysql-test/suite/innodb/t/select_count_perf.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB, also on the tables of the Bug#23596760 part
+#   - the binlog_format=MIXED workaround for Bug#22286170 is removed: MyRocks refuses
+#     writes with STATEMENT or MIXED binlog format
+#   - innodb_lock_wait_timeout replaced by rocksdb_lock_wait_timeout
+#   - connection 3 runs at READ COMMITTED instead of READ UNCOMMITTED, which MyRocks does
+#     not support; it therefore does not see the other connections' uncommitted rows
+#   - the setup INSERT ... SELECT and CREATE TABLE ... SELECT statements run at READ
+#     COMMITTED: at REPEATABLE READ MyRocks rejects them with the gap-lock error
+#   - the lock wait timeouts of SELECT ... FOR UPDATE are checked from an extra READ
+#     COMMITTED connection (con_rc). At REPEATABLE READ, the original statements in con1 are
+#     multi-statement range locking reads and MyRocks rejects them with the gap-lock error;
+#     that error is checked once in a separate transaction
+#   - the full-table UPDATE in the default REPEATABLE READ transaction is replaced by primary
+#     key updates: a row the transaction can see unchanged is updated, a row changed by a
+#     transaction committed after the snapshot gives a snapshot conflict (MyRocks RR does not
+#     update the latest committed version like InnoDB does); the full-table UPDATE itself
+#     gets the gap-lock error
+#   - the ALTER TABLE t2 / ER_TABLE_DEF_CHANGED part moved to
+#     innodb_port_select_count_perf_ddl (port-findings.md #8)
+#   - the ALTER TABLE t4 DISCARD TABLESPACE part is removed: MyRocks has no tablespaces
+#     (rocksdb.unsupported_tablespace_ops covers DISCARD)
+#   - the t5/t6/t7 part keeps the REPEATABLE READ view checks; the DML of the default
+#     connection, which MyRocks rejects at RR with the gap-lock error, runs again in a READ
+#     COMMITTED transaction
+#   - EXPLAIN also masks the filtered column (11); the two-table EXPLAINs of the
+#     Bug#23596760 part are sorted because the join order of t1 and t2 (same row count)
+#     varies between runs
+#   - the Bug#23596760 part also shows the COUNT(*) results
+#
+--source include/have_rocksdb.inc
+--source include/rpl/deprecated/not_binlog_format_statement.inc
+
+--echo #
+--echo # Traverse various indexes to get the right counts.
+--echo #
+CREATE TABLE t1 (
+	c1 INT AUTO_INCREMENT PRIMARY KEY,
+	c2 INT,
+	c3 INT,
+	c4 INT,
+	INDEX k2(c2)
+) ENGINE=ROCKSDB;
+let $1=10;
+while ($1 > 0) {
+  INSERT INTO t1(c2,c3,c4) VALUES (1, 1, 1);
+  dec $1;
+}
+
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+CREATE TABLE t2 LIKE t1;
+--enable_info
+INSERT INTO t2 (SELECT * FROM t1);
+--disable_info
+
+CREATE TABLE t3 (
+	c1 INT AUTO_INCREMENT PRIMARY KEY,
+	c2 INT,
+	c3 INT,
+	c4 INT,
+	INDEX k2(c2)
+) ENGINE=ROCKSDB PARTITION BY HASH(c1) PARTITIONS 4;
+--enable_info
+INSERT INTO t3 (SELECT * FROM t1);
+--disable_info
+
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Do some DML in the default connection and leave the transaction pending.
+--echo #
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+--enable_info
+UPDATE t1 SET c2 = c2 * 3 WHERE c1 = 1;
+UPDATE t3 SET c2 = c2 * 3 WHERE c1 = 1;
+DELETE FROM t1 WHERE c1 = 6;
+DELETE FROM t3 WHERE c1 = 6;
+--disable_info
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Start transactions of Repeatable Read, Read Committed, and Read Committed
+--echo #
+--echo # Connection 1 REPEATABLE READ
+--echo #
+connect (con1,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+--enable_info
+UPDATE t1 SET c2 = c2 * 5 WHERE c1 = 2;
+UPDATE t3 SET c2 = c2 * 5 WHERE c1 = 2;
+DELETE FROM t1 WHERE c1 = 7;
+DELETE FROM t3 WHERE c1 = 7;
+INSERT INTO t1(c2,c3,c4) VALUES (100, 1, 1);
+INSERT INTO t3(c2,c3,c4) VALUES (100, 1, 1);
+--disable_info
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Test a lock wait timeout during COUNT(*), from a READ COMMITTED connection
+--echo #
+connect (con_rc,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET rocksdb_lock_wait_timeout = 1;
+BEGIN;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT COUNT(*) FROM t1 FOR UPDATE;
+ROLLBACK;
+
+--echo #
+--echo # Connection 2 READ COMMITTED
+--echo #
+connect (con2,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+--enable_info
+UPDATE t1 SET c2 = c2 * 7 WHERE c1 = 3;
+DELETE FROM t1 WHERE c1 = 8;
+DELETE FROM t3 WHERE c1 = 8;
+INSERT INTO t1(c2,c3,c4) VALUES (1000, 1, 1);
+INSERT INTO t3(c2,c3,c4) VALUES (1000, 1, 1);
+--disable_info
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 3  READ COMMITTED (READ UNCOMMITTED in the original)
+--echo #
+connect (con3,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+--enable_info
+UPDATE t1 SET c2 = c2 * 11 WHERE c1 = 4;
+UPDATE t3 SET c2 = c2 * 11 WHERE c1 = 4;
+INSERT INTO t1(c2,c3,c4) VALUES (10000, 1, 1);
+INSERT INTO t3(c2,c3,c4) VALUES (10000, 1, 1);
+DELETE FROM t1 WHERE c1 in(9);
+DELETE FROM t3 WHERE c1 in(9);
+--disable_info
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection default REPEATABLE READ
+--echo #
+connection default;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Commit the 3 extra connections
+--echo #
+--echo # Connection 1 REPEATABLE READ
+--echo #
+connection con1;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 2 READ COMMITTED
+--echo #
+connection con2;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 3  READ COMMITTED
+--echo #
+connection con3;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+COMMIT;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 2 READ COMMITTED
+--echo #
+connection con2;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+COMMIT;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 1 REPEATABLE READ
+--echo #
+connection con1;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Select the first 5 records FOR UPDATE using count(*) in a subquery.
+--echo # The second record is still pending so we get a lock timeout.
+--echo # (from a READ COMMITTED connection, see the header)
+--echo #
+connection con_rc;
+BEGIN;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT c1, c2 FROM t1 WHERE c1 < ((SELECT COUNT(*) FROM t1) / 2) FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT COUNT(*) FROM t1 FOR UPDATE;
+ROLLBACK;
+
+connection con1;
+COMMIT;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # The same locking reads in a REPEATABLE READ transaction get the gap-lock error.
+--echo #
+BEGIN;
+--error ER_UNKNOWN_ERROR
+SELECT COUNT(*) FROM t1 FOR UPDATE;
+--error ER_UNKNOWN_ERROR
+SELECT c1, c2 FROM t1 WHERE c1 < ((SELECT COUNT(*) FROM t1) / 2) FOR UPDATE;
+ROLLBACK;
+
+--echo #
+--echo # Show The EXPLAIN output for these queries;
+--echo #
+--replace_column 10 # 11 #
+EXPLAIN SELECT * FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(*) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(*) FROM t3;
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(c1) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(c2) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(c3) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT SUM(c1) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT SUM(c2) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT AVG(c1), MAX(c1), MIN(c2), AVG(c3), SUM(c4) FROM t1;
+--replace_column 10 # 11 #
+EXPLAIN SELECT AVG(c1), MAX(c1), MIN(c2), AVG(c3), SUM(c4) FROM t3;
+--replace_column 10 # 11 #
+EXPLAIN SELECT c1, c2 FROM t1 WHERE c1 > ((SELECT COUNT(*) FROM t1) / 2);
+--replace_column 10 # 11 #
+EXPLAIN SELECT c1, c2 FROM t1 WHERE c1 > ((SELECT COUNT(*) FROM t3) / 2);
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(c2) FROM t1 WHERE c1 > ((SELECT COUNT(*) FROM t1) / 2);
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(c2) FROM t1 WHERE c1 > ((SELECT COUNT(*) FROM t3) / 2);
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(*) FROM t1 WHERE c1 > (SELECT AVG(c1) FROM t1);
+--replace_column 10 # 11 #
+EXPLAIN SELECT COUNT(*) FROM t1 WHERE c1 > (SELECT AVG(c1) FROM t3);
+
+--echo #
+--echo # Connection default REPEATABLE READ
+--echo # Do more DML in the default REPEATABLE READ transaction.
+--echo #
+connection default;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+--echo # Full-table UPDATE: gap-lock error at REPEATABLE READ.
+--error ER_UNKNOWN_ERROR
+UPDATE t1 SET c4 = c2 * 10;
+--echo # Rows unchanged since the snapshot (1 was changed by this transaction).
+--enable_info
+UPDATE t1 SET c4 = c2 * 10 WHERE c1 = 1;
+UPDATE t1 SET c4 = c2 * 10 WHERE c1 = 5;
+UPDATE t3 SET c4 = c2 * 10 WHERE c1 = 1;
+UPDATE t3 SET c4 = c2 * 10 WHERE c1 = 5;
+--disable_info
+--echo # Row 2 was changed by con1, committed after the snapshot: snapshot conflict.
+--error ER_LOCK_DEADLOCK
+UPDATE t1 SET c4 = c2 * 10 WHERE c1 = 2;
+--echo # The statement error does not roll back the transaction.
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+COMMIT;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Connection 2
+--echo #
+connection con2;
+--source suite/innodb/include/innodb_wl6742_selects.inc
+
+--echo #
+--echo # Test the interaction of a repeatable read transaction
+--echo # to changes that happen outside its view.
+--echo #
+connection default;
+
+CREATE TABLE t5 (a INT AUTO_INCREMENT PRIMARY KEY, b TEXT, aa INT, bb TEXT) ENGINE=ROCKSDB;
+INSERT INTO t5(b) VALUES ("inserted by client 1");
+INSERT INTO t5(b) VALUES ("inserted by client 1");
+INSERT INTO t5(b) VALUES ("inserted by client 1");
+INSERT INTO t5(b) VALUES ("inserted by client 1");
+UPDATE t5 SET aa=a, bb=b;
+CREATE TABLE t6 (a INT AUTO_INCREMENT PRIMARY KEY, b TEXT, aa INT, bb TEXT) ENGINE=ROCKSDB;
+INSERT INTO t6(b) VALUES ("inserted by client 1");
+INSERT INTO t6(b) VALUES ("inserted by client 1");
+INSERT INTO t6(b) VALUES ("inserted by client 1");
+INSERT INTO t6(b) VALUES ("inserted by client 1");
+UPDATE t6 SET aa=a, bb=b;
+CREATE TABLE t7 (a INT AUTO_INCREMENT PRIMARY KEY, b TEXT, aa INT, bb TEXT) ENGINE=ROCKSDB;
+INSERT INTO t7(b) VALUES ("inserted by client 1");
+INSERT INTO t7(b) VALUES ("inserted by client 1");
+INSERT INTO t7(b) VALUES ("inserted by client 1");
+INSERT INTO t7(b) VALUES ("inserted by client 1");
+UPDATE t7 SET aa=a, bb=b;
+BEGIN;
+SELECT * FROM t5;
+SELECT COUNT(*) FROM t5;
+SELECT * FROM t6;
+SELECT COUNT(*) FROM t6;
+SELECT * FROM t7;
+SELECT COUNT(*) FROM t7;
+
+--echo #
+--echo # Connection 1
+--echo #
+connection con1;
+INSERT INTO t5(b) VALUES ("inserted by client 2");
+UPDATE t5 SET a = 10 where a = 1;
+UPDATE t5 SET b = "updated by client 2" where a = 2;
+DELETE FROM t5 WHERE a = 3;
+SELECT * FROM t5;
+SELECT COUNT(*) FROM t5;
+INSERT INTO t6(b) VALUES ("inserted by client 2");
+UPDATE t6 SET a = 10 where a = 1;
+UPDATE t6 SET b = "updated by client 2" where a = 2;
+DELETE FROM t6 WHERE a = 3;
+SELECT * FROM t6;
+SELECT COUNT(*) FROM t6;
+INSERT INTO t7(b) VALUES ("inserted by client 2");
+UPDATE t7 SET a = 10 where a = 1;
+UPDATE t7 SET b = "updated by client 2" where a = 2;
+DELETE FROM t7 WHERE a = 3;
+SELECT * FROM t7;
+SELECT COUNT(*) FROM t7;
+
+--echo #
+--echo # Connection default
+--echo #
+connection default;
+--echo # The REPEATABLE READ view still shows the four original rows.
+SELECT * FROM t5;
+SELECT COUNT(*) FROM t5;
+SELECT * FROM t6;
+SELECT COUNT(*) FROM t6;
+SELECT * FROM t7;
+SELECT COUNT(*) FROM t7;
+--echo # Full-table DML in the REPEATABLE READ transaction: gap-lock error.
+--error ER_UNKNOWN_ERROR
+UPDATE t5 SET a = a + 100;
+--error ER_UNKNOWN_ERROR
+UPDATE t6 SET b = "updated by client 2";
+--error ER_UNKNOWN_ERROR
+DELETE FROM t7;
+COMMIT;
+
+--echo # The same DML in a READ COMMITTED transaction.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT * FROM t5;
+INSERT INTO t5(b) VALUES ("inserted by client 1");
+SELECT * FROM t5;
+UPDATE t5 SET a = a + 100;
+SELECT * FROM t5;
+SELECT COUNT(*) FROM t5;
+
+UPDATE t6 SET b = "updated by client 2";
+SELECT * FROM t6;
+SELECT COUNT(*) FROM t6;
+
+DELETE FROM t7;
+SELECT * FROM t7;
+SELECT COUNT(*) FROM t7;
+
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT * FROM t5;
+SELECT COUNT(*) FROM t5;
+SELECT * FROM t6;
+SELECT COUNT(*) FROM t6;
+SELECT * FROM t7;
+SELECT COUNT(*) FROM t7;
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE t1,t2,t3,t5,t6,t7;
+disconnect con1;
+disconnect con2;
+disconnect con3;
+disconnect con_rc;
+
+--echo #
+--echo # Bug #23596760: FORCE INDEX IS SKIPPED WHILE EXECUTING SELECT COUNT(*)
+--echo #
+
+CREATE TABLE t1(c1 INT NOT NULL PRIMARY KEY,
+                c2 INT NOT NULL DEFAULT 1,
+                c3 char(20) DEFAULT '',
+                KEY c2_idx (c2)) ENGINE=ROCKSDB;
+
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO t1(c1) VALUES (1), (2), (3);
+INSERT INTO t1(c1) SELECT c1 + 10 FROM t1;
+INSERT INTO t1(c1) SELECT c1 + 100 FROM t1;
+
+CREATE TABLE t2 ENGINE=ROCKSDB SELECT * FROM t1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+ANALYZE TABLE t1, t2;
+
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX(c2_idx);
+SELECT COUNT(*) FROM t1, t2;
+SELECT COUNT(*) FROM t1 FORCE INDEX(c2_idx), t2;
+
+let query1= SELECT COUNT(*) FROM t1;
+let query2= SELECT COUNT(*) FROM t1 FORCE INDEX(c2_idx);
+let query3= SELECT COUNT(*) FROM t1, t2;
+let query4= SELECT COUNT(*) FROM t1 FORCE INDEX(c2_idx), t2;
+
+--replace_column 10 # 11 #
+eval EXPLAIN $query1;
+--replace_column 10 # 11 #
+eval EXPLAIN $query2;
+--echo # t1 and t2 have the same row count: the join order is not stable, sort the plan rows.
+--sorted_result
+--replace_column 10 # 11 #
+eval EXPLAIN $query3;
+--sorted_result
+--replace_column 10 # 11 #
+eval EXPLAIN $query4;
+
+DROP TABLE t1, t2;
