@@ -1,0 +1,10 @@
+#### suite/funcs_1/t/innodb_storedproc_03.test
+#
+# 1. Check if InnoDB is available
+
+# 2. Set $engine_type
+# Generated from innodb_storedproc_03.test: runs the same scenario on MyRocks.
+--source include/have_rocksdb.inc
+let $engine_type= rocksdb;
+
+--source suite/funcs_1/storedproc/storedproc_03.inc

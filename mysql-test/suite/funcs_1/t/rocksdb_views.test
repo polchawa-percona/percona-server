@@ -1,0 +1,28 @@
+#### suite/funcs_1/t/innodb_views.test
+
+# Generated from innodb_views.test: runs the same scenario on MyRocks.
+# Runs at READ COMMITTED (see -master.opt): MyRocks has no gap locks.
+--source include/have_rocksdb.inc
+--source include/no_valgrind_without_big.inc
+
+# InnoDB tables should be used
+#
+# 1. Check if InnoDB is available
+# 2. Set $engine_type
+let $engine_type= rocksdb;
+
+# Create some objects needed in many testcases
+USE test;
+--source suite/funcs_1/include/rocksdb_tb2.inc
+--disable_warnings
+DROP DATABASE IF EXISTS test1;
+--enable_warnings
+CREATE DATABASE test1;
+USE test1;
+--source suite/funcs_1/include/rocksdb_tb2.inc
+USE test;
+
+--source suite/funcs_1/views/views_main.inc
+DROP DATABASE test1;
+DROP TABLE test.tb2;
+
