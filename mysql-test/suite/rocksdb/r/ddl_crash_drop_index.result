@@ -1,0 +1,53 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+3
+INSERT INTO t1 VALUES (4,4,4);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 DROP INDEX ka;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = ON;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INSTANT
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INSTANT;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+3
+INSERT INTO t1 VALUES (4,4,4);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 DROP INDEX ka;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+DROP TABLE t1;
