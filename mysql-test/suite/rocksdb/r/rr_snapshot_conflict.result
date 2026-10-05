@@ -1,0 +1,391 @@
+
+########################################################################
+# Engine: ROCKSDB, isolation: REPEATABLE READ
+########################################################################
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+# Scenario A: lost update.
+# con1 reads a row, con2 updates it and commits, then con1 updates the
+# same row. MyRocks at REPEATABLE READ validates the row against con1's
+# snapshot and fails with ER_LOCK_DEADLOCK; the whole transaction must be
+# rolled back, as InnoDB does for that error. MyRocks at READ COMMITTED
+# and InnoDB at both levels update the latest committed version.
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20);
+BEGIN;
+SELECT v FROM t1 WHERE id = 1;
+v
+10
+# An earlier write in the same transaction.
+INSERT INTO t2 VALUES (1);
+UPDATE t1 SET v = v + 1 WHERE id = 1;
+UPDATE t1 SET v = v + 100 WHERE id = 1;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+# Without a conflict con1 still sees its earlier write. After a snapshot
+# conflict the transaction is gone: the earlier write is rolled back and
+# the next statement sees the latest committed data.
+SELECT * FROM t2;
+id
+SELECT v FROM t1 WHERE id = 1;
+v
+11
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	11
+2	20
+SELECT * FROM t2 ORDER BY id;
+id
+DROP TABLE t1, t2;
+
+# Scenario B: write skew.
+# Both transactions check that two doctors are on call, then each takes a
+# different doctor off call. Neither engine detects this at either level:
+# both commits succeed and nobody is left on call.
+CREATE TABLE t1 (id INT PRIMARY KEY, on_call INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+UPDATE t1 SET on_call = 0 WHERE id = 1;
+UPDATE t1 SET on_call = 0 WHERE id = 2;
+COMMIT;
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	on_call
+1	0
+2	0
+DROP TABLE t1;
+
+# Scenario C: phantom insert into an updated range.
+# con1 updates a secondary-key range inside a multi-statement transaction,
+# then con2 inserts a row into that range. InnoDB at REPEATABLE READ
+# blocks the insert with a gap lock. MyRocks has no gap locks; at
+# REPEATABLE READ it refuses con1's range update instead, and at READ
+# COMMITTED (like InnoDB at READ COMMITTED) the insert goes through and
+# the new row is not updated.
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v INT, KEY (k))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+BEGIN;
+UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30;
+ERROR HY000: Using Gap Lock without full unique key in multi-table or multi-statement transactions is not allowed. You need to either rewrite queries to use all unique key columns in WHERE equal conditions, or rewrite to single-table, single-statement transaction.  Query: UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30
+INSERT INTO t1 VALUES (4, 15, 0);
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	0
+2	20	0
+3	30	0
+4	15	0
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	0
+2	20	0
+3	30	0
+4	15	0
+DROP TABLE t1;
+
+########################################################################
+# Engine: ROCKSDB, isolation: READ COMMITTED
+########################################################################
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+# Scenario A: lost update.
+# con1 reads a row, con2 updates it and commits, then con1 updates the
+# same row. MyRocks at REPEATABLE READ validates the row against con1's
+# snapshot and fails with ER_LOCK_DEADLOCK; the whole transaction must be
+# rolled back, as InnoDB does for that error. MyRocks at READ COMMITTED
+# and InnoDB at both levels update the latest committed version.
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20);
+BEGIN;
+SELECT v FROM t1 WHERE id = 1;
+v
+10
+# An earlier write in the same transaction.
+INSERT INTO t2 VALUES (1);
+UPDATE t1 SET v = v + 1 WHERE id = 1;
+UPDATE t1 SET v = v + 100 WHERE id = 1;
+# Without a conflict con1 still sees its earlier write. After a snapshot
+# conflict the transaction is gone: the earlier write is rolled back and
+# the next statement sees the latest committed data.
+SELECT * FROM t2;
+id
+1
+SELECT v FROM t1 WHERE id = 1;
+v
+111
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	111
+2	20
+SELECT * FROM t2 ORDER BY id;
+id
+1
+DROP TABLE t1, t2;
+
+# Scenario B: write skew.
+# Both transactions check that two doctors are on call, then each takes a
+# different doctor off call. Neither engine detects this at either level:
+# both commits succeed and nobody is left on call.
+CREATE TABLE t1 (id INT PRIMARY KEY, on_call INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+UPDATE t1 SET on_call = 0 WHERE id = 1;
+UPDATE t1 SET on_call = 0 WHERE id = 2;
+COMMIT;
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	on_call
+1	0
+2	0
+DROP TABLE t1;
+
+# Scenario C: phantom insert into an updated range.
+# con1 updates a secondary-key range inside a multi-statement transaction,
+# then con2 inserts a row into that range. InnoDB at REPEATABLE READ
+# blocks the insert with a gap lock. MyRocks has no gap locks; at
+# REPEATABLE READ it refuses con1's range update instead, and at READ
+# COMMITTED (like InnoDB at READ COMMITTED) the insert goes through and
+# the new row is not updated.
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v INT, KEY (k))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+BEGIN;
+UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30;
+INSERT INTO t1 VALUES (4, 15, 0);
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+4	15	0
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+4	15	0
+DROP TABLE t1;
+
+########################################################################
+# Engine: InnoDB, isolation: REPEATABLE READ
+########################################################################
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+# Scenario A: lost update.
+# con1 reads a row, con2 updates it and commits, then con1 updates the
+# same row. MyRocks at REPEATABLE READ validates the row against con1's
+# snapshot and fails with ER_LOCK_DEADLOCK; the whole transaction must be
+# rolled back, as InnoDB does for that error. MyRocks at READ COMMITTED
+# and InnoDB at both levels update the latest committed version.
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=InnoDB;
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20);
+BEGIN;
+SELECT v FROM t1 WHERE id = 1;
+v
+10
+# An earlier write in the same transaction.
+INSERT INTO t2 VALUES (1);
+UPDATE t1 SET v = v + 1 WHERE id = 1;
+UPDATE t1 SET v = v + 100 WHERE id = 1;
+# Without a conflict con1 still sees its earlier write. After a snapshot
+# conflict the transaction is gone: the earlier write is rolled back and
+# the next statement sees the latest committed data.
+SELECT * FROM t2;
+id
+1
+SELECT v FROM t1 WHERE id = 1;
+v
+111
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	111
+2	20
+SELECT * FROM t2 ORDER BY id;
+id
+1
+DROP TABLE t1, t2;
+
+# Scenario B: write skew.
+# Both transactions check that two doctors are on call, then each takes a
+# different doctor off call. Neither engine detects this at either level:
+# both commits succeed and nobody is left on call.
+CREATE TABLE t1 (id INT PRIMARY KEY, on_call INT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+UPDATE t1 SET on_call = 0 WHERE id = 1;
+UPDATE t1 SET on_call = 0 WHERE id = 2;
+COMMIT;
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	on_call
+1	0
+2	0
+DROP TABLE t1;
+
+# Scenario C: phantom insert into an updated range.
+# con1 updates a secondary-key range inside a multi-statement transaction,
+# then con2 inserts a row into that range. InnoDB at REPEATABLE READ
+# blocks the insert with a gap lock. MyRocks has no gap locks; at
+# REPEATABLE READ it refuses con1's range update instead, and at READ
+# COMMITTED (like InnoDB at READ COMMITTED) the insert goes through and
+# the new row is not updated.
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v INT, KEY (k))
+ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+BEGIN;
+UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30;
+INSERT INTO t1 VALUES (4, 15, 0);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+DROP TABLE t1;
+
+########################################################################
+# Engine: InnoDB, isolation: READ COMMITTED
+########################################################################
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION innodb_lock_wait_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+# Scenario A: lost update.
+# con1 reads a row, con2 updates it and commits, then con1 updates the
+# same row. MyRocks at REPEATABLE READ validates the row against con1's
+# snapshot and fails with ER_LOCK_DEADLOCK; the whole transaction must be
+# rolled back, as InnoDB does for that error. MyRocks at READ COMMITTED
+# and InnoDB at both levels update the latest committed version.
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=InnoDB;
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20);
+BEGIN;
+SELECT v FROM t1 WHERE id = 1;
+v
+10
+# An earlier write in the same transaction.
+INSERT INTO t2 VALUES (1);
+UPDATE t1 SET v = v + 1 WHERE id = 1;
+UPDATE t1 SET v = v + 100 WHERE id = 1;
+# Without a conflict con1 still sees its earlier write. After a snapshot
+# conflict the transaction is gone: the earlier write is rolled back and
+# the next statement sees the latest committed data.
+SELECT * FROM t2;
+id
+1
+SELECT v FROM t1 WHERE id = 1;
+v
+111
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	111
+2	20
+SELECT * FROM t2 ORDER BY id;
+id
+1
+DROP TABLE t1, t2;
+
+# Scenario B: write skew.
+# Both transactions check that two doctors are on call, then each takes a
+# different doctor off call. Neither engine detects this at either level:
+# both commits succeed and nobody is left on call.
+CREATE TABLE t1 (id INT PRIMARY KEY, on_call INT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+BEGIN;
+SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+COUNT(*)
+2
+UPDATE t1 SET on_call = 0 WHERE id = 1;
+UPDATE t1 SET on_call = 0 WHERE id = 2;
+COMMIT;
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	on_call
+1	0
+2	0
+DROP TABLE t1;
+
+# Scenario C: phantom insert into an updated range.
+# con1 updates a secondary-key range inside a multi-statement transaction,
+# then con2 inserts a row into that range. InnoDB at REPEATABLE READ
+# blocks the insert with a gap lock. MyRocks has no gap locks; at
+# REPEATABLE READ it refuses con1's range update instead, and at READ
+# COMMITTED (like InnoDB at READ COMMITTED) the insert goes through and
+# the new row is not updated.
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v INT, KEY (k))
+ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+BEGIN;
+UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30;
+INSERT INTO t1 VALUES (4, 15, 0);
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+4	15	0
+COMMIT;
+SELECT * FROM t1 ORDER BY id;
+id	k	v
+1	10	1
+2	20	1
+3	30	1
+4	15	0
+DROP TABLE t1;
