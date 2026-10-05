@@ -1,0 +1,10 @@
+# Test of explicit partition selection in dml statements (wl5217)
+# Creation date: 01-07-10
+# Author: Horst Hunger
+
+# Generated from rpl-partition-dml-1-1-innodb.test: runs the same scenario on MyRocks.
+--source include/have_rocksdb.inc
+let $ENGINE=ROCKSDB;
+--source suite/parts/inc/rpl-partition-dml-1-1.inc
+--source include/rpl/deinit.inc
+

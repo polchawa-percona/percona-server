@@ -1,0 +1,4 @@
+# Generated from partition-dml-1-2-innodb.test: runs the same scenario on MyRocks.
+--source include/have_rocksdb.inc
+let $engine= ROCKSDB;
+--source suite/parts/inc/partition-dml-1-2.inc

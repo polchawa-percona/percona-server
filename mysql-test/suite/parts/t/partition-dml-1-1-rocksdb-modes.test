@@ -1,0 +1,11 @@
+# Test of explicit partition selection in dml statements (wl5217)
+# Creation date: 01-07-10
+# Author: Horst Hunger
+
+# Generated from partition-dml-1-1-innodb-modes.test: runs the same scenario on MyRocks.
+--source include/have_rocksdb.inc
+set @save_sqlmode= @@global.sql_mode;
+let $ENGINE=ROCKSDB;
+--source suite/parts/inc/partition-dml-1-1-modes.inc
+set @@global.sql_mode= @save_sqlmode;
+
