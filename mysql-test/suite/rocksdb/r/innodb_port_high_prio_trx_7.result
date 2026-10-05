@@ -1,0 +1,171 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+# Scenario:1
+#  T1= ({W(B)})
+#  T2= ( Try to take table level lock )
+# Outcome: T2 waits for T1 to commit before it gets the table lock
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+START TRANSACTION;
+UPDATE t1 SET c1=1 WHERE c1=0;
+LOCK TABLE t1 WRITE/* From connection 2 */;
+COMMIT;
+SELECT * FROM t1;
+c1
+1
+UNLOCK TABLES;
+include/assert.inc ['There is a 1 in t1']
+DROP TABLE t1;
+# Scenario:2
+#  T1= (LOCK TABLE)
+#  T2= ({ W(B)})
+# Outcome : T2 waits for T1.
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+LOCK TABLE t1 WRITE/* From connection 2 */;
+UPDATE t1 SET c1=2 WHERE c1=0;
+START TRANSACTION;
+UPDATE t1 SET c1=1 WHERE c1=0;
+COMMIT;
+UNLOCK TABLES;
+SELECT ROW_COUNT() AS con1_updated;
+con1_updated
+0
+COMMIT;
+SELECT * FROM t1;
+c1
+2
+DROP TABLE t1;
+# Scenario:3
+#  T1= ({R(B)}, READ ONLY)
+#  T2= ({ R(B)}, READ ONLY)
+# Outcome: Both T1 and T2 continue as they only take shared locks; a writer waits.
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+START TRANSACTION READ ONLY;
+SELECT c1 FROM t1 WHERE c1=0 LOCK IN SHARE MODE;
+c1
+0
+START TRANSACTION READ ONLY;
+SELECT c1 FROM t1 WHERE c1=0 LOCK IN SHARE MODE;
+c1
+0
+SET SESSION rocksdb_lock_wait_timeout = 1;
+UPDATE t1 SET c1=1 WHERE c1=0;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+COMMIT;
+UPDATE t1 SET c1=1 WHERE c1=0;
+SELECT * FROM t1;
+c1
+1
+DROP TABLE t1;
+# Scenario:4
+# Start of transaction causes table locks acquired with LOCK TABLES to be released
+# LOCK TABLES Implicitly commit any active transaction
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+INSERT INTO t2 VALUES (0);
+LOCK TABLE t2 WRITE;
+# In_use is 1
+SHOW OPEN TABLES LIKE 't2';
+Database	Table	In_use	Name_locked
+test	t2	1	0
+START TRANSACTION;
+# In_use is 0 , its released due to start transaction statement
+SHOW OPEN TABLES LIKE 't2';
+Database	Table	In_use	Name_locked
+test	t2	0	0
+UPDATE t1 SET c1=1;
+ROLLBACK;
+# At REPEATABLE READ the same multi-statement update hits the gap-lock rule
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION;
+UPDATE t1 SET c1=1;
+ERROR HY000: Using Gap Lock without full unique key in multi-table or multi-statement transactions is not allowed. You need to either rewrite queries to use all unique key columns in WHERE equal conditions, or rewrite to single-table, single-statement transaction.  Query: <query>
+UPDATE t1 SET c1=1 WHERE c1=0;
+# Implicitly commits active transaction
+LOCK TABLE t1 READ;
+UNLOCK TABLES;
+include/assert.inc ['There is a 1 in t1']
+DROP TABLES t1,t2;
+# Scenario:5
+# Concurrent transactions waiting on the same row, one after another.
+# Outcome : each waiter is granted when the previous holder commits
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+START TRANSACTION;
+# connection 1:
+INSERT INTO t1 VALUES (0);
+ERROR 23000: Duplicate entry '0' for key 't1.PRIMARY'
+UPDATE t1 SET c1=1 WHERE c1=0;
+START TRANSACTION;
+# connection 2: wait - update
+UPDATE t1 SET c1=2 WHERE c1=1 /* From connection 2 */;
+START TRANSACTION;
+# connection 5: Insert goes but as it new row
+INSERT INTO t1 VALUES (50);
+# connection 1:
+COMMIT;
+# connection 2: Reap UPDATE t1 SET c1=2 WHERE c1=1
+SELECT ROW_COUNT() AS con2_updated;
+con2_updated
+1
+START TRANSACTION;
+# connection 3: wait - delete
+DELETE FROM t1 WHERE c1=1 /* From connection 3 */;
+COMMIT;
+# connection 3: Reap DELETE FROM t1 WHERE c1=1
+SELECT ROW_COUNT() AS con3_deleted;
+con3_deleted
+0
+START TRANSACTION;
+# connection 4: wait - insert
+INSERT INTO t1 VALUES (1) /* From connection 4 */;
+COMMIT;
+# connection 4: Reap INSERT INTO t1 VALUES (1)
+COMMIT;
+INSERT INTO t1 VALUES (3);
+UPDATE t1 SET c1=4 WHERE c1=2;
+INSERT INTO t1 VALUES (50);
+COMMIT;
+ERROR 23000: Duplicate entry '50' for key 't1.PRIMARY'
+include/assert.inc ['There is a 3 in t1']
+# Expected values : 1,3,4,50
+SELECT * FROM t1 order by c1;
+c1
+1
+3
+4
+50
+DROP TABLES t1;
+#
+# Bug#21075892 SHUTDOWN HANG, WAITING FOR ASYNC ROLLBACK TO FINISH
+#
+CREATE TABLE t1(col1 INT PRIMARY KEY, col2 INT) ENGINE=ROCKSDB;
+INSERT INTO t1 values(10, 10), (20, 20), (30, 30);
+#connection 0
+START TRANSACTION;
+#Lock record (col1 = 20)
+UPDATE t1 set col2 = 25 where col1 = 20;
+#connection 1
+START TRANSACTION;
+#MyRocks waits for the row locked by connection 0
+UPDATE t1 SET col2 = 20 where col1 > 10 and col1 <30 and col2 = 30;
+#connection 0
+ROLLBACK WORK;
+#connection 1
+SELECT ROW_COUNT() AS con1_updated;
+con1_updated
+0
+COMMIT WORK;
+SELECT * FROM t1 ORDER BY col1;
+col1	col2
+10	10
+20	20
+30	30
+DROP TABLE t1;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;

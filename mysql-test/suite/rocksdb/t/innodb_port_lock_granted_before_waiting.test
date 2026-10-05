@@ -1,0 +1,106 @@
+#
+# Port of innodb.lock_granted_before_waiting
+# (mysql-test/suite/innodb/t/lock_granted_before_waiting.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; innodb_lock_wait_timeout ->
+#     rocksdb_lock_wait_timeout
+#   - the original checks InnoDB's lock-queue invariant ("GRANTED locks before WAITING locks")
+#     across a page split that moves lock structs; MyRocks has no pages, lock structs or gap
+#     locks. The port keeps the observable behaviour: shared locks on a row are granted to a
+#     new reader even while a writer waits on that row, a waiter is granted when the blocking
+#     writer commits after many concurrent inserts, and every waiter finishes in order once
+#     the locks are released
+#   - InnoDB's insert-intention wait on the gap before id=3 becomes a writer waiting for the
+#     shared lock on row id=3 (an INSERT into a gap does not wait in MyRocks)
+#   - runs at READ COMMITTED (-master.opt): the range locking reads would otherwise be
+#     rejected by the MyRocks gap-lock rule inside multi-statement transactions
+#   - show_locks() (performance_schema.data_locks) is not used: MyRocks locks are not
+#     reported there; waits are detected with INFORMATION_SCHEMA.ROCKSDB_TRX
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+# Save the original settings, to be restored at the end of test
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+
+# Make sure that transactions will not finish prematurely
+SET GLOBAL rocksdb_lock_wait_timeout = 20;
+SET SESSION rocksdb_lock_wait_timeout = 20;
+
+# The CHAR(200) keeps the rows large, as in the original.
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, val CHAR(200)) ENGINE=ROCKSDB;
+INSERT INTO t1 (id,val) VALUES (1, "a"),  (3, "c"), (1998,"x"), (2000, "z");
+
+--connect (con1, localhost, root,,)
+  BEGIN;
+  SELECT id FROM t1 WHERE id<=3 FOR SHARE;
+
+--connect (con2, localhost, root,,)
+  --let $con2_id= `SELECT CONNECTION_ID()`
+  BEGIN;
+  --send UPDATE t1 SET val = "b" WHERE id = 3
+
+--connect (con3, localhost, root,,)
+  --let $wait_conn_id= $con2_id
+  --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+  BEGIN;
+  SELECT id FROM t1 WHERE id=2000 FOR UPDATE;
+
+--connect (con4, localhost, root,,)
+  --let $con4_id= `SELECT CONNECTION_ID()`
+  BEGIN;
+  --send SELECT id FROM t1 WHERE 1999<=id FOR SHARE
+
+--connection default
+  --let $wait_conn_id= $con4_id
+  --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+  SELECT COUNT(*) AS waiting_transactions FROM information_schema.rocksdb_trx WHERE waiting_key != '';
+
+--connection con3
+  --let i=10
+  --disable_query_log
+  while($i<100){
+    --eval INSERT INTO t1 (id,val) VALUES ($i,"x")
+    --inc $i
+  }
+  --enable_query_log
+
+--connection default
+  SELECT COUNT(*) AS waiting_transactions FROM information_schema.rocksdb_trx WHERE waiting_key != '';
+
+--connection con3
+  COMMIT;
+
+--echo # con4 is granted, and also gets a shared lock on rows con2 is waiting to update
+--connection con4
+  --reap
+  SELECT id FROM t1 WHERE id<=3 FOR SHARE;
+
+--connection default
+  SELECT COUNT(*) AS waiting_transactions FROM information_schema.rocksdb_trx WHERE waiting_key != '';
+
+--connection con1
+  COMMIT;
+
+--connection con4
+  COMMIT;
+
+--connection con2
+  --reap
+  COMMIT;
+
+--connection default
+SELECT id, val FROM t1 WHERE id <= 3 OR id >= 1998 ORDER BY id;
+SELECT COUNT(*) FROM t1;
+
+--disconnect con1
+--disconnect con2
+--disconnect con3
+--disconnect con4
+
+DROP TABLE t1;
+
+# Restore saved settings
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc

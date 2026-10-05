@@ -1,0 +1,148 @@
+#
+# Port of innodb.deadlock_detect (mysql-test/suite/innodb/t/deadlock_detect.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - innodb_deadlock_detect -> rocksdb_deadlock_detect (OFF by default in MyRocks),
+#     innodb_lock_wait_timeout -> rocksdb_lock_wait_timeout
+#   - the lock_wait_will_wait debug sync point does not exist in MyRocks; waits are detected
+#     with INFORMATION_SCHEMA.ROCKSDB_TRX.WAITING_KEY (innodb_port_wait_for_lock.inc), so the
+#     test needs no debug build
+#   - part 1 gives each session its own rocksdb_lock_wait_timeout, so only the intended session
+#     times out (the original relies on two equal global timeouts expiring in order)
+#   - part 2 (Bug #23036096): show_last_deadlock.inc (InnoDB monitor output) is replaced by
+#     INFORMATION_SCHEMA.ROCKSDB_DEADLOCK. The "full query text" check moved to
+#     rocksdb.innodb_port_deadlock_detect_full_query, which is disabled (port-findings.md #31)
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+
+--echo # Part 1: deadlock detection OFF, the cycle is broken by a lock wait timeout
+SET GLOBAL rocksdb_deadlock_detect = OFF;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+
+connect (con1,localhost,root,,);
+
+connection default;
+
+CREATE TABLE t1(
+	id	INT,
+	PRIMARY KEY(id)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(1), (2), (3);
+
+BEGIN;
+
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+connection con1;
+--let $con1_id= `SELECT CONNECTION_ID()`
+SET SESSION rocksdb_lock_wait_timeout = 2;
+
+BEGIN;
+
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+
+--send SELECT * FROM t1 WHERE id = 1 FOR UPDATE
+
+connection default;
+--let $wait_conn_id= $con1_id
+--source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+--send SELECT * FROM t1 WHERE id = 2 FOR UPDATE
+
+connection con1;
+--error ER_LOCK_WAIT_TIMEOUT
+--reap
+
+ROLLBACK;
+
+connection default;
+--reap
+
+ROLLBACK;
+
+DROP TABLE t1;
+
+disconnect con1;
+
+--source include/wait_until_count_sessions.inc
+
+--echo #
+--echo # Bug #23036096 INNODB LAST DETECTED DEADLOCK NOT SHOWING FULL QUERY
+--echo #
+
+--source include/count_sessions.inc
+
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 10;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+# Clear the deadlock history so only this test's deadlock is listed.
+SET @saved_max_latest_deadlocks = @@global.rocksdb_max_latest_deadlocks;
+SET GLOBAL rocksdb_max_latest_deadlocks = 0;
+SET GLOBAL rocksdb_max_latest_deadlocks = @saved_max_latest_deadlocks;
+
+connect(con1, localhost, root,,);
+connect(con2, localhost, root,,);
+
+CREATE TABLE bug(
+    id INT PRIMARY KEY,
+    ColumnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA INT,
+    ColumnBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB INT,
+    ColumnCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC INT,
+    ColumnDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD INT,
+    ColumnEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE INT)
+    engine = rocksdb;
+
+INSERT INTO bug(id) VALUES(0), (1);
+
+--connection con1
+    --let $con1_id= `SELECT CONNECTION_ID()`
+    BEGIN;
+    SELECT * FROM bug WHERE id = 0 FOR UPDATE;
+
+--connection con2
+    BEGIN;
+    SELECT * FROM bug WHERE id = 1 FOR UPDATE;
+
+--connection con1
+    --send SELECT * FROM bug WHERE id = 1 AND ColumnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA = 0 AND ColumnBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB = 0 AND ColumnCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC = 0 AND ColumnDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD = 0 AND ColumnEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE = 0 FOR UPDATE
+
+--connection con2
+    --let $wait_conn_id= $con1_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+    --error ER_LOCK_DEADLOCK
+    SELECT * FROM bug WHERE id = 0
+        AND ColumnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA = 0
+        AND ColumnBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB = 0
+        AND ColumnCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC = 0
+        AND ColumnDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD = 0
+        AND ColumnEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE = 0
+    FOR UPDATE;
+    ROLLBACK;
+
+--connection con1
+    --reap
+    ROLLBACK;
+
+--echo # The deadlock is recorded: two transactions, the victim is the second one.
+--connection default
+SELECT COUNT(DISTINCT deadlock_id) AS deadlocks, COUNT(*) AS path_entries,
+       SUM(rolled_back) AS victims, MIN(table_name) AS table_name,
+       MIN(index_name) AS index_name, MIN(lock_type) AS lock_type
+  FROM information_schema.rocksdb_deadlock;
+
+--connection default
+    DROP TABLE bug;
+
+disconnect con1;
+disconnect con2;
+
+--source include/wait_until_count_sessions.inc
+
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;

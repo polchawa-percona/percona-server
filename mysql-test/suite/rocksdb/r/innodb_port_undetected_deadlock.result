@@ -1,0 +1,45 @@
+#
+# Bug #29882690  UNDETECTED DEADLOCK WITH GAP AND INSERT INTENTION LOCKS
+#                IS POSSIBLE
+#
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 20;
+SET SESSION rocksdb_lock_wait_timeout = 20;
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, val VARCHAR(200)) ENGINE=ROCKSDB;
+INSERT INTO t1 (id,val) VALUES (1, "a"),     (3, "c"), (4, "d");
+BEGIN;
+BEGIN;
+BEGIN;
+# 1. con1 locks the missing key id=2
+SELECT * FROM t1 WHERE id=2 FOR UPDATE;
+id	val
+# 2. con2 locks row id=4
+SELECT * FROM t1 WHERE id=4 FOR UPDATE;
+id	val
+4	d
+# 3. con2 locks id=2 (waits for con1), and would then lock id=3
+UPDATE t1 SET val = CONCAT(val, "2") WHERE id IN (2, 3);
+# 4. con3 locks id=3, then waits for id=4 held by con2
+SELECT * FROM t1 WHERE id=3 FOR UPDATE;
+id	val
+3	c
+SELECT * FROM t1 WHERE id=4 FOR UPDATE;
+# 5. con1 updates another row and commits; con2 now asks for id=3 (held by con3)
+UPDATE t1 SET val="cccccccccccccccc" WHERE id=1;
+COMMIT;
+ROLLBACK;
+id	val
+4	d
+ROLLBACK;
+# Deadlocks reported (expected 1): 1
+SELECT * FROM t1 ORDER BY id;
+id	val
+1	cccccccccccccccc
+3	c
+4	d
+DROP TABLE t1;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
