@@ -1,0 +1,189 @@
+call mtr.add_suppression("Cannot mark Column family .* to be dropped, because it is in use");
+#
+# Moving indexes and the primary key between column families with ALTER
+# TABLE. A column family is selected only by the cfname= qualifier of an
+# index comment; an index comment without it leaves the index in the
+# default column family.
+#
+CREATE TABLE t1 (
+pk INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) NOT NULL,
+PRIMARY KEY (pk),
+KEY ka (a) COMMENT 'cfname=ddl5_cf_a',
+KEY kb (b) COMMENT 'rev:ddl5_not_a_cf'
+) ENGINE=ROCKSDB;
+# Initial layout: kb's comment has no cfname=, so it is in the default CF.
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	ddl5_cf_a
+kb	default
+PRIMARY	default
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+# Re-creating an index under the same name with a different cfname= changes
+# its comment, which MyRocks does not do in place.
+ALTER TABLE t1 DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+# A new index in the new CF is built in place; then the old one is dropped.
+ALTER TABLE t1 ADD INDEX ka2 (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=INPLACE;
+Warnings:
+Warning	1831	Duplicate index 'ka2' defined on the table 'test.t1'. This is deprecated and will be disallowed in a future release.
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+ALTER TABLE t1 RENAME INDEX ka2 TO ka;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	default
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+SELECT a, COUNT(*) FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 10 AND 12 GROUP BY a ORDER BY a DESC;
+a	COUNT(*)
+12	11
+11	11
+10	11
+# Changing only the index comment of an existing index is not possible in
+# SQL; ALTER INDEX ... VISIBLE keeps the CF.
+ALTER TABLE t1 ALTER INDEX kb INVISIBLE;
+ALTER TABLE t1 ALTER INDEX kb VISIBLE;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	default
+# Move the primary key to a reverse CF. Changing the primary key is not
+# supported in place; COPY works.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=rev:ddl5_cf_pk', ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=rev:ddl5_cf_pk', ALGORITHM=COPY;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	rev:ddl5_cf_pk
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+SELECT pk FROM t1 ORDER BY pk LIMIT 3;
+pk
+1
+2
+3
+SELECT pk FROM t1 ORDER BY pk DESC LIMIT 3;
+pk
+1000
+999
+998
+SELECT * FROM t1 WHERE pk IN (1, 500, 1000) ORDER BY pk;
+pk	a	b
+1	1	v000001
+500	15	v000500
+1000	30	v001000
+# Move both back to normal CFs with one COPY ALTER.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (pk) COMMENT 'cfname=ddl5_cf_pk',
+DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=ddl5_cf_a', ALGORITHM=COPY;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+# Restart with table validation (default rocksdb_validate_tables=1).
+# restart
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+#
+# rocksdb_no_create_column_family: ALTER into an existing CF works, ALTER
+# into a new CF fails and leaves the table unchanged.
+#
+# restart: --rocksdb_no_create_column_family=1
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+ALTER TABLE t1 DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:ddl5_cf_a', ALGORITHM=COPY;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+ALTER TABLE t1 ADD INDEX kb2 (b) COMMENT 'cfname=ddl5_cf_new', ALGORITHM=INPLACE;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+ALTER TABLE t1 DROP INDEX kb, ADD INDEX kb (b) COMMENT 'cfname=ddl5_cf_new', ALGORITHM=COPY;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME = 'ddl5_cf_new';
+COUNT(*)
+0
+# restart
+#
+# Dropping a column family: refused while an index uses it, allowed once
+# a failed ALTER has left it unused.
+#
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_pk';
+ERROR HY000: Cannot drop Column family ('ddl5_cf_pk') because it is in use or does not exist.
+# A failed ALTER creates the CF of the new index, then rolls back.
+INSERT INTO t1 VALUES (1001, 1, 'v000001');
+ALTER TABLE t1 ADD UNIQUE INDEX ub (b) COMMENT 'cfname=ddl5_cf_failed', ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry 'v000001' for key '#sql-tmp.ub'
+ALTER TABLE t1 ADD UNIQUE INDEX ub (b) COMMENT 'cfname=ddl5_cf_failed_copy', ALGORITHM=COPY;
+ERROR 23000: Duplicate entry 'v000001' for key 't1.ub'
+DELETE FROM t1 WHERE pk = 1001;
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+CF_NAME
+ddl5_cf_failed
+ddl5_cf_failed_copy
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_failed_copy';
+SET @@global.rocksdb_delete_cf = 'ddl5_cf_failed';
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+CF_NAME
+ddl5_cf_failed
+ddl5_cf_failed_copy
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+# The background thread removes the marked CFs without a restart.
+# After a restart the table is still valid and the marked CFs are gone.
+# restart
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+SELECT INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	CF
+ka	rev:ddl5_cf_a
+kb	default
+PRIMARY	ddl5_cf_pk
+SELECT CF_NAME FROM INFORMATION_SCHEMA.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'ddl5_cf_failed%' GROUP BY CF_NAME ORDER BY CF_NAME;
+CF_NAME
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (ka)) AS n_ka, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb, (SELECT SUM(a) FROM t1 FORCE INDEX (PRIMARY)) AS sum_pk, (SELECT SUM(a) FROM t1 FORCE INDEX (ka)) AS sum_ka, (SELECT MIN(b) FROM t1 FORCE INDEX (kb)) AS min_kb, (SELECT MAX(b) FROM t1 FORCE INDEX (kb)) AS max_kb, (SELECT MAX(pk) FROM t1) AS max_pk;
+n_pk	n_ka	n_kb	sum_pk	sum_ka	min_kb	max_kb	max_pk
+1000	1000	1000	47025	47025	v000001	v001000	1000
+DROP TABLE t1;
