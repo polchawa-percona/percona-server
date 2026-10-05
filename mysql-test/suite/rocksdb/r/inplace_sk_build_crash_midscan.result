@@ -1,0 +1,114 @@
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 VARCHAR(20)) ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 5000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, n % 100, CONCAT('row', n) FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+3000	148500
+# Crash while an INPLACE ADD INDEX is paused at rocksdb.inplace_populate_sk_scan_row
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL paused WAIT_FOR never';
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+# Kill and restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+3000	148500
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# No leftover index in the MyRocks dictionary: 1
+# Leftover bulk-load SST files (none expected):
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+AS k_c2_matches_table;
+k_c2_matches_table
+1
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+AS k_c3_matches_table;
+k_c3_matches_table
+1
+ALTER TABLE t1 DROP INDEX k_c2, DROP INDEX k_c3;
+# Crash while an INPLACE ADD INDEX is paused at rocksdb.inplace_populate_sk_before_merge
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL paused WAIT_FOR never';
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+# Kill and restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+3000	148500
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# No leftover index in the MyRocks dictionary: 1
+# Leftover bulk-load SST files (none expected):
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+AS k_c2_matches_table;
+k_c2_matches_table
+1
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+AS k_c3_matches_table;
+k_c3_matches_table
+1
+ALTER TABLE t1 DROP INDEX k_c2, DROP INDEX k_c3;
+# Crash while an INPLACE ADD INDEX is paused at rocksdb.bulk_load_before_ingest
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL paused WAIT_FOR never';
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+# Kill and restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int NOT NULL,
+  `c3` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+3000	148500
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# No leftover index in the MyRocks dictionary: 1
+# Leftover bulk-load SST files (none expected):
+ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+AS k_c2_matches_table;
+k_c2_matches_table
+1
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+AS k_c3_matches_table;
+k_c3_matches_table
+1
+ALTER TABLE t1 DROP INDEX k_c2, DROP INDEX k_c3;
+DROP TABLE t1;
