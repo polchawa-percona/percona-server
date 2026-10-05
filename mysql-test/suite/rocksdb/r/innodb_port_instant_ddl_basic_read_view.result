@@ -1,0 +1,103 @@
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t2 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES ("r1c1", "r1c2");
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+CREATE TABLE t1 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ("r1c1", "r1c2");
+SELECT * FROM t1;
+c1	c2
+r1c1	r1c2
+BEGIN;
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+ALTER TABLE t1 ADD COLUMN c3 char(10) DEFAULT "c3_def",
+ALGORITHM=COPY;
+UPDATE t1 SET c1 = "r1c11";
+SELECT * FROM t1;
+c1	c2	c3
+r1c11	r1c2	c3_def
+SELECT * FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+ROLLBACK;
+DROP TABLE t1;
+DROP TABLE t2;
+CREATE TABLE t2 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES ("r1c1", "r1c2");
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+CREATE TABLE t1 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ("r1c1", "r1c2");
+SELECT * FROM t1;
+c1	c2
+r1c1	r1c2
+BEGIN;
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+ALTER TABLE t1 ADD COLUMN c3 char(10) DEFAULT "c3_def", ALGORITHM=INSTANT;
+# MyRocks: INSTANT accepted
+UPDATE t1 SET c1 = "r1c11";
+SELECT * FROM t1;
+c1	c2	c3
+r1c11	r1c2	c3_def
+SELECT * FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+ROLLBACK;
+DROP TABLE t1;
+DROP TABLE t2;
+CREATE TABLE t2 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES ("r1c1", "r1c2");
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+CREATE TABLE t1 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ("r1c1", "r1c2");
+SELECT * FROM t1;
+c1	c2
+r1c1	r1c2
+BEGIN;
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+ALTER TABLE t1 DROP COLUMN c2,
+ALGORITHM=COPY;
+UPDATE t1 SET c1 = "r1c11";
+SELECT * FROM t1;
+c1
+r1c11
+SELECT * FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+ROLLBACK;
+DROP TABLE t1;
+DROP TABLE t2;
+CREATE TABLE t2 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES ("r1c1", "r1c2");
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+CREATE TABLE t1 (c1 char(10), c2 char(10)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ("r1c1", "r1c2");
+SELECT * FROM t1;
+c1	c2
+r1c1	r1c2
+BEGIN;
+SELECT * FROM t2;
+c1	c2
+r1c1	r1c2
+ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INSTANT;
+# MyRocks: INSTANT rejected (error 1845); running it with the default algorithm
+UPDATE t1 SET c1 = "r1c11";
+SELECT * FROM t1;
+c1
+r1c11
+SELECT * FROM t1;
+ERROR HY000: Table definition has changed, please retry transaction
+ROLLBACK;
+DROP TABLE t1;
+DROP TABLE t2;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;

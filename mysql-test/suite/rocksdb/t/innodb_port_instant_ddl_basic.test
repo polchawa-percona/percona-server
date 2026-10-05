@@ -1,0 +1,40 @@
+#
+# Port of innodb.instant_ddl_basic (mysql-test/suite/innodb/t/instant_ddl_basic.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of InnoDB; the REDUNDANT/DYNAMIC/COMPACT row format
+#     loop is dropped (MyRocks has one row format), so each index variant runs once
+#   - every ALTER ... ALGORITHM=INSTANT goes through
+#     include/innodb_port_instant_alter.inc: the result records whether MyRocks
+#     accepts INSTANT, and a rejected ALTER is re-run with the default algorithm
+#     so the data checks still run. MyRocks supports INSTANT only for appending
+#     columns, and only with rocksdb_enable_instant_ddl_for_append_column=ON
+#   - the InnoDB metadata dumps (INNODB_TABLES/INNODB_COLUMNS) are removed; the
+#     MyRocks DD metadata is checked in innodb_port_instant_ddl_limitations
+#   - the read view part (Bug #33937504) is in innodb_port_instant_ddl_basic_read_view
+#
+--source include/have_rocksdb.inc
+
+--echo # By default MyRocks does not add columns instantly.
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN c3 INT, ALGORITHM=INSTANT;
+DROP TABLE t1;
+
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+--echo # Test without any index
+let $clust_index=;
+let $sec_index=;
+--source suite/rocksdb/include/innodb_port_instant_ddl_basic.inc
+
+--echo # Test with clustered index
+let $clust_index=, PRIMARY KEY (c1);
+--source suite/rocksdb/include/innodb_port_instant_ddl_basic.inc
+
+--echo # Test with secondary index
+let $sec_index=, KEY (c2);
+--source suite/rocksdb/include/innodb_port_instant_ddl_basic.inc
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;

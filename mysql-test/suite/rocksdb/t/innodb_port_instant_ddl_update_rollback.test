@@ -1,0 +1,217 @@
+#
+# Port of innodb.instant_ddl_update and innodb.instant_ddl_rollback
+# (mysql-test/suite/innodb/include/instant_ddl_update.inc and
+# instant_ddl_rollback.inc) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of InnoDB; the REDUNDANT/DYNAMIC/COMPACT row format
+#     loop is dropped (MyRocks has one row format)
+#   - every ALTER ... ALGORITHM=INSTANT goes through
+#     include/innodb_port_instant_alter.inc: the result records whether MyRocks
+#     accepts INSTANT (only appending a column, with
+#     rocksdb_enable_instant_ddl_for_append_column=ON), and a rejected ALTER runs
+#     with the default algorithm so the UPDATE and ROLLBACK checks still run
+#   - the InnoDB metadata dumps (INNODB_TABLES/INNODB_COLUMNS) are removed, so the
+#     test also runs on release builds; the MyRocks DD metadata is checked in
+#     innodb_port_instant_ddl_limitations
+#   - not ported: the debug-only online DDL part of instant_ddl_update.inc, which
+#     pauses InnoDB's row log (row_log_table_apply1_before); MyRocks has no row
+#     log
+#   - added: rows of every table version are read again after a restart and a
+#     manual compaction
+#
+--source include/have_rocksdb.inc
+
+# The restart below resets the variable to its startup value, so it is reset
+# to that value with DEFAULT at the end.
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+--echo ##############################################
+--echo # UPDATE on a table with instantly added columns
+--echo ##############################################
+
+CREATE TABLE t1 (c1 char(20), c2 char(20)) ENGINE=ROCKSDB;
+INSERT INTO t1 values ("row1_c1", "row1_c2");
+
+SHOW CREATE TABLE t1;
+
+--echo # ------------------------------------------------------------
+--echo # ADD AN INSTANT COLUMN At the end [c1, c2, +c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 ADD COLUMN c3 char(20) default "c3_def"
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row2_c1", "row2_c2", "row2_c3");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r1_c1" where c1="row1_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c3="row1_c3" where c1="r1_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # ADD AN INSTANT COLUMN At the first [+c0, c1, c2, c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 ADD COLUMN c0 char(20) default "c0_def" FIRST
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row3_c0", "row3_c1", "row3_c2", "row3_c3");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r2_c1" where c1="row2_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c0="row2_c0" where c1="r2_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # ADD AN INSTANT COLUMN in between [c0, c1, +c4, c2, c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 ADD COLUMN c4 char(20) default "c4_def" AFTER c1
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row4_c0", "row4_c1", "row4_c4", "row4_c2", "row4_c3");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r3_c1" where c1="row3_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c4="row3_c4" where c1="r3_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # DROP A COLUMN in between [c0, c1, c4, -c2, c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 DROP COLUMN c2
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row5_c0", "row5_c1", "row5_c4", "row5_c3");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r4_c1" where c1="row4_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c4="row1_c4" where c1="r1_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # DROP A COLUMN at the end [c0, c1, c4, ~c2, -c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 DROP COLUMN c3
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row6_c0", "row6_c1", "row6_c4");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r5_c1" where c1="row5_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c0="row1_c0" where c1="r1_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # DROP A COLUMN at the beginning [-c0, c1, c4, ~c2, ~c3]
+--echo # ------------------------------------------------------------
+--let $alter = ALTER TABLE t1 DROP COLUMN c0
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row7_c1", "row7_c4");
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # INPLACE UPDATE
+UPDATE t1 SET c1="r6_c1" where c1="row6_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # NOT INPLACE UPDATE
+UPDATE t1 SET c4="row2_c4" where c1="r2_c1";
+SELECT * FROM t1 ORDER BY c1;
+
+--echo # ------------------------------------------------------------
+--echo # Rebuild table [c1, c4]
+--echo # ------------------------------------------------------------
+ALTER TABLE t1 FORCE;
+
+SELECT * FROM t1 ORDER BY c1;
+
+INSERT INTO t1 values ("row8_c1", "row8_c4");
+SELECT * FROM t1 ORDER BY c1;
+
+
+--echo # Rows of every version after a restart and a manual compaction
+--source include/restart_mysqld.inc
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+SELECT * FROM t1 ORDER BY c1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT * FROM t1 ORDER BY c1;
+DROP TABLE t1;
+
+--echo ##############################################
+--echo # ROLLBACK on a table with instantly added columns
+--echo ##############################################
+
+--echo # ------------------------------------------------------------
+--echo # Create a table with 3 columns. [id, c1, c2, c3]
+--echo # ------------------------------------------------------------
+CREATE TABLE t1(id INT PRIMARY KEY, c1 VARCHAR(4000), c2 VARCHAR(4000), c3 VARCHAR(1000)) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(1, repeat('a', 4000), repeat('b', 4000), repeat('c', 1));
+SELECT id, length(c1), length(c2), length(c3) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), c3 FROM t1;
+
+--echo # INSTANT ADD a column
+--let $alter = ALTER TABLE t1 ADD COLUMN c4 VARCHAR(500) NOT NULL DEFAULT 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+
+INSERT INTO t1 VALUES(2, repeat('e', 4000), repeat('f', 4000), repeat('g', 1), repeat('h', 100));
+
+SELECT id, length(c1), length(c2), length(c3), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), c3, LEFT(c4, 10) FROM t1;
+
+START TRANSACTION;
+UPDATE t1 SET c1 = repeat('x', 200) WHERE id = 1;
+SELECT id, length(c1), length(c2), length(c3), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), c3, LEFT(c4, 10) FROM t1;
+ROLLBACK;
+
+SELECT id, length(c1), length(c2), length(c3), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), c3, LEFT(c4, 10) FROM t1;
+
+--echo # INSTANT DROP a column
+--let $alter = ALTER TABLE t1 DROP COLUMN c3
+--source suite/rocksdb/include/innodb_port_instant_alter.inc
+
+SELECT id, length(c1), length(c2), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), LEFT(c4, 10) FROM t1;
+
+START TRANSACTION;
+UPDATE t1 SET c1 = repeat('x', 200) WHERE id = 1;
+SELECT id, length(c1), length(c2), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), LEFT(c4, 10) FROM t1;
+ROLLBACK;
+
+SELECT id, length(c1), length(c2), length(c4) FROM t1;
+SELECT id, LEFT(c1 , 10), LEFT(c2, 10), LEFT(c4, 10) FROM t1;
+
+--echo ###########
+--echo # CLEANUP #
+--echo ###########
+DROP TABLE t1;
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
