@@ -1,0 +1,66 @@
+#
+# Port of innodb.bug33788578_release (mysql-test/suite/innodb/t/bug33788578_release.test
+# and suite/innodb/include/bug33788578_release.inc) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of InnoDB ROW_FORMAT=REDUNDANT.
+#   - have_nodebug.inc is dropped: the race is only timing-based, and the test
+#     passes on debug and release builds.
+#   - 100001 rows instead of 1000001, to keep the COPY rebuild short.
+#   - MyRocks adds a column instantly only when it is appended, NOT NULL, and
+#     rocksdb_enable_instant_ddl_for_append_column is ON, so the column is
+#     NOT NULL and the variable is enabled for the ALTER.
+#   - MyRocks changes the primary key with ALGORITHM=COPY, which blocks writes,
+#     so the concurrent DELETE runs either before or after the rebuild. Both
+#     orders must give the same table: row 1 deleted, the instant column value
+#     in every row, and a new primary key that covers the instant column.
+#   - Extra checks: row count, CHECK TABLE and a point lookup through the new
+#     primary key.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let $table_name = t1
+--let $pk_col = num
+--let $new_col = col
+
+eval CREATE TABLE $table_name ($pk_col INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+--echo # Insert dummy data to increase time taken to complete ALTER rebuild
+--echo # Table is inserted with 1, 2, 3, .. , 100001
+SET SESSION cte_max_recursion_depth=10000000;
+eval INSERT INTO $table_name WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n <= 100000) SELECT n FROM v;
+
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+eval ALTER TABLE $table_name ADD $new_col INT NOT NULL DEFAULT 1, ALGORITHM=INSTANT;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;
+eval SELECT * FROM $table_name LIMIT 15;
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+connection con1;
+--echo # Prepare the new instant column
+send;
+eval ALTER TABLE $table_name DROP PRIMARY KEY, ADD PRIMARY KEY ($pk_col, $new_col);
+
+connection con2;
+--echo # Run the DML in online
+send;
+eval DELETE FROM $table_name WHERE $pk_col=1;
+reap;
+
+connection con1;
+reap;
+
+connection default;
+disconnect con1;
+disconnect con2;
+
+eval SELECT * FROM $table_name LIMIT 15;
+eval SELECT COUNT(*), SUM($new_col = 1), MIN($pk_col), MAX($pk_col) FROM $table_name;
+eval SELECT * FROM $table_name WHERE $pk_col = 50000 AND $new_col = 1;
+eval SHOW CREATE TABLE $table_name;
+eval CHECK TABLE $table_name EXTENDED;
+eval DROP TABLE $table_name;
+--source include/wait_until_count_sessions.inc

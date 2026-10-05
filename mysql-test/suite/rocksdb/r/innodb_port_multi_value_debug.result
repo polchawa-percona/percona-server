@@ -1,0 +1,403 @@
+# Multi-valued indexes are rejected by MyRocks.
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->"$[*]" AS DECIMAL(4,2) ARRAY)));
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+CREATE INDEX i2 ON t1((CAST(f1->"$[*]" AS CHAR(10) ARRAY)));
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+ALTER TABLE t1 ADD INDEX i3 ((CAST(f1->"$[*]" AS UNSIGNED ARRAY))), ALGORITHM=COPY;
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+DROP TABLE t1;
+CREATE TABLE t1 (
+i INT NOT NULL PRIMARY KEY,
+j JSON DEFAULT (CAST('["HelloWorld"]' AS JSON)),
+KEY mv_idx_binary (( CAST(j->'$[*]' AS BINARY(10) ARRAY) )) ) ENGINE=ROCKSDB;
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+CREATE TABLE IF NOT EXISTS t1 (
+i INT NOT NULL PRIMARY KEY,
+j JSON DEFAULT (CAST('["100"]' AS JSON)),
+UNIQUE KEY mv_idx_binary (( CAST(j->'$[*]' AS UNSIGNED ARRAY) )) ) ENGINE=ROCKSDB;
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+CREATE TABLE `t1` (
+`id` int NOT NULL AUTO_INCREMENT,
+`j2` JSON, `j3` JSON, `j4` JSON,
+PRIMARY KEY (`id`),
+KEY `mv_idx_binary` ((JSON_LENGTH(`j3`)), (CAST(JSON_EXTRACT(`j4`,_utf8mb4'$[*]') AS BINARY(10) ARRAY)), (JSON_DEPTH(`j2`)))
+) ENGINE=ROCKSDB;
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+SHOW CREATE TABLE t1;
+ERROR 42S02: Table 'test.t1' doesn't exist
+# Functional indexes on the first array element instead.
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->"$[0]" AS DECIMAL(4,2))));
+CREATE INDEX i2 ON t1((CAST(f1->>"$[0]" AS CHAR(10))));
+ALTER TABLE t1 ADD INDEX i0 ((CAST(f1->"$[0]" AS UNSIGNED))), ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+INSERT INTO t1(f1) VALUES(CAST('["11.11", "22.22", "33.33", "44.44", "55.55", "66.66", "77.77", "88.88", "99.99"]' AS JSON));
+SELECT * FROM t1;
+id	f1
+1	["11.11", "22.22", "33.33", "44.44", "55.55", "66.66", "77.77", "88.88", "99.99"]
+SELECT * FROM t1 WHERE 11.11 MEMBER OF (f1->'$[*]');
+id	f1
+SELECT * FROM t1 WHERE 99.99 MEMBER OF (f1->'$[*]');
+id	f1
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 11.11;
+id
+1
+SELECT id FROM t1 WHERE CAST(f1->>"$[0]" AS CHAR(10)) = '11.11';
+id
+1
+TRUNCATE TABLE t1;
+INSERT INTO t1(f1) VALUES(CAST('["13.33","13.21"]' AS JSON));
+INSERT INTO t1(f1) VALUES(CAST('["15.67","18.55"]' AS JSON));
+SELECT * FROM t1 WHERE 13.33 MEMBER OF (f1->'$[*]');
+id	f1
+SELECT * FROM t1 WHERE "18.55" MEMBER OF (f1->'$[*]');
+id	f1
+2	["15.67", "18.55"]
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 15.67;
+id
+2
+DELETE FROM t1;
+SELECT * FROM t1 WHERE 13.33 MEMBER OF (f1->'$[*]');
+id	f1
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 15.67;
+id
+INSERT INTO t1(f1) VALUES(CAST('["13.33","13.21","13.45"]' AS JSON));
+INSERT INTO t1(f1) VALUES(CAST('["15.67","18.55","19.32"]' AS JSON));
+UPDATE t1 SET f1 = CAST('["13.21","13.33"]' AS JSON) WHERE 13.45 MEMBER OF (f1->'$[*]');
+UPDATE t1 SET f1 = CAST('["19.32","15.67","18.55"]' AS JSON) WHERE 19.32 MEMBER OF (f1->'$[*]');
+SELECT * FROM t1;
+id	f1
+3	["13.33", "13.21", "13.45"]
+4	["15.67", "18.55", "19.32"]
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS DECIMAL(4,2)) = 13.21;
+id
+SELECT id FROM t1 WHERE CAST(f1->>"$[0]" AS CHAR(10)) = '19.32';
+id
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.i1 matches the table: 1
+# t1.i2 matches the table: 1
+DELETE FROM t1;
+DROP TABLE t1;
+CREATE TABLE t1(id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, f1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t1(f1) VALUES (CAST('[1,3]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[1,3,9,8]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[1,3,9,8,10,11,20,30]' AS JSON));
+INSERT INTO t1(f1) VALUES (CAST('[9,3,9,8,10,11,20,30]' AS JSON));
+CREATE INDEX idx1 ON t1((CAST(f1->"$[0]" AS UNSIGNED)));
+SELECT * FROM t1 WHERE 9 MEMBER OF (f1->'$[*]');
+id	f1
+2	[1, 3, 9, 8]
+3	[1, 3, 9, 8, 10, 11, 20, 30]
+4	[9, 3, 9, 8, 10, 11, 20, 30]
+SELECT * FROM t1 WHERE 30 MEMBER OF (f1->'$[*]');
+id	f1
+3	[1, 3, 9, 8, 10, 11, 20, 30]
+4	[9, 3, 9, 8, 10, 11, 20, 30]
+SELECT id FROM t1 WHERE CAST(f1->"$[0]" AS UNSIGNED) = 9;
+id
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.idx1 matches the table: 1
+DROP TABLE t1;
+CREATE TABLE t1(j JSON) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('["test"]'), ('[]'), ('null');
+SET SESSION debug = "+d,abort_copy_table";
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL rolling_back WAIT_FOR drop_created';
+CREATE INDEX mv_idx_date ON t1 ((CAST(j->'$[0]' AS UNSIGNED)));;
+SET DEBUG_SYNC='now WAIT_FOR rolling_back';
+SELECT * FROM t1;
+j
+["test"]
+[]
+null
+SET DEBUG_SYNC='now SIGNAL drop_created';
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION debug = "-d,abort_copy_table";
+INSERT INTO t1 VALUES ('["Hello"]');
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `j` json DEFAULT NULL
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT * FROM t1;
+j
+["test"]
+[]
+null
+["Hello"]
+DROP TABLE t1;
+CREATE TABLE t1 (
+i INT NOT NULL PRIMARY KEY,
+j JSON DEFAULT (CAST('["HelloWorld"]' AS JSON)),
+KEY mv_idx_binary (( CAST(j->>'$[0]' AS BINARY(10)) )) ) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1, CAST('["HelloWorld", "Hello"]' AS JSON));
+INSERT INTO t1 VALUES(2, CAST('["HelloMySQL", "Hello"]' AS JSON));
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+i	j
+2	["HelloMySQL", "Hello"]
+SELECT * FROM t1 WHERE "Hello" MEMBER OF (j->'$[*]');
+i	j
+1	["HelloWorld", "Hello"]
+2	["HelloMySQL", "Hello"]
+# A consistent snapshot needs REPEATABLE READ (the test runs at READ COMMITTED).
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+DELETE FROM t1;
+START TRANSACTION;
+INSERT INTO t1 VALUES(1, CAST('["HelloMySQL", "Hello"]' AS JSON));
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+i	j
+1	["HelloMySQL", "Hello"]
+SELECT i FROM t1 WHERE CAST(j->>'$[0]' AS BINARY(10)) = 'HelloMySQL';
+i
+1
+ROLLBACK;
+COMMIT;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT * FROM t1 WHERE "HelloMySQL" MEMBER OF (j->'$[*]');
+i	j
+SELECT * FROM t1 WHERE "Hello" MEMBER OF (j->'$[*]');
+i	j
+SELECT i FROM t1 WHERE CAST(j->>'$[0]' AS BINARY(10)) = 'HelloMySQL';
+i
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+CREATE TABLE t1 (id INT NOT NULL KEY AUTO_INCREMENT, f1 JSON, f2 JSON, f3 JSON, f4 JSON , f5 JSON, f6 JSON,
+KEY mv_idx_binary (( CAST(f1->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary1 (( CAST(f2->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary2 (( CAST(f3->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary3 (( CAST(f4->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary4 (( CAST(f5->>'$[0]' AS CHAR(10)) )),
+KEY mv_idx_binary5 (( CAST(f6->>'$[0]' AS CHAR(10)) ))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1, CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON), CAST('["HelloWorld", "Hello"]' AS JSON));
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+DELETE FROM t1;
+INSERT INTO t1 VALUES(1, CAST('["Helloworl", "hell"]' AS JSON), CAST('["Helloworl", "hell"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON), CAST('["helloworl", "well"]' AS JSON), CAST('["helloworl", "hell"]' AS JSON));
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.mv_idx_binary matches the table: 1
+# t1.mv_idx_binary4 matches the table: 1
+DELETE FROM t1;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1 FORCE INDEX (mv_idx_binary3);
+COUNT(*)
+0
+DROP TABLE t1;
+COMMIT;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+CREATE TABLE IF NOT EXISTS t1 (
+i INT NOT NULL PRIMARY KEY,
+j JSON DEFAULT (CAST('["100"]' AS JSON)),
+UNIQUE KEY mv_idx_binary (( CAST(j->'$[0]' AS UNSIGNED) )) ) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1, CAST('["90"]' AS JSON));
+START TRANSACTION;
+INSERT INTO t1 VALUES(2, CAST('["100"]' AS JSON));
+SET SESSION rocksdb_lock_wait_timeout = 60;
+START TRANSACTION;
+INSERT INTO t1 VALUES(3, CAST('["100"]' AS JSON));
+COMMIT;
+ERROR 23000: Duplicate entry '100' for key 't1.mv_idx_binary'
+# Like InnoDB, the failed insert keeps a lock on the duplicate key until
+# the transaction ends.
+COMMIT;
+START TRANSACTION;
+DELETE FROM t1;
+INSERT INTO t1 VALUES(4, CAST('["100"]' AS JSON));
+ROLLBACK;
+ERROR 23000: Duplicate entry '100' for key 't1.mv_idx_binary'
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+i	j
+1	["90"]
+2	["100"]
+# t1.mv_idx_binary matches the table: 1
+DROP TABLE t1;
+CREATE TABLE t1 (a INT, b INT, f JSON,
+KEY mv_idx_binary ((( CAST(f->>'$[0]' AS BINARY(10) ))))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (a,b,f) VALUES(1, 1, '["foobar"]');
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t1 SET f = NULL;
+ALTER TABLE t1 DROP INDEX mv_idx_binary, ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+ALTER TABLE t1 DROP INDEX mv_idx_binary;
+COMMIT;
+UPDATE t1 SET a = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+a	b	f
+1	1	NULL
+DROP TABLE t1;
+CREATE TABLE t1(a INT PRIMARY KEY, b INT, f1 JSON) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->>"$[0]" AS CHAR(10))));
+INSERT INTO t1 VALUES(1, 1, CAST('["1111", "2222"]' AS JSON));
+INSERT INTO t1 VALUES(2, 2, CAST('["11111", "2222", "22222", "3333"]' AS JSON));
+INSERT INTO t1 VALUES(3, 3, CAST('["1111", "2222", "22222", "3333", "444"]' AS JSON));
+INSERT INTO t1 VALUES(4, 4, CAST('["22222", "3333", "444", "5555"]' AS JSON));
+SET DEBUG_SYNC='after_admin_flush SIGNAL before_apply WAIT_FOR apply';
+OPTIMIZE TABLE t1;;
+connection con1
+SET DEBUG_SYNC='now WAIT_FOR before_apply';
+INSERT INTO t1 VALUES(5, 5, CAST('["2222", "5555"]' AS JSON));
+SET DEBUG_SYNC='now SIGNAL apply';
+connection default
+/* reap */ OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	status	OK
+DELETE FROM t1 WHERE "444" MEMBER OF (f1->"$[*]");
+INSERT INTO t1 VALUES(6, 6, CAST('["1111", "444"]' AS JSON));
+UPDATE t1 SET f1 = CAST('["11111", "2222"]' AS JSON) WHERE a = 1;
+UPDATE t1 SET f1 = CAST('["11111", "22222", "33333", "44444"]' AS JSON) WHERE a = 3;
+UPDATE t1 SET f1 = CAST('["2222", "5555", "6666"]' AS JSON) WHERE a = 5;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+a	b	f1
+1	1	["11111", "2222"]
+2	2	["11111", "2222", "22222", "3333"]
+5	5	["2222", "5555", "6666"]
+6	6	["1111", "444"]
+SELECT * FROM t1 WHERE "1111" MEMBER OF (f1->"$[*]");
+a	b	f1
+6	6	["1111", "444"]
+SELECT * FROM t1 WHERE "5555" MEMBER OF (f1->"$[*]");
+a	b	f1
+5	5	["2222", "5555", "6666"]
+SELECT * FROM t1 WHERE "11111" MEMBER OF (f1->"$[*]");
+a	b	f1
+1	1	["11111", "2222"]
+2	2	["11111", "2222", "22222", "3333"]
+# t1.i1 matches the table: 1
+SET DEBUG_SYNC='after_admin_flush SIGNAL before_apply_1 WAIT_FOR apply_1';
+OPTIMIZE TABLE t1;;
+SET DEBUG_SYNC='now WAIT_FOR before_apply_1';
+INSERT INTO t1 VALUES(7, 7, CAST('["6666", "1111"]' AS JSON));
+SET DEBUG_SYNC='now SIGNAL apply_1';
+connection default
+/* reap */ OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	status	OK
+DELETE FROM t1 WHERE "22222" MEMBER OF (f1->"$[*]");
+INSERT INTO t1 VALUES(8, 8, CAST('["1111", "3333", "444", "6666"]' AS JSON));
+UPDATE t1 SET f1 = CAST('["5555", "2222", "6666", "777"]' AS JSON) WHERE a = 5;
+UPDATE t1 SET f1 = CAST('["666", "777", "6666", "7777"]' AS JSON) WHERE a = 6;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+a	b	f1
+1	1	["11111", "2222"]
+5	5	["5555", "2222", "6666", "777"]
+6	6	["666", "777", "6666", "7777"]
+7	7	["6666", "1111"]
+8	8	["1111", "3333", "444", "6666"]
+SELECT * FROM t1 WHERE "1111" MEMBER OF (f1->"$[*]");
+a	b	f1
+7	7	["6666", "1111"]
+8	8	["1111", "3333", "444", "6666"]
+SELECT * FROM t1 WHERE "6666" MEMBER OF (f1->"$[*]");
+a	b	f1
+5	5	["5555", "2222", "6666", "777"]
+6	6	["666", "777", "6666", "7777"]
+7	7	["6666", "1111"]
+8	8	["1111", "3333", "444", "6666"]
+SELECT * FROM t1 WHERE "777" MEMBER OF (f1->"$[*]");
+a	b	f1
+5	5	["5555", "2222", "6666", "777"]
+6	6	["666", "777", "6666", "7777"]
+# t1.i1 matches the table: 1
+DROP TABLE t1;
+CREATE TABLE `t1` (
+`id` int(11) NOT NULL AUTO_INCREMENT,
+`j1` JSON DEFAULT (CAST(_utf8mb4'[5,-1,0]' AS JSON)),
+`j2` JSON DEFAULT (CAST(_utf8mb4'[9,8,0,1]' AS JSON)),
+`j3` JSON DEFAULT (CAST(_utf8mb4'["foobar"]' AS JSON)),
+`j4` JSON DEFAULT (CAST(_utf8mb4'["HelloWorld"]' AS JSON)),
+`j5` JSON DEFAULT (CAST(_utf8mb4'["HelloMySQL"]' AS JSON)),
+PRIMARY KEY (`id`),
+KEY `mv_idx_binary` ((JSON_LENGTH(`j3`)), (CAST(JSON_UNQUOTE(JSON_EXTRACT(`j4`,_utf8mb4'$[0]')) AS BINARY(10))), (JSON_DEPTH(`j2`)))
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+Warnings:
+Warning	1681	Integer display width is deprecated and will be removed in a future release.
+INSERT INTO t1 VALUES(0, CAST(_utf8mb4'[5,-1,0]' AS JSON), CAST(_utf8mb4'[9,8,0,1]' AS JSON), CAST(_utf8mb4'["foobar"]' AS JSON), CAST(_utf8mb4'["HelloWorld"]' AS JSON), CAST(_utf8mb4'["HelloMySQL"]' AS JSON));
+INSERT INTO t1 VALUES(0, CAST(_utf8mb4'[5,-1,0]' AS JSON), CAST(_utf8mb4'[9,8,0,1]' AS JSON), CAST(_utf8mb4'["foobar"]' AS JSON), CAST(_utf8mb4'["HelloWorld"]' AS JSON), '[]');
+SELECT * FROM t1;
+id	j1	j2	j3	j4	j5
+1	[5, -1, 0]	[9, 8, 0, 1]	["foobar"]	["HelloWorld"]	["HelloMySQL"]
+2	[5, -1, 0]	[9, 8, 0, 1]	["foobar"]	["HelloWorld"]	[]
+SET SESSION debug = "+d,abort_copy_table";
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL rollback WAIT_FOR try_drop';
+CREATE INDEX mv_idx_date ON t1 ((CAST(j5->'$' AS UNSIGNED)));;
+SET DEBUG_SYNC='now WAIT_FOR rollback';
+SELECT id, JSON_LENGTH(j3), JSON_DEPTH(j2) FROM t1 FORCE INDEX (mv_idx_binary) WHERE JSON_LENGTH(j3) = 1;
+id	JSON_LENGTH(j3)	JSON_DEPTH(j2)
+1	1	2
+2	1	2
+SET DEBUG_SYNC='now SIGNAL try_drop';
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION debug = "-d,abort_copy_table";
+SET DEBUG_SYNC='alter_table_copy_after_lock_upgrade SIGNAL inplace_done WAIT_FOR upgrade_lock';
+ALTER TABLE t1 DROP INDEX mv_idx_binary;;
+SET DEBUG_SYNC='now WAIT_FOR inplace_done';
+DELETE FROM t1;
+SET DEBUG_SYNC='now SIGNAL upgrade_lock';
+SELECT * FROM t1;
+id	j1	j2	j3	j4	j5
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `j1` json DEFAULT (cast(_utf8mb4'[5,-1,0]' as json)),
+  `j2` json DEFAULT (cast(_utf8mb4'[9,8,0,1]' as json)),
+  `j3` json DEFAULT (cast(_utf8mb4'["foobar"]' as json)),
+  `j4` json DEFAULT (cast(_utf8mb4'["HelloWorld"]' as json)),
+  `j5` json DEFAULT (cast(_utf8mb4'["HelloMySQL"]' as json)),
+  PRIMARY KEY (`id`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t1;
+SET DEBUG_SYNC='RESET';
+#
+# Bug#31474182 THE MULTI-VALUED INDEX RETURNS ERROR WHEN --DEBUG OPTION SPECIFIED.
+#
+CREATE TABLE t1 (f1 JSON, id VARCHAR(64) AS (f1->"$[0]") STORED NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE INDEX i1 ON t1((CAST(f1->"$[*]" AS UNSIGNED ARRAY)));
+ERROR 42000: The storage engine for the table doesn't support multi-valued indexes
+CREATE INDEX i1 ON t1((CAST(f1->"$[1]" AS UNSIGNED)));
+INSERT INTO t1(f1) VALUES ('[1,2,3]'), ('[4,3,7]'), ('[7,8,9]'), ('[5,6]');
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT * FROM t1 WHERE JSON_OVERLAPS(f1->'$[*]', '[4,3,7]') ORDER BY id;
+f1	id
+[1, 2, 3]	1
+[4, 3, 7]	4
+[7, 8, 9]	7
+SELECT id FROM t1 WHERE CAST(f1->"$[1]" AS UNSIGNED) = 3;
+id
+4
+# t1.i1 matches the table: 1
+DROP TABLE t1;

@@ -1,0 +1,583 @@
+call mtr.add_suppression("Current value of rocksdb_merge_buf_size=.* is too small");
+CREATE TABLE t1(c1 INT NOT NULL, c2 INT, PRIMARY KEY(c1)) Engine=ROCKSDB;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int DEFAULT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3),(4,4),(5,5);
+SET SESSION DEBUG='+d,myrocks_simulate_index_create_rollback';
+ALTER TABLE t1 ADD UNIQUE INDEX(c2);
+ERROR HY000: Intentional failure in inplace alter occurred.
+SET SESSION DEBUG=DEFAULT;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c1` int NOT NULL,
+  `c2` int DEFAULT NULL,
+  PRIMARY KEY (`c1`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't1';
+COUNT(*)
+1
+# The same ALTER succeeds without the failure.
+ALTER TABLE t1 ADD UNIQUE INDEX(c2);
+# t1.c2 matches the table: 1
+DROP TABLE t1;
+SET @saved_merge_buf_size = @@session.rocksdb_merge_buf_size;
+SET SESSION rocksdb_merge_buf_size = 4096;
+CREATE TABLE bug13861218 (c1 INT NOT NULL, c2 INT NOT NULL, INDEX(c2))
+ENGINE=ROCKSDB;
+INSERT INTO bug13861218 VALUES (8, 0), (4, 0), (0, 0);
+CREATE UNIQUE INDEX ui ON bug13861218(c1);
+CHECK TABLE bug13861218;
+Table	Op	Msg_type	Msg_text
+test.bug13861218	check	status	OK
+# bug13861218.ui matches the table: 1
+# bug13861218.c2 matches the table: 1
+DROP TABLE bug13861218;
+CREATE TABLE bug13861218 (c1 INT NOT NULL, c2 INT UNIQUE) ENGINE=ROCKSDB;
+INSERT INTO bug13861218 VALUES (8, NULL), (4, NULL), (0, NULL);
+CREATE UNIQUE INDEX ui ON bug13861218(c1);
+CHECK TABLE bug13861218;
+Table	Op	Msg_type	Msg_text
+test.bug13861218	check	status	OK
+SELECT * FROM bug13861218 FORCE INDEX (ui) ORDER BY c1;
+c1	c2
+0	NULL
+4	NULL
+8	NULL
+# bug13861218.ui matches the table: 1
+# bug13861218.c2 matches the table: 1
+DROP TABLE bug13861218;
+#
+# Bug #17657223	EXCESSIVE TEMPORARY FILE USAGE IN ALTER TABLE
+#
+create table t480(a serial)engine=rocksdb;
+insert into t480
+values(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),(),(),(),(),();
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+create table t1(f1 int auto_increment not null,
+f2 char(200) not null, f3 char(200) not null,
+primary key(f1,f2,f3), key(f1))engine=rocksdb charset latin1;
+insert into t1 select NULL,'aaa','bbb' from t480;
+insert into t1 select NULL,'aaaa','bbbb' from t480;
+insert into t1 select NULL,'aaaaa','bbbbb' from t480;
+insert into t1 select NULL,'aaaaaa','bbbbbb' from t480;
+# An index build sorting through many merge chunks on disk.
+alter table t1 add index k2(f2, f1), algorithm=inplace;
+# t1.k2 matches the table: 1
+alter table t1 drop index k2;
+# Error in the merge sort of an index build.
+SET DEBUG = '+d,myrocks_merge_buf_offset_overflow';
+alter table t1 add index k2(f2, f1), algorithm=inplace;
+ERROR HY000: MyRocks failed populating secondary key during alter.
+SET DEBUG = '-d,myrocks_merge_buf_offset_overflow';
+SET SESSION rocksdb_merge_buf_size = @saved_merge_buf_size;
+# Error while copying the rows of a primary key rebuild.
+SET DEBUG = '+d,abort_copy_table';
+alter table t1 drop primary key,add primary key(f2,f1);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG = '-d,abort_copy_table';
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `f1` int NOT NULL AUTO_INCREMENT,
+  `f2` char(200) NOT NULL,
+  `f3` char(200) NOT NULL,
+  PRIMARY KEY (`f1`,`f2`,`f3`),
+  KEY `f1` (`f1`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=1921 DEFAULT CHARSET=latin1
+select count(*), count(distinct f1) from t1;
+count(*)	count(distinct f1)
+1920	1920
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# t1.f1 matches the table: 1
+select count(*) from information_schema.rocksdb_ddl
+where table_schema = 'test' and table_name = 't1';
+count(*)
+2
+drop table t1;
+create table t1(k1 int auto_increment primary key,
+k2 char(200),k3 char(200))engine=rocksdb;
+insert into t1 values(NULL,'a','b'), (NULL,'aa','bb');
+SET DEBUG_SYNC= 'after_admin_flush
+SIGNAL opened WAIT_FOR flushed';
+optimize table t1;
+connection default
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+INSERT INTO t1 select NULL,'aaa','bbb' from t480;
+SET DEBUG_SYNC= 'now SIGNAL flushed';
+/*con1 reap*/ Optimize table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	status	OK
+affected rows: 1
+SELECT COUNT(k1),k2,k3 FROM t1 GROUP BY k2,k3;
+COUNT(k1)	k2	k3
+1	a	b
+1	aa	bb
+480	aaa	bbb
+drop table t1;
+create table t1(k1 int auto_increment primary key,
+k2 char(200),k3 char(200))engine=rocksdb;
+INSERT INTO t1 select NULL,'aaa','bbb' from t480;
+SET DEBUG_SYNC= 'alter_table_copy_after_lock_upgrade
+SIGNAL opened WAIT_FOR flushed';
+SET SESSION debug = '+d,abort_copy_table';
+ALTER TABLE t1 ADD COLUMN k4 int, ALGORITHM=COPY;
+connection default
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+480
+SET DEBUG_SYNC= 'now SIGNAL flushed';
+/*con1 reap*/ ALTER TABLE t1 ADD COLUMN k4 int, ALGORITHM=COPY;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION debug = '-d,abort_copy_table';
+INSERT INTO t1 select NULL,'aaaa','bbbb' from t480;
+SELECT COUNT(k1),k2,k3 FROM t1 GROUP BY k2,k3;
+COUNT(k1)	k2	k3
+480	aaa	bbb
+480	aaaa	bbbb
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `k1` int NOT NULL AUTO_INCREMENT,
+  `k2` char(200) DEFAULT NULL,
+  `k3` char(200) DEFAULT NULL,
+  PRIMARY KEY (`k1`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=961 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SET DEBUG_SYNC='RESET';
+# The table definition must not show new column "k4" after a restart
+# because ALTER failed
+# restart
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `k1` int NOT NULL AUTO_INCREMENT,
+  `k2` char(200) DEFAULT NULL,
+  `k3` char(200) DEFAULT NULL,
+  PRIMARY KEY (`k1`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=961 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+select count(*) from t1;
+count(*)
+960
+drop table t1;
+drop table t480;
+SET DEBUG_SYNC='RESET';
+#
+#  BUG#21612714 ALTER TABLE SORTING SKIPPED WHEN CHANGE PK AND DROP
+#                LAST COLUMN OF OLD PK
+#
+create table t1(o1 varchar(10), primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 drop primary key, add primary key(o1(3));
+select * from t1;
+o1
+abd
+acd
+drop table t1;
+create table t1(o1 varchar(10), primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 drop primary key, add primary key(o1);
+select * from t1;
+o1
+abd
+acd
+drop table t1;
+create table t1(o1 varchar(10), primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 add n1 int not null, drop primary key, add primary key(o1(3), n1);
+select * from t1;
+o1	n1
+abd	0
+acd	0
+drop table t1;
+create table t1(o1 varchar(10), primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 add n1 int not null, drop primary key, add primary key(o1, n1);
+select * from t1;
+o1	n1
+abd	0
+acd	0
+drop table t1;
+create table t1(o1 varchar(10), o2 int not null, primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1(3), o2);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 varchar(10), o2 int not null, primary key(o1(2))) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1, o2);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 varchar(10), primary key(o1(3))) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 drop primary key, add primary key(o1(2));
+select * from t1;
+o1
+abd
+acd
+drop table t1;
+create table t1(o1 varchar(10), primary key(o1)) engine = rocksdb;
+insert into t1 values('abd'), ('acd');
+alter table t1 drop primary key, add primary key(o1(2));
+select * from t1;
+o1
+abd
+acd
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1(3), o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 drop primary key, add primary key(o1(2));
+select * from t1;
+o1	o2
+abd	1
+acd	2
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1, o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 drop primary key, add primary key(o1(2));
+select * from t1;
+o1	o2
+abd	1
+acd	2
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1(3), o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1(2),n1);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1, o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1(2),n1);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1(3), o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1(3),n1);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 varchar(10), o2 int, primary key(o1, o2)) engine = rocksdb;
+insert into t1 values('abd', 1), ('acd', 2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,n1);
+select * from t1;
+o1	o2	n1
+abd	1	0
+acd	2	0
+drop table t1;
+create table t1(o1 int, o2 varchar(10), primary key(o1,o2(3))) engine = rocksdb;
+insert into t1 values(1,'abd'), (2,'acd');
+alter table t1 drop primary key, add primary key(o1,o2(2));
+select * from t1;
+o1	o2
+1	abd
+2	acd
+drop table t1;
+create table t1(o1 int, o2 varchar(10), primary key(o1,o2)) engine = rocksdb;
+insert into t1 values(1,'abd'), (2,'acd');
+alter table t1 drop primary key, add primary key(o1,o2(2));
+select * from t1;
+o1	o2
+1	abd
+2	acd
+drop table t1;
+create table t1(o1 int, o2 varchar(10), primary key(o1,o2(2))) engine = rocksdb;
+insert into t1 values(1, 'abd'), (2, 'acd');
+alter table t1 drop primary key, add primary key(o1,o2(3));
+select * from t1;
+o1	o2
+1	abd
+2	acd
+drop table t1;
+create table t1(o1 int, o2 varchar(10), primary key(o1,o2(2))) engine = rocksdb;
+insert into t1 values(1, 'abd'), (2, 'acd');
+alter table t1 drop primary key, add primary key(o1,o2);
+select * from t1;
+o1	o2
+1	abd
+2	acd
+drop table t1;
+create table t1(o1 int, o2 varchar(10), o3 int, primary key(o1,o2(3),o3)) engine = rocksdb;
+insert into t1 values(1, 'abd', 1), (2, 'acd', 2);
+alter table t1 drop primary key, add primary key(o1,o2(2));
+select * from t1;
+o1	o2	o3
+1	abd	1
+2	acd	2
+drop table t1;
+create table t1(o1 int, o2 varchar(10), o3 int, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1, 'abd', 1), (2, 'acd', 2);
+alter table t1 drop primary key, add primary key(o1,o2(2));
+select * from t1;
+o1	o2	o3
+1	abd	1
+2	acd	2
+drop table t1;
+create table t1(o1 varchar(10), o2 varchar(10), primary key(o1(3),o2(3))) engine = rocksdb;
+insert into t1 values('abd', 'acd'), ('acd', 'abd');
+alter table t1 drop primary key, add primary key(o1(3),o2(2));
+select * from t1;
+o1	o2
+abd	acd
+acd	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 varchar(10), primary key(o1,o2)) engine = rocksdb;
+insert into t1 values('abd', 'acd'), ('acd', 'abd');
+alter table t1 drop primary key, add primary key(o1,o2(2));
+select * from t1;
+o1	o2
+abd	acd
+acd	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 varchar(10), primary key(o1(3),o2(2))) engine = rocksdb;
+insert into t1 values('abd', 'acd'), ('acd', 'abd');
+alter table t1 drop primary key, add primary key(o1(3),o2(3));
+select * from t1;
+o1	o2
+abd	acd
+acd	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 varchar(10), primary key(o1,o2(2))) engine = rocksdb;
+insert into t1 values('abd', 'acd'), ('acd', 'abd');
+alter table t1 drop primary key, add primary key(o1,o2);
+select * from t1;
+o1	o2
+abd	acd
+acd	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 int, o3 varchar(10), primary key(o1(3),o2,o3(2))) engine = rocksdb;
+insert into t1 values('abd', 1, 'acd'), ('acd', 2, 'abd');
+alter table t1 drop primary key, add primary key(o1(3),o2,o3(3));
+select * from t1;
+o1	o2	o3
+abd	1	acd
+acd	2	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 int, o3 varchar(10), primary key(o1,o2,o3(2))) engine = rocksdb;
+insert into t1 values('abd', 1, 'acd'), ('acd', 2, 'abd');
+alter table t1 drop primary key, add primary key(o1,o2,o3);
+select * from t1;
+o1	o2	o3
+abd	1	acd
+acd	2	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 int, o3 varchar(10), primary key(o1(3),o2,o3(3))) engine = rocksdb;
+insert into t1 values('abd', 1, 'acd'), ('acd', 2, 'abd');
+alter table t1 drop primary key, add primary key(o1(3),o2,o3(2));
+select * from t1;
+o1	o2	o3
+abd	1	acd
+acd	2	abd
+drop table t1;
+create table t1(o1 varchar(10), o2 int, o3 varchar(10), primary key(o1,o2,o3(3))) engine = rocksdb;
+insert into t1 values('abd', 1, 'acd'), ('acd', 2, 'abd');
+alter table t1 drop primary key, add primary key(o1,o2,o3(2));
+select * from t1;
+o1	o2	o3
+abd	1	acd
+acd	2	abd
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 drop primary key, add primary key(o1,o2);
+select * from t1;
+o1	o2
+1	1
+2	2
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,n1);
+select * from t1;
+o1	o2	n1
+1	1	0
+2	2	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, drop primary key, add primary key(n1,o1);
+select * from t1;
+o1	o2	n1
+1	1	0
+2	2	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, add n2 int not null, drop primary key, add primary key(n1,o1,n2);
+select * from t1;
+o1	o2	n1	n2
+1	1	0	0
+2	2	0	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, add n2 int not null, drop primary key, add primary key(n1,n2,o1);
+select * from t1;
+o1	o2	n1	n2
+1	1	0	0
+2	2	0	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, add n2 int not null, drop primary key, add primary key(o1,n1,n2);
+select * from t1;
+o1	o2	n1	n2
+1	1	0	0
+2	2	0	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,o2,n1);
+select * from t1;
+o1	o2	n1
+1	1	0
+2	2	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,n1,o2);
+select * from t1;
+o1	o2	n1
+1	1	0
+2	2	0
+drop table t1;
+create table t1(o1 int, o2 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1),(2,2);
+alter table t1 add n1 int not null, drop primary key, add primary key(n1,o1,o2);
+select * from t1;
+o1	o2	n1
+1	1	0
+2	2	0
+drop table t1;
+create table t1(o1 int, o2 int not null, o3 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 drop primary key, add primary key(o1,o2,o3);
+select * from t1;
+o1	o2	o3
+1	1	2
+2	2	1
+drop table t1;
+create table t1(o1 int, o2 int not null, o3 int not null, primary key(o1)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 drop primary key, add primary key(o1,o3,o2);
+select * from t1;
+o1	o2	o3
+1	1	2
+2	2	1
+drop table t1;
+create table t1(o1 int, o2 int, o3 int, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 drop primary key, add primary key(o1,o2);
+select * from t1;
+o1	o2	o3
+1	1	2
+2	2	1
+drop table t1;
+create table t1(o1 int, o2 int, o3 int, o4 int not null, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1,1,2,2),(2,2,1,1);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,o2,o3,o4);
+select * from t1;
+o1	o2	o3	o4	n1
+1	1	2	2	0
+2	2	1	1	0
+drop table t1;
+create table t1(o1 int, o2 int, o3 int, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,o2,n1);
+select * from t1;
+o1	o2	o3	n1
+1	1	2	0
+2	2	1	0
+drop table t1;
+create table t1(o1 int, o2 int, o3 int, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 add n1 int not null, drop primary key, add primary key(o1,n1,o2);
+select * from t1;
+o1	o2	o3	n1
+1	1	2	0
+2	2	1	0
+drop table t1;
+create table t1(o1 int, o2 int, o3 int, primary key(o1,o2,o3)) engine = rocksdb;
+insert into t1 values(1,1,2),(2,2,1);
+alter table t1 drop primary key, add primary key(o1);
+select * from t1;
+o1	o2	o3
+1	1	2
+2	2	1
+drop table t1;
+CREATE TABLE t1(o1 int, o2 int, o3 int, PRIMARY KEY(o1), KEY(o2)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1,1,2),(2,2,1);
+EXPLAIN SELECT * FROM t1 ORDER BY o2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	#	100.00	Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`o1` AS `o1`,`test`.`t1`.`o2` AS `o2`,`test`.`t1`.`o3` AS `o3` from `test`.`t1` order by `test`.`t1`.`o2`
+SELECT * FROM t1 ORDER BY o2;
+o1	o2	o3
+1	1	2
+2	2	1
+ALTER TABLE t1 DROP INDEX o2, ADD INDEX (o2 DESC);
+ERROR 42000: The storage engine for the table doesn't support descending indexes
+ALTER TABLE t1 DROP INDEX o2, ADD INDEX o2 (o2) COMMENT 'rev:cf_o2';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+o1	o2	o3
+1	1	2
+2	2	1
+EXPLAIN SELECT * FROM t1 ORDER BY o2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	#	100.00	Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`o1` AS `o1`,`test`.`t1`.`o2` AS `o2`,`test`.`t1`.`o3` AS `o3` from `test`.`t1` order by `test`.`t1`.`o2`
+SELECT * FROM t1 ORDER BY o2;
+o1	o2	o3
+1	1	2
+2	2	1
+ALTER TABLE t1 DROP INDEX o2, ADD INDEX (o2 ASC);
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT * FROM t1;
+o1	o2	o3
+1	1	2
+2	2	1
+EXPLAIN SELECT * FROM t1 ORDER BY o2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	#	100.00	Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`o1` AS `o1`,`test`.`t1`.`o2` AS `o2`,`test`.`t1`.`o3` AS `o3` from `test`.`t1` order by `test`.`t1`.`o2`
+SELECT * FROM t1 ORDER BY o2;
+o1	o2	o3
+1	1	2
+2	2	1
+DROP TABLE t1;

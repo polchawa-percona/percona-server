@@ -1,0 +1,135 @@
+#
+# Port of innodb.alter_table_update_primary_key
+# (mysql-test/suite/innodb/t/alter_table_update_primary_key.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - The InnoDB debug keyword ddl_buf_add_two (small DDL sort buffer) is dropped,
+#     so the test needs no debug build.
+#   - MyRocks rebuilds the table for a primary key change with ALGORITHM=COPY;
+#     ALGORITHM=INPLACE is rejected, which is pinned once. The other ALTERs use
+#     ALGORITHM=COPY.
+#   - Each table also has a secondary index, and after every failed ALTER the
+#     test checks that the table, the secondary index and the MyRocks dictionary
+#     are unchanged (CHECK TABLE, secondary index vs primary key).
+#
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Test#0 : a primary key change cannot be done in place.
+--echo #
+
+CREATE TABLE t0 (id0 INT, id1 INT, PRIMARY KEY (id0, id1)) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t0 DROP PRIMARY KEY, ADD PRIMARY KEY(id0), ALGORITHM = INPLACE;
+DROP TABLE t0;
+
+--echo #
+--echo # Test#1 : Try and fail to rebuild the table's PK from 2 columns to 1 column with duplicates.
+--echo #
+
+CREATE TABLE t1 (
+    id0 int,
+    id1 int,
+    PRIMARY KEY (id0, id1),
+    KEY k1 (id1)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1(id0, id1) VALUES
+(1, 1),
+(2, 2),
+(2, 3);
+
+--error ER_DUP_ENTRY
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY(id0), ALGORITHM = COPY;
+
+--echo # Check that records are present.
+SELECT * FROM t1 ORDER BY id0, id1;
+SHOW CREATE TABLE t1;
+CHECK TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= k1
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+
+--echo #
+--echo # Test#2 : Try and fail to rebuild the table's PK from 2 columns to 1 column with duplicates.
+--echo #          Then succeed doing it on second set of two columns with unique rows.
+--echo #
+
+CREATE TABLE t2 (
+    id0 int,
+    id1 int,
+    id2 int,
+    PRIMARY KEY (id0, id2),
+    KEY k1 (id1)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t2(id0, id1, id2) VALUES
+(1, 2, 3),
+(1, 2, 4),
+(1, 3, 5);
+
+--error ER_DUP_ENTRY
+ALTER TABLE t2 DROP PRIMARY KEY, ADD PRIMARY KEY(id1), ALGORITHM = COPY;
+
+ALTER TABLE t2 DROP PRIMARY KEY, ADD PRIMARY KEY(id1, id2), ALGORITHM = COPY;
+
+--echo # Check that records are present.
+SELECT * FROM t2 ORDER BY id0, id1, id2;
+SHOW CREATE TABLE t2;
+CHECK TABLE t2;
+--let $pk_check_table= t2
+--let $pk_check_index= k1
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--echo # Point lookups through the new primary key.
+SELECT * FROM t2 WHERE id1 = 2 AND id2 = 4;
+SELECT * FROM t2 WHERE id1 = 3;
+
+DROP TABLE t2;
+
+--echo #
+--echo # Test#3 : Try and fail to rebuild the table's PK from unique 1 column to
+--echo #          set of 2 columns with duplicate rows.
+--echo #
+
+CREATE TABLE t3 (
+    id0 int,
+    id1 char(2),
+    id2 varchar(3),
+    id3 date,
+    id4 bool,
+    PRIMARY KEY (id0),
+    KEY k2 (id2, id3)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t3(id0, id1, id2, id3, id4) VALUES
+(1, '22', '3', '2020-01-01', true),
+(2, '33', '4', '2020-02-01', false),
+(3, '22', '3', '2020-01-01', true);
+
+--error ER_DUP_ENTRY
+ALTER TABLE t3 DROP PRIMARY KEY, ADD PRIMARY KEY(id1, id2), ALGORITHM = COPY;
+
+--echo #
+--echo # Test#4 : Change primary key to all 5 columns. Then fail to change to
+--echo #          last 4 ones due to duplicates.
+--echo #
+
+ALTER TABLE t3 DROP PRIMARY KEY, ADD PRIMARY KEY(id0, id1, id2, id3, id4), ALGORITHM = COPY;
+
+--error ER_DUP_ENTRY
+ALTER TABLE t3 DROP PRIMARY KEY, ADD PRIMARY KEY(id1, id2, id3, id4), ALGORITHM = COPY;
+
+--echo # Check that records are present.
+SELECT * FROM t3 ORDER BY id0, id1, id2, id3, id4;
+SHOW CREATE TABLE t3;
+CHECK TABLE t3;
+--let $pk_check_table= t3
+--let $pk_check_index= k2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t3;
+
+--echo # No temporary tables of the failed ALTERs are left in the MyRocks dictionary.
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test';

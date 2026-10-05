@@ -1,0 +1,976 @@
+#
+# Port of innodb.virtual_debug (mysql-test/suite/innodb/t/virtual_debug.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB; have_innodb_max_16k.inc dropped.
+#     DESC index parts are dropped (MyRocks has no descending indexes), and so is
+#     KEY_BLOCK_SIZE. ROW_FORMAT is kept: MyRocks stores it, and changing it
+#     rebuilds the table with ALGORITHM=COPY.
+#   - InnoDB runs DML concurrently with online DDL and replays it from a row log.
+#     MyRocks has no row log: an INPLACE ADD INDEX holds LOCK=SHARED, while COPY
+#     ALTERs and OPTIMIZE (a compaction) block writes. So every ALTER paused at an
+#     InnoDB point (innodb_inplace_alter_table_enter, ddl_after_scan,
+#     row_log_table_apply1_before, row_log_apply_before, inplace_after_index_build)
+#     is paused at a server point instead:
+#       - alter_table_inplace_after_lock_downgrade for INPLACE ADD INDEX,
+#       - alter_table_copy_after_lock_upgrade for COPY ALTERs (writes are
+#         already blocked there; copy_data_between_tables_before is reached
+#         only after the first copied row, so never for an empty table),
+#       - after_admin_flush for OPTIMIZE TABLE.
+#     The first concurrent DML statement is sent in con2 and must queue behind
+#     the ALTER (it waits for the metadata lock). It runs once the ALTER resumes.
+#     The rest of the original concurrent DML runs after the ALTER, or inside a
+#     transaction that is rolled back, as in the original. Every secondary index
+#     on a virtual column is then compared with a scan without that index.
+#   - ib_alter_add_virtual_fail and create_index_fail become the MyRocks keyword
+#     myrocks_simulate_index_create_rollback (ER_UNKNOWN_ERROR). ADD COLUMN of a
+#     virtual column is COPY only, so the failing ALTERs add only an index.
+#   - Bug#24658707 (purge_wait_for_btr_search_latch) and Bug#26330279 (InnoDB
+#     purge) have no MyRocks equivalent and become plain DDL/DML, followed by a
+#     flush and a manual compaction in place of purge.
+#   - force_virtual_col_build_fail with a concurrent scan becomes
+#     myrocks_simulate_index_create_rollback on an INPLACE ADD INDEX of an
+#     existing virtual column; the virtual column itself is added with COPY.
+#   - Bug#28825718: the ALTER times out on the metadata lock of an open
+#     transaction that inserted a row, instead of InnoDB's row log apply.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/have_debug.inc
+--source include/count_sessions.inc
+
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for table metadata lock';
+
+CREATE TABLE `t` (
+  `a` VARCHAR(100),
+  `b` VARCHAR(100),
+  `c` VARCHAR(200) GENERATED ALWAYS AS (CONCAT(a,b)) VIRTUAL,
+  `h` VARCHAR(10) DEFAULT NULL,
+  `i` int
+) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (REPEAT('g', 100), REPEAT('x', 10), DEFAULT, "kk", 1);
+INSERT INTO t VALUES (REPEAT('a', 100), REPEAT('b', 100), DEFAULT, "mm", 2);
+
+CREATE INDEX idx ON t(c(100));
+
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t ADD COLUMN x VARCHAR(200) GENERATED ALWAYS AS (a) VIRTUAL, ADD INDEX(h),
+ALGORITHM = INPLACE;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t DROP COLUMN c, ADD INDEX(h), ALGORITHM = INPLACE;
+SET session debug="+d,myrocks_simulate_index_create_rollback";
+--error ER_UNKNOWN_ERROR
+ALTER TABLE t ADD INDEX(h), ADD INDEX ic(c(20)), ALGORITHM = INPLACE;
+SET session debug="-d,myrocks_simulate_index_create_rollback";
+SHOW CREATE TABLE t;
+--let $pk_check_table= t
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+#online test
+CREATE TABLE t (a INT, b INT, c INT GENERATED ALWAYS AS(a+b), h VARCHAR(10)) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (11, 3, DEFAULT, 'mm');
+INSERT INTO t VALUES (18, 1, DEFAULT, 'mm');
+INSERT INTO t VALUES (28, 1, DEFAULT, 'mm');
+INSERT INTO t VALUES (null, null, DEFAULT, "mx");
+
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL start_create WAIT_FOR go_ahead';
+--send CREATE INDEX idx ON t(c);
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+connection con1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+--sorted_result
+SELECT c FROM t;
+connection con2;
+--send update t set a=0 where a = 11
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+reap;
+connection con2;
+reap;
+connection default;
+
+--sorted_result
+SELECT c FROM t;
+SHOW CREATE TABLE t;
+SELECT * FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL start_create WAIT_FOR go_ahead';
+--send ALTER TABLE t ADD COLUMN x INT;
+
+connection con1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+connection con2;
+--send update t set a=1 where a = 0
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+reap;
+connection con2;
+reap;
+start transaction;
+update t set a=0 where a = 1;
+ROLLBACK;
+update t set a=0 where a = 1;
+connection default;
+
+--sorted_result
+SELECT c FROM t;
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL start_create WAIT_FOR go_ahead';
+--send ALTER TABLE t ADD COLUMN x2 INT;
+
+connection con1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+connection con2;
+--send DELETE FROM t WHERE a = 18
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+reap;
+connection con2;
+reap;
+start transaction;
+DELETE FROM t WHERE a = 0;
+ROLLBACK;
+DELETE FROM t WHERE a = 0;
+connection default;
+
+--sorted_result
+SELECT c FROM t;
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+disconnect con1;
+disconnect con2;
+DROP TABLE t;
+
+SET DEBUG_SYNC = 'RESET';
+
+
+# Test add virtual column and add index at the same time
+# introduce some error
+
+CREATE TABLE t (a INT, b INT, c INT GENERATED ALWAYS AS(a+b), h VARCHAR(10)) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (11, 3, DEFAULT, 'mm');
+
+INSERT INTO t VALUES (18, 1, DEFAULT, 'mm');
+
+INSERT INTO t VALUES (28, 1, DEFAULT, 'mm');
+
+INSERT INTO t VALUES (null, null, DEFAULT, 'mm');
+
+CREATE INDEX idx_1 on t(c);
+
+--echo # Adding a virtual column together with unique indexes fails on a duplicate.
+--enable_info
+--replace_regex /#sql-[0-9a-f_]+/#sql-temp/
+--error ER_DUP_ENTRY
+ALTER TABLE t ADD COLUMN x INT GENERATED ALWAYS AS(a+b), ADD UNIQUE INDEX idx (x), ADD UNIQUE INDEX hx (h);
+--disable_info
+SET SESSION debug="+d,myrocks_simulate_index_create_rollback";
+--error ER_UNKNOWN_ERROR
+ALTER TABLE t ADD INDEX idx (c, h), ALGORITHM=INPLACE;
+SET SESSION debug="-d,myrocks_simulate_index_create_rollback";
+
+SHOW CREATE TABLE t;
+
+--sorted_result
+SELECT c FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= idx_1
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t;
+
+
+--echo #
+--echo # Bug#22018532 ASSERTION WHEN ONLINE REAPPLY REBUILD LOG ON
+--echo # MULTIPLE INDEXED VIRTUAL COLUMNS
+--echo #
+
+create table t (
+  a int as (1) virtual,
+  b int,
+  c int as (1) virtual,
+  unique(b),
+  unique(c),
+  key(a)
+) engine=rocksdb;
+
+insert ignore into t values();
+
+SET DEBUG_SYNC = 'after_admin_flush SIGNAL start_create WAIT_FOR go_ahead';
+--send optimize table t
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+connection con2;
+--send insert ignore into t values()
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+--echo /* connection default */ optimize table t;
+reap;
+connection con2;
+--echo /* connection con2 */ insert ignore into t values();
+reap;
+connection default;
+--sorted_result
+SELECT c FROM t;
+SHOW CREATE TABLE t;
+SELECT * FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= c
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--let $pk_check_index= a
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+# Do another test without duplicate error
+
+CREATE TABLE t (a INT, b INT, c INT GENERATED ALWAYS AS(a+b), h VARCHAR(10)) ENGINE=ROCKSDB;
+
+INSERT INTO t VALUES (11, 3, DEFAULT, 'mm');
+INSERT INTO t VALUES (18, 1, DEFAULT, 'mm');
+INSERT INTO t VALUES (28, 1, DEFAULT, 'mm');
+INSERT INTO t VALUES (null, null, DEFAULT, 'mm');
+
+CREATE INDEX idx ON t(c);
+
+SET DEBUG_SYNC = 'after_admin_flush SIGNAL start_rebuild WAIT_FOR go_ahead';
+--send optimize table t
+
+connection con1;
+SET DEBUG_SYNC = 'now WAIT_FOR start_rebuild';
+connection con2;
+--send INSERT INTO t VALUES (48, 2, DEFAULT, 'xx')
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+--echo /* connection default */ optimize table t;
+reap;
+connection con2;
+reap;
+INSERT INTO t VALUES (68, 3, DEFAULT, 'sx');
+connection default;
+
+--sorted_result
+SELECT c FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= idx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+disconnect con1;
+disconnect con2;
+
+DROP TABLE t;
+--echo #
+--echo #  Bug#22140944    WL#8149: ADD TEST FOR THE ROW0LOG.CC FIX THAT
+--echo #                  WAS UNRELATED TO Bug#21894654
+--echo #
+
+CREATE TABLE t1 ( id INT ,a VARCHAR(20), b VARCHAR(20) ,c VARCHAR(40)
+GENERATED ALWAYS AS (CONCAT(a,b)),key(c)) ENGINE=ROCKSDB;
+INSERT INTO t1 (id,a,b) VALUES (10,'aditya','hello');
+
+connect (con1,localhost,root);
+connect (con2,localhost,root);
+connection con1;
+
+SET DEBUG_SYNC= 'alter_table_copy_after_lock_upgrade SIGNAL opened WAIT_FOR go_ddl';
+send ALTER TABLE t1 ADD CONSTRAINT  pk1 PRIMARY KEY (id);
+
+connection default;
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+connection con2;
+--send UPDATE t1 SET a = 'fg', id = 20 WHERE id = 10
+connection default;
+--source include/wait_condition.inc
+SET DEBUG_SYNC= 'now SIGNAL go_ddl';
+
+connection con1;
+reap;
+disconnect con1;
+connection con2;
+reap;
+disconnect con2;
+
+connection default;
+SELECT * from t1;
+SHOW CREATE TABLE t1;
+--let $pk_check_table= t1
+--let $pk_check_index= c
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+--echo #
+--echo #  Bug#22951879 - ASSERTS RELATED TO ONLINE DDL AND GCOL
+--echo #
+
+# Create a table with 2 virtual column, one (vbidxcol) is indexed and
+# the other one (vbcol) is not
+create table ibstd_14 (a int not null, d int not null, b varchar(198) not null, c char(181), vadcol int as (a+length(d)) stored, vbcol char(2) as (substr(b,2,2)) virtual, vbidxcol char(3) as (substr(b,1,3)) virtual , index(d), index(a), index(vbidxcol), index(a,vbidxcol), index(vbidxcol,d), unique key (b(10), a, d), index(c(99), b(31)), index(b(5), c(10), a) , index(a,d)) engine=ROCKSDB stats_persistent=1 row_format=dynamic charset latin1;
+
+# Do an alter table rebuild table and also create a new index on this
+# non-indexed virtual column
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL start_create WAIT_FOR go_ahead';
+--send alter table ibstd_14  row_format=compressed,add  key kn3 (d,c,vbcol,b);
+
+# Do a concurrent insert, and make sure this newly indexed virtual column
+# is also logged
+connect (con1,localhost,root);
+connect (con2,localhost,root);
+connection con1;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+connection con2;
+--send insert into ibstd_14 (a,d,b,c, vbidxcol, vbcol) values ('118','6',repeat('oacolaarlruoacuroauurloraarucoooarcooauoolacalllaulrruarrrucruuooclacuoouccarrcoocloccorrrrarourcooalloocooccouruolaorlcaocualolc','1'),repeat('lolrrlalcocroraaulauclaaucolcorcuooaolruaooooluooooouaoorlarucorullalcrrloccououaooaorluorraclrcooouuolocoaolcocaaculruoocucoocoooauuolarcoraraocaoolulolarru','1'),default,default)
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+reap;
+connection con2;
+reap;
+
+insert into ibstd_14 (a,d,b,c, vbidxcol, vbcol) values ('118','6', 'aaaa', 'lll', default, default);
+
+# Also do an update, make sure this is performed
+update ibstd_14 set b='11111' where b='aaaa';
+connection default;
+
+select * from ibstd_14;
+
+# This will use the newly added "kn3" index, to check materialized vbcol
+--sorted_result
+select d,c,vbcol,b from  ibstd_14;
+
+# check the value is inserted into the index
+--sorted_result
+select vbcol from ibstd_14;
+--let $pk_check_table= ibstd_14
+--let $pk_check_index= kn3
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--let $pk_check_index= vbidxcol_2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+drop table ibstd_14;
+
+--echo #
+--echo # Bug#26375771 INNODB: ASSERTION FAILURE: MACH0DATA.IC:308:VAL > 0X7F
+--echo #
+create table ibstd_07 (a int not null, d int not null, b blob not null, c text, vadcol int as (a+length(d)) stored, vbcol char(2) as (substr(b,2,2)) virtual, vbidxcol char(3) as (substr(b,1,3)) virtual , index(d), index(a), index(vbidxcol), index(vbidxcol,d  asc), unique key (b(101), a  asc, d ), index(c(255), b(255)  asc), index(b(5), c(10)  asc, a ) ) engine=ROCKSDB default charset=latin1 row_format=redundant;
+
+insert into ibstd_07 values (2, 2, repeat('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc','281'),repeat('ouolrculuouocououooalcoraooaulouuacrolrocooraoaooooolaccralacalooolalocoaacoorarorcurccarocucla','317'), default, default, default);
+
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL start_create WAIT_FOR go_ahead';
+--send alter table ibstd_07  add primary key (b(11),a  asc, d );
+
+# Do a concurrent update
+connection con2;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+--send update ibstd_07 set c=repeat('0.366710324443464crllooolarlollorlulololucrluacoorrrluroluroocouauacacruloulcurlraorcrclrolcocrrcoccolourrooclrcocruruauallo','70')
+connection con1;
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection default;
+reap;
+connection con2;
+reap;
+connection default;
+
+SELECT a, d, LENGTH(b), MD5(b), LENGTH(c), MD5(c), vadcol, vbcol, vbidxcol FROM ibstd_07;
+--let $pk_check_table= ibstd_07
+--let $pk_check_index= vbidxcol
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE ibstd_07;
+
+--echo #
+--echo # Bug#22018745 CORRUPTION IN ONLINE TABLE REBUILD
+--echo # (ROW_FORMAT=REDUNDANT, INDEXED VIRTUAL COLUMN)
+--echo #
+
+CREATE TABLE t (
+  b char(5) PRIMARY KEY,
+  v char(3) GENERATED ALWAYS AS (substr(b,1,3)) VIRTUAL, KEY(v)
+) ENGINE=ROCKSDB DEFAULT CHARSET=latin1 ROW_FORMAT=REDUNDANT;
+
+connection con1;
+SET DEBUG_SYNC='after_admin_flush SIGNAL prepared WAIT_FOR apply';
+--send OPTIMIZE TABLE t
+connection default;
+
+SET DEBUG_SYNC='now WAIT_FOR prepared';
+connection con2;
+--send INSERT INTO t SET b='fubar'
+connection default;
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL apply';
+
+connection con1;
+reap;
+connection con2;
+reap;
+
+connection default;
+BEGIN;
+DELETE FROM t;
+ROLLBACK;
+CHECK TABLE t;
+SELECT * FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= v
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+disconnect con1;
+disconnect con2;
+
+SET DEBUG_SYNC = 'RESET';
+
+--echo #
+--echo # Bug#24658707 ASSERT: BUF0BUF.CC:2469:BUF_BLOCK_GET_STATE(BLOCK)
+--echo # == BUF_BLOCK_FILE_PAGE#
+--echo #
+
+CREATE TABLE t1 (
+     col1 int(11) NOT NULL,
+     col2 int(11) DEFAULT NULL
+   ) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 ADD COLUMN col3 INT GENERATED ALWAYS AS (col1 % col2) VIRTUAL, algorithm=inplace;
+ALTER TABLE t1 ADD COLUMN col3 INT GENERATED ALWAYS AS (col1 % col2) VIRTUAL;
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#26330279 - ASSERT ON ROW_PURGE_REMOVE_SEC_IF_POSS_LEAF| INNOBASE/ROW/ROW0PURGE.CC
+--echo #
+
+CREATE TABLE t1 (col1 INT,
+                 col2 VARCHAR(100),
+                 col3 VARCHAR(80) GENERATED ALWAYS AS (SUBSTR(col2,1,70)),
+                 PRIMARY KEY (col1), UNIQUE KEY uidx(col3(10))) ENGINE = ROCKSDB;
+
+INSERT INTO t1(col1, col2) VALUES(1, CONCAT(1, REPEAT('z',90)));
+
+REPLACE INTO t1(col1, col2) SELECT col1, col2 FROM t1;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT col1, col3 FROM t1 FORCE INDEX (uidx);
+--let $pk_check_table= t1
+--let $pk_check_index= uidx
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+
+
+--echo #
+--echo # BUG#27319084 - INDEX CORRUPT: INNODB: FIELD 0 LEN IS NNN, SHOULD BE NNN; RECORD
+--echo #
+
+CREATE TABLE t1(a INT NOT NULL, d INT NOT NULL, b VARCHAR(198) NOT NULL, c CHAR(84), vbcol CHAR(2) AS (substr(b, 2, 2)) VIRTUAL, vbidxcol CHAR(3) AS (substr(b, 1, 3)) VIRTUAL, INDEX(vbidxcol ASC)) ENGINE=ROCKSDB ROW_FORMAT = DYNAMIC;
+
+INSERT INTO t1(a, d, b, c) VALUES(200, 300, '1.3.1415926535', 'hello world');
+
+connect (conn1, localhost, root,,);
+connect (conn2, localhost, root,,);
+
+connection default;
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL altered WAIT_FOR dmls_done';
+
+--send ALTER TABLE t1 ROW_FORMAT = REDUNDANT
+
+connection conn1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR altered';
+
+connection conn2;
+--send INSERT INTO t1(a, d, b, c) VALUES(201, 300, '3.1415926535', 'hello world')
+connection conn1;
+--source include/wait_condition.inc
+
+SET DEBUG_SYNC = 'now SIGNAL dmls_done';
+
+connection default;
+
+reap;
+connection conn2;
+reap;
+UPDATE t1 SET b = '6.1516179' WHERE a = 200;
+connection default;
+
+SET DEBUG_SYNC = 'reset';
+
+CHECK TABLE t1;
+
+SELECT * FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= vbidxcol
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+
+
+CREATE TABLE t1(a INT NOT NULL, d INT NOT NULL, b VARCHAR(198) NOT NULL, c CHAR(84), vbcol CHAR(2) AS (substr(b, 2, 2)) VIRTUAL, vbidxcol CHAR(3) AS (substr(b, 1, 3)) VIRTUAL, INDEX(vbidxcol ASC)) ENGINE=ROCKSDB ROW_FORMAT = REDUNDANT;
+
+INSERT INTO t1(a, d, b, c) VALUES(200, 300, '1.3.1415926535', 'hello world');
+
+connection default;
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL altered WAIT_FOR dmls_done';
+
+--send ALTER TABLE t1 ROW_FORMAT = DYNAMIC
+
+connection conn1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR altered';
+
+connection conn2;
+--send INSERT INTO t1(a, d, b, c) VALUES(201, 300, '3.1415926535', 'hello world')
+connection conn1;
+--source include/wait_condition.inc
+
+SET DEBUG_SYNC = 'now SIGNAL dmls_done';
+
+connection default;
+
+reap;
+connection conn2;
+reap;
+UPDATE t1 SET b = '6.1516179' WHERE a = 200;
+connection default;
+
+SET DEBUG_SYNC = 'reset';
+
+CHECK TABLE t1;
+
+SELECT * FROM t1;
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+
+DROP TABLE t1;
+
+
+--echo #
+--echo # BUG#28448853 - ASSERTION FAILURE: ROW0LOG.CC:2153 ROW_LOG_TABLE_APPLY (THR=0X7F7C7C050030
+--echo #
+
+CREATE TABLE t1(a INT NOT NULL, d INT NOT NULL, b VARCHAR(198) NOT NULL, c CHAR(84), vbcol CHAR(2) AS (substr(b, 2, 2)) VIRTUAL) ENGINE=ROCKSDB;
+
+INSERT INTO t1(a, d, b, c) VALUES(200, 300, '1.3.1415926535', 'hello world');
+
+SELECT * FROM t1;
+
+connection default;
+
+SET DEBUG_SYNC = 'alter_table_copy_after_lock_upgrade SIGNAL altered WAIT_FOR dmls_done';
+
+--send ALTER TABLE t1 ROW_FORMAT = COMPRESSED;
+
+connection conn1;
+
+SET DEBUG_SYNC = 'now WAIT_FOR altered';
+
+SELECT * FROM t1;
+
+SET DEBUG_SYNC = 'now SIGNAL dmls_done';
+
+disconnect conn1;
+disconnect conn2;
+
+connection default;
+
+reap;
+
+START TRANSACTION;
+UPDATE t1 SET b = '6.1516179' WHERE a = 200;
+ROLLBACK;
+
+SET DEBUG_SYNC = 'reset';
+
+CHECK TABLE t1;
+
+SHOW CREATE TABLE t1;
+
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+
+
+--echo #
+--echo # Bug#28825718 - ASSERTION FAILURE: TRX0REC.CC:NNN:N_IDX > 0 WHILE DOING REPLACE/INSERT
+--echo #
+
+CREATE TABLE t1(a INT PRIMARY KEY, b INT, c INT GENERATED ALWAYS AS(b+1) VIRTUAL) ENGINE=ROCKSDB;
+
+INSERT INTO t1(a, b) VALUES(1, 1);
+
+BEGIN;
+INSERT INTO t1(a, b) VALUES(2, 2);
+
+connect (con1,localhost,root,,);
+connection con1;
+SET lock_wait_timeout = 1;
+--echo /* con1 */ ALTER TABLE t1 ADD UNIQUE INDEX(c, b);
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t1 ADD UNIQUE INDEX(c, b);
+
+disconnect con1;
+
+connection default;
+COMMIT;
+
+ALTER TABLE t1 ADD KEY(b);
+
+INSERT INTO t1(a, b) VALUES(3, 3);
+
+SELECT * FROM t1;
+
+CHECK TABLE t1;
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#28834208 ROW_LOG_TABLE_APPLY_UPDATE*INPLACE_ALTER_TABLE
+--echo #
+
+CREATE TABLE t1 (
+   pkey INT(11) PRIMARY KEY,
+   a VARCHAR(100),
+   v VARCHAR(100) GENERATED ALWAYS AS (SUBSTRING(a,2,2)) VIRTUAL,
+   c varchar(100),
+  UNIQUE KEY k (v)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 ( pkey,a,c) VALUES (149,'bata','test');
+SELECT pkey,a,v FROM t1;
+SET DEBUG_SYNC = 'after_admin_flush SIGNAL index_built WAIT_FOR S2';
+--send OPTIMIZE TABLE t1
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+--echo # Connect to con1
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR index_built';
+--connection con2
+--send UPDATE t1 SET a='tata' WHERE pkey=149
+--connection con1
+--source include/wait_condition.inc
+SET DEBUG_SYNC ='now signal S2';
+--connection con2
+reap;
+SELECT pkey,a,v FROM t1;
+--connection default
+--echo # Connect to Default
+reap;
+SELECT * FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= k
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+CREATE TABLE t1 (
+   pkey INT(11) PRIMARY KEY,
+   a VARCHAR(100),
+   v VARCHAR(100) GENERATED ALWAYS AS (SUBSTRING(a,2,2)) VIRTUAL,
+   c varchar(100),
+   v1 VARCHAR(100) GENERATED ALWAYS AS (SUBSTRING(c,2,2)) VIRTUAL,
+   KEY k (v),
+   KEY v (v1)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (pkey, a, c) VALUES (149, 'bata', 'test');
+INSERT INTO t1 (pkey, a, c) VALUES (150, 'bata', 'test');
+INSERT INTO t1 (pkey, a, c) VALUES (160, 'bata', 'test');
+SELECT pkey, a, v, c, v1 FROM t1;
+SET DEBUG_SYNC = 'after_admin_flush SIGNAL index_built WAIT_FOR S2';
+--send OPTIMIZE TABLE t1
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR index_built';
+--connection con2
+--send UPDATE t1 SET c = 'best' WHERE pkey = 149
+--connection con1
+--source include/wait_condition.inc
+SET DEBUG_SYNC ='now signal S2';
+--connection con2
+reap;
+UPDATE t1 SET a = 'tata' WHERE pkey = 150;
+UPDATE t1 SET a = 'tata', c = 'best' WHERE pkey = 160;
+SELECT pkey, a, v, c, v1 FROM t1;
+--connection default
+--echo # Connect to Default
+reap;
+SELECT * FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= k
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--let $pk_check_index= v
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+CREATE TABLE t1(
+   j SERIAL PRIMARY KEY,
+   a VARCHAR(36),
+   isa BOOLEAN,
+   ab VARCHAR(36) AS (IF(`isa`,`a`,NULL )),
+   KEY k(ab)
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (a, isa) VALUES ('test', 1);
+SET DEBUG_SYNC = 'after_admin_flush SIGNAL index_built WAIT_FOR S2';
+--send OPTIMIZE TABLE t1
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR index_built';
+--connection con2
+--send UPDATE t1 SET isa=0
+--connection con1
+--source include/wait_condition.inc
+SET DEBUG_SYNC ='now signal S2';
+--connection con2
+reap;
+SELECT j,a,isa,ab FROM t1;
+disconnect con1;
+disconnect con2;
+--echo # Connect to Default
+--connection default
+reap;
+SELECT j,a,isa,ab FROM t1;
+UPDATE t1 SET isa = 1 WHERE a = 'test' AND isa = 0;
+SELECT j,a,isa,ab FROM t1;
+--let $pk_check_table= t1
+--let $pk_check_index= k
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+
+
+# Test for the rollback scenario when both a virtual column and a virtual
+# Index are added. MyRocks adds the virtual column with COPY, and the index
+# build on it fails.
+
+CREATE TABLE t1(a INT) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES(1), (1);
+
+ALTER TABLE t1 ADD COLUMN (h INT GENERATED ALWAYS AS(a+1) VIRTUAL);
+
+set session debug = '+d,myrocks_simulate_index_create_rollback';
+
+connect (conn1,localhost,root,,);
+
+connection default;
+
+SET DEBUG_SYNC='alter_table_inplace_after_lock_downgrade SIGNAL rolling_back WAIT_FOR drop_created';
+--send ALTER TABLE t1 ADD INDEX idx(h), ALGORITHM=INPLACE;
+
+connection conn1;
+SET DEBUG_SYNC='now WAIT_FOR rolling_back';
+SELECT * FROM t1;
+SET DEBUG_SYNC='now SIGNAL drop_created';
+
+connection default;
+--error ER_UNKNOWN_ERROR
+--reap
+
+connection conn1;
+SELECT * FROM t1;
+
+disconnect conn1;
+
+connection default;
+
+set session debug = '-d,myrocks_simulate_index_create_rollback';
+
+INSERT INTO t1(a) VALUES(1);
+
+CHECK TABLE t1;
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug 31279528 - CRASH IN MYSQL SERVER, ASSERTION FAILURE: DICT0DICT.CC
+--echo #
+CREATE TABLE t1 (c1 INT) ENGINE=ROCKSDB;
+
+# Create a secondary index which will cause virtual columns to be added into table
+CREATE INDEX idx ON t1 ( ( c1 = 127 ) , ( c1 + c1 ) , c1 , ( c1 + - -1 ) , (c1 > 26 ) ) ;
+
+SHOW WARNINGS;
+
+SHOW CREATE TABLE t1;
+
+SET SESSION debug= '+d,skip_dd_table_access_check';
+SELECT ID INTO @tid FROM mysql.tables WHERE NAME='t1';
+SELECT NAME, ORDINAL_POSITION, TYPE, HIDDEN, GENERATION_EXPRESSION_UTF8 FROM mysql.columns WHERE TABLE_ID=@tid ORDER BY ORDINAL_POSITION;
+SET SESSION debug= '-d,skip_dd_table_access_check';
+
+INSERT INTO t1 VALUES (1), (127), (200);
+SELECT * FROM t1 FORCE INDEX (idx) WHERE c1 = 127 AND c1 + c1 = 254;
+
+DROP TABLE t1;
+
+
+--echo #
+--echo # Bug #30556595  FAILING ASSERTION: !CURSOR->INDEX->IS_COMMITTED()
+--echo # ON TABLE WITH GCOLS
+--echo #
+
+--echo # Set binlog_row_image = MINIMAL.
+SET @old_binlog_row_image = @@binlog_row_image;
+SET @@session.binlog_row_image = 'MINIMAL';
+
+--echo # Testcase-1
+CREATE TABLE t (pid int PRIMARY KEY,
+                uid int,
+                vid int AS (uid) VIRTUAL) ENGINE=ROCKSDB;
+connect(con1,localhost,root,,);
+connect(con2,localhost,root,,);
+connection con1;
+--echo # Create index on virtual column and pause it.
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL start_dml WAIT_FOR resume_ddl';
+--send ALTER TABLE t ADD INDEX idx_vid(vid), algorithm=inplace
+connection default;
+SET DEBUG_SYNC= 'now WAIT_FOR start_dml';
+connection con2;
+--echo # Insert a record queued behind the ALTER.
+--send INSERT INTO t(pid, uid) VALUES (1,10)
+connection default;
+--source include/wait_condition.inc
+SET DEBUG_SYNC= 'now SIGNAL resume_ddl';
+connection con1;
+--reap
+connection con2;
+--reap
+connection default;
+--echo # Update the record changing PK.
+UPDATE t SET pid = 2 WHERE pid = 1;
+SELECT * FROM t;
+--echo # Insert a record that re-uses the old index key [10, 1]
+INSERT INTO t(pid, uid) VALUES (1,10);
+SELECT * FROM t;
+--let $pk_check_table= t
+--let $pk_check_index= idx_vid
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+--echo # Testcase-2
+CREATE TABLE t (pid int PRIMARY KEY,
+                uid int,
+                vid int AS (uid) VIRTUAL) ENGINE=ROCKSDB;
+--echo # Create index on virtual column and pause it.
+connection con1;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL start_dml WAIT_FOR resume_ddl';
+--send ALTER TABLE t ADD INDEX idx_vid(vid), algorithm=inplace
+connection default;
+SET DEBUG_SYNC= 'now WAIT_FOR start_dml';
+SELECT * FROM t;
+SET DEBUG_SYNC= 'now SIGNAL resume_ddl';
+connection con1;
+--reap
+connection default;
+--echo # Start transaction
+BEGIN;
+INSERT INTO t(pid, uid) VALUES (1,10);
+--echo # Update the record changing PK.
+UPDATE t SET pid = 2 WHERE pid = 1;
+SELECT * FROM t;
+--echo # Rollback transaction
+ROLLBACK;
+--echo # Insert a record to check valid entry in idx_vid [NULL, 1]
+INSERT INTO t(pid) VALUES (1);
+SELECT * FROM t;
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+--echo # Testcase-3
+CREATE TABLE t (pid int PRIMARY KEY,
+                uid int,
+                vid int AS (uid) VIRTUAL) ENGINE=ROCKSDB;
+INSERT INTO t(pid, uid) VALUES (1,10);
+--echo # Create index on virtual column and pause it.
+connection con1;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL start_dml WAIT_FOR resume_ddl';
+--send ALTER TABLE t ADD INDEX idx_vid(vid), algorithm=inplace
+connection default;
+SET DEBUG_SYNC= 'now WAIT_FOR start_dml';
+connection con2;
+--echo # Update the record changing PK, queued behind the ALTER.
+--send UPDATE t SET pid = 2 WHERE pid = 1
+connection default;
+--source include/wait_condition.inc
+SET DEBUG_SYNC= 'now SIGNAL resume_ddl';
+connection con1;
+--reap
+connection con2;
+--reap
+connection default;
+--echo # Read [2, 10, 10] row using idx_vid index key.
+select * from t where VID=10;
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t;
+
+--echo # Testcase-4
+CREATE TABLE t (pid int PRIMARY KEY,
+                uid int,
+                vid int AS (uid) VIRTUAL) ENGINE=ROCKSDB;
+INSERT INTO t(pid, uid) VALUES (1,10);
+--echo # Create index on virtual column and pause it.
+connection con1;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL start_dml WAIT_FOR resume_ddl';
+--send ALTER TABLE t ADD INDEX idx_vid(vid), algorithm=inplace
+connection default;
+SET DEBUG_SYNC= 'now WAIT_FOR start_dml';
+connection con2;
+--echo # Update the record changing PK, queued behind the ALTER.
+--send UPDATE t SET pid = 2 WHERE pid = 1
+connection default;
+--source include/wait_condition.inc
+SET DEBUG_SYNC= 'now SIGNAL resume_ddl';
+connection con1;
+--reap
+connection con2;
+--reap
+connection default;
+--echo # Delete a record.
+delete from t limit 1;
+SELECT COUNT(*) FROM t FORCE INDEX (idx_vid);
+disconnect con1;
+disconnect con2;
+DROP TABLE t;
+SET @@session.binlog_row_image = @old_binlog_row_image;
+SET DEBUG_SYNC = 'RESET';
+
+--source include/wait_until_count_sessions.inc

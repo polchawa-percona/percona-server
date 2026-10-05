@@ -1,0 +1,218 @@
+#
+# Port of innodb.innodb-index-debug (mysql-test/suite/innodb/t/innodb-index-debug.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - Bug#12739098: the InnoDB keywords ib_*_too_many_concurrent_trxs become the
+#     MyRocks keyword myrocks_simulate_index_create_rollback, which fails an
+#     INPLACE ADD UNIQUE INDEX after the index is built (ER_UNKNOWN_ERROR). The
+#     table and the MyRocks dictionary must be unchanged afterwards.
+#   - Bug#13861218: the InnoDB keyword ddl_buf_add_two (tiny sort buffer) becomes a
+#     small rocksdb_merge_buf_size, so the MyRocks external merge sort is used
+#     (rocksdb_merge_combine_read_size stays large: when it is divided among
+#     too many sorted chunks, the build fails: port-findings.md #39, tested by
+#     rocksdb.innodb_port_innodb_index_debug_merge_chunk).
+#   - Bug#17657223: the InnoDB keyword ddl_write_failure (PK rebuild sort file
+#     write error) becomes:
+#       - an INPLACE ADD INDEX that sorts through many merge chunks on disk,
+#       - the same ALTER failing in the merge sort (myrocks_merge_buf_offset_overflow),
+#       - the PK rebuild, which is ALGORITHM=COPY in MyRocks, failing through the
+#         server keyword abort_copy_table.
+#     OPTIMIZE TABLE is paused at the server point after_admin_flush instead of
+#     InnoDB's ddl_after_scan. MyRocks OPTIMIZE (a compaction) holds an exclusive
+#     metadata lock there, so the concurrent INSERT waits and runs afterwards.
+#     The row log file failure (row_log_tmpfile_fail) and the ibd2sdi SDI check
+#     are InnoDB-only. They become an ALGORITHM=COPY ADD COLUMN failing through
+#     abort_copy_table (paused first at alter_table_copy_after_lock_upgrade,
+#     where reads still run), after which SHOW CREATE TABLE must not show the
+#     column.
+#   - Bug#21612714: innodb_alter_table_pk_assert_no_sort is an InnoDB-only
+#     assertion. The PK changes of alter_table_pk_no_sort.inc run without it
+#     (suite/rocksdb/include/innodb_port_alter_table_pk_no_sort.inc), and every
+#     table is checked afterwards.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/count_sessions.inc
+--source include/have_debug_sync.inc
+
+call mtr.add_suppression("Current value of rocksdb_merge_buf_size=.* is too small");
+
+#
+# Test for BUG# 12739098, check whether trx->error_status is reset on error.
+#
+CREATE TABLE t1(c1 INT NOT NULL, c2 INT, PRIMARY KEY(c1)) Engine=ROCKSDB;
+SHOW CREATE TABLE t1;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3),(4,4),(5,5);
+
+SET SESSION DEBUG='+d,myrocks_simulate_index_create_rollback';
+--error ER_UNKNOWN_ERROR
+ALTER TABLE t1 ADD UNIQUE INDEX(c2);
+SET SESSION DEBUG=DEFAULT;
+
+SHOW CREATE TABLE t1;
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't1';
+--echo # The same ALTER succeeds without the failure.
+ALTER TABLE t1 ADD UNIQUE INDEX(c2);
+--let $pk_check_table= t1
+--let $pk_check_index= c2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE t1;
+
+#
+# Test for Bug#13861218 Records are not fully sorted during index creation
+#
+SET @saved_merge_buf_size = @@session.rocksdb_merge_buf_size;
+SET SESSION rocksdb_merge_buf_size = 4096;
+
+CREATE TABLE bug13861218 (c1 INT NOT NULL, c2 INT NOT NULL, INDEX(c2))
+ENGINE=ROCKSDB;
+INSERT INTO bug13861218 VALUES (8, 0), (4, 0), (0, 0);
+CREATE UNIQUE INDEX ui ON bug13861218(c1);
+CHECK TABLE bug13861218;
+--let $pk_check_table= bug13861218
+--let $pk_check_index= ui
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--let $pk_check_index= c2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE bug13861218;
+
+CREATE TABLE bug13861218 (c1 INT NOT NULL, c2 INT UNIQUE) ENGINE=ROCKSDB;
+INSERT INTO bug13861218 VALUES (8, NULL), (4, NULL), (0, NULL);
+CREATE UNIQUE INDEX ui ON bug13861218(c1);
+CHECK TABLE bug13861218;
+SELECT * FROM bug13861218 FORCE INDEX (ui) ORDER BY c1;
+--let $pk_check_table= bug13861218
+--let $pk_check_index= ui
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+--let $pk_check_index= c2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+DROP TABLE bug13861218;
+
+--echo #
+--echo # Bug #17657223	EXCESSIVE TEMPORARY FILE USAGE IN ALTER TABLE
+--echo #
+
+create table t480(a serial)engine=rocksdb;
+insert into t480
+values(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),
+(),(),(),(),(),(),(),();
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+insert into t480 select 0 from t480;
+
+create table t1(f1 int auto_increment not null,
+		f2 char(200) not null, f3 char(200) not null,
+		primary key(f1,f2,f3), key(f1))engine=rocksdb charset latin1;
+insert into t1 select NULL,'aaa','bbb' from t480;
+insert into t1 select NULL,'aaaa','bbbb' from t480;
+insert into t1 select NULL,'aaaaa','bbbbb' from t480;
+insert into t1 select NULL,'aaaaaa','bbbbbb' from t480;
+
+--echo # An index build sorting through many merge chunks on disk.
+alter table t1 add index k2(f2, f1), algorithm=inplace;
+--let $pk_check_table= t1
+--let $pk_check_index= k2
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+alter table t1 drop index k2;
+
+--echo # Error in the merge sort of an index build.
+SET DEBUG = '+d,myrocks_merge_buf_offset_overflow';
+--error ER_SK_POPULATE_DURING_ALTER
+alter table t1 add index k2(f2, f1), algorithm=inplace;
+SET DEBUG = '-d,myrocks_merge_buf_offset_overflow';
+SET SESSION rocksdb_merge_buf_size = @saved_merge_buf_size;
+
+--echo # Error while copying the rows of a primary key rebuild.
+SET DEBUG = '+d,abort_copy_table';
+--error ER_LOCK_WAIT_TIMEOUT
+alter table t1 drop primary key,add primary key(f2,f1);
+SET DEBUG = '-d,abort_copy_table';
+show create table t1;
+select count(*), count(distinct f1) from t1;
+check table t1;
+--let $pk_check_table= t1
+--let $pk_check_index= f1
+--source suite/rocksdb/include/innodb_port_check_sk_vs_pk.inc
+select count(*) from information_schema.rocksdb_ddl
+where table_schema = 'test' and table_name = 't1';
+drop table t1;
+
+# Optimize table with a concurrent insert
+connect (con1,localhost,root);
+connect (con2,localhost,root);
+connection con1;
+create table t1(k1 int auto_increment primary key,
+k2 char(200),k3 char(200))engine=rocksdb;
+insert into t1 values(NULL,'a','b'), (NULL,'aa','bb');
+SET DEBUG_SYNC= 'after_admin_flush
+SIGNAL opened WAIT_FOR flushed';
+send optimize table t1;
+connection default;
+--echo connection default
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+connection con2;
+send INSERT INTO t1 select NULL,'aaa','bbb' from t480;
+connection default;
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'INSERT INTO t1%';
+--source include/wait_condition.inc
+SET DEBUG_SYNC= 'now SIGNAL flushed';
+connection con1;
+--enable_info
+--echo /*con1 reap*/ Optimize table t1;
+reap;
+--disable_info
+connection con2;
+reap;
+disconnect con2;
+connection con1;
+SELECT COUNT(k1),k2,k3 FROM t1 GROUP BY k2,k3;
+drop table t1;
+
+# Failure of an ALGORITHM=COPY ADD COLUMN with a concurrent insert
+create table t1(k1 int auto_increment primary key,
+k2 char(200),k3 char(200))engine=rocksdb;
+INSERT INTO t1 select NULL,'aaa','bbb' from t480;
+SET DEBUG_SYNC= 'alter_table_copy_after_lock_upgrade
+SIGNAL opened WAIT_FOR flushed';
+SET SESSION debug = '+d,abort_copy_table';
+send ALTER TABLE t1 ADD COLUMN k4 int, ALGORITHM=COPY;
+connection default;
+--echo connection default
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+SELECT COUNT(*) FROM t1;
+SET DEBUG_SYNC= 'now SIGNAL flushed';
+connection con1;
+--echo /*con1 reap*/ ALTER TABLE t1 ADD COLUMN k4 int, ALGORITHM=COPY;
+--error ER_LOCK_WAIT_TIMEOUT
+reap;
+SET SESSION debug = '-d,abort_copy_table';
+INSERT INTO t1 select NULL,'aaaa','bbbb' from t480;
+SELECT COUNT(k1),k2,k3 FROM t1 GROUP BY k2,k3;
+disconnect con1;
+connection default;
+show create table t1;
+check table t1;
+
+SET DEBUG_SYNC='RESET';
+--source include/wait_until_count_sessions.inc
+
+--echo # The table definition must not show new column "k4" after a restart
+--echo # because ALTER failed
+--source include/restart_mysqld.inc
+show create table t1;
+select count(*) from t1;
+drop table t1;
+drop table t480;
+SET DEBUG_SYNC='RESET';
+
+--echo #
+--echo #  BUG#21612714 ALTER TABLE SORTING SKIPPED WHEN CHANGE PK AND DROP
+--echo #                LAST COLUMN OF OLD PK
+--echo #
+
+--source suite/rocksdb/include/innodb_port_alter_table_pk_no_sort.inc
