@@ -1,0 +1,89 @@
+SELECT @@global.sync_binlog, @@global.innodb_flush_log_at_trx_commit,
+@@global.rocksdb_flush_log_at_trx_commit;
+@@global.sync_binlog	@@global.innodb_flush_log_at_trx_commit	@@global.rocksdb_flush_log_at_trx_commit
+1	1	1
+CREATE TABLE ti (id INT PRIMARY KEY, v VARCHAR(16)) ENGINE=InnoDB;
+CREATE TABLE tr (id INT PRIMARY KEY, v VARCHAR(16)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+# Crash point: crash_commit_before
+BEGIN;
+INSERT INTO ti VALUES (1, 'innodb');
+INSERT INTO tr VALUES (1, 'rocksdb');
+SET SESSION debug = "+d,crash_commit_before";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 1) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 1) AS rocksdb_has_row, 0 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+0	0	0
+# Crash point: crash_commit_after_prepare
+BEGIN;
+INSERT INTO ti VALUES (2, 'innodb');
+INSERT INTO tr VALUES (2, 'rocksdb');
+SET SESSION debug = "+d,crash_commit_after_prepare";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 2) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 2) AS rocksdb_has_row, 0 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+0	0	0
+# Crash point: crash_commit_before_log
+BEGIN;
+INSERT INTO ti VALUES (3, 'innodb');
+INSERT INTO tr VALUES (3, 'rocksdb');
+SET SESSION debug = "+d,crash_commit_before_log";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 3) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 3) AS rocksdb_has_row, 0 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+0	0	0
+# Crash point: crash_after_flush_engine_log
+BEGIN;
+INSERT INTO ti VALUES (4, 'innodb');
+INSERT INTO tr VALUES (4, 'rocksdb');
+SET SESSION debug = "+d,crash_after_flush_engine_log";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 4) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 4) AS rocksdb_has_row, 0 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+0	0	0
+# Crash point: crash_after_flush_binlog
+BEGIN;
+INSERT INTO ti VALUES (5, 'innodb');
+INSERT INTO tr VALUES (5, 'rocksdb');
+SET SESSION debug = "+d,crash_after_flush_binlog";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 5) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 5) AS rocksdb_has_row, 1 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+1	1	1
+# Crash point: crash_commit_after_log
+BEGIN;
+INSERT INTO ti VALUES (6, 'innodb');
+INSERT INTO tr VALUES (6, 'rocksdb');
+SET SESSION debug = "+d,crash_commit_after_log";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 6) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 6) AS rocksdb_has_row, 1 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+1	1	1
+# Crash point: crash_commit_after
+BEGIN;
+INSERT INTO ti VALUES (7, 'innodb');
+INSERT INTO tr VALUES (7, 'rocksdb');
+SET SESSION debug = "+d,crash_commit_after";
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT (SELECT COUNT(*) FROM ti WHERE id = 7) AS innodb_has_row, (SELECT COUNT(*) FROM tr WHERE id = 7) AS rocksdb_has_row, 1 AS expected;
+innodb_has_row	rocksdb_has_row	expected
+1	1	1
+SELECT * FROM ti ORDER BY id;
+id	v
+5	innodb
+6	innodb
+7	innodb
+SELECT * FROM tr ORDER BY id;
+id	v
+5	rocksdb
+6	rocksdb
+7	rocksdb
+binlog_matches_committed: 1
+DROP TABLE ti, tr;

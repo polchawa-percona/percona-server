@@ -1,0 +1,51 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+# t1: committed autocommit bulk-load statement
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 20000)
+SELECT n, n FROM seq;
+# t2: bulk load inside a transaction that never commits
+BEGIN;
+INSERT INTO t2
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 20000)
+SELECT n, n FROM seq;
+# Kill and restart
+# After recovery
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)
+20000	1	20000
+SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0;
+COUNT(*)
+20000
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+20000
+SELECT COUNT(*) FROM t2 FORCE INDEX (k) WHERE k > 0;
+COUNT(*)
+20000
+# Temporary bulk load files are removed at startup
+leftover_tmp_sst_files: 0
+# The tables are usable for a new bulk load after the crash
+TRUNCATE TABLE t2;
+SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 20000)
+SELECT n, n FROM seq;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*), MIN(id), MAX(id) FROM t2;
+COUNT(*)	MIN(id)	MAX(id)
+20000	1	20000
+SELECT COUNT(*) FROM t2 FORCE INDEX (k) WHERE k > 0;
+COUNT(*)
+20000
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+DROP TABLE t1, t2;
