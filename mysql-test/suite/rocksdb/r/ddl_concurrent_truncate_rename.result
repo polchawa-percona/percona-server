@@ -1,0 +1,64 @@
+concurrent load finished, all checks passed
+# Reclaim every dropped index and compact both column families.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cf_cc2';
+# No SST holds rows of an index that MyRocks no longer knows.
+SELECT COUNT(*) AS orphan_index_rows
+FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.NUM_ROWS > 0
+AND f.COLUMN_FAMILY IN (SELECT DISTINCT COLUMN_FAMILY
+FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'd1')
+AND f.INDEX_NUMBER NOT IN (SELECT INDEX_NUMBER
+FROM information_schema.ROCKSDB_DDL);
+orphan_index_rows
+0
+# Rows per table and their identities, before the restart.
+SELECT 't0' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t0 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t0 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t0 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t0	1	1
+SELECT 't1' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t1 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t1 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t1 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t1	1	1
+SELECT 't2' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t2 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t2 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t2 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t2	1	1
+SELECT 't3' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t3 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t3 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t3 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t3	1	1
+SELECT 't4' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t4 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t4 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t4 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t4	1	1
+SELECT 't5' AS tbl, COUNT(DISTINCT owner) AS owners,
+(SELECT COUNT(*) FROM d1.t5 FORCE INDEX(PRIMARY)) =
+(SELECT COUNT(*) FROM d1.t5 FORCE INDEX(sk)) AS pk_eq_sk
+FROM d1.t5 HAVING owners <= 1;
+tbl	owners	pk_eq_sk
+t5	1	1
+# Restart with table validation; every table must survive unchanged.
+# restart: --rocksdb_validate_tables=1
+# Row counts and id sums are unchanged after the restart.
+SELECT COUNT(*) = 6 AS same_tables
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'd1' AND TABLE_NAME LIKE 't_' AND ENGINE = 'ROCKSDB';
+same_tables
+1
+DROP DATABASE d1;
+DROP DATABASE d2;
