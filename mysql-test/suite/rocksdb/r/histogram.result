@@ -1,0 +1,209 @@
+CREATE TABLE t1 (
+pk INT PRIMARY KEY,
+i INT,
+u INT UNSIGNED,
+d DOUBLE,
+dec_col DECIMAL(10,2),
+v VARCHAR(20),
+dt DATE,
+dtm DATETIME,
+tm TIME,
+e ENUM('a','b','c'),
+s SET('x','y','z'),
+k INT,
+KEY (k)
+) ENGINE=ROCKSDB;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+SELECT n,
+IF(n % 10 = 0, NULL, n % 100),
+n,
+ROUND(n / 7, 4),
+ROUND(n / 3, 2),
+CONCAT('v', LPAD(n % 50, 3, '0')),
+DATE_ADD('2020-01-01', INTERVAL n % 365 DAY),
+DATE_ADD('2020-01-01 00:00:00', INTERVAL n MINUTE),
+SEC_TO_TIME(n * 37),
+ELT(1 + n % 3, 'a', 'b', 'c'),
+ELT(1 + n % 4, '', 'x', 'x,y', 'x,y,z'),
+n % 20
+FROM seq;
+#
+# One histogram per supported data type
+#
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON i, u, d, dec_col, v, dt, dtm, tm, e, s WITH 16 BUCKETS;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	status	Histogram statistics created for column 'd'.
+test.t1	histogram	status	Histogram statistics created for column 'dec_col'.
+test.t1	histogram	status	Histogram statistics created for column 'dt'.
+test.t1	histogram	status	Histogram statistics created for column 'dtm'.
+test.t1	histogram	status	Histogram statistics created for column 'e'.
+test.t1	histogram	status	Histogram statistics created for column 'i'.
+test.t1	histogram	status	Histogram statistics created for column 's'.
+test.t1	histogram	status	Histogram statistics created for column 'tm'.
+test.t1	histogram	status	Histogram statistics created for column 'u'.
+test.t1	histogram	status	Histogram statistics created for column 'v'.
+SELECT COLUMN_NAME,
+JSON_EXTRACT(histogram, '$."data-type"') AS data_type,
+JSON_EXTRACT(histogram, '$."histogram-type"') AS type,
+JSON_LENGTH(histogram, '$.buckets') AS buckets,
+JSON_EXTRACT(histogram, '$."null-values"') AS null_values,
+JSON_EXTRACT(histogram, '$."sampling-rate"') AS sampling_rate
+FROM information_schema.column_statistics
+WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+COLUMN_NAME	data_type	type	buckets	null_values	sampling_rate
+d	"double"	"equi-height"	16	0.0	1.0
+dec_col	"decimal"	"equi-height"	16	0.0	1.0
+dt	"date"	"equi-height"	16	0.0	1.0
+dtm	"datetime"	"equi-height"	16	0.0	1.0
+e	"enum"	"singleton"	3	0.0	1.0
+i	"int"	"equi-height"	16	0.1	1.0
+s	"set"	"singleton"	4	0.0	1.0
+tm	"time"	"equi-height"	16	0.0	1.0
+u	"int"	"equi-height"	16	0.0	1.0
+v	"string"	"equi-height"	16	0.0	1.0
+# Singleton histogram with exact frequencies (e has three values)
+SELECT JSON_EXTRACT(histogram, '$.buckets') FROM information_schema.column_statistics
+WHERE TABLE_NAME = 't1' AND COLUMN_NAME = 'e';
+JSON_EXTRACT(histogram, '$.buckets')
+[[1, 0.333], [2, 0.667], [3, 1.0]]
+#
+# The optimizer uses the histograms for non-indexed columns
+#
+filtered for i < 10 (about 9%: 9 of 90 values, NULLs are 10%): 8.57
+filtered for i IS NULL: 10.00
+filtered for e = 'a': 33.30
+filtered for v = 'v001': 2.00
+#
+# A histogram on an indexed column is allowed; one on the primary key
+# (a single-part unique index) is rejected
+#
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON k WITH 4 BUCKETS;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	status	Histogram statistics created for column 'k'.
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON pk WITH 4 BUCKETS;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	Error	The column 'pk' is covered by a single-part unique index.
+#
+# DROP HISTOGRAM
+#
+ANALYZE TABLE t1 DROP HISTOGRAM ON d, k;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	status	Histogram statistics removed for column 'd'.
+test.t1	histogram	status	Histogram statistics removed for column 'k'.
+SELECT COLUMN_NAME FROM information_schema.column_statistics
+WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+COLUMN_NAME
+dec_col
+dt
+dtm
+e
+i
+s
+tm
+u
+v
+filtered for d < 10 without a histogram (default guess): 33.33
+#
+# Histograms survive a restart
+#
+# restart
+SELECT COLUMN_NAME, JSON_LENGTH(histogram, '$.buckets') AS buckets
+FROM information_schema.column_statistics
+WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+COLUMN_NAME	buckets
+dec_col	16
+dt	16
+dtm	16
+e	3
+i	16
+s	4
+tm	16
+u	16
+v	16
+filtered for e = 'a' after restart: 33.30
+#
+# Histograms and DDL: RENAME keeps them, COPY ALTER keeps them,
+# dropping a column drops its histogram, TRUNCATE keeps them (stale)
+#
+RENAME TABLE t1 TO t2;
+SELECT TABLE_NAME, COUNT(*) FROM information_schema.column_statistics
+WHERE TABLE_NAME IN ('t1', 't2') GROUP BY TABLE_NAME;
+TABLE_NAME	COUNT(*)
+t2	9
+ALTER TABLE t2 ADD COLUMN extra INT, ALGORITHM=COPY;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE TABLE_NAME = 't2';
+COUNT(*)
+9
+ALTER TABLE t2 DROP COLUMN e;
+SELECT COLUMN_NAME FROM information_schema.column_statistics
+WHERE TABLE_NAME = 't2' ORDER BY COLUMN_NAME;
+COLUMN_NAME
+dec_col
+dt
+dtm
+i
+s
+tm
+u
+v
+TRUNCATE TABLE t2;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE TABLE_NAME = 't2';
+COUNT(*)
+8
+#
+# AUTO UPDATE: ANALYZE TABLE refreshes the histogram from current data
+#
+INSERT INTO t2 (pk, i) VALUES (1, 1), (2, 1), (3, 2);
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON i WITH 8 BUCKETS AUTO UPDATE;
+Table	Op	Msg_type	Msg_text
+test.t2	histogram	status	Histogram statistics created for column 'i'.
+SELECT JSON_EXTRACT(histogram, '$.buckets'), JSON_EXTRACT(histogram, '$."auto-update"')
+FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'i';
+JSON_EXTRACT(histogram, '$.buckets')	JSON_EXTRACT(histogram, '$."auto-update"')
+[[1, 0.6666666666666666], [2, 1.0]]	true
+INSERT INTO t2 (pk, i) VALUES (4, 3), (5, 3), (6, 3);
+ANALYZE TABLE t2;
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'i';
+JSON_EXTRACT(histogram, '$.buckets')
+[[1, 0.3333333333333333], [2, 0.5], [3, 1.0]]
+# A MANUAL UPDATE histogram is not refreshed by ANALYZE TABLE
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON u WITH 8 BUCKETS;
+Table	Op	Msg_type	Msg_text
+test.t2	histogram	status	Histogram statistics created for column 'u'.
+INSERT INTO t2 (pk, u) VALUES (7, 100);
+ANALYZE TABLE t2;
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'u';
+JSON_EXTRACT(histogram, '$.buckets')
+[]
+#
+# UPDATE HISTOGRAM ... USING DATA
+#
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON dt USING DATA '{"buckets": [["2020-01-01", 0.5], ["2020-06-01", 1.0]], "data-type": "date", "auto-update": false, "null-values": 0.0, "collation-id": 8, "sampling-rate": 1.0, "histogram-type": "singleton", "number-of-buckets-specified": 2}';
+Table	Op	Msg_type	Msg_text
+test.t2	histogram	status	Histogram statistics created for column 'dt'.
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'dt';
+JSON_EXTRACT(histogram, '$.buckets')
+[["2020-01-01", 0.5], ["2020-06-01", 1.0]]
+#
+# Uncommitted rows of another transaction are not in the histogram
+#
+CREATE TABLE t3 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 1), (2, 2);
+BEGIN;
+INSERT INTO t3 VALUES (3, 3), (4, 4);
+ANALYZE TABLE t3 UPDATE HISTOGRAM ON c WITH 8 BUCKETS;
+Table	Op	Msg_type	Msg_text
+test.t3	histogram	status	Histogram statistics created for column 'c'.
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+FROM information_schema.column_statistics WHERE TABLE_NAME = 't3';
+JSON_EXTRACT(histogram, '$.buckets')
+[[1, 0.5], [2, 1.0]]
+COMMIT;
+DROP TABLE t2, t3;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE SCHEMA_NAME = 'test';
+COUNT(*)
+0

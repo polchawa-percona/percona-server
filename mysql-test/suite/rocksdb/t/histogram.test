@@ -1,0 +1,168 @@
+#
+# Histograms on MyRocks tables: creation for each supported data type, NULL
+# values, singleton and equi-height histograms, DROP and AUTO UPDATE,
+# persistence across a restart and across DDL, and the effect on the
+# optimizer's filter estimates. No MyRocks test covered histograms before.
+#
+# Histograms are built with the generic handler sampling (MyRocks does not
+# implement handler::sample_init()). All tables here are small enough to be
+# read completely (sampling-rate 1.0), so the histograms are exact.
+#
+# Difference from InnoDB: MyRocks builds the histogram from a consistent
+# snapshot, so another transaction's uncommitted rows are not included
+# (InnoDB's sampling reader includes them; the same scenario run on InnoDB
+# gives four rows in the t3 histogram instead of two).
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  i INT,
+  u INT UNSIGNED,
+  d DOUBLE,
+  dec_col DECIMAL(10,2),
+  v VARCHAR(20),
+  dt DATE,
+  dtm DATETIME,
+  tm TIME,
+  e ENUM('a','b','c'),
+  s SET('x','y','z'),
+  k INT,
+  KEY (k)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+  SELECT n,
+         IF(n % 10 = 0, NULL, n % 100),
+         n,
+         ROUND(n / 7, 4),
+         ROUND(n / 3, 2),
+         CONCAT('v', LPAD(n % 50, 3, '0')),
+         DATE_ADD('2020-01-01', INTERVAL n % 365 DAY),
+         DATE_ADD('2020-01-01 00:00:00', INTERVAL n MINUTE),
+         SEC_TO_TIME(n * 37),
+         ELT(1 + n % 3, 'a', 'b', 'c'),
+         ELT(1 + n % 4, '', 'x', 'x,y', 'x,y,z'),
+         n % 20
+  FROM seq;
+
+--echo #
+--echo # One histogram per supported data type
+--echo #
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON i, u, d, dec_col, v, dt, dtm, tm, e, s WITH 16 BUCKETS;
+SELECT COLUMN_NAME,
+       JSON_EXTRACT(histogram, '$."data-type"') AS data_type,
+       JSON_EXTRACT(histogram, '$."histogram-type"') AS type,
+       JSON_LENGTH(histogram, '$.buckets') AS buckets,
+       JSON_EXTRACT(histogram, '$."null-values"') AS null_values,
+       JSON_EXTRACT(histogram, '$."sampling-rate"') AS sampling_rate
+  FROM information_schema.column_statistics
+  WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+
+--echo # Singleton histogram with exact frequencies (e has three values)
+SELECT JSON_EXTRACT(histogram, '$.buckets') FROM information_schema.column_statistics
+  WHERE TABLE_NAME = 't1' AND COLUMN_NAME = 'e';
+
+--echo #
+--echo # The optimizer uses the histograms for non-indexed columns
+--echo #
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE i < 10, filtered, 1);
+--echo filtered for i < 10 (about 9%: 9 of 90 values, NULLs are 10%): $f
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE i IS NULL, filtered, 1);
+--echo filtered for i IS NULL: $f
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE e = 'a', filtered, 1);
+--echo filtered for e = 'a': $f
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE v = 'v001', filtered, 1);
+--echo filtered for v = 'v001': $f
+
+--echo #
+--echo # A histogram on an indexed column is allowed; one on the primary key
+--echo # (a single-part unique index) is rejected
+--echo #
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON k WITH 4 BUCKETS;
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON pk WITH 4 BUCKETS;
+
+--echo #
+--echo # DROP HISTOGRAM
+--echo #
+ANALYZE TABLE t1 DROP HISTOGRAM ON d, k;
+SELECT COLUMN_NAME FROM information_schema.column_statistics
+  WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE d < 10, filtered, 1);
+--echo filtered for d < 10 without a histogram (default guess): $f
+
+--echo #
+--echo # Histograms survive a restart
+--echo #
+--source include/restart_mysqld.inc
+SELECT COLUMN_NAME, JSON_LENGTH(histogram, '$.buckets') AS buckets
+  FROM information_schema.column_statistics
+  WHERE TABLE_NAME = 't1' ORDER BY COLUMN_NAME;
+let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE e = 'a', filtered, 1);
+--echo filtered for e = 'a' after restart: $f
+
+--echo #
+--echo # Histograms and DDL: RENAME keeps them, COPY ALTER keeps them,
+--echo # dropping a column drops its histogram, TRUNCATE keeps them (stale)
+--echo #
+RENAME TABLE t1 TO t2;
+SELECT TABLE_NAME, COUNT(*) FROM information_schema.column_statistics
+  WHERE TABLE_NAME IN ('t1', 't2') GROUP BY TABLE_NAME;
+ALTER TABLE t2 ADD COLUMN extra INT, ALGORITHM=COPY;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE TABLE_NAME = 't2';
+ALTER TABLE t2 DROP COLUMN e;
+SELECT COLUMN_NAME FROM information_schema.column_statistics
+  WHERE TABLE_NAME = 't2' ORDER BY COLUMN_NAME;
+TRUNCATE TABLE t2;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE TABLE_NAME = 't2';
+
+--echo #
+--echo # AUTO UPDATE: ANALYZE TABLE refreshes the histogram from current data
+--echo #
+INSERT INTO t2 (pk, i) VALUES (1, 1), (2, 1), (3, 2);
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON i WITH 8 BUCKETS AUTO UPDATE;
+SELECT JSON_EXTRACT(histogram, '$.buckets'), JSON_EXTRACT(histogram, '$."auto-update"')
+  FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'i';
+INSERT INTO t2 (pk, i) VALUES (4, 3), (5, 3), (6, 3);
+--disable_result_log
+ANALYZE TABLE t2;
+--enable_result_log
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+  FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'i';
+
+--echo # A MANUAL UPDATE histogram is not refreshed by ANALYZE TABLE
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON u WITH 8 BUCKETS;
+INSERT INTO t2 (pk, u) VALUES (7, 100);
+--disable_result_log
+ANALYZE TABLE t2;
+--enable_result_log
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+  FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'u';
+
+--echo #
+--echo # UPDATE HISTOGRAM ... USING DATA
+--echo #
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON dt USING DATA '{"buckets": [["2020-01-01", 0.5], ["2020-06-01", 1.0]], "data-type": "date", "auto-update": false, "null-values": 0.0, "collation-id": 8, "sampling-rate": 1.0, "histogram-type": "singleton", "number-of-buckets-specified": 2}';
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+  FROM information_schema.column_statistics WHERE TABLE_NAME = 't2' AND COLUMN_NAME = 'dt';
+
+--echo #
+--echo # Uncommitted rows of another transaction are not in the histogram
+--echo #
+CREATE TABLE t3 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 1), (2, 2);
+connect (con1,localhost,root,,);
+BEGIN;
+INSERT INTO t3 VALUES (3, 3), (4, 4);
+connection default;
+ANALYZE TABLE t3 UPDATE HISTOGRAM ON c WITH 8 BUCKETS;
+SELECT JSON_EXTRACT(histogram, '$.buckets')
+  FROM information_schema.column_statistics WHERE TABLE_NAME = 't3';
+connection con1;
+COMMIT;
+disconnect con1;
+connection default;
+
+DROP TABLE t2, t3;
+SELECT COUNT(*) FROM information_schema.column_statistics WHERE SCHEMA_NAME = 'test';
