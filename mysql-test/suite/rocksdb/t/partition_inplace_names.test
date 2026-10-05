@@ -1,0 +1,47 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # In-place ADD/DROP PARTITION (rocksdb_allow_unsafe_alter=ON) must name
+--echo # partitions the same way as CREATE TABLE and table open do, and must
+--echo # reject names that do not fit into the internal name buffer.
+--echo #
+
+SELECT @@rocksdb_allow_unsafe_alter;
+SET NAMES utf8mb4;
+
+--echo # Non-ASCII partition names.
+CREATE TABLE t1 (i INT) ENGINE=ROCKSDB
+  PARTITION BY LIST(i) (PARTITION p中 VALUES IN (1));
+ALTER TABLE t1 ADD PARTITION (PARTITION q中 VALUES IN (2));
+INSERT INTO t1 VALUES (1), (2);
+SELECT * FROM t1 PARTITION (q中);
+
+--source include/restart_mysqld.inc
+SET NAMES utf8mb4;
+SELECT * FROM t1 ORDER BY i;
+SELECT * FROM t1 PARTITION (q中);
+
+ALTER TABLE t1 DROP PARTITION q中;
+SELECT * FROM t1 ORDER BY i;
+--echo # Only the remaining partition is left in the MyRocks dictionary.
+SELECT COUNT(DISTINCT PARTITION_NAME) FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--echo # Subpartitioned table: adding a partition whose subpartition names do
+--echo # not fit is rejected and leaves the table intact.
+# '中' is encoded as @4e2d (5 bytes) in file names.
+--let $long_p = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中
+--let $long_s = 中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中s
+CREATE TABLE t2 (i INT) ENGINE=ROCKSDB
+  PARTITION BY LIST(MOD(i, 2)) SUBPARTITION BY HASH(i)
+  (PARTITION p0 VALUES IN (0) (SUBPARTITION sp0, SUBPARTITION sp1));
+INSERT INTO t2 VALUES (0), (2);
+--replace_regex /The path specified for .* is too long/The path specified for PATH is too long/
+--error ER_PATH_LENGTH
+eval ALTER TABLE t2 ADD PARTITION
+  (PARTITION $long_p VALUES IN (1) (SUBPARTITION $long_s, SUBPARTITION sp3));
+SELECT COUNT(*) FROM t2;
+INSERT INTO t2 VALUES (4);
+SELECT COUNT(*) FROM t2;
+
+DROP TABLE t1, t2;
