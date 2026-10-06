@@ -1,0 +1,8 @@
+[default]
+
+[batch_limit]
+rocksdb-write-batch-max-bytes=4194304
+
+[wup_flush]
+rocksdb-write-policy=write_unprepared
+rocksdb-write-batch-flush-threshold=65536

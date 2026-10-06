@@ -7,3 +7,9 @@ rocksdb-merge-tmp-file-removal-delay-ms=1
 
 [delete_range]
 rocksdb-enable-delete-range-for-drop-index=ON
+
+[batch_limit]
+rocksdb-write-batch-max-bytes=1048576
+
+[merge_min]
+rocksdb-merge-buf-size=100
