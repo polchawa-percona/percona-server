@@ -1,0 +1,22 @@
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+# The second COMMIT-class call of an autocommit INSERT is the WAL flush
+# of the binary log flush stage (after Prepare, before Commit).
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+INSERT INTO t1 VALUES (2, 2);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+Pattern "injected error at flush_wal" found
+# The INSERT is neither in the table nor in the binary log.
+SELECT * FROM t1;
+pk	a
+1	1
+First binary log event after the first INSERT: No such row
+DROP TABLE t1;

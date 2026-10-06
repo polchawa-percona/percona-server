@@ -1,0 +1,22 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+# COMMIT/IOERROR multi-row INSERT: every injected failure was handled correctly
+# COMMIT/IOERROR UPDATE of the primary key: every injected failure was handled correctly
+# COMMIT/IOERROR transaction at REPEATABLE READ: every injected failure was handled correctly
+# READ/IOERROR multi-row INSERT: every injected failure was handled correctly
+# READ/IOERROR UPDATE of the primary key: every injected failure was handled correctly
+# READ/IOERROR transaction at REPEATABLE READ: every injected failure was handled correctly
+# ITERATOR/IOERROR multi-row INSERT: no RocksDB call of this class was made
+# ITERATOR/IOERROR UPDATE of the primary key: every injected failure was handled correctly
+# ITERATOR/IOERROR transaction at REPEATABLE READ: every injected failure was handled correctly
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;
