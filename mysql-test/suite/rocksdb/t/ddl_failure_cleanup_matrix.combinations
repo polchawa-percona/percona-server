@@ -1,0 +1,8 @@
+[default]
+
+[ingest_settings]
+rocksdb-tmpdir=$MYSQLTEST_VARDIR/tmp
+rocksdb-bulk-load-compression-parallel-threads=4
+rocksdb-merge-buf-size=65536
+rocksdb-merge-combine-read-size=1048576
+rocksdb-merge-tmp-file-removal-delay-ms=1

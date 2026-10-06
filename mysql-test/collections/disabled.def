@@ -139,6 +139,7 @@ rocksdb.sst_partitioner_multi_version : BUG#0 PS-11725 SST partitioner assert
 rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest error message
 rocksdb.innodb_port_ddl_kill : BUG#0 PS-11635 killed ADD INDEX reports 8012, not 1317
 rocksdb.inplace_sk_build_after_kill : BUG#0 PS-11658 next ADD INDEX fails after a kill
+rocksdb.bulk_load_unique_check_table_switch : BUG#0 PS-11742 crash at table switch
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

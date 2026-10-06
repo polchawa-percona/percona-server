@@ -1,0 +1,39 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/not_valgrind.inc
+--source include/count_sessions.inc
+
+#
+# Several sessions bulk load (rocksdb_bulk_load=1) batches of rows into their
+# own tables while other sessions run ADD/DROP INDEX, COPY ALTER, RENAME and
+# TRUNCATE on other tables that share the same column families, and another
+# session flushes memtables, compacts and wakes the drop-index thread. Small
+# write buffers make most SST files hold keys of several tables.
+#
+# Each loading session verifies after every batch that all its rows are
+# visible through the primary, the secondary and the unique key. Afterwards
+# the test checks that no bulk-load temporary files are left, that the
+# drop-index list is empty and no SST data of dropped indexes remains after
+# compaction, and that all tables are complete, also after a restart with
+# rocksdb_validate_tables=1.
+#
+# The combinations vary the bulk-load and index-merge settings: unsorted
+# input with secondary keys and the unique key check, small bulk-load and
+# merge sizes with commit in the middle, and large batches with partial
+# indexes not materialized.
+#
+# A session that runs DDL on a table being bulk loaded by another session is
+# not part of this test (PS-11684 has its own test).
+#
+
+--exec python suite/rocksdb/t/ddl_concurrent_bulk_load.py root 127.0.0.1 $MASTER_MYPORT 30 3 3 300 2>/dev/null
+
+--source suite/rocksdb/include/ddl_concurrent_bulk_load_check.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+
+--source suite/rocksdb/include/ddl_concurrent_bulk_load_check.inc
+
+--exec python suite/rocksdb/t/ddl_concurrent_bulk_load.py root 127.0.0.1 $MASTER_MYPORT cleanup
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,39 @@
+--source include/have_rocksdb.inc
+
+#
+# With rocksdb_bulk_load_allow_sk and rocksdb_bulk_load_enable_unique_key_check
+# ON, a bulk load that puts a duplicate value into a unique secondary key must
+# be rejected with ER_DUP_ENTRY when the bulk load is finished.
+#
+# The bulk load of one table is also finished implicitly when the session
+# starts bulk loading another table. That path must report the duplicate the
+# same way as SET rocksdb_bulk_load=0 does, and the server must keep running.
+#
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY ub (b)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+SET rocksdb_bulk_load_allow_sk = 1;
+SET rocksdb_bulk_load_enable_unique_key_check = 1;
+
+--echo # Duplicate detected when the bulk load is finished explicitly.
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 1), (3, 3);
+--error ER_DUP_ENTRY
+SET rocksdb_bulk_load = 0;
+SELECT @@rocksdb_bulk_load;
+SELECT COUNT(*) FROM t1;
+
+--echo # Duplicate detected when the session switches to another table.
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 1), (3, 3);
+--error ER_DUP_ENTRY
+INSERT INTO t2 VALUES (1);
+SET rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (ub);
+CHECK TABLE t1;
+
+SET rocksdb_bulk_load_allow_sk = DEFAULT;
+SET rocksdb_bulk_load_enable_unique_key_check = DEFAULT;
+DROP TABLE t1, t2;
