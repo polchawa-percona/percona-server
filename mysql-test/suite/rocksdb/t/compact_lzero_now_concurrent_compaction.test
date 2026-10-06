@@ -1,0 +1,17 @@
+#
+# PS-11747: SET GLOBAL rocksdb_compact_lzero_now = 1 must not fail because
+# automatic compactions remove L0 files while it runs. rocksdb_compact_lzero()
+# reads each column family's L0 files and calls CompactFiles(); when a file is
+# gone in between, it retries only three times without waiting and then fails
+# the SET with ER_WRONG_VALUE_FOR_VAR.
+#
+# The race needs L0 files that are compacted continuously: the write buffer
+# manager with a small global budget (-master.opt) flushes all column families
+# often, while ddl_concurrent_admin_ops runs DDL, DML and other
+# administrative operations, rocksdb_compact_lzero_now among them. Every
+# administrative operation must succeed. The race is timing dependent; on a
+# debug build the test failed in about one of three runs before the fix.
+#
+
+--let $rounds = 30
+--source suite/rocksdb/t/ddl_concurrent_admin_ops.test
