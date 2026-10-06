@@ -1,0 +1,48 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/not_valgrind.inc
+--source include/count_sessions.inc
+
+#
+# Concurrent bulk loads, INPLACE index builds, DML, DDL and compactions with
+# rocksdb_bulk_load_use_sst_partitioner=ON in every session.
+#
+# A bulk load or an INPLACE index build registers its index ids in the column
+# family's SST partitioner, and every compaction into the bottom level of that
+# column family then cuts SST files at those index boundaries. Here several
+# sessions do that at the same time in two shared column families (one
+# reverse), while other sessions update rows under open snapshots (so that
+# compactions see several versions of the same keys), create and drop tables,
+# and force flushes, compactions and drop-index thread wake-ups.
+#
+# Checked by the driver: no unexpected error; every bulk-loaded table has all
+# its rows through the primary and the secondary key (or, if the bulk load
+# could not be placed in the bottom level with
+# rocksdb_bulk_load_fail_if_not_bottommost_level=ON, none of them); every
+# index built INPLACE matches the primary key; the survivor tables are
+# unchanged. Checked here afterwards, and again after a restart with table
+# validation: the drop-index list is empty, no SST file keeps keys of a
+# dropped index, and the survivors have all their rows through both indexes.
+#
+# Combinations: the partitioner alone, together with
+# rocksdb_bulk_load_fail_if_not_bottommost_level, and with small SST files.
+#
+
+call mtr.add_suppression("MyRocks: failed to bulk load");
+call mtr.add_suppression("Failed to bulk load. status code = 13");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+
+--let $cc_rows = 400
+--exec python suite/rocksdb/t/ddl_concurrent_partitioner.py root 127.0.0.1 $MASTER_MYPORT 30 3 400 2>/dev/null
+
+--let $cp_check_cfs = 'cp_cf1', 'rev:cp_cf2'
+--source suite/rocksdb/include/ddl_concurrent_partitioner_check.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+
+--source suite/rocksdb/include/ddl_concurrent_partitioner_check.inc
+
+DROP TABLE survivor_0, survivor_1;
+--exec python suite/rocksdb/t/ddl_concurrent_partitioner.py root 127.0.0.1 $MASTER_MYPORT cleanup
+--source include/wait_until_count_sessions.inc
