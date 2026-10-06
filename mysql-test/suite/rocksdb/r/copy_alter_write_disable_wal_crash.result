@@ -1,0 +1,31 @@
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+CREATE TABLE t_copy (id INT PRIMARY KEY, k INT, v VARCHAR(100), KEY sk (k)) ENGINE=ROCKSDB;
+CREATE TABLE t_inplace (id INT PRIMARY KEY, k INT, v VARCHAR(100), KEY sk (k)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_write_disable_wal = ON;
+ALTER TABLE t_copy ADD COLUMN c INT, ALGORITHM=COPY;
+ALTER TABLE t_inplace ADD INDEX k2 (v), ALGORITHM=INPLACE;
+SET SESSION rocksdb_write_disable_wal = OFF;
+SELECT COUNT(*) FROM t_copy;
+COUNT(*)
+60
+# Kill and restart: --rocksdb_flush_log_at_trx_commit=2
+# All rows committed before the ALTER must survive.
+SELECT COUNT(*) FROM t_copy FORCE INDEX (PRIMARY);
+COUNT(*)
+60
+SELECT COUNT(*) FROM t_copy FORCE INDEX (sk);
+COUNT(*)
+60
+SELECT COUNT(*) FROM t_inplace FORCE INDEX (PRIMARY);
+COUNT(*)
+30
+SELECT COUNT(*) FROM t_inplace FORCE INDEX (k2);
+COUNT(*)
+30
+CHECK TABLE t_copy, t_inplace;
+Table	Op	Msg_type	Msg_text
+test.t_copy	check	status	OK
+test.t_inplace	check	status	OK
+DROP TABLE t_copy, t_inplace;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
