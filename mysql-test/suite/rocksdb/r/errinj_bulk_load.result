@@ -1,0 +1,11 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+# SST/ABORTED bulk load: every injected failure was handled correctly
+# INGEST/ABORTED bulk load: every injected failure was handled correctly
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;
