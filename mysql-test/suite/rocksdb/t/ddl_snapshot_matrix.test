@@ -1,0 +1,309 @@
+#
+# DDL statements against transactions that already hold a snapshot, and DDL
+# under each write policy.
+#
+# rocksdb.consistent_snapshot_ddl (PS-11627) covers COPY ALTER, TRUNCATE
+# TABLE, INPLACE ADD INDEX, RENAME TABLE, INSTANT ADD COLUMN and new tables.
+# This test adds the DDL kinds it does not cover, and checks that a reader
+# whose snapshot is older than the DDL either reads its snapshot's rows or
+# gets ER_TABLE_DEF_CHANGED, never an empty or partial table. A reader at
+# READ COMMITTED takes a new snapshot per statement and sees the new table.
+#
+# INSTANT ADD COLUMN read from an older snapshot is covered by the disabled
+# rocksdb.innodb_port_instant_ddl_basic_read_view (PS-11657).
+#
+# MyRocks-specific behaviour pinned here, differing from InnoDB:
+# - RENAME INDEX rebuilds the table (InnoDB renames in place), so an older
+#   snapshot gets ER_TABLE_DEF_CHANGED for the whole table.
+# - REORGANIZE PARTITION rebuilds the whole table by copying, so an older
+#   snapshot gets ER_TABLE_DEF_CHANGED even for partitions the statement
+#   did not touch; InnoDB rebuilds only the reorganized partitions.
+# - TRUNCATE PARTITION: a read of the whole table from an older snapshot gets
+#   ER_TABLE_DEF_CHANGED; InnoDB returns the other partitions' rows.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t_base (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_base VALUES (1);
+
+connect (reader,localhost,root,,);
+connect (ddl,localhost,root,,);
+connect (p,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+--echo #
+--echo # 1. DDL kinds against an older snapshot. Mode 0: START TRANSACTION WITH
+--echo #    CONSISTENT SNAPSHOT; mode 1: BEGIN and a first read; mode 2: READ
+--echo #    COMMITTED.
+--echo #
+connection default;
+CREATE TABLE t_di (id INT PRIMARY KEY, v INT, w INT, KEY kv (v), KEY kw (w)) ENGINE=ROCKSDB;
+INSERT INTO t_di VALUES (1,10,100),(2,20,200),(3,30,300);
+CREATE TABLE t_ri (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t_ri VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t_tp (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10),
+  PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t_tp VALUES (1,1),(2,2),(11,11),(12,12),(21,21);
+CREATE TABLE t_rp (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10),
+  PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t_rp VALUES (1,1),(2,2),(11,11),(12,12),(21,21);
+CREATE TABLE t_cs (id INT PRIMARY KEY, s VARCHAR(20), KEY ks (s)) ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t_cs VALUES (1,'a'),(2,'b'),(3,'c');
+CREATE TABLE t_dc (id INT PRIMARY KEY, v INT, w INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t_dc VALUES (1,10,100),(2,20,200),(3,30,300);
+
+--let $mode = 0
+while ($mode < 3)
+{
+  --let $def_changed = ER_TABLE_DEF_CHANGED
+  --let $index_name = kv2
+  connection reader;
+  if ($mode == 0)
+  {
+    --echo # Mode 0: consistent snapshot
+    START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  }
+  if ($mode == 1)
+  {
+    --echo # Mode 1: BEGIN and a first read
+    BEGIN;
+    --let $index_name = kv
+  }
+  if ($mode == 2)
+  {
+    --echo # Mode 2: READ COMMITTED
+    SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    BEGIN;
+    --let $def_changed = 0
+  }
+  SELECT COUNT(*) FROM t_base;
+
+  connection ddl;
+  if ($mode == 0)
+  {
+    ALTER TABLE t_di DROP INDEX kw, ALGORITHM=INPLACE;
+    ALTER TABLE t_ri RENAME INDEX kv TO kv2;
+    ALTER TABLE t_tp TRUNCATE PARTITION p1;
+    ALTER TABLE t_rp REORGANIZE PARTITION p1 INTO
+      (PARTITION p1a VALUES LESS THAN (15), PARTITION p1b VALUES LESS THAN (20));
+    ALTER TABLE t_cs CONVERT TO CHARACTER SET utf8mb4;
+    ALTER TABLE t_dc DROP COLUMN w, ALGORITHM=COPY;
+  }
+  if ($mode == 1)
+  {
+    ALTER TABLE t_di DROP INDEX kv, ALGORITHM=INPLACE;
+    ALTER TABLE t_ri RENAME INDEX kv2 TO kv;
+    ALTER TABLE t_tp TRUNCATE PARTITION p2;
+    ALTER TABLE t_rp REORGANIZE PARTITION p1a, p1b INTO
+      (PARTITION p1 VALUES LESS THAN (20));
+    ALTER TABLE t_cs CONVERT TO CHARACTER SET latin1;
+    ALTER TABLE t_dc ADD COLUMN w INT, ALGORITHM=COPY;
+  }
+  if ($mode == 2)
+  {
+    ALTER TABLE t_di ADD INDEX kw (w), ALGORITHM=INPLACE;
+    ALTER TABLE t_ri RENAME INDEX kv TO kv2;
+    ALTER TABLE t_tp TRUNCATE PARTITION p0;
+    ALTER TABLE t_rp REORGANIZE PARTITION p2 INTO
+      (PARTITION p2a VALUES LESS THAN (30), PARTITION p2b VALUES LESS THAN MAXVALUE);
+    ALTER TABLE t_cs CONVERT TO CHARACTER SET utf8mb4;
+    ALTER TABLE t_dc DROP COLUMN w, ALGORITHM=COPY;
+  }
+
+  connection reader;
+  --echo # An INPLACE ADD/DROP INDEX keeps the other indexes readable.
+  SELECT * FROM t_di ORDER BY id;
+  --echo # RENAME INDEX rebuilds the table.
+  --error $def_changed
+  SELECT * FROM t_ri FORCE INDEX (PRIMARY) ORDER BY id;
+  --error $def_changed
+  eval SELECT v FROM t_ri FORCE INDEX ($index_name) ORDER BY v;
+  --echo # TRUNCATE PARTITION: the untouched partition stays readable.
+  --error $def_changed
+  SELECT * FROM t_tp ORDER BY id;
+  SELECT * FROM t_tp PARTITION (p0) ORDER BY id;
+  --echo # REORGANIZE PARTITION rebuilds the whole table.
+  --error $def_changed
+  SELECT * FROM t_rp ORDER BY id;
+  --error $def_changed
+  SELECT * FROM t_rp WHERE id < 10 ORDER BY id;
+  --echo # CONVERT TO CHARACTER SET and COPY ALTER rebuild the table.
+  --error $def_changed
+  SELECT * FROM t_cs ORDER BY id;
+  --error $def_changed
+  SELECT * FROM t_dc ORDER BY id;
+  COMMIT;
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  SELECT COUNT(*) FROM t_di;
+  SELECT * FROM t_tp ORDER BY id;
+  SELECT * FROM t_rp ORDER BY id;
+  SELECT * FROM t_cs ORDER BY id;
+  SELECT * FROM t_dc ORDER BY id;
+  --inc $mode
+}
+connection default;
+DROP TABLE t_di, t_ri, t_tp, t_rp, t_cs, t_dc;
+
+--echo #
+--echo # 2. Bulk load: a session with loaded but not yet ingested rows
+--echo #    (rocksdb_bulk_load=1) and DDL from another session. A COPY ALTER in
+--echo #    this window loses the rows; that case is in the disabled
+--echo #    rocksdb.ddl_bulk_load_copy_alter.
+--echo #
+connection default;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+connection p;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11),(12,12);
+connection ddl;
+--echo # INPLACE ADD INDEX: the new index also gets the ingested rows.
+ALTER TABLE tb ADD INDEX kv (v), ALGORITHM=INPLACE;
+connection p;
+SET SESSION rocksdb_bulk_load = 0;
+connection default;
+SELECT * FROM tb FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT v FROM tb FORCE INDEX (kv) ORDER BY v;
+CHECK TABLE tb;
+DROP TABLE tb;
+
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+connection p;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11);
+connection ddl;
+--echo # TRUNCATE after the loaded rows: the table ends up empty.
+TRUNCATE TABLE tb;
+connection p;
+SET SESSION rocksdb_bulk_load = 0;
+connection default;
+SELECT * FROM tb ORDER BY id;
+DROP TABLE tb;
+
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+connection p;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11);
+connection ddl;
+--echo # DROP and re-CREATE: the loaded rows do not reach the new table.
+DROP TABLE tb;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+connection p;
+SET SESSION rocksdb_bulk_load = 0;
+connection default;
+SELECT * FROM tb ORDER BY id;
+DROP TABLE tb;
+
+--echo #
+--echo # 3. A snapshot held while the drop-index thread reclaims indexes.
+--echo #
+CREATE TABLE t (id INT PRIMARY KEY, v INT, w INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t SELECT seq, seq % 100, seq FROM
+  (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 1000)
+   SELECT seq FROM s) x;
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+UPDATE t SET w = w + 1 WHERE id <= 10;
+--echo # INPLACE DROP INDEX, reclaimed while the snapshot is held.
+ALTER TABLE t DROP INDEX kv, ALGORITHM=INPLACE;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--source suite/rocksdb/include/drop_table_sync.inc
+SET GLOBAL rocksdb_compact_cf = 'default';
+connection reader;
+--echo # The snapshot still sees the rows from before the UPDATE.
+SELECT COUNT(*), SUM(w) FROM t;
+SELECT w FROM t WHERE id = 5;
+COMMIT;
+SELECT COUNT(*), SUM(w) FROM t;
+
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+--echo # COPY ALTER, its old indexes reclaimed while the snapshot is held.
+ALTER TABLE t ADD INDEX kv (v), ALGORITHM=COPY;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--source suite/rocksdb/include/drop_table_sync.inc
+SET GLOBAL rocksdb_compact_cf = 'default';
+connection reader;
+--error ER_TABLE_DEF_CHANGED
+SELECT COUNT(*) FROM t;
+COMMIT;
+SELECT COUNT(*) FROM t FORCE INDEX (kv);
+
+--echo #
+--echo # 4. DDL with a large pending transaction (under write_unprepared its
+--echo #    batches are already written), and failed DDL.
+--echo #
+connection p;
+BEGIN;
+INSERT INTO t SELECT id + 10000, v, w FROM t;
+connection ddl;
+SET SESSION lock_wait_timeout = 1;
+--echo # The pending transaction holds the metadata lock, so DDL times out.
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t ADD COLUMN x INT, ALGORITHM=COPY;
+connection p;
+COMMIT;
+connection ddl;
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t FORCE INDEX (kv);
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+
+connection p;
+BEGIN;
+DELETE FROM t WHERE id > 10000;
+UPDATE t SET w = w + 1000000;
+connection ddl;
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER TABLE t DROP INDEX kw, ALGORITHM=INPLACE;
+connection p;
+--echo # The pending transaction rolls back after the failed DDL.
+ROLLBACK;
+connection ddl;
+ALTER TABLE t ADD COLUMN x INT, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(w) FROM t FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(w) FROM t FORCE INDEX (kw);
+
+connection default;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+connection p;
+--echo # A large pending transaction on another table does not block DDL.
+BEGIN;
+INSERT INTO t2 SELECT seq, seq FROM
+  (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 1000)
+   SELECT seq FROM s) x;
+connection ddl;
+ALTER TABLE t DROP COLUMN x, ALGORITHM=COPY;
+ALTER TABLE t DROP INDEX kw, ALGORITHM=INPLACE;
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+connection p;
+COMMIT;
+connection ddl;
+SELECT COUNT(*) FROM t2;
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+
+--echo # Failed DDL leaves no index behind.
+--replace_regex /#sql-[0-9a-f_]+/#sql-tmp/
+--error ER_DUP_ENTRY
+ALTER TABLE t ADD UNIQUE INDEX uv (v), ALGORITHM=INPLACE;
+--error ER_DUP_ENTRY
+ALTER TABLE t ADD UNIQUE INDEX uv (v), ALGORITHM=COPY;
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME = 't';
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+CHECK TABLE t;
+
+connection default;
+disconnect reader;
+disconnect ddl;
+disconnect p;
+DROP TABLE t_base, t, t2;

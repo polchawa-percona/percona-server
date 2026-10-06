@@ -1,0 +1,45 @@
+#
+# Finding 50 (port-findings.md): a crash inside INPLACE or INSTANT DROP INDEX
+# after the MyRocks dictionary commit and before the server's data dictionary
+# commit leaves MyRocks with one index less than the server. Every open of the
+# table then crashes the server (SIGSEGV in Rdb_key_def::setup), with
+# rocksdb_validate_tables 1 or 2.
+#
+# Expected: with default options the table opens and is usable (the index
+# either exists in both dictionaries or in neither).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Table '.*' definition differs between MyRocks");
+--enable_query_log
+
+--let $i = 0
+while ($i < 2)
+{
+  CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+  --let $crash_point = crash_commit_after_prepare
+  if ($i == 0)
+  {
+    --let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+  }
+  if ($i == 1)
+  {
+    SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = ON;
+    --let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INSTANT
+  }
+  --source suite/rocksdb/include/ddl_crash.inc
+  SELECT COUNT(*) FROM t1;
+  INSERT INTO t1 VALUES (4,4,4);
+  SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+  CHECK TABLE t1;
+  --error 0,ER_CANT_DROP_FIELD_OR_KEY
+  ALTER TABLE t1 DROP INDEX ka;
+  SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+    WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+  DROP TABLE t1;
+  --inc $i
+}

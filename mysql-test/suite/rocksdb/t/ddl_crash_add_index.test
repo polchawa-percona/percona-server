@@ -1,0 +1,49 @@
+#
+# Finding 49 (port-findings.md): a crash inside INPLACE ADD INDEX after the
+# MyRocks dictionary commit and before the server's data dictionary commit
+# leaves MyRocks with one more index than the server. With the default
+# rocksdb_validate_tables=1 the table opens, but the first INSERT crashes the
+# server (SIGSEGV in Rdb_field_packing::get_field_in_table). Only
+# rocksdb_validate_tables=2 repairs the table (rocksdb.recovery_after_alter_crash).
+# The same happens for a crash between the MyRocks commit and the end of the
+# "create index ongoing" marker (rocksdb_crash_before_finish_create_index).
+#
+# Expected: with default options the table is usable (the index either exists
+# in both dictionaries or in neither).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Table '.*' definition differs between MyRocks");
+CALL mtr.add_suppression("Start the server with \"rocksdb_validate_tables=2\"");
+CALL mtr.add_suppression("Removing incomplete create index");
+--enable_query_log
+
+--let $i = 0
+while ($i < 2)
+{
+  CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+  if ($i == 0)
+  {
+    --let $crash_point = crash_commit_after_prepare
+  }
+  if ($i == 1)
+  {
+    --let $crash_point = rocksdb_crash_before_finish_create_index
+  }
+  --let $crash_stmt = ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+  --source suite/rocksdb/include/ddl_crash.inc
+  INSERT INTO t1 VALUES (4,4,4);
+  UPDATE t1 SET b = b + 10 WHERE id = 1;
+  SELECT * FROM t1 ORDER BY id;
+  SELECT id FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY id;
+  CHECK TABLE t1;
+  --error 0,ER_DUP_KEYNAME
+  ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+  SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+  DROP TABLE t1;
+  --inc $i
+}

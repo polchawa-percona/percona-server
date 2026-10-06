@@ -1,0 +1,10 @@
+#
+# rocksdb.restart_during_drop_cf with rocksdb_enable_remove_orphaned_dropped_cfs=OFF.
+#
+# The restart happens after the column family was dropped in RocksDB but
+# before its id was removed from the list of column families to drop. At
+# startup the id is an orphan: with the option ON it is removed, with OFF it is
+# only reported, and the drop-index thread must still finish the drop without
+# errors.
+#
+--source suite/rocksdb/t/restart_during_drop_cf.test

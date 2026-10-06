@@ -1,0 +1,48 @@
+#
+# Finding 48 (port-findings.md): a crash inside TRUNCATE TABLE after the table
+# is renamed to #truncate_tmp#<name> and before the new table is committed.
+# Startup deletes the old data as a truncate leftover, then MyRocks refuses to
+# start because the table exists only in the server's data dictionary. For
+# TRUNCATE PARTITION MyRocks starts, but the table cannot be opened.
+# rocksdb.truncate_failures records today's behaviour with
+# rocksdb_validate_tables=2.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and the
+# table is usable, either with its old rows or empty.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Removing truncated leftover table");
+--enable_query_log
+
+--let $check_tables = 't1'
+
+--echo # TRUNCATE TABLE
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = rocksdb_truncate_failure_crash
+--let $crash_stmt = TRUNCATE TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) IN (0, 3) AS old_rows_or_empty FROM t1;
+CHECK TABLE t1;
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
+
+--echo # ALTER TABLE ... TRUNCATE PARTITION
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+                           PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = rocksdb_truncate_failure_crash
+--let $crash_stmt = ALTER TABLE t1 TRUNCATE PARTITION p0
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS p1_rows FROM t1 PARTITION (p1);
+SELECT COUNT(*) IN (0, 1) AS p0_old_rows_or_empty FROM t1 PARTITION (p0);
+CHECK TABLE t1;
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;

@@ -1,0 +1,1 @@
+--rocksdb_enable_remove_orphaned_dropped_cfs=0
