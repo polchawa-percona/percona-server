@@ -1,0 +1,46 @@
+#
+# Systematic error injection of I/O errors into the data dictionary reads and
+# commits of INPLACE ADD INDEX (see suite/rocksdb/include/errinj_loop.inc). An
+# I/O error at a dictionary commit aborts the server; after the restart the
+# table must have either the old or the new definition, with every index
+# usable.
+#
+# PS-11669: a crash after the MyRocks dictionary commit of the new index and
+# before the server data dictionary commit leaves a MyRocks index that the
+# server does not know, and the first write to the table crashes the server.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+
+--source suite/rocksdb/include/errinj_ddl_setup.inc
+--let $errinj_crash = 1
+--let $errinj_class = DICT
+--let $errinj_status = IOERROR
+--let $errinj_tables = t2
+
+--let $errinj_stmt = ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE
+--let $errinj_label = DICT/IOERROR INPLACE ADD INDEX
+--source suite/rocksdb/include/errinj_loop.inc
+
+--let $errinj_stmt = ALTER TABLE t2 ADD UNIQUE INDEX ua (a), ALGORITHM=INPLACE
+--let $errinj_label = DICT/IOERROR INPLACE ADD UNIQUE INDEX
+--source suite/rocksdb/include/errinj_loop.inc
+
+--let $errinj_crash = 0
+--let $errinj_state_proc =
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;
