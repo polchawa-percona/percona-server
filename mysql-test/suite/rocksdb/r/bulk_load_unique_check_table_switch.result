@@ -1,0 +1,33 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY ub (b)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET rocksdb_bulk_load_allow_sk = 1;
+SET rocksdb_bulk_load_enable_unique_key_check = 1;
+# Duplicate detected when the bulk load is finished explicitly.
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 1), (3, 3);
+SET rocksdb_bulk_load = 0;
+ERROR 23000: Duplicate entry found for key name: ub, key:000001010180000001
+SELECT @@rocksdb_bulk_load;
+@@rocksdb_bulk_load
+0
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+# Duplicate detected when the session switches to another table.
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 1), (3, 3);
+INSERT INTO t2 VALUES (1);
+ERROR 23000: Duplicate entry found for key name: ub, key:000001010180000001
+SET rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+SELECT COUNT(*) FROM t1 FORCE INDEX (ub);
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SET rocksdb_bulk_load_allow_sk = DEFAULT;
+SET rocksdb_bulk_load_enable_unique_key_check = DEFAULT;
+DROP TABLE t1, t2;

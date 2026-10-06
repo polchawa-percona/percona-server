@@ -1,0 +1,60 @@
+#
+# Finding #41 (myrocks-notes/port-findings.md): after an INPLACE ADD INDEX is
+# killed during the primary key scan, the next INPLACE ADD INDEX on the same
+# connection must succeed. Today it fails with ER_SK_POPULATE_DURING_ALTER,
+# because the killed build leaves its bulk-load state in the transaction.
+#
+# The killed ALTER itself may report ER_QUERY_INTERRUPTED or
+# ER_SK_POPULATE_DURING_ALTER; the wrong code is finding #30, tested by
+# rocksdb.innodb_port_ddl_kill.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL) ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n FROM v;
+
+call mtr.add_suppression("Error retrieving index entry from primary key");
+
+connect (con1,localhost,root,,);
+
+--let $i= 1
+while ($i <= 2)
+{
+  # MyRocks honours KILL QUERY only during the primary key scan, so both
+  # rounds kill the build there; the second round checks a connection that has
+  # already recovered once.
+  --let $point= rocksdb.inplace_populate_sk_scan_row
+  --echo # Kill an INPLACE ADD INDEX paused at $point
+  connection con1;
+  let $ID= `SELECT CONNECTION_ID()`;
+  eval SET DEBUG_SYNC = '$point SIGNAL paused WAIT_FOR killed';
+  --send ALTER TABLE t1 ADD INDEX k_killed(c2), ALGORITHM = INPLACE
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR paused';
+  --replace_result $ID ID
+  eval KILL QUERY $ID;
+  SET DEBUG_SYNC = 'now SIGNAL killed';
+
+  connection con1;
+  --error ER_QUERY_INTERRUPTED, ER_SK_POPULATE_DURING_ALTER
+  reap;
+  SET DEBUG_SYNC = 'RESET';
+
+  --echo # The next index build on the same connection must succeed.
+  ALTER TABLE t1 ADD INDEX k_next(c2), ALGORITHM = INPLACE;
+  SELECT COUNT(*), SUM(c2) FROM t1 FORCE INDEX (k_next);
+  ALTER TABLE t1 DROP INDEX k_next;
+  --inc $i
+}
+
+connection default;
+SHOW CREATE TABLE t1;
+CHECK TABLE t1;
+DROP TABLE t1;
+disconnect con1;
+--source include/wait_until_count_sessions.inc

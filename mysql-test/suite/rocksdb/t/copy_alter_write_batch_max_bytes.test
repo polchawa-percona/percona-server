@@ -1,0 +1,57 @@
+--source include/have_rocksdb.inc
+
+#
+# A COPY ALTER TABLE whose rows do not fit into rocksdb_write_batch_max_bytes
+# must fail with the memory-limit error and leave the table unchanged, as
+# INSERT ... SELECT, CREATE TABLE ... SELECT, UPDATE and a COPY ALTER with
+# rocksdb_commit_in_the_middle do. Without commit_in_the_middle the ALTER
+# succeeded and kept only the rows that fitted into the write batch, because
+# the DDL write path ignored the status of WriteBatch::Put() (finding #54).
+#
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c VARCHAR(20), KEY kc (c))
+  ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO t VALUES ($i, $i % 1500, REPEAT('x', 1 + $i % 5));
+  inc $i;
+}
+--enable_query_log
+
+SET SESSION rocksdb_write_batch_max_bytes = 4096;
+
+--echo # The same limit applied to a non-DDL statement
+CREATE TABLE t2 LIKE t;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+--error ER_GET_ERRMSG
+INSERT INTO t2 SELECT * FROM t;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT COUNT(*) FROM t2;
+DROP TABLE t2;
+
+--echo # COPY ALTER, rocksdb_commit_in_the_middle=OFF
+--error ER_GET_ERRMSG
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+SELECT COUNT(*) FROM t FORCE INDEX (kc) WHERE c >= '';
+--error ER_GET_ERRMSG
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SHOW CREATE TABLE t;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+
+--echo # COPY ALTER, rocksdb_commit_in_the_middle=ON
+SET SESSION rocksdb_commit_in_the_middle = ON;
+--error ER_GET_ERRMSG
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+
+--echo # With the default limit the ALTER succeeds and keeps every row
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+SELECT COUNT(*) FROM t FORCE INDEX (kc) WHERE c >= '';
+
+DROP TABLE t;
