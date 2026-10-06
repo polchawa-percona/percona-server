@@ -1,0 +1,289 @@
+SET @save_rot = @@global.rocksdb_rollback_on_timeout;
+SET @save_skip = @@global.rocksdb_skip_locks_if_skip_unique_check;
+CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(10,10);
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,0);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION lock_wait_timeout = 60;
+#
+# 1. Row-lock timeout while a COPY ALTER is queued, rollback_on_timeout
+#    OFF (statement rollback) and ON (transaction rollback).
+#
+SET GLOBAL rocksdb_rollback_on_timeout = 0;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+BEGIN;
+UPDATE t SET a = a + 100 WHERE id = 1;
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+UPDATE t SET a = a + 1 WHERE id = 2;
+ALTER TABLE t ADD COLUMN c0 INT, ALGORITHM=COPY;
+UPDATE t SET a = a + 10 WHERE id = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# Earlier writes of the victim kept (OFF) or rolled back (ON):
+SELECT v AS victim_t2 FROM t2 WHERE id = 1;
+victim_t2
+1
+SELECT a AS victim_id2 FROM t WHERE id = 2;
+victim_id2
+3
+# The ALTER still waits: the victim's metadata lock is kept
+# (OFF) or, after the transaction rollback, only the holder's (ON).
+SELECT COUNT(*) AS alter_waiting FROM performance_schema.processlist
+WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN%';
+alter_waiting
+1
+COMMIT;
+COMMIT;
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	156	10
+SELECT * FROM t2;
+id	v
+1	1
+UPDATE t SET a = id;
+UPDATE t2 SET v = 0;
+SET GLOBAL rocksdb_rollback_on_timeout = 1;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+BEGIN;
+UPDATE t SET a = a + 100 WHERE id = 1;
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+UPDATE t SET a = a + 1 WHERE id = 2;
+ALTER TABLE t ADD COLUMN c1 INT, ALGORITHM=COPY;
+UPDATE t SET a = a + 10 WHERE id = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# Earlier writes of the victim kept (OFF) or rolled back (ON):
+SELECT v AS victim_t2 FROM t2 WHERE id = 1;
+victim_t2
+0
+SELECT a AS victim_id2 FROM t WHERE id = 2;
+victim_id2
+2
+# The ALTER still waits: the victim's metadata lock is kept
+# (OFF) or, after the transaction rollback, only the holder's (ON).
+SELECT COUNT(*) AS alter_waiting FROM performance_schema.processlist
+WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN%';
+alter_waiting
+1
+COMMIT;
+COMMIT;
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	155	10
+SELECT * FROM t2;
+id	v
+1	0
+UPDATE t SET a = id;
+UPDATE t2 SET v = 0;
+SET GLOBAL rocksdb_rollback_on_timeout = @save_rot;
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+#
+# 2. rocksdb_max_row_locks exceeded by a DML transaction while a COPY
+#    ALTER is queued: the statement fails, the transaction and its
+#    metadata lock stay until ROLLBACK.
+#
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+UPDATE t SET a = a WHERE id = 1;
+SET SESSION rocksdb_max_row_locks = 3;
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+UPDATE t SET a = a + 1;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SELECT v AS victim_t2 FROM t2 WHERE id = 1;
+victim_t2
+1
+SELECT COUNT(*) AS alter_waiting FROM performance_schema.processlist
+WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN d%';
+alter_waiting
+1
+ROLLBACK;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	55	10
+SELECT * FROM t2;
+id	v
+1	0
+#
+# 3. rocksdb_max_row_locks applies to the DDL session itself: a COPY
+#    ALTER that needs more row locks fails, the table is unchanged and
+#    no #sql table is left; INPLACE ADD INDEX takes no row locks.
+#
+SET SESSION rocksdb_max_row_locks = 3;
+ALTER TABLE t ADD COLUMN e INT, ALGORITHM=COPY;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+ALTER TABLE t ADD INDEX kx (a, id), ALGORITHM=INPLACE;
+SET SESSION rocksdb_lock_scanned_rows = ON;
+ALTER TABLE t ADD COLUMN e INT, ALGORITHM=COPY;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SET SESSION rocksdb_lock_scanned_rows = DEFAULT;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `c0` int DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kx` (`a`,`id`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	55	10
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+#
+# 4. rocksdb_lock_scanned_rows: an UPDATE that scans the whole table
+#    keeps the locks of rows it did not change (ON) or releases them
+#    (OFF); a writer of such a row waits only with ON.
+#
+SET SESSION rocksdb_lock_scanned_rows = 0;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE a + 0 = 9;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 2;
+COMMIT;
+COMMIT;
+SET SESSION rocksdb_lock_scanned_rows = 1;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE a + 0 = 9;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 2;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+COMMIT;
+SET SESSION rocksdb_lock_scanned_rows = DEFAULT;
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	57	10
+#
+# 5. rocksdb_deadlock_detect with a small depth: a deadlock between two
+#    DML transactions while a COPY ALTER waits for both; the victim is
+#    rolled back, the ALTER completes after the survivor commits.
+#
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 3;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 4;
+ALTER TABLE t ADD COLUMN f INT, ALGORITHM=COPY;
+UPDATE t SET a = a + 1 WHERE id = 4;
+UPDATE t SET a = a + 1 WHERE id = 3;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+COMMIT;
+SET SESSION rocksdb_deadlock_detect = DEFAULT;
+SET SESSION rocksdb_deadlock_detect_depth = DEFAULT;
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	59	10
+SELECT id, a FROM t WHERE id IN (3, 4);
+id	a
+3	4
+4	5
+#
+# 6. rocksdb_skip_locks_if_skip_unique_check with unique_checks=0: on a
+#    table with only a primary key, INSERT takes no row lock and does no
+#    duplicate check, so a concurrent insert of the same key does not
+#    wait and the last committer silently wins (documented: the user
+#    guarantees there are no duplicates). Without the setting the second
+#    insert waits. UPDATE still locks the row when it reads it.
+#
+SET GLOBAL rocksdb_skip_locks_if_skip_unique_check = 0;
+SET SESSION unique_checks = 0;
+BEGIN;
+INSERT INTO t2 VALUES (10 + 0, 1);
+SET SESSION unique_checks = 0;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+INSERT INTO t2 VALUES (10 + 0, 2);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+SET SESSION unique_checks = 1;
+SET SESSION unique_checks = 1;
+SELECT * FROM t2 WHERE id = 10 + 0;
+id	v
+10	1
+SET GLOBAL rocksdb_skip_locks_if_skip_unique_check = 1;
+SET SESSION unique_checks = 0;
+BEGIN;
+INSERT INTO t2 VALUES (10 + 1, 1);
+SET SESSION unique_checks = 0;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+INSERT INTO t2 VALUES (10 + 1, 2);
+COMMIT;
+SET SESSION unique_checks = 1;
+SET SESSION unique_checks = 1;
+SELECT * FROM t2 WHERE id = 10 + 1;
+id	v
+11	1
+SET SESSION unique_checks = 0;
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+SET SESSION unique_checks = 0;
+UPDATE t2 SET v = v + 10 WHERE id = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+SET SESSION unique_checks = 1;
+SET SESSION unique_checks = 1;
+SET GLOBAL rocksdb_skip_locks_if_skip_unique_check = @save_skip;
+SELECT * FROM t2 ORDER BY id;
+id	v
+1	1
+10	1
+11	1
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Final consistency
+#
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `c0` int DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `d` int DEFAULT NULL,
+  `f` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kx` (`a`,`id`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	59	10
+SELECT COUNT(*) AS sql_leftovers FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%';
+sql_leftovers
+0
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# restart
+SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t;
+n	sa	n_ka
+10	59	10
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t, t2;
