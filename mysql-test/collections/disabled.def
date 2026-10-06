@@ -133,6 +133,8 @@ rocksdb.cons_snapshot_serializable : BUG#0 MyRocks does not yet support ISO seri
 rocksdb.level_read_uncommitted : BUG#0 MyRocks does not yet suppore ISO read uncommitted
 rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
+rocksdb.unchecked_status_delete_range_write : BUG#11764 PS-11764 DROP ok on write error
+rocksdb.unchecked_status_rollback_to_savepoint : BUG#11765 PS-11765 rollback ignored
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 
