@@ -1,0 +1,76 @@
+SELECT @@global.rocksdb_no_create_column_family;
+@@global.rocksdb_no_create_column_family
+1
+# CREATE TABLE into a new column family is refused.
+CREATE TABLE t_new (id INT, a INT, PRIMARY KEY (id) COMMENT 'cfname=cf_nc_new') ENGINE=ROCKSDB;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+CREATE TABLE t_new (id INT PRIMARY KEY, a INT, KEY ka(a) COMMENT 'cfname=rev:cf_nc_new') ENGINE=ROCKSDB;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+SHOW TABLES LIKE 't\_new';
+Tables_in_test (t\_new)
+# Existing column families can be used.
+CREATE TABLE t1 (id INT, a INT, b INT, PRIMARY KEY (id) COMMENT 'cfname=default',
+KEY ka(a) COMMENT 'cfname=default') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# INPLACE ADD INDEX into a new column family is refused.
+ALTER TABLE t1 ADD INDEX kb(b) COMMENT 'cfname=cf_nc_new', ALGORITHM=INPLACE;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+# COPY ALTER moving the primary key into a new column family is refused.
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (id) COMMENT 'cfname=cf_nc_new', ALGORITHM=COPY;
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`) COMMENT 'cfname=default',
+  KEY `ka` (`a`) COMMENT 'cfname=default'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+include/assert.inc [t1 is unchanged by the refused ALTERs]
+# ADD INDEX into an existing column family works.
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 1 ORDER BY id;
+id
+2
+3
+# Partitioned table with per-partition column families.
+CREATE TABLE tp (id INT, a INT, PRIMARY KEY (id) COMMENT 'p0_cfname=cf_nc_p0;p1_cfname=cf_nc_p1')
+ENGINE=ROCKSDB PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+CREATE TABLE tp (id INT, a INT, PRIMARY KEY (id) COMMENT 'p0_cfname=default;p2_cfname=cf_nc_p2')
+ENGINE=ROCKSDB PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO tp VALUES (1,1),(15,15);
+# ADD PARTITION naming a column family that does not exist yet is refused.
+ALTER TABLE tp ADD PARTITION (PARTITION p2 VALUES LESS THAN MAXVALUE);
+ERROR HY000: Incorrect arguments to CREATE | ALTER - can not find column family for storing index data and creation is not allowed.
+SELECT * FROM tp ORDER BY id;
+id	a
+1	1
+15	15
+SELECT PARTITION_NAME, INDEX_NAME, CF FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tp' ORDER BY 1, 2;
+PARTITION_NAME	INDEX_NAME	CF
+p0	PRIMARY	default
+p1	PRIMARY	default
+# No column family was created.
+SELECT COUNT(*) AS new_cfs FROM information_schema.ROCKSDB_CFSTATS WHERE CF_NAME LIKE '%cf\_nc\_%';
+new_cfs
+0
+# restart
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	1	1
+2	2	2
+3	3	3
+SELECT * FROM tp ORDER BY id;
+id	a
+1	1
+15	15
+CHECK TABLE t1, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.tp	check	status	OK
+DROP TABLE t1, tp;

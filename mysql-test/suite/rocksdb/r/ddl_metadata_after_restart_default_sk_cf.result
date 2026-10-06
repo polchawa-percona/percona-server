@@ -1,0 +1,617 @@
+CREATE TABLE md_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE md_probe;
+# CREATE TABLE, including a secondary index in its own column family
+CREATE TABLE t_create (a INT PRIMARY KEY, b INT,
+KEY kb(b) COMMENT 'cfname=cf_md') ENGINE=ROCKSDB;
+# INPLACE ADD INDEX
+CREATE TABLE t_addidx (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+INSERT INTO t_addidx VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+ALTER TABLE t_addidx ADD INDEX kc(c), ALGORITHM=INPLACE;
+# INPLACE DROP INDEX
+CREATE TABLE t_dropidx (a INT PRIMARY KEY, b INT, c INT,
+KEY kb(b), KEY kc(c)) ENGINE=ROCKSDB;
+INSERT INTO t_dropidx VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ALTER TABLE t_dropidx DROP INDEX kc, ALGORITHM=INPLACE;
+# RENAME TABLE, in the same and into another database
+CREATE TABLE t_ren0 (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+RENAME TABLE t_ren0 TO t_rename;
+CREATE DATABASE md2;
+CREATE TABLE t_xdb (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+RENAME TABLE t_xdb TO md2.t_xdb;
+# TRUNCATE TABLE
+CREATE TABLE t_trunc (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_trunc VALUES (100, 100);
+TRUNCATE TABLE t_trunc;
+# COPY ALTER
+CREATE TABLE t_copy (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_copy VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_copy MODIFY b BIGINT, ALGORITHM=COPY;
+# INSTANT ADD COLUMN
+CREATE TABLE t_instant (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_instant VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+ALTER TABLE t_instant ADD COLUMN e INT DEFAULT 5, ALGORITHM=INSTANT;
+# RENAME INDEX (a COPY ALTER on MyRocks)
+CREATE TABLE t_renidx (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_renidx VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_renidx RENAME INDEX kb TO kb2;
+# Primary key change
+CREATE TABLE t_pk (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_pk VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_pk DROP PRIMARY KEY, ADD PRIMARY KEY (a, b);
+# Hidden primary key, then an explicit one
+CREATE TABLE t_hidden (a INT NOT NULL, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_hidden VALUES (1, 1), (2, 2), (3, 3);
+SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't_hidden' ORDER BY 1;
+INDEX_NAME
+HIDDEN_PK_ID
+kb
+ALTER TABLE t_hidden ADD PRIMARY KEY (a);
+# Partition DDL
+CREATE TABLE t_part (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t_part VALUES (1, 1), (11, 11);
+ALTER TABLE t_part ADD PARTITION (PARTITION p2 VALUES LESS THAN (30));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO t_part VALUES (21, 21);
+ALTER TABLE t_part REORGANIZE PARTITION p0 INTO
+(PARTITION p0a VALUES LESS THAN (5), PARTITION p0b VALUES LESS THAN (10));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO t_part VALUES (7, 7);
+# TTL table
+CREATE TABLE t_ttl (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB
+COMMENT 'ttl_duration=360000;';
+# Data for every table
+INSERT INTO t_create VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_rename VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO md2.t_xdb VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_trunc VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_instant (a, b) VALUES (4, 4);
+INSERT INTO t_ttl VALUES (1, 1), (2, 2), (3, 3);
+# Let the drop-index thread finish and compact the dropped data away.
+Timeout in wait_condition.inc for SELECT COUNT(*) = 0
+FROM INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO
+WHERE TYPE = 'DDL_DROP_INDEX_ONGOING'
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cf_md';
+# Index definitions in ROCKSDB_DDL
+SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME, INDEX_TYPE,
+KV_FORMAT_VERSION, CF, TTL_DURATION, INDEX_FLAGS
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'md2')
+ORDER BY TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME;
+TABLE_SCHEMA	TABLE_NAME	PARTITION_NAME	INDEX_NAME	INDEX_TYPE	KV_FORMAT_VERSION	CF	TTL_DURATION	INDEX_FLAGS
+md2	t_xdb	NULL	kb	2	16	default_sk	0	0
+md2	t_xdb	NULL	PRIMARY	1	15	default	0	0
+test	t_addidx	NULL	kc	2	16	default_sk	0	0
+test	t_addidx	NULL	PRIMARY	1	15	default	0	0
+test	t_copy	NULL	kb	2	16	default_sk	0	0
+test	t_copy	NULL	PRIMARY	1	15	default	0	0
+test	t_create	NULL	kb	2	16	cf_md	0	0
+test	t_create	NULL	PRIMARY	1	15	default	0	0
+test	t_dropidx	NULL	kb	2	16	default_sk	0	0
+test	t_dropidx	NULL	PRIMARY	1	15	default	0	0
+test	t_hidden	NULL	kb	2	16	default_sk	0	0
+test	t_hidden	NULL	PRIMARY	1	15	default	0	0
+test	t_instant	NULL	kb	2	16	default_sk	0	0
+test	t_instant	NULL	PRIMARY	1	15	default	0	0
+test	t_part	p0a	kb	2	16	default_sk	0	0
+test	t_part	p0a	PRIMARY	1	15	default	0	0
+test	t_part	p0b	kb	2	16	default_sk	0	0
+test	t_part	p0b	PRIMARY	1	15	default	0	0
+test	t_part	p1	kb	2	16	default_sk	0	0
+test	t_part	p1	PRIMARY	1	15	default	0	0
+test	t_part	p2	kb	2	16	default_sk	0	0
+test	t_part	p2	PRIMARY	1	15	default	0	0
+test	t_pk	NULL	kb	2	16	default_sk	0	0
+test	t_pk	NULL	PRIMARY	1	15	default	0	0
+test	t_rename	NULL	kb	2	16	default_sk	0	0
+test	t_rename	NULL	PRIMARY	1	15	default	0	0
+test	t_renidx	NULL	kb2	2	16	default_sk	0	0
+test	t_renidx	NULL	PRIMARY	1	15	default	0	0
+test	t_trunc	NULL	kb	2	16	default_sk	0	0
+test	t_trunc	NULL	PRIMARY	1	15	default	0	0
+test	t_ttl	NULL	kb	2	16	default_sk	360000	1
+test	t_ttl	NULL	PRIMARY	1	15	default	360000	1
+# Indexes known to the server but missing in ROCKSDB_DDL (expect none)
+SELECT s.TABLE_SCHEMA, s.TABLE_NAME, s.INDEX_NAME
+FROM (SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA IN ('test', 'md2') AND TABLE_NAME LIKE 't\_%') s
+WHERE NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA = s.TABLE_SCHEMA
+AND d.TABLE_NAME = s.TABLE_NAME
+AND d.INDEX_NAME = s.INDEX_NAME);
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME
+# Indexes in ROCKSDB_DDL unknown to the server (expect none)
+SELECT DISTINCT d.TABLE_SCHEMA, d.TABLE_NAME, d.INDEX_NAME
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS s
+WHERE s.TABLE_SCHEMA = d.TABLE_SCHEMA
+AND s.TABLE_NAME = d.TABLE_NAME
+AND s.INDEX_NAME = d.INDEX_NAME)
+ORDER BY 1, 2, 3;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME
+# SST data of indexes that no table owns any more (expect none)
+SELECT DISTINCT f.INDEX_NUMBER > 0 AS orphan_index
+FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER > MD_BASE
+AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.INDEX_NUMBER = f.INDEX_NUMBER
+AND d.COLUMN_FAMILY = f.COLUMN_FAMILY);
+orphan_index
+# Indexes of non-empty tables without SST data (expect none)
+SELECT d.TABLE_SCHEMA, d.TABLE_NAME, d.PARTITION_NAME, d.INDEX_NAME
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+AND d.TABLE_NAME LIKE 't\_%'
+   AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER = d.INDEX_NUMBER
+AND f.COLUMN_FAMILY = d.COLUMN_FAMILY)
+ORDER BY 1, 2, 3, 4;
+TABLE_SCHEMA	TABLE_NAME	PARTITION_NAME	INDEX_NAME
+# Row counts through the primary key and each secondary index
+SELECT 't_create' t, (SELECT COUNT(*) FROM t_create) pk,
+(SELECT COUNT(*) FROM t_create FORCE INDEX (kb)) sk;
+t	pk	sk
+t_create	3	3
+SELECT 't_addidx' t, (SELECT COUNT(*) FROM t_addidx) pk,
+(SELECT COUNT(*) FROM t_addidx FORCE INDEX (kc)) sk;
+t	pk	sk
+t_addidx	3	3
+SELECT 't_dropidx' t, (SELECT COUNT(*) FROM t_dropidx) pk,
+(SELECT COUNT(*) FROM t_dropidx FORCE INDEX (kb)) sk;
+t	pk	sk
+t_dropidx	3	3
+SELECT 't_rename' t, (SELECT COUNT(*) FROM t_rename) pk,
+(SELECT COUNT(*) FROM t_rename FORCE INDEX (kb)) sk;
+t	pk	sk
+t_rename	3	3
+SELECT 'md2.t_xdb' t, (SELECT COUNT(*) FROM md2.t_xdb) pk,
+(SELECT COUNT(*) FROM md2.t_xdb FORCE INDEX (kb)) sk;
+t	pk	sk
+md2.t_xdb	3	3
+SELECT 't_trunc' t, (SELECT COUNT(*) FROM t_trunc) pk,
+(SELECT COUNT(*) FROM t_trunc FORCE INDEX (kb)) sk;
+t	pk	sk
+t_trunc	3	3
+SELECT 't_copy' t, (SELECT COUNT(*) FROM t_copy) pk,
+(SELECT COUNT(*) FROM t_copy FORCE INDEX (kb)) sk;
+t	pk	sk
+t_copy	3	3
+SELECT 't_instant' t, (SELECT COUNT(*) FROM t_instant) pk,
+(SELECT COUNT(*) FROM t_instant FORCE INDEX (kb)) sk,
+(SELECT SUM(e) FROM t_instant) e_sum;
+t	pk	sk	e_sum
+t_instant	4	4	20
+SELECT 't_renidx' t, (SELECT COUNT(*) FROM t_renidx) pk,
+(SELECT COUNT(*) FROM t_renidx FORCE INDEX (kb2)) sk;
+t	pk	sk
+t_renidx	3	3
+SELECT 't_pk' t, (SELECT COUNT(*) FROM t_pk) pk,
+(SELECT COUNT(*) FROM t_pk FORCE INDEX (kb)) sk;
+t	pk	sk
+t_pk	3	3
+SELECT 't_hidden' t, (SELECT COUNT(*) FROM t_hidden) pk,
+(SELECT COUNT(*) FROM t_hidden FORCE INDEX (kb)) sk;
+t	pk	sk
+t_hidden	3	3
+SELECT 't_part' t, (SELECT COUNT(*) FROM t_part) pk,
+(SELECT COUNT(*) FROM t_part FORCE INDEX (kb)) sk;
+t	pk	sk
+t_part	4	4
+SELECT 't_ttl' t, (SELECT COUNT(*) FROM t_ttl) pk,
+(SELECT COUNT(*) FROM t_ttl FORCE INDEX (kb)) sk;
+t	pk	sk
+t_ttl	3	3
+CREATE TABLE md_snapshot ENGINE=InnoDB AS
+SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME, COLUMN_FAMILY,
+INDEX_NUMBER, INDEX_TYPE, KV_FORMAT_VERSION, TTL_DURATION,
+INDEX_FLAGS, CF
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'md2');
+SHOW CREATE TABLE t_create;
+Table	Create Table
+t_create	CREATE TABLE `t_create` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`) COMMENT 'cfname=cf_md'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_addidx;
+Table	Create Table
+t_addidx	CREATE TABLE `t_addidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kc` (`c`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_dropidx;
+Table	Create Table
+t_dropidx	CREATE TABLE `t_dropidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_rename;
+Table	Create Table
+t_rename	CREATE TABLE `t_rename` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE md2.t_xdb;
+Table	Create Table
+t_xdb	CREATE TABLE `t_xdb` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_trunc;
+Table	Create Table
+t_trunc	CREATE TABLE `t_trunc` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_copy;
+Table	Create Table
+t_copy	CREATE TABLE `t_copy` (
+  `a` int NOT NULL,
+  `b` bigint DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_instant;
+Table	Create Table
+t_instant	CREATE TABLE `t_instant` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `e` int DEFAULT '5',
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_renidx;
+Table	Create Table
+t_renidx	CREATE TABLE `t_renidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb2` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_pk;
+Table	Create Table
+t_pk	CREATE TABLE `t_pk` (
+  `a` int NOT NULL,
+  `b` int NOT NULL,
+  PRIMARY KEY (`a`,`b`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_hidden;
+Table	Create Table
+t_hidden	CREATE TABLE `t_hidden` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_part;
+Table	Create Table
+t_part	CREATE TABLE `t_part` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`a`)
+(PARTITION p0a VALUES LESS THAN (5) ENGINE = ROCKSDB,
+ PARTITION p0b VALUES LESS THAN (10) ENGINE = ROCKSDB,
+ PARTITION p1 VALUES LESS THAN (20) ENGINE = ROCKSDB,
+ PARTITION p2 VALUES LESS THAN (30) ENGINE = ROCKSDB) */
+SHOW CREATE TABLE t_ttl;
+Table	Create Table
+t_ttl	CREATE TABLE `t_ttl` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ttl_duration=360000;'
+# Restart with the default rocksdb_validate_tables=1.
+# restart
+# Open every table first (see finding #27 above).
+SELECT * FROM t_create LIMIT 1;
+SELECT * FROM t_addidx LIMIT 1;
+SELECT * FROM t_dropidx LIMIT 1;
+SELECT * FROM t_rename LIMIT 1;
+SELECT * FROM md2.t_xdb LIMIT 1;
+SELECT * FROM t_trunc LIMIT 1;
+SELECT * FROM t_copy LIMIT 1;
+SELECT * FROM t_instant LIMIT 1;
+SELECT * FROM t_renidx LIMIT 1;
+SELECT * FROM t_pk LIMIT 1;
+SELECT * FROM t_hidden LIMIT 1;
+SELECT * FROM t_part LIMIT 1;
+SELECT * FROM t_ttl LIMIT 1;
+# Index definitions in ROCKSDB_DDL
+SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME, INDEX_TYPE,
+KV_FORMAT_VERSION, CF, TTL_DURATION, INDEX_FLAGS
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'md2')
+ORDER BY TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME;
+TABLE_SCHEMA	TABLE_NAME	PARTITION_NAME	INDEX_NAME	INDEX_TYPE	KV_FORMAT_VERSION	CF	TTL_DURATION	INDEX_FLAGS
+md2	t_xdb	NULL	kb	2	16	default_sk	0	0
+md2	t_xdb	NULL	PRIMARY	1	15	default	0	0
+test	t_addidx	NULL	kc	2	16	default_sk	0	0
+test	t_addidx	NULL	PRIMARY	1	15	default	0	0
+test	t_copy	NULL	kb	2	16	default_sk	0	0
+test	t_copy	NULL	PRIMARY	1	15	default	0	0
+test	t_create	NULL	kb	2	16	cf_md	0	0
+test	t_create	NULL	PRIMARY	1	15	default	0	0
+test	t_dropidx	NULL	kb	2	16	default_sk	0	0
+test	t_dropidx	NULL	PRIMARY	1	15	default	0	0
+test	t_hidden	NULL	kb	2	16	default_sk	0	0
+test	t_hidden	NULL	PRIMARY	1	15	default	0	0
+test	t_instant	NULL	kb	2	16	default_sk	0	0
+test	t_instant	NULL	PRIMARY	1	15	default	0	0
+test	t_part	p0a	kb	2	16	default_sk	0	0
+test	t_part	p0a	PRIMARY	1	15	default	0	0
+test	t_part	p0b	kb	2	16	default_sk	0	0
+test	t_part	p0b	PRIMARY	1	15	default	0	0
+test	t_part	p1	kb	2	16	default_sk	0	0
+test	t_part	p1	PRIMARY	1	15	default	0	0
+test	t_part	p2	kb	2	16	default_sk	0	0
+test	t_part	p2	PRIMARY	1	15	default	0	0
+test	t_pk	NULL	kb	2	16	default_sk	0	0
+test	t_pk	NULL	PRIMARY	1	15	default	0	0
+test	t_rename	NULL	kb	2	16	default_sk	0	0
+test	t_rename	NULL	PRIMARY	1	15	default	0	0
+test	t_renidx	NULL	kb2	2	16	default_sk	0	0
+test	t_renidx	NULL	PRIMARY	1	15	default	0	0
+test	t_trunc	NULL	kb	2	16	default_sk	0	0
+test	t_trunc	NULL	PRIMARY	1	15	default	0	0
+test	t_ttl	NULL	kb	2	16	default_sk	360000	1
+test	t_ttl	NULL	PRIMARY	1	15	default	360000	1
+# Indexes known to the server but missing in ROCKSDB_DDL (expect none)
+SELECT s.TABLE_SCHEMA, s.TABLE_NAME, s.INDEX_NAME
+FROM (SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA IN ('test', 'md2') AND TABLE_NAME LIKE 't\_%') s
+WHERE NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA = s.TABLE_SCHEMA
+AND d.TABLE_NAME = s.TABLE_NAME
+AND d.INDEX_NAME = s.INDEX_NAME);
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME
+# Indexes in ROCKSDB_DDL unknown to the server (expect none)
+SELECT DISTINCT d.TABLE_SCHEMA, d.TABLE_NAME, d.INDEX_NAME
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS s
+WHERE s.TABLE_SCHEMA = d.TABLE_SCHEMA
+AND s.TABLE_NAME = d.TABLE_NAME
+AND s.INDEX_NAME = d.INDEX_NAME)
+ORDER BY 1, 2, 3;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME
+# SST data of indexes that no table owns any more (expect none)
+SELECT DISTINCT f.INDEX_NUMBER > 0 AS orphan_index
+FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER > MD_BASE
+AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.INDEX_NUMBER = f.INDEX_NUMBER
+AND d.COLUMN_FAMILY = f.COLUMN_FAMILY);
+orphan_index
+# Indexes of non-empty tables without SST data (expect none)
+SELECT d.TABLE_SCHEMA, d.TABLE_NAME, d.PARTITION_NAME, d.INDEX_NAME
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+AND d.TABLE_NAME LIKE 't\_%'
+   AND NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER = d.INDEX_NUMBER
+AND f.COLUMN_FAMILY = d.COLUMN_FAMILY)
+ORDER BY 1, 2, 3, 4;
+TABLE_SCHEMA	TABLE_NAME	PARTITION_NAME	INDEX_NAME
+# Row counts through the primary key and each secondary index
+SELECT 't_create' t, (SELECT COUNT(*) FROM t_create) pk,
+(SELECT COUNT(*) FROM t_create FORCE INDEX (kb)) sk;
+t	pk	sk
+t_create	3	3
+SELECT 't_addidx' t, (SELECT COUNT(*) FROM t_addidx) pk,
+(SELECT COUNT(*) FROM t_addidx FORCE INDEX (kc)) sk;
+t	pk	sk
+t_addidx	3	3
+SELECT 't_dropidx' t, (SELECT COUNT(*) FROM t_dropidx) pk,
+(SELECT COUNT(*) FROM t_dropidx FORCE INDEX (kb)) sk;
+t	pk	sk
+t_dropidx	3	3
+SELECT 't_rename' t, (SELECT COUNT(*) FROM t_rename) pk,
+(SELECT COUNT(*) FROM t_rename FORCE INDEX (kb)) sk;
+t	pk	sk
+t_rename	3	3
+SELECT 'md2.t_xdb' t, (SELECT COUNT(*) FROM md2.t_xdb) pk,
+(SELECT COUNT(*) FROM md2.t_xdb FORCE INDEX (kb)) sk;
+t	pk	sk
+md2.t_xdb	3	3
+SELECT 't_trunc' t, (SELECT COUNT(*) FROM t_trunc) pk,
+(SELECT COUNT(*) FROM t_trunc FORCE INDEX (kb)) sk;
+t	pk	sk
+t_trunc	3	3
+SELECT 't_copy' t, (SELECT COUNT(*) FROM t_copy) pk,
+(SELECT COUNT(*) FROM t_copy FORCE INDEX (kb)) sk;
+t	pk	sk
+t_copy	3	3
+SELECT 't_instant' t, (SELECT COUNT(*) FROM t_instant) pk,
+(SELECT COUNT(*) FROM t_instant FORCE INDEX (kb)) sk,
+(SELECT SUM(e) FROM t_instant) e_sum;
+t	pk	sk	e_sum
+t_instant	4	4	20
+SELECT 't_renidx' t, (SELECT COUNT(*) FROM t_renidx) pk,
+(SELECT COUNT(*) FROM t_renidx FORCE INDEX (kb2)) sk;
+t	pk	sk
+t_renidx	3	3
+SELECT 't_pk' t, (SELECT COUNT(*) FROM t_pk) pk,
+(SELECT COUNT(*) FROM t_pk FORCE INDEX (kb)) sk;
+t	pk	sk
+t_pk	3	3
+SELECT 't_hidden' t, (SELECT COUNT(*) FROM t_hidden) pk,
+(SELECT COUNT(*) FROM t_hidden FORCE INDEX (kb)) sk;
+t	pk	sk
+t_hidden	3	3
+SELECT 't_part' t, (SELECT COUNT(*) FROM t_part) pk,
+(SELECT COUNT(*) FROM t_part FORCE INDEX (kb)) sk;
+t	pk	sk
+t_part	4	4
+SELECT 't_ttl' t, (SELECT COUNT(*) FROM t_ttl) pk,
+(SELECT COUNT(*) FROM t_ttl FORCE INDEX (kb)) sk;
+t	pk	sk
+t_ttl	3	3
+# ROCKSDB_DDL rows that changed across the restart (expect none)
+(SELECT 'before' AS side, s.* FROM md_snapshot s
+WHERE (s.TABLE_SCHEMA, s.TABLE_NAME, IFNULL(s.PARTITION_NAME, ''),
+s.INDEX_NAME, s.COLUMN_FAMILY, s.INDEX_NUMBER, s.INDEX_TYPE,
+s.KV_FORMAT_VERSION, s.TTL_DURATION, s.INDEX_FLAGS, s.CF) NOT IN
+(SELECT TABLE_SCHEMA, TABLE_NAME, IFNULL(PARTITION_NAME, ''),
+INDEX_NAME, COLUMN_FAMILY, INDEX_NUMBER, INDEX_TYPE,
+KV_FORMAT_VERSION, TTL_DURATION, INDEX_FLAGS, CF
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL))
+UNION ALL
+(SELECT 'after', d.TABLE_SCHEMA, d.TABLE_NAME, d.PARTITION_NAME, d.INDEX_NAME,
+d.COLUMN_FAMILY, d.INDEX_NUMBER, d.INDEX_TYPE, d.KV_FORMAT_VERSION,
+d.TTL_DURATION, d.INDEX_FLAGS, d.CF
+FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+AND (d.TABLE_SCHEMA, d.TABLE_NAME, IFNULL(d.PARTITION_NAME, ''),
+d.INDEX_NAME, d.COLUMN_FAMILY, d.INDEX_NUMBER, d.INDEX_TYPE,
+d.KV_FORMAT_VERSION, d.TTL_DURATION, d.INDEX_FLAGS, d.CF) NOT IN
+(SELECT TABLE_SCHEMA, TABLE_NAME, IFNULL(PARTITION_NAME, ''),
+INDEX_NAME, COLUMN_FAMILY, INDEX_NUMBER, INDEX_TYPE,
+KV_FORMAT_VERSION, TTL_DURATION, INDEX_FLAGS, CF
+FROM md_snapshot));
+side	TABLE_SCHEMA	TABLE_NAME	PARTITION_NAME	INDEX_NAME	COLUMN_FAMILY	INDEX_NUMBER	INDEX_TYPE	KV_FORMAT_VERSION	TTL_DURATION	INDEX_FLAGS	CF
+SHOW CREATE TABLE t_create;
+Table	Create Table
+t_create	CREATE TABLE `t_create` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`) COMMENT 'cfname=cf_md'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_addidx;
+Table	Create Table
+t_addidx	CREATE TABLE `t_addidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kc` (`c`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_dropidx;
+Table	Create Table
+t_dropidx	CREATE TABLE `t_dropidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_rename;
+Table	Create Table
+t_rename	CREATE TABLE `t_rename` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE md2.t_xdb;
+Table	Create Table
+t_xdb	CREATE TABLE `t_xdb` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_trunc;
+Table	Create Table
+t_trunc	CREATE TABLE `t_trunc` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_copy;
+Table	Create Table
+t_copy	CREATE TABLE `t_copy` (
+  `a` int NOT NULL,
+  `b` bigint DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_instant;
+Table	Create Table
+t_instant	CREATE TABLE `t_instant` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `e` int DEFAULT '5',
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_renidx;
+Table	Create Table
+t_renidx	CREATE TABLE `t_renidx` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb2` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_pk;
+Table	Create Table
+t_pk	CREATE TABLE `t_pk` (
+  `a` int NOT NULL,
+  `b` int NOT NULL,
+  PRIMARY KEY (`a`,`b`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_hidden;
+Table	Create Table
+t_hidden	CREATE TABLE `t_hidden` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE t_part;
+Table	Create Table
+t_part	CREATE TABLE `t_part` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`a`)
+(PARTITION p0a VALUES LESS THAN (5) ENGINE = ROCKSDB,
+ PARTITION p0b VALUES LESS THAN (10) ENGINE = ROCKSDB,
+ PARTITION p1 VALUES LESS THAN (20) ENGINE = ROCKSDB,
+ PARTITION p2 VALUES LESS THAN (30) ENGINE = ROCKSDB) */
+SHOW CREATE TABLE t_ttl;
+Table	Create Table
+t_ttl	CREATE TABLE `t_ttl` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ttl_duration=360000;'
+DROP TABLE md_snapshot;
+DROP TABLE t_create, t_addidx, t_dropidx, t_rename, t_trunc, t_copy,
+t_instant, t_renidx, t_pk, t_hidden, t_part, t_ttl;
+DROP DATABASE md2;

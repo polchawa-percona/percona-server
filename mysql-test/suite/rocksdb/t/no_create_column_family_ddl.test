@@ -1,0 +1,62 @@
+#
+# rocksdb_no_create_column_family=ON forbids creating column families through
+# index comments. Every DDL statement that would create one must fail cleanly
+# and leave the table unchanged; DDL that uses existing column families must
+# keep working, also after a restart.
+#
+--source include/have_rocksdb.inc
+
+SELECT @@global.rocksdb_no_create_column_family;
+
+--echo # CREATE TABLE into a new column family is refused.
+--error ER_WRONG_ARGUMENTS
+CREATE TABLE t_new (id INT, a INT, PRIMARY KEY (id) COMMENT 'cfname=cf_nc_new') ENGINE=ROCKSDB;
+--error ER_WRONG_ARGUMENTS
+CREATE TABLE t_new (id INT PRIMARY KEY, a INT, KEY ka(a) COMMENT 'cfname=rev:cf_nc_new') ENGINE=ROCKSDB;
+SHOW TABLES LIKE 't\_new';
+
+--echo # Existing column families can be used.
+CREATE TABLE t1 (id INT, a INT, b INT, PRIMARY KEY (id) COMMENT 'cfname=default',
+                 KEY ka(a) COMMENT 'cfname=default') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+--let $checksum_before= `CHECKSUM TABLE t1`
+
+--echo # INPLACE ADD INDEX into a new column family is refused.
+--error ER_WRONG_ARGUMENTS
+ALTER TABLE t1 ADD INDEX kb(b) COMMENT 'cfname=cf_nc_new', ALGORITHM=INPLACE;
+--echo # COPY ALTER moving the primary key into a new column family is refused.
+--error ER_WRONG_ARGUMENTS
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (id) COMMENT 'cfname=cf_nc_new', ALGORITHM=COPY;
+SHOW CREATE TABLE t1;
+--let $checksum_after= `CHECKSUM TABLE t1`
+--let $assert_text= t1 is unchanged by the refused ALTERs
+--let $assert_cond= "$checksum_before" = "$checksum_after"
+--source include/assert.inc
+--echo # ADD INDEX into an existing column family works.
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 1 ORDER BY id;
+
+--echo # Partitioned table with per-partition column families.
+--error ER_WRONG_ARGUMENTS
+CREATE TABLE tp (id INT, a INT, PRIMARY KEY (id) COMMENT 'p0_cfname=cf_nc_p0;p1_cfname=cf_nc_p1')
+  ENGINE=ROCKSDB PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+CREATE TABLE tp (id INT, a INT, PRIMARY KEY (id) COMMENT 'p0_cfname=default;p2_cfname=cf_nc_p2')
+  ENGINE=ROCKSDB PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO tp VALUES (1,1),(15,15);
+--echo # ADD PARTITION naming a column family that does not exist yet is refused.
+--error ER_WRONG_ARGUMENTS
+ALTER TABLE tp ADD PARTITION (PARTITION p2 VALUES LESS THAN MAXVALUE);
+SELECT * FROM tp ORDER BY id;
+SELECT PARTITION_NAME, INDEX_NAME, CF FROM information_schema.ROCKSDB_DDL
+ WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tp' ORDER BY 1, 2;
+
+--echo # No column family was created.
+SELECT COUNT(*) AS new_cfs FROM information_schema.ROCKSDB_CFSTATS WHERE CF_NAME LIKE '%cf\_nc\_%';
+
+--source include/restart_mysqld.inc
+SELECT * FROM t1 ORDER BY id;
+SELECT * FROM tp ORDER BY id;
+CHECK TABLE t1, tp;
+DROP TABLE t1, tp;

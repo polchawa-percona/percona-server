@@ -114,6 +114,14 @@ let $wait_condition = SELECT COUNT(*) = 0
 SET GLOBAL rocksdb_force_flush_memtable_now = 1;
 SET GLOBAL rocksdb_compact_cf = 'default';
 SET GLOBAL rocksdb_compact_cf = 'cf_md';
+# With rocksdb_use_default_sk_cf=ON (ddl_metadata_after_restart_default_sk_cf)
+# secondary indexes live in "default_sk"; compact it too.
+if (`SELECT COUNT(*) FROM information_schema.ROCKSDB_CFSTATS WHERE CF_NAME = 'default_sk'`)
+{
+  --disable_query_log
+  SET GLOBAL rocksdb_compact_cf = 'default_sk';
+  --enable_query_log
+}
 
 --source suite/rocksdb/include/ddl_metadata_check.inc
 
