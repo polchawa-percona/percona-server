@@ -1557,6 +1557,8 @@ class Rdb_ddl_manager : public Ensure_initialized {
                                    bool not_used [[maybe_unused]]);
   static void free_hash_elem(void *const data);
 
+  void report_tmp_tables() const;
+
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
   [[nodiscard]] bool validate_schemas() const;
 
