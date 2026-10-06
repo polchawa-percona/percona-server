@@ -1,0 +1,127 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/not_valgrind.inc
+
+#
+# Concurrent DDL and DML, killed at a random moment and restarted, several
+# rounds in a row, under each durability setting in the .combinations file
+# (rocksdb_flush_log_at_trx_commit, rocksdb_manual_wal_flush,
+# rocksdb_wal_recovery_mode, the binary log and sync_binlog).
+#
+# Work tables get only DDL that keeps their rows unchanged (COPY ALTER,
+# INSTANT ADD COLUMN, RENAME away and back), so after every restart each of
+# them must exist under exactly one name with all its rows through every
+# index, whatever DDL was running when the server was killed. Scratch tables
+# are created, filled and dropped, and a DML table is updated; the DML table
+# may lose recent commits with the relaxed settings, but its primary and
+# secondary keys must agree. At the end every dropped index must be reclaimed.
+#
+# INPLACE ADD/DROP INDEX, TRUNCATE and CREATE/DROP of work tables are left
+# out: a kill inside them hits known bugs that crash the server or stop it
+# from starting (PS-11666..PS-11670). The server is restarted with
+# rocksdb_validate_tables=2 so that a kill inside a RENAME or COPY ALTER
+# rename (PS-11667, PS-11681) does not stop the test; those cases and leftover
+# #sql tables are written to
+# $MYSQLTEST_VARDIR/log/ddl_concurrent_kill_restart.known, not to the result.
+#
+# The driver prints only unexpected problems, so the expected output after
+# each round is empty.
+#
+# Known crash windows leave tables that SQL cannot remove, so the data
+# directory is copied before the first round and restored at the end.
+#
+
+call mtr.add_suppression("Table .* not found");
+call mtr.add_suppression("RocksDB: .*");
+call mtr.add_suppression("Plugin rocksdb reported");
+call mtr.add_suppression("table .* does not exist");
+call mtr.add_suppression("Schema mismatch");
+call mtr.add_suppression("Can't open table");
+
+--let $kr_rows = 2000
+--let $kr_rounds = 4
+--let $kr_py = python suite/rocksdb/t/ddl_concurrent_kill_restart.py
+--let $kr_done = $MYSQLTEST_VARDIR/tmp/kr_done
+--let KNOWN_LOG = $MYSQLTEST_VARDIR/log/ddl_concurrent_kill_restart.known
+
+--let $kr_datadir = `SELECT @@datadir`
+--let $kr_backup = $MYSQL_TMP_DIR/ddl_concurrent_kill_restart_datadir
+--source include/shutdown_mysqld.inc
+--force-cpdir $kr_datadir $kr_backup
+--source include/start_mysqld.inc
+
+--exec $kr_py setup root 127.0.0.1 $MASTER_MYPORT $kr_rows
+
+--let $kr_round = 1
+while ($kr_round <= $kr_rounds)
+{
+  --remove_files_wildcard $MYSQLTEST_VARDIR/tmp kr_done
+  --exec_in_background $kr_py load root 127.0.0.1 $MASTER_MYPORT 60 $kr_done 2>/dev/null
+
+  # Kill at a random moment between 3 and 12 seconds into the load.
+  --let $kr_sleep = `SELECT 3 + FLOOR(RAND() * 10)`
+  --sleep $kr_sleep
+  --disable_query_log
+  --source include/kill_mysqld.inc
+  --enable_query_log
+
+  # Wait for the driver to notice and exit.
+  --let $grep_file = $kr_done
+  --let $grep_pattern = done
+  --let $wait_timeout = 120
+  --perl
+    my $f = "$ENV{MYSQLTEST_VARDIR}/tmp/kr_done";
+    for (my $i = 0; $i < 600 && !-e $f; $i++) { select(undef, undef, undef, 0.2); }
+  EOF
+
+  --let $restart_parameters = restart: --rocksdb_validate_tables=2
+  --let $do_not_echo_parameters = 1
+  --source include/start_mysqld.inc
+  --let $do_not_echo_parameters = 0
+
+  --echo # Round $kr_round: problems after the restart (none expected)
+  --exec $kr_py check root 127.0.0.1 $MASTER_MYPORT $kr_rows
+  --inc $kr_round
+}
+
+--echo # Dropped indexes are reclaimed
+--disable_query_log
+--disable_result_log
+let $kr_i = 600;
+while ($kr_i)
+{
+  SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+  let $kr_ongoing = query_get_value(SELECT COUNT(*) AS c FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING', c, 1);
+  if ($kr_ongoing == 0)
+  {
+    let $kr_i = 1;
+  }
+  if ($kr_ongoing != 0)
+  {
+    sleep 0.5;
+  }
+  dec $kr_i;
+}
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--enable_result_log
+--enable_query_log
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+ WHERE type = 'DDL_DROP_INDEX_ONGOING';
+SELECT COUNT(*) AS orphan_index_entries
+  FROM information_schema.rocksdb_index_file_map m
+ WHERE m.column_family = 0 AND m.num_rows > 0
+   AND m.index_number > 255
+   AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+                    WHERE d.column_family = m.column_family
+                      AND d.index_number = m.index_number);
+
+--remove_files_wildcard $MYSQLTEST_VARDIR/tmp kr_done
+
+# Restore the data directory from before the first round.
+--source include/kill_mysqld.inc
+--force-rmdir $kr_datadir
+--force-cpdir $kr_backup $kr_datadir
+--force-rmdir $kr_backup
+--let $restart_parameters = restart
+--source include/start_mysqld.inc
