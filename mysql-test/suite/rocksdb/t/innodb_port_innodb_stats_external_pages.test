@@ -1,0 +1,85 @@
+#
+# Port of innodb.innodb_stats_external_pages
+# (mysql-test/suite/innodb/t/innodb_stats_external_pages.test) to MyRocks.
+#
+# Bug#18384390: wrong statistics with big row length. The table has 1024
+# rows of 10000 bytes each; after ANALYZE TABLE, the row count and the
+# primary key cardinality must be within 30% of the real row count.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB; STATS_AUTO_RECALC=0 is dropped (MyRocks ignores it).
+#   - READ COMMITTED (-master.opt): at REPEATABLE READ, MyRocks refuses
+#     INSERT ... SELECT from the same table (gap-lock rule).
+#   - mysql.innodb_table_stats and mysql.innodb_index_stats do not exist.
+#     INFORMATION_SCHEMA.TABLES.TABLE_ROWS and
+#     INFORMATION_SCHEMA.STATISTICS.CARDINALITY are checked, as in the
+#     original.
+#   - The check runs for both MyRocks statistics methods (SST properties and
+#     table scan), after a memtable flush. Nothing is printed when the
+#     estimates are within the margin. With the rows still in the memtable
+#     the estimates are wrong (findings #40 and #51); that case is in
+#     innodb_port_innodb_stats_analyze_memtable (disabled).
+#
+--source include/have_rocksdb.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+
+--let $mode = 0
+while ($mode < 2)
+{
+  --eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode
+  --let $flush = 1
+  while ($flush < 2)
+  {
+    CREATE TABLE bug18384390 (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      txt VARCHAR(10000)
+    ) ENGINE=ROCKSDB;
+
+    INSERT INTO bug18384390 (txt) VALUES (REPEAT('0', 10000));
+
+    --let $i = 0
+    while ($i < 10) {
+      INSERT INTO bug18384390 (txt) SELECT txt FROM bug18384390;
+      --inc $i
+    }
+
+    if ($flush)
+    {
+      SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    }
+
+    --let $count = `SELECT COUNT(*) FROM bug18384390`
+
+    ANALYZE TABLE bug18384390;
+
+    --let $table_rows = `SELECT table_rows FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'bug18384390'`
+    --let $cardinality = `SELECT IFNULL(cardinality, 0) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'bug18384390'`
+
+    --let $margin_of_err_pct = 30
+    --let $margin_of_err_rows = `SELECT ROUND($count * $margin_of_err_pct / 100)`
+    --let $min_allowed = `SELECT $count - $margin_of_err_rows`
+    --let $max_allowed = `SELECT $count + $margin_of_err_rows`
+
+    if ($table_rows < $min_allowed) {
+      --echo information_schema.tables.table_rows is too small ($table_rows < $min_allowed) mode $mode flush $flush
+    }
+    if ($table_rows > $max_allowed) {
+      --echo information_schema.tables.table_rows is too big ($table_rows > $max_allowed) mode $mode flush $flush
+    }
+    if ($cardinality < $min_allowed) {
+      --echo information_schema.statistics.cardinality is too small ($cardinality < $min_allowed) mode $mode flush $flush
+    }
+    if ($cardinality > $max_allowed) {
+      --echo information_schema.statistics.cardinality is too big ($cardinality > $max_allowed) mode $mode flush $flush
+    }
+
+    DROP TABLE bug18384390;
+    --inc $flush
+  }
+  --inc $mode
+}
+
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--enable_query_log

@@ -1,0 +1,50 @@
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY (b)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT COUNT(*) FROM t;
+COUNT(*)
+1000
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 't';
+TABLE_ROWS
+1000
+DELETE FROM t WHERE a <= 900;
+# Deleted rows are still in the memtable.
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT COUNT(*) FROM t;
+COUNT(*)
+100
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 't';
+TABLE_ROWS
+100
+SELECT index_name, cardinality FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 't' ORDER BY index_name;
+INDEX_NAME	CARDINALITY
+b	10
+PRIMARY	100
+# Deleted rows are in an SST file, not yet compacted.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 't';
+TABLE_ROWS
+100
+SELECT index_name, cardinality FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 't' ORDER BY index_name;
+INDEX_NAME	CARDINALITY
+b	10
+PRIMARY	100
+DROP TABLE t;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;

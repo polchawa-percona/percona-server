@@ -1,0 +1,77 @@
+#
+# Port of innodb.innodb_stats_auto_recalc_lots
+# (mysql-test/suite/innodb/t/innodb_stats_auto_recalc_lots.test) to MyRocks.
+#
+# The original creates 200 tables, changes all of them so that each is
+# queued for background statistics recalculation, and drops them while the
+# queue is being processed.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB with rocksdb_table_stats_use_table_scan=ON, the MyRocks
+#     mode with a background recalculation queue, and InnoDB's recalculation
+#     rule (10% of the rows, no minimum count), so that every insert queues
+#     its table.
+#   - mysql.innodb_table_stats does not exist. The test prints the row count
+#     of each table from INFORMATION_SCHEMA.TABLES after CREATE, as the
+#     original prints n_rows, and checks the recalculation counters: no
+#     recalculation may fail, and the queue must be empty at the end.
+#
+--source include/have_rocksdb.inc
+--source include/no_valgrind_without_big.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+--let $save_threshold_count = `SELECT @@global.rocksdb_table_stats_recalc_threshold_count`
+--let $save_threshold_pct = `SELECT @@global.rocksdb_table_stats_recalc_threshold_pct`
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 0;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 10;
+
+--let $failures_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_failure', Value, 1)
+
+--disable_query_log
+--let $i = 1200
+while ($i > 1000) {
+  --eval CREATE TABLE ar_$i (a INT, PRIMARY KEY (a)) ENGINE=ROCKSDB
+  --dec $i
+}
+--enable_query_log
+
+SELECT COUNT(*), SUM(table_rows) FROM information_schema.tables
+  WHERE table_schema = DATABASE() AND table_name LIKE 'ar\_%';
+
+--disable_query_log
+--let $i = 1200
+while ($i > 1000) {
+  --eval INSERT INTO ar_$i VALUES (1), (2)
+  --dec $i
+}
+--let $i = 1200
+while ($i > 1000) {
+  --eval INSERT INTO ar_$i VALUES (3), (4)
+  --dec $i
+}
+--enable_query_log
+
+--echo # Drop the tables while the queue is being processed.
+--disable_query_log
+--let $i = 1200
+while ($i > 1000) {
+  --eval DROP TABLE ar_$i
+  --dec $i
+}
+--enable_query_log
+
+--echo # Wait for the recalculation queue to drain.
+--let $wait_condition = SELECT variable_value = 0 FROM performance_schema.global_status WHERE variable_name = 'rocksdb_table_index_stats_req_queue_length'
+--source include/wait_condition.inc
+
+--let $failures_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_failure', Value, 1)
+--let $assert_text = No background statistics recalculation failed
+--let $assert_cond = $failures_after = $failures_before
+--source include/assert.inc
+
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--eval SET GLOBAL rocksdb_table_stats_recalc_threshold_count = $save_threshold_count
+--eval SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = $save_threshold_pct
+--enable_query_log

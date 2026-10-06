@@ -1,0 +1,72 @@
+#
+# Finding #43 (port-findings.md), found while porting innodb.stats_post_alter_copy
+# (Bug#35127747: the row count in the statistics became 0 after repeated
+# ALTER TABLE ... ALGORITHM=COPY).
+#
+# With rocksdb_table_stats_use_table_scan=ON, MyRocks keeps the statistics up
+# to date with a background thread. A table rebuilt by a COPY ALTER is left
+# with zero statistics (no rows, cardinality NULL) until ANALYZE TABLE or
+# until 10% more rows change. Likely cause, from reading the code (not yet
+# confirmed with a debugger):
+#   - the copy queues a recalculation from write_row(), before the ALTER
+#     commits; the first recalculation of the new table runs at once and
+#     sees no committed rows;
+#   - later requests are queued under the temporary #sql name and are
+#     skipped after the rename.
+#
+# The test asserts the correct behaviour: after the COPY ALTER, the
+# background recalculation reports rows and a cardinality for every index.
+# Only whether they are non-zero is printed, because with the default 10%
+# sampling the values are estimates. It reproduces with the default
+# sampling and no ANALYZE TABLE before the ALTER; the statistics of the
+# original table come from the background thread (15 second wait). It is
+# disabled until the bug is fixed.
+#
+--source include/have_rocksdb.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+
+--let $check = SELECT s.index_name, t.table_rows > 0 AS has_rows, s.cardinality > 0 AS has_cardinality FROM information_schema.tables t JOIN information_schema.statistics s USING (table_schema, table_name) WHERE t.table_schema = DATABASE() AND t.table_name = 't1' ORDER BY s.index_name
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT, KEY k2 (c2)) ENGINE=ROCKSDB;
+--disable_query_log
+--let $i = 0
+while ($i < 1000)
+{
+  --inc $i
+  --eval INSERT INTO t1 VALUES ($i, $i % 10)
+}
+--enable_query_log
+--echo # Let the background thread calculate the statistics.
+--sleep 15
+FLUSH TABLE t1;
+--eval $check
+
+ALTER TABLE t1 ADD COLUMN c5 INT, ALGORITHM = COPY;
+
+--echo # Wait up to 30 seconds for the background recalculation.
+--let $tries = 30
+--let $done = 0
+--disable_query_log
+while (!$done)
+{
+  FLUSH TABLE t1;
+  --let $done = `SELECT IFNULL(cardinality, 0) > 0 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 't1' AND index_name = 'PRIMARY'`
+  if (!$done)
+  {
+    --dec $tries
+    if (!$tries)
+    {
+      --let $done = 1
+    }
+    --sleep 1
+  }
+}
+--enable_query_log
+--eval $check
+
+DROP TABLE t1;
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--enable_query_log

@@ -1,0 +1,2 @@
+--transaction-isolation=READ-COMMITTED
+--loose-rocksdb_debug_optimizer_no_zero_cardinality=0

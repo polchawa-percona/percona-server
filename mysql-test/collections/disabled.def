@@ -133,8 +133,16 @@ rocksdb.cons_snapshot_serializable : BUG#0 MyRocks does not yet support ISO seri
 rocksdb.level_read_uncommitted : BUG#0 MyRocks does not yet suppore ISO read uncommitted
 rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
+rocksdb.innodb_port_innodb_stats_table_scan_rows : BUG#0 PS-11662 table-scan stats count deletes
+rocksdb.innodb_port_stats_post_alter_copy_table_scan : BUG#0 PS-11663 zero stats after COPY ALTER
+rocksdb.innodb_port_innodb_stats_analyze_memtable : BUG#0 PS-11664 ANALYZE counts memtable rows twice
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.shutdown_paused_background_work : BUG#0 PS-11729 shutdown hangs when background paused
+rocksdb.ddl_concurrent_admin_ops_stats : BUG#0 PS-11730 stats lost after concurrent DDL
+rocksdb.stats_row_cap_concurrent_ddl : BUG#0 PS-11694 row cap assert under concurrent DDL
+rocksdb.memtable_stats_cache_stale : BUG#0 PS-11746 stale memtable stats cache
+rocksdb.stats_table_scan_no_sst_properties : BUG#0 PS-11662 table-scan stats without SST props
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

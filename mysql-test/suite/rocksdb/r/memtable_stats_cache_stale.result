@@ -1,0 +1,28 @@
+SET @save_cachetime = @@global.rocksdb_force_compute_memtable_stats_cachetime;
+SET GLOBAL rocksdb_force_compute_memtable_stats_cachetime = 60000000;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t
+WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 1999)
+SELECT n, n % 100 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+SELECT table_rows FROM information_schema.tables WHERE table_name = 't';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+# Row estimate within 25% of the 2000 rows
+SELECT table_rows BETWEEN 1500 AND 2500 AS rows_ok
+FROM information_schema.tables WHERE table_name = 't';
+rows_ok
+1
+# Cardinality of ka (100 distinct values) at most the row count
+SELECT cardinality <= 2500 AS cardinality_ok
+FROM information_schema.statistics
+WHERE table_name = 't' AND index_name = 'ka';
+cardinality_ok
+1
+SELECT COUNT(*) FROM t;
+COUNT(*)
+2000
+DROP TABLE t;
+SET GLOBAL rocksdb_force_compute_memtable_stats_cachetime = @save_cachetime;

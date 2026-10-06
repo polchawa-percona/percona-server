@@ -1,0 +1,15 @@
+#
+# Profile 3 of rocksdb.stats_settings_concurrent_ddl: table-scan statistics
+# with a row cap (rocksdb_table_stats_max_num_rows_scanned=500) and 100%
+# sampling, under concurrent TRUNCATE/RENAME/ALTER/DROP. ANALYZE TABLE and the
+# background statistics thread hit the assertion in adjust_cardinality()
+# (m_distinct_keys_per_prefix <= m_rows) on debug builds: PS-11694. The
+# expected result asserts sane statistics; disabled until PS-11694 is fixed.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--let $profile_first = 3
+--let $profile_last = 3
+--let $profile_skip = 0
+--source suite/rocksdb/include/stats_settings_concurrent_ddl.inc
+--source include/wait_until_count_sessions.inc

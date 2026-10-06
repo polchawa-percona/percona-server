@@ -1,0 +1,73 @@
+#
+# Finding #51 (port-findings.md), found while porting
+# innodb.innodb_stats_external_pages (Bug#18384390: wrong statistics with big
+# row length; the estimates must be within 30% of the real row count).
+#
+# With the default statistics method (SST properties plus live memtable
+# estimates), ANALYZE TABLE on a table whose rows are still in the memtable
+# stores the SST row count plus the memtable row count. Every later
+# statistics read adds the live memtable row count again
+# (rocksdb_force_compute_memtable_stats=ON, the default), so the rows in the
+# memtable are counted twice: the estimate roughly doubles after ANALYZE and
+# stays too high after the next flush until another ANALYZE TABLE.
+#
+# The test asserts the correct behaviour: the row count and the primary key
+# cardinality stay within 30% of the real row count before ANALYZE TABLE,
+# after it, and after a memtable flush. Nothing is printed when they do. It
+# runs with small rows and with the 10 KB rows of the original test. It is
+# disabled until the bug is fixed.
+#
+--source include/have_rocksdb.inc
+
+--let $row_size = 10
+while ($row_size <= 10000)
+{
+  eval CREATE TABLE t1 (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    txt VARCHAR($row_size)
+  ) ENGINE=ROCKSDB;
+
+  eval INSERT INTO t1 (txt) VALUES (REPEAT('0', $row_size));
+  --let $i = 0
+  while ($i < 10) {
+    INSERT INTO t1 (txt) SELECT txt FROM t1;
+    --inc $i
+  }
+  --let $count = `SELECT COUNT(*) FROM t1`
+  --let $min_allowed = `SELECT $count - ROUND($count * 30 / 100)`
+  --let $max_allowed = `SELECT $count + ROUND($count * 30 / 100)`
+
+  --let $step = 0
+  while ($step < 3)
+  {
+    if ($step == 1)
+    {
+      ANALYZE TABLE t1;
+    }
+    if ($step == 2)
+    {
+      SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    }
+    --let $table_rows = `SELECT table_rows FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 't1'`
+    --let $cardinality = `SELECT IFNULL(cardinality, 0) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 't1'`
+    if ($table_rows < $min_allowed) {
+      --echo row size $row_size step $step: table_rows is too small ($table_rows < $min_allowed)
+    }
+    if ($table_rows > $max_allowed) {
+      --echo row size $row_size step $step: table_rows is too big ($table_rows > $max_allowed)
+    }
+    if ($step > 0)
+    {
+      if ($cardinality < $min_allowed) {
+        --echo row size $row_size step $step: cardinality is too small ($cardinality < $min_allowed)
+      }
+      if ($cardinality > $max_allowed) {
+        --echo row size $row_size step $step: cardinality is too big ($cardinality > $max_allowed)
+      }
+    }
+    --inc $step
+  }
+
+  DROP TABLE t1;
+  --let $row_size = `SELECT $row_size * 1000`
+}
