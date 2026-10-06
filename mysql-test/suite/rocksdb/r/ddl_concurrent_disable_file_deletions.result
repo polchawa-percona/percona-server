@@ -1,0 +1,94 @@
+CREATE TABLE keep_a (id INT PRIMARY KEY, v INT, KEY k (v) COMMENT 'cfname=rev:cf_rev') ENGINE=ROCKSDB;
+CREATE TABLE keep_b (id INT PRIMARY KEY COMMENT 'cfname=rev:cf_rev', v INT, KEY k (v)) ENGINE=ROCKSDB;
+CREATE TABLE trunc_t (id INT PRIMARY KEY, v INT, KEY k (v)) ENGINE=ROCKSDB;
+CREATE TABLE idx_t (id INT PRIMARY KEY, v INT, w INT) ENGINE=ROCKSDB;
+INSERT INTO idx_t SELECT id, v, v + 1 FROM keep_a;
+# Round 1: hold file deletions while DDL runs.
+SET SESSION rocksdb_disable_file_deletions = ON;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+include/assert.inc [Obsolete SST files are kept while deletions are disabled]
+SET SESSION rocksdb_disable_file_deletions = OFF;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+include/assert.inc [No obsolete SST file is left after deletions are enabled again]
+SELECT COUNT(*), SUM(v) FROM keep_a;
+COUNT(*)	SUM(v)
+400	240600
+SELECT COUNT(*), SUM(v) FROM keep_a FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	240600
+SELECT COUNT(*), SUM(v) FROM keep_b;
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(v) FROM keep_b FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(v) FROM trunc_t FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(w) FROM idx_t;
+COUNT(*)	SUM(w)
+400	241000
+SHOW TABLES LIKE 'tmp%';
+Tables_in_test (tmp%)
+CHECK TABLE keep_a, keep_b, trunc_t, idx_t;
+Table	Op	Msg_type	Msg_text
+test.keep_a	check	status	OK
+test.keep_b	check	status	OK
+test.trunc_t	check	status	OK
+test.idx_t	check	status	OK
+# Round 2: hold file deletions while DDL runs.
+SET SESSION rocksdb_disable_file_deletions = ON;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+include/assert.inc [Obsolete SST files are kept while deletions are disabled]
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+include/assert.inc [No obsolete SST file is left after deletions are enabled again]
+SELECT COUNT(*), SUM(v) FROM keep_a;
+COUNT(*)	SUM(v)
+400	240600
+SELECT COUNT(*), SUM(v) FROM keep_a FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	240600
+SELECT COUNT(*), SUM(v) FROM keep_b;
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(v) FROM keep_b FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(v) FROM trunc_t FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(w) FROM idx_t;
+COUNT(*)	SUM(w)
+400	241000
+SHOW TABLES LIKE 'tmp%';
+Tables_in_test (tmp%)
+CHECK TABLE keep_a, keep_b, trunc_t, idx_t;
+Table	Op	Msg_type	Msg_text
+test.keep_a	check	status	OK
+test.keep_b	check	status	OK
+test.trunc_t	check	status	OK
+test.idx_t	check	status	OK
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*), SUM(v) FROM keep_a FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	240600
+SELECT COUNT(*), SUM(v) FROM keep_b FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*), SUM(v) FROM trunc_t FORCE INDEX (k);
+COUNT(*)	SUM(v)
+400	401000
+SELECT COUNT(*) FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+COUNT(*)
+0
+DROP TABLE keep_a, keep_b, trunc_t, idx_t;

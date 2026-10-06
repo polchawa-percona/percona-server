@@ -8,3 +8,10 @@ loose-rocksdb_enable_delete_range_for_drop_index=ON
 loose-rocksdb_enable_delete_range_for_drop_index=OFF
 loose-rocksdb_table_stats_use_table_scan=ON
 loose-rocksdb_stats_recalc_rate=10
+
+[compaction_settings]
+loose-rocksdb_enable_delete_range_for_drop_index=OFF
+loose-rocksdb_manual_compaction_bottommost_level=kForce
+loose-rocksdb_compaction_sequential_deletes=50
+loose-rocksdb_compaction_sequential_deletes_window=100
+loose-rocksdb_compaction_sequential_deletes_file_size=4096

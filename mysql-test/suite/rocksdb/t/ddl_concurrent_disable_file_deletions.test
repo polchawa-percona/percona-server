@@ -1,0 +1,148 @@
+#
+# Concurrent DDL while file deletions are disabled, as a backup tool does
+# with rocksdb_disable_file_deletions (and a checkpoint) while it copies SST
+# files.
+#
+# Three connections run DDL loops on tables that share the default and a
+# reverse column family (CREATE/INSERT/DROP, TRUNCATE + refill, ADD/DROP
+# INDEX) while the default connection flushes, compacts, wakes the drop-index
+# thread and creates checkpoints. A fourth connection holds
+# rocksdb_disable_file_deletions=ON for the whole run, so every SST file made
+# obsolete by DDL reclaim and compaction must stay on disk. Afterwards the
+# hold is released: all obsolete files must be deleted, the drop-index queue
+# must drain, the surviving tables must be complete through both indexes and
+# a restart with table validation must succeed. The run is repeated with the
+# hold released by disconnecting.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let $iterations = 25
+--let $ckpt = $MYSQLTEST_VARDIR/tmp/dfd_checkpoint
+
+CREATE TABLE keep_a (id INT PRIMARY KEY, v INT, KEY k (v) COMMENT 'cfname=rev:cf_rev') ENGINE=ROCKSDB;
+CREATE TABLE keep_b (id INT PRIMARY KEY COMMENT 'cfname=rev:cf_rev', v INT, KEY k (v)) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 400)
+{
+  inc $i;
+  eval INSERT INTO keep_a VALUES ($i, $i * 3);
+  eval INSERT INTO keep_b VALUES ($i, $i * 5);
+}
+--enable_query_log
+CREATE TABLE trunc_t (id INT PRIMARY KEY, v INT, KEY k (v)) ENGINE=ROCKSDB;
+CREATE TABLE idx_t (id INT PRIMARY KEY, v INT, w INT) ENGINE=ROCKSDB;
+INSERT INTO idx_t SELECT id, v, v + 1 FROM keep_a;
+
+--let $round = 1
+while ($round <= 2)
+{
+  --echo # Round $round: hold file deletions while DDL runs.
+  connect (hold,localhost,root,,);
+  SET SESSION rocksdb_disable_file_deletions = ON;
+  connect (c1,localhost,root,,);
+  connect (c2,localhost,root,,);
+  connect (c3,localhost,root,,);
+  connection default;
+  --source suite/rocksdb/include/sst_files_on_disk.inc
+  --let $live_before = $sst_live
+
+  --disable_query_log
+  --disable_result_log
+  --let $i = 0
+  while ($i < $iterations)
+  {
+    --inc $i
+    connection c1;
+    send_eval CREATE TABLE tmp_$i (id INT PRIMARY KEY, v INT, KEY k (v)) ENGINE=ROCKSDB;
+    connection c2;
+    send TRUNCATE TABLE trunc_t;
+    connection c3;
+    send ALTER TABLE idx_t ADD INDEX kw (w);
+    connection default;
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    SET GLOBAL rocksdb_compact_cf = 'default';
+    connection c1;
+    reap;
+    send_eval INSERT INTO tmp_$i SELECT id, v FROM keep_a;
+    connection c2;
+    reap;
+    send INSERT INTO trunc_t SELECT id, v FROM keep_b;
+    connection c3;
+    reap;
+    send ALTER TABLE idx_t DROP INDEX kw;
+    connection default;
+    SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+    SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+    if ($i == 10)
+    {
+      --eval SET GLOBAL rocksdb_create_checkpoint = '$ckpt'
+      --force-rmdir $ckpt
+    }
+    connection c1;
+    reap;
+    send_eval DROP TABLE tmp_$i;
+    connection c2;
+    reap;
+    connection c3;
+    reap;
+    connection c1;
+    reap;
+    connection default;
+  }
+  --enable_result_log
+  --enable_query_log
+
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+  --source suite/rocksdb/include/sst_files_on_disk.inc
+  --let $assert_text = Obsolete SST files are kept while deletions are disabled
+  --let $assert_cond = $sst_on_disk > $sst_live
+  --source include/assert.inc
+
+  if ($round == 1)
+  {
+    connection hold;
+    SET SESSION rocksdb_disable_file_deletions = OFF;
+  }
+  disconnect hold;
+  disconnect c1;
+  disconnect c2;
+  disconnect c3;
+  connection default;
+  --source include/wait_until_count_sessions.inc
+
+  SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+  let $wait_timeout = 300;
+  let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+  --source include/wait_condition.inc
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  SET GLOBAL rocksdb_compact_cf = 'rev:cf_rev';
+  --source suite/rocksdb/include/wait_obsolete_sst_files.inc
+  --let $assert_text = No obsolete SST file is left after deletions are enabled again
+  --let $assert_cond = $sst_on_disk = $sst_live
+  --source include/assert.inc
+
+  SELECT COUNT(*), SUM(v) FROM keep_a;
+  SELECT COUNT(*), SUM(v) FROM keep_a FORCE INDEX (k);
+  SELECT COUNT(*), SUM(v) FROM keep_b;
+  SELECT COUNT(*), SUM(v) FROM keep_b FORCE INDEX (k);
+  SELECT COUNT(*), SUM(v) FROM trunc_t FORCE INDEX (k);
+  SELECT COUNT(*), SUM(w) FROM idx_t;
+  SHOW TABLES LIKE 'tmp%';
+  CHECK TABLE keep_a, keep_b, trunc_t, idx_t;
+  --inc $round
+}
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+SELECT COUNT(*), SUM(v) FROM keep_a FORCE INDEX (k);
+SELECT COUNT(*), SUM(v) FROM keep_b FORCE INDEX (k);
+SELECT COUNT(*), SUM(v) FROM trunc_t FORCE INDEX (k);
+SELECT COUNT(*) FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+
+DROP TABLE keep_a, keep_b, trunc_t, idx_t;
+--source include/wait_until_count_sessions.inc
