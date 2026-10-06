@@ -1,0 +1,4 @@
+[sst_properties]
+
+[no_sst_properties]
+loose-rocksdb_collect_sst_properties=OFF

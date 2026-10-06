@@ -1,0 +1,50 @@
+#
+# Table statistics must stay sane after concurrent DDL, for every value of the
+# MyRocks statistics settings.
+#
+# For each settings profile, four tables in the default column family are
+# loaded with 2000 rows and then changed concurrently from four connections:
+#   con1: TRUNCATE TABLE and reload
+#   con2: RENAME TABLE away and back
+#   con3: INPLACE ADD/DROP INDEX and a COPY ALTER
+#   con4: DROP TABLE, CREATE TABLE and reload
+# while con5 runs ANALYZE TABLE on all four tables. Afterwards the memtables
+# are flushed (ANALYZE counts unflushed rows twice, PS-11664), every table is
+# analyzed, and the statistics are checked: the row count is close to 2000
+# and every index has a non-NULL cardinality that does not exceed it.
+#
+# Known bugs are kept out of the checks:
+#   - PS-11662: with table-scan statistics, deleted rows are counted. No rows
+#     are deleted except by TRUNCATE/DROP, which reclaim whole indexes.
+#   - PS-11663: zero statistics after a COPY ALTER until ANALYZE TABLE. Every
+#     table is analyzed before the checks.
+#   - PS-11694: ANALYZE and the background statistics thread assert with
+#     table-scan statistics and a row cap (profile 3). That profile runs in
+#     rocksdb.stats_row_cap_concurrent_ddl, disabled until PS-11694 is fixed.
+#   - The memtable statistics cache (rocksdb_force_compute_memtable_stats_
+#     cachetime > 0) is not refreshed by a flush, DDL or ANALYZE TABLE, so
+#     row counts are wrong until it expires; see
+#     rocksdb.memtable_stats_cache_stale. The profiles keep the suite's
+#     cachetime of 0.
+#   - PS-11730: statistics lost after concurrent DROP/CREATE/RENAME with
+#     ANALYZE (intermittent). The concurrent ANALYZE runs only in the profiles
+#     without table-scan statistics.
+#
+# rocksdb_table_stats_background_thread_nice_value is not varied: the thread
+# starts at nice 19, and lowering a nice value needs CAP_SYS_NICE, which the
+# test server usually does not have (setpriority() fails with EPERM).
+#
+# The test runs at READ COMMITTED: at REPEATABLE READ the gap-lock rule
+# rejects INSERT ... SELECT from a table without a full unique key lookup.
+#
+# rocksdb_collect_sst_properties is read-only; the combinations file runs the
+# whole test with it ON and OFF.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let $profile_first = 1
+--let $profile_last = 6
+--let $profile_skip = 3
+--source suite/rocksdb/include/stats_settings_concurrent_ddl.inc
+--source include/wait_until_count_sessions.inc

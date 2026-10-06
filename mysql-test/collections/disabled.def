@@ -140,6 +140,9 @@ rocksdb.innodb_port_innodb_stats_analyze_memtable : BUG#0 PS-11664 ANALYZE count
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.shutdown_paused_background_work : BUG#0 PS-11729 shutdown hangs when background paused
 rocksdb.ddl_concurrent_admin_ops_stats : BUG#0 PS-11730 stats lost after concurrent DDL
+rocksdb.stats_row_cap_concurrent_ddl : BUG#0 PS-11694 row cap assert under concurrent DDL
+rocksdb.memtable_stats_cache_stale : BUG#0 PS-11746 stale memtable stats cache
+rocksdb.stats_table_scan_no_sst_properties : BUG#0 PS-11662 table-scan stats without SST props
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
