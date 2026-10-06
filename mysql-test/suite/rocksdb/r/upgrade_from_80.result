@@ -1,0 +1,425 @@
+#########
+# Begin upgrade testing with mysql_upgrade
+###
+# Copy the remote tablespace & DB zip files from suite location to working location.
+# Check that the file exists in the working folder.
+# Stop DB server which was created by MTR default
+# Unzip the zip file.
+# Remove copied files
+# restart
+#########
+# Performing test specific validation
+###
+SET SESSION time_zone = '+00:00';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# MyRocks dictionary after the upgrade.
+SELECT table_name, partition_name, index_number, cf, index_type,
+kv_format_version, ttl_duration, index_flags
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'upg'
+ ORDER BY index_number;
+table_name	partition_name	index_number	cf	index_type	kv_format_version	ttl_duration	index_flags
+t_types	NULL	256	default	1	15	0	0
+t_types	NULL	257	default	2	16	0	0
+t_types	NULL	258	default	2	16	0	0
+t_types	NULL	259	default	2	16	0	0
+t_types	NULL	260	default	2	16	0	0
+t_types	NULL	261	default	2	16	0	0
+t_types	NULL	262	default	2	16	0	0
+t_types	NULL	263	default	2	16	0	0
+t_types	NULL	264	default	2	16	0	0
+t_types	NULL	265	default	2	16	0	0
+t_types	NULL	266	default	2	16	0	0
+t_types	NULL	267	default	2	16	0	0
+t_types	NULL	268	default	2	16	0	0
+t_types	NULL	269	default	2	16	0	0
+t_pk_coll	NULL	270	default	1	15	0	0
+t_pk_coll	NULL	271	default	2	16	0	0
+t_cf	NULL	272	rev:upg_rev_cf	1	15	0	0
+t_cf	NULL	273	upg_custom_cf	2	16	0	0
+t_cf	NULL	274	default	2	16	0	0
+t_part_range	p0	275	upg_p0	1	15	0	0
+t_part_range	p0	276	default	2	16	0	0
+t_part_range	p1	277	rev:upg_p1	1	15	0	0
+t_part_range	p1	278	default	2	16	0	0
+t_part_range	p2	279	upg_p2	1	15	0	0
+t_part_range	p2	280	default	2	16	0	0
+t_part_hash	p0	281	default	1	15	0	0
+t_part_hash	p0	282	default	2	16	0	0
+t_part_hash	p1	283	default	1	15	0	0
+t_part_hash	p1	284	default	2	16	0	0
+t_part_hash	p2	285	default	1	15	0	0
+t_part_hash	p2	286	default	2	16	0	0
+t_part_hash	p3	287	default	1	15	0	0
+t_part_hash	p3	288	default	2	16	0	0
+t_part_list	pa	289	default	1	15	0	0
+t_part_list	pa	290	default	2	16	0	0
+t_part_list	pb	291	default	1	15	0	0
+t_part_list	pb	292	default	2	16	0	0
+t_ttl_short	NULL	293	default	1	15	300	1
+t_ttl_short	NULL	294	default	2	16	300	1
+t_ttl_long	NULL	295	default	1	15	3000000000	1
+t_ttl_long	NULL	296	default	2	16	3000000000	1
+t_ttl_col	NULL	297	default	1	15	60	1
+t_ttl_col	NULL	298	default	2	16	60	1
+t_ttl_part	custom_p0	299	default	1	15	300	1
+t_ttl_part	custom_p1	300	default	1	15	0	0
+t_partial	NULL	301	default	1	15	0	0
+t_partial	NULL	302	default	2	16	0	0
+t_nopk	NULL	303	default	2	16	0	0
+t_nopk	NULL	304	default	3	15	0	0
+t_autoinc	NULL	305	default	1	15	0	0
+t_autoinc	NULL	306	default	2	16	0	0
+t_autoinc_sk	NULL	307	default	1	15	0	0
+t_autoinc_sk	NULL	308	default	2	16	0	0
+t_gen	NULL	309	default	1	15	0	0
+t_gen	NULL	310	default	2	16	0	0
+t_gen	NULL	311	default	2	16	0	0
+t_instant	NULL	312	default	1	15	0	0
+t_instant	NULL	313	default	2	16	0	0
+t_log	NULL	314	default	1	15	0	0
+# Data dictionary after the upgrade.
+SHOW CREATE TABLE upg.t_types;
+Table	Create Table
+t_types	CREATE TABLE `t_types` (
+  `id` int NOT NULL,
+  `ti` tinyint DEFAULT NULL,
+  `tiu` tinyint unsigned DEFAULT NULL,
+  `si` smallint DEFAULT NULL,
+  `mi` mediumint DEFAULT NULL,
+  `bi` bigint DEFAULT NULL,
+  `biu` bigint unsigned DEFAULT NULL,
+  `de` decimal(20,6) DEFAULT NULL,
+  `fl` float DEFAULT NULL,
+  `db` double DEFAULT NULL,
+  `bt` bit(13) DEFAULT NULL,
+  `d` date DEFAULT NULL,
+  `t` time(3) DEFAULT NULL,
+  `dt` datetime(6) DEFAULT NULL,
+  `ts` timestamp(2) NULL DEFAULT NULL,
+  `y` year DEFAULT NULL,
+  `c_bin` char(12) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT NULL,
+  `vc_lat` varchar(40) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT NULL,
+  `vc_u8bin` varchar(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `vc_u8ai` varchar(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL,
+  `c_u8gen` char(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `vc_u8` varchar(40) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL,
+  `bn` binary(8) DEFAULT NULL,
+  `vb` varbinary(32) DEFAULT NULL,
+  `bl` blob,
+  `tx` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  `js` json DEFAULT NULL,
+  `en` enum('a','bb','ccc') DEFAULT NULL,
+  `st` set('x','y','z') DEFAULT NULL,
+  `uq` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk` (`uq`),
+  KEY `k_int` (`ti`,`si`,`mi`,`bi`),
+  KEY `k_num` (`de`,`db`),
+  KEY `k_time` (`d`,`t`,`dt`,`ts`,`y`),
+  KEY `k_cbin` (`c_bin`),
+  KEY `k_lat` (`vc_lat`),
+  KEY `k_u8bin` (`vc_u8bin`),
+  KEY `k_u8ai` (`vc_u8ai`),
+  KEY `k_u8gen` (`c_u8gen`),
+  KEY `k_u8` (`vc_u8`),
+  KEY `k_bin` (`bn`,`vb`),
+  KEY `k_prefix` (`bl`(6),`tx`(5)),
+  KEY `k_enum` (`en`,`st`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE upg.t_cf;
+Table	Create Table
+t_cf	CREATE TABLE `t_cf` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`id`) COMMENT 'cfname=rev:upg_rev_cf',
+  KEY `ka` (`a`) COMMENT 'cfname=upg_custom_cf',
+  KEY `kb` (`b`) COMMENT 'rev:upg_rev_sk_cf'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE upg.t_part_range;
+Table	Create Table
+t_part_range	CREATE TABLE `t_part_range` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`id`) COMMENT 'p0_cfname=upg_p0;p1_cfname=rev:upg_p1;p2_cfname=upg_p2',
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`id`)
+(PARTITION p0 VALUES LESS THAN (100) ENGINE = ROCKSDB,
+ PARTITION p1 VALUES LESS THAN (200) ENGINE = ROCKSDB,
+ PARTITION p2 VALUES LESS THAN MAXVALUE ENGINE = ROCKSDB) */
+SHOW CREATE TABLE upg.t_ttl_col;
+Table	Create Table
+t_ttl_col	CREATE TABLE `t_ttl_col` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `ts` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ttl_duration=60;ttl_col=ts;'
+SHOW CREATE TABLE upg.t_ttl_part;
+Table	Create Table
+t_ttl_part	CREATE TABLE `t_ttl_part` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='custom_p0_ttl_duration=300;'
+/*!50100 PARTITION BY RANGE (`id`)
+(PARTITION custom_p0 VALUES LESS THAN (100) ENGINE = ROCKSDB,
+ PARTITION custom_p1 VALUES LESS THAN MAXVALUE ENGINE = ROCKSDB) */
+SHOW CREATE TABLE upg.t_partial;
+Table	Create Table
+t_partial	CREATE TABLE `t_partial` (
+  `id1` int NOT NULL,
+  `id2` int NOT NULL,
+  `v` int DEFAULT NULL,
+  PRIMARY KEY (`id1`,`id2`),
+  KEY `kp` (`id1`,`v`) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE upg.t_gen;
+Table	Create Table
+t_gen	CREATE TABLE `t_gen` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(20) DEFAULT NULL,
+  `gs` int GENERATED ALWAYS AS ((`a` * 2)) STORED,
+  `gv` varchar(25) GENERATED ALWAYS AS (concat(`b`,_utf8mb4'-v')) VIRTUAL,
+  PRIMARY KEY (`id`),
+  KEY `kgs` (`gs`),
+  KEY `kgv` (`gv`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SHOW CREATE TABLE upg.t_instant;
+Table	Create Table
+t_instant	CREATE TABLE `t_instant` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT '8',
+  `c` varchar(20) NOT NULL DEFAULT 'instant_c',
+  `d` datetime DEFAULT '2020-01-02 03:04:05',
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='instant comment'
+SHOW CREATE TABLE upg.t_autoinc;
+Table	Create Table
+t_autoinc	CREATE TABLE `t_autoinc` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `a` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB AUTO_INCREMENT=1001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# Every index returns the rows and values recorded on 8.0.
+SELECT COUNT(*) AS expected_entries FROM upgcheck.expected WHERE db = 'upg';
+expected_entries
+54
+CALL upgcheck.collect('upg', 'actual', 't_ttl_short,t_ttl_col,t_ttl_part');
+# Entries that differ between upgcheck.expected and upgcheck.actual:
+tbl	idx	expected_cnt	actual_cnt	same_crc
+CHECK TABLE upg.t_types, upg.t_pk_coll, upg.t_cf, upg.t_part_range,
+upg.t_part_hash, upg.t_part_list, upg.t_ttl_long, upg.t_partial,
+upg.t_nopk, upg.t_autoinc, upg.t_autoinc_sk, upg.t_gen,
+upg.t_instant, upg.t_log, upg.t_inno;
+Table	Op	Msg_type	Msg_text
+upg.t_types	check	status	OK
+upg.t_pk_coll	check	status	OK
+upg.t_cf	check	status	OK
+upg.t_part_range	check	status	OK
+upg.t_part_hash	check	status	OK
+upg.t_part_list	check	status	OK
+upg.t_ttl_long	check	status	OK
+upg.t_partial	check	status	OK
+upg.t_nopk	check	status	OK
+upg.t_autoinc	check	status	OK
+upg.t_autoinc_sk	check	status	OK
+upg.t_gen	check	status	OK
+upg.t_instant	check	status	OK
+upg.t_log	check	status	OK
+upg.t_inno	check	status	OK
+# Instant columns: rows written before and after each instant change.
+SELECT * FROM upg.t_instant WHERE id IN (0, 10, 299, 1000, 1001) ORDER BY id;
+id	a	b	c	d
+0	0	7	instant_c	2020-01-02 03:04:05
+10	10	70	instant_c	2020-01-02 03:04:05
+299	2	7	instant_c	2020-01-02 03:04:05
+1000	1	2	after	2021-01-01 00:00:00
+1001	3	8	instant_c	2020-01-02 03:04:05
+INSERT INTO upg.t_instant (id, a) VALUES (2000, 5);
+SELECT * FROM upg.t_instant WHERE id = 2000;
+id	a	b	c	d
+2000	5	8	instant_c	2020-01-02 03:04:05
+# Generated columns, through their indexes.
+SELECT id, gs, gv FROM upg.t_gen FORCE INDEX (kgv) WHERE gv = 'g7-v' ORDER BY id;
+id	gs	gv
+7	14	g7-v
+48	22	g7-v
+89	30	g7-v
+130	38	g7-v
+171	46	g7-v
+212	54	g7-v
+253	62	g7-v
+294	70	g7-v
+SELECT COUNT(*) FROM upg.t_gen FORCE INDEX (kgs) WHERE gs = 14;
+COUNT(*)
+8
+# Collation-sensitive lookups through secondary indexes.
+SELECT COUNT(*) FROM upg.t_types FORCE INDEX (k_u8ai) WHERE vc_u8ai LIKE 'strasse%';
+COUNT(*)
+120
+SELECT COUNT(*) FROM upg.t_types FORCE INDEX (k_lat) WHERE vc_lat LIKE 'arger%';
+COUNT(*)
+75
+SELECT COUNT(*) FROM upg.t_types FORCE INDEX (k_u8gen) WHERE c_u8gen = 'bar';
+COUNT(*)
+300
+SELECT COUNT(*) FROM upg.t_pk_coll WHERE a = 'ALA0' AND b = 'K';
+COUNT(*)
+1
+# Partial index.
+SELECT id1, COUNT(*), SUM(v) FROM upg.t_partial FORCE INDEX (kp)
+WHERE id1 IN (0, 3, 6) GROUP BY id1 ORDER BY id1;
+id1	COUNT(*)	SUM(v)
+0	43	250
+3	43	262
+6	42	247
+# Trigger and view.
+INSERT INTO upg.t_cf VALUES (6000, 1, 'post-upgrade');
+SELECT msg FROM upg.t_log ORDER BY id DESC LIMIT 1;
+msg
+cf 6000
+SELECT COUNT(*) FROM upg.v_join;
+COUNT(*)
+270
+# Auto-increment continues after the highest value written on 8.0.
+INSERT INTO upg.t_autoinc (a) VALUES (1);
+SELECT MAX(id) FROM upg.t_autoinc;
+MAX(id)
+1001
+INSERT INTO upg.t_autoinc_sk (pk) VALUES (1000);
+SELECT id FROM upg.t_autoinc_sk WHERE pk = 1000;
+id
+51
+# TTL: table-level duration of 5 minutes, everything has expired.
+SELECT COUNT(*) FROM upg.t_ttl_short;
+COUNT(*)
+0
+SELECT COUNT(*) FROM upg.t_ttl_short FORCE INDEX (ka);
+COUNT(*)
+0
+# TTL column: rows with a timestamp 5 minutes after generation have
+# expired, rows with a timestamp in 2100 have not.
+SELECT COUNT(*), MIN(ts), MAX(ts) FROM upg.t_ttl_col;
+COUNT(*)	MIN(ts)	MAX(ts)
+150	4102444800	4102444800
+SELECT COUNT(*) FROM upg.t_ttl_col FORCE INDEX (ka);
+COUNT(*)
+150
+# Per-partition TTL: only custom_p0 expires.
+SELECT COUNT(*), MIN(id) FROM upg.t_ttl_part;
+COUNT(*)	MIN(id)
+200	100
+# Compaction removes the expired rows.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+include/assert.inc [Compaction removed expired TTL rows]
+# Without read filtering only the unexpired rows are left.
+SET GLOBAL rocksdb_enable_ttl_read_filtering = OFF;
+SELECT COUNT(*) FROM upg.t_ttl_short;
+COUNT(*)
+0
+SELECT COUNT(*) FROM upg.t_ttl_col;
+COUNT(*)
+150
+SELECT COUNT(*) FROM upg.t_ttl_part;
+COUNT(*)
+200
+SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+# DML after the upgrade.
+UPDATE upg.t_types SET vc_u8ai = CONCAT(vc_u8ai, '+'), vc_lat = UPPER(vc_lat),
+bi = bi + 1 WHERE id % 4 = 0;
+DELETE FROM upg.t_types WHERE id % 25 = 1;
+INSERT INTO upg.t_types (id, vc_u8ai, vc_lat, uq)
+VALUES (900, 'Ärger', 'Ärger', 'uq900');
+INSERT INTO upg.t_types (id, uq) VALUES (901, 'UQ900');
+ERROR 23000: Duplicate entry 'UQ900' for key 't_types.uk'
+UPDATE upg.t_part_range SET id = id + 1000 WHERE id BETWEEN 90 AND 110;
+DELETE FROM upg.t_nopk WHERE a = 7;
+INSERT INTO upg.t_nopk VALUES (7, 'again');
+# DDL after the upgrade.
+ALTER TABLE upg.t_types ADD INDEX k_new (vc_u8ai, c_u8gen), ALGORITHM=INPLACE;
+ALTER TABLE upg.t_instant ADD INDEX kb (b), ALGORITHM=INPLACE;
+ALTER TABLE upg.t_instant FORCE, ALGORITHM=COPY;
+ALTER TABLE upg.t_pk_coll ADD COLUMN extra INT DEFAULT 1, ALGORITHM=COPY;
+ALTER TABLE upg.t_cf DROP INDEX ka, ALGORITHM=INPLACE;
+ALTER TABLE upg.t_part_range REORGANIZE PARTITION p2 INTO (
+PARTITION p2 VALUES LESS THAN (1100),
+PARTITION p3 VALUES LESS THAN MAXVALUE);
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE upg.t_part_range TRUNCATE PARTITION p0;
+ALTER TABLE upg.t_part_hash ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE upg.t_part_list ADD PARTITION (PARTITION pc VALUES IN (5));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO upg.t_part_list VALUES (1000, 5, 1);
+ALTER TABLE upg.t_part_list DROP PARTITION pa;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SELECT COUNT(*) FROM upg.t_types FORCE INDEX (k_new) WHERE vc_u8ai LIKE 'ärger%';
+COUNT(*)
+1
+SELECT COUNT(*) FROM upg.t_instant FORCE INDEX (kb) WHERE b = 70;
+COUNT(*)
+10
+SELECT * FROM upg.t_instant WHERE id IN (10, 1000, 2000) ORDER BY id;
+id	a	b	c	d
+10	10	70	instant_c	2020-01-02 03:04:05
+1000	1	2	after	2021-01-01 00:00:00
+2000	5	8	instant_c	2020-01-02 03:04:05
+SELECT PARTITION_NAME, TABLE_ROWS > 0 AS has_rows
+FROM information_schema.partitions
+WHERE table_schema = 'upg' AND table_name = 't_part_range'
+ ORDER BY PARTITION_ORDINAL_POSITION;
+PARTITION_NAME	has_rows
+p0	0
+p1	1
+p2	1
+p3	1
+SELECT COUNT(*) FROM upg.t_part_range;
+COUNT(*)
+210
+SELECT COUNT(*) FROM upg.t_part_hash;
+COUNT(*)
+289
+SELECT cat, COUNT(*) FROM upg.t_part_list GROUP BY cat ORDER BY cat;
+cat	COUNT(*)
+3	75
+4	75
+5	1
+# Record the post-DDL state and restart with rocksdb_validate_tables=1.
+CALL upgcheck.collect('upg', 'expected', 't_ttl_short,t_ttl_col,t_ttl_part');
+# restart
+SET SESSION time_zone = '+00:00';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+CALL upgcheck.collect('upg', 'actual', 't_ttl_short,t_ttl_col,t_ttl_part');
+# Entries that differ between upgcheck.expected and upgcheck.actual:
+tbl	idx	expected_cnt	actual_cnt	same_crc
+CHECK TABLE upg.t_types, upg.t_pk_coll, upg.t_cf, upg.t_part_range,
+upg.t_part_hash, upg.t_part_list, upg.t_instant;
+Table	Op	Msg_type	Msg_text
+upg.t_types	check	status	OK
+upg.t_pk_coll	check	status	OK
+upg.t_cf	check	status	OK
+upg.t_part_range	check	status	OK
+upg.t_part_hash	check	status	OK
+upg.t_part_list	check	status	OK
+upg.t_instant	check	status	OK
+#########
+# End upgrade testing with mysql_upgrade
+###
+# Stop the server
+# Remove temp datadir
+# Restart the server with default options.
+# restart

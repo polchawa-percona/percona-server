@@ -1,0 +1,111 @@
+#########
+# Begin upgrade testing with mysql_upgrade
+###
+# Copy the remote tablespace & DB zip files from suite location to working location.
+# Check that the file exists in the working folder.
+# Stop DB server which was created by MTR default
+# Unzip the zip file.
+# Remove copied files
+# restart
+#########
+# Performing test specific validation
+###
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Committed rows, including the ones that were only in the WAL.
+SELECT COUNT(*) AS expected_entries FROM upgcheck.expected WHERE db = 'upgc';
+expected_entries
+10
+CALL upgcheck.collect('upgc', 'actual', 't_bulk,t_alter,t_drop');
+# Entries that differ between upgcheck.expected and upgcheck.actual:
+tbl	idx	expected_cnt	actual_cnt	same_crc
+SELECT COUNT(*), SUM(a), MAX(id) FROM upgc.t_wal;
+COUNT(*)	SUM(a)	MAX(id)
+857	23946	999
+SELECT COUNT(*) FROM upgc.t_wal FORCE INDEX (kb) WHERE b LIKE 'wal 5 u%';
+COUNT(*)
+2
+# The unfinished bulk load left nothing behind.
+SELECT COUNT(*), MAX(id) FROM upgc.t_bulk;
+COUNT(*)	MAX(id)
+10	9
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO upgc.t_bulk SELECT seq + 100, seq FROM upgc.seq1000 WHERE seq < 500;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*), MAX(id) FROM upgc.t_bulk;
+COUNT(*)	MAX(id)
+510	599
+# The dropped table is gone; the table sharing its column family is intact.
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_schema = 'upgc' AND table_name = 't_drop';
+COUNT(*)
+0
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'upgc' AND table_name = 't_drop';
+COUNT(*)
+0
+SELECT COUNT(*), SUM(a) FROM upgc.t_drop_keep FORCE INDEX (ka);
+COUNT(*)	SUM(a)
+1000	999
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'upgc_drop_cf';
+SELECT COUNT(*), SUM(a) FROM upgc.t_drop_keep FORCE INDEX (ka);
+COUNT(*)	SUM(a)
+1000	999
+# The interrupted COPY ALTER left t_alter unchanged.
+SHOW CREATE TABLE upgc.t_alter;
+Table	Create Table
+t_alter	CREATE TABLE `t_alter` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(a) FROM upgc.t_alter;
+COUNT(*)	SUM(a)
+3000	17982
+SELECT COUNT(*), SUM(a) FROM upgc.t_alter FORCE INDEX (ka);
+COUNT(*)	SUM(a)
+3000	17982
+# The #sql table of the interrupted COPY ALTER is not visible as a table.
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_schema = 'upgc' AND table_name LIKE '#sql%';
+COUNT(*)
+0
+# Its MyRocks dictionary entries (if any) belong to a #sql name only.
+SELECT COUNT(*) FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'upgc' AND table_name NOT LIKE '#sql%'
+   AND table_name NOT IN ('t_wal', 't_wal_part', 't_bulk', 't_drop_keep',
+'t_alter');
+COUNT(*)
+0
+ALTER TABLE upgc.t_alter ADD COLUMN h CHAR(64) AS (SHA2(id, 256)) STORED,
+ALGORITHM=COPY;
+SELECT COUNT(*), COUNT(DISTINCT h) FROM upgc.t_alter;
+COUNT(*)	COUNT(DISTINCT h)
+3000	3000
+CHECK TABLE upgc.t_wal, upgc.t_wal_part, upgc.t_bulk, upgc.t_drop_keep,
+upgc.t_alter;
+Table	Op	Msg_type	Msg_text
+upgc.t_wal	check	status	OK
+upgc.t_wal_part	check	status	OK
+upgc.t_bulk	check	status	OK
+upgc.t_drop_keep	check	status	OK
+upgc.t_alter	check	status	OK
+# Restart once more with rocksdb_validate_tables=1.
+# restart
+SELECT COUNT(*) FROM upgc.t_wal;
+COUNT(*)
+857
+SELECT COUNT(*) FROM upgc.t_bulk;
+COUNT(*)
+510
+SELECT COUNT(*) FROM upgc.t_alter;
+COUNT(*)
+3000
+#########
+# End upgrade testing with mysql_upgrade
+###
+# Stop the server
+# Remove temp datadir
+# Restart the server with default options.
+# restart
