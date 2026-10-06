@@ -1,0 +1,243 @@
+#
+# DDL on several tables running at the same time as storage-level
+# administrative operations: manual compaction of the column families the
+# tables live in, memtable flush, L0 compaction, cancelling manual
+# compactions, waking the drop-index thread, ANALYZE TABLE, checkpoints, and
+# a column family that is created, emptied and dropped with
+# rocksdb_delete_cf, plus a DML session.
+#
+# MyRocks stores the indexes of many tables in the same column families, so
+# one SST file holds data of several tables and indexes. Every DDL statement
+# writes, ingests or deletes index data in those shared files while the
+# administrative operations compact, flush or copy the same files. After each
+# round every table must still return all of its rows through the primary key
+# and through its secondary index, CHECK TABLE must pass, and after the last
+# round nothing must be left in the drop-index queue, no dropped column family
+# may remain, and a restart with table validation must succeed.
+#
+# Parameters (set before sourcing, or use the defaults):
+#   $rounds   number of rounds (default 30)
+#
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+if (!$rounds)
+{
+  --let $rounds = 30
+  # write_unprepared with a flush threshold of 1 writes every row as its own
+  # batch; fewer rounds keep the test well inside the MTR time limit.
+  if (`SELECT @@global.rocksdb_write_policy = 'write_unprepared'`)
+  {
+    --let $rounds = 3
+  }
+}
+
+--disable_query_log
+call mtr.add_suppression("Column family '[a-z_0-9]+' not found");
+call mtr.add_suppression("Manual Compaction Failed");
+--enable_query_log
+
+SET @save_cte_max_recursion_depth = @@session.cte_max_recursion_depth;
+SET SESSION cte_max_recursion_depth = 100000;
+
+--let $nrows = 3000
+--let $create_t1 = CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b)) ENGINE=ROCKSDB
+--let $create_t2 = CREATE TABLE t2 (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=cf_a', KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB
+--let $create_t3 = CREATE TABLE t3 (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=rev:cf_b', KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB
+--let $load = SELECT n, n % 101, REPEAT(CHAR(97 + n % 26), 40) FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < $nrows) SELECT n FROM seq) s
+
+eval $create_t1;
+eval $create_t2;
+eval $create_t3;
+eval INSERT INTO t1 $load;
+eval INSERT INTO t2 $load;
+eval INSERT INTO t3 $load;
+
+--echo # A table that is never altered, in a column family shared with t2 and t3.
+CREATE TABLE ts (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=cf_a', KEY kb (b) COMMENT 'rev:cf_b') ENGINE=ROCKSDB;
+eval INSERT INTO ts $load;
+--echo # A table only written by DML.
+CREATE TABLE td (a INT AUTO_INCREMENT PRIMARY KEY, b INT, KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB;
+
+--let $sum = `SELECT SUM(a) + SUM(b) FROM t1`
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (c1, localhost, root,,);
+connect (c2, localhost, root,,);
+connect (c3, localhost, root,,);
+connect (cadmin, localhost, root,,);
+connect (ccf, localhost, root,,);
+connect (cdml, localhost, root,,);
+connection cdml;
+SET SESSION cte_max_recursion_depth = 100000;
+
+--disable_query_log
+--disable_result_log
+--let $td_rows = 0
+--let $ten = 10
+--let $batch = 500
+--let $r = 1
+while ($r <= $rounds)
+{
+  # DDL on t1, t2 and t3. Each connection walks through the same six
+  # operations, shifted by one, so different operations overlap.
+  --let $tn = 1
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_ddl.inc
+  --let $op1 = $ddl_op
+  --let $tn = 2
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_ddl.inc
+  --let $op2 = $ddl_op
+  --let $tn = 3
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_ddl.inc
+  --let $op3 = $ddl_op
+
+  # One administrative operation per round.
+  --expr $aop = $r % $ten
+  --let $admin = SET GLOBAL rocksdb_compact_cf = 'default'
+  if ($aop == 1)
+  {
+    --let $admin = SET GLOBAL rocksdb_compact_cf = 'cf_a'
+  }
+  if ($aop == 2)
+  {
+    --let $admin = SET GLOBAL rocksdb_compact_cf = 'rev:cf_b'
+  }
+  if ($aop == 3)
+  {
+    --let $admin = SET GLOBAL rocksdb_force_flush_memtable_now = 1
+  }
+  if ($aop == 4)
+  {
+    --let $admin = SET GLOBAL rocksdb_compact_lzero_now = 1
+  }
+  if ($aop == 5)
+  {
+    --let $admin = SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1
+  }
+  if ($aop == 6)
+  {
+    --let $admin = SET GLOBAL rocksdb_cancel_manual_compactions = 1
+  }
+  if ($aop == 7)
+  {
+    --let $admin = SET GLOBAL rocksdb_signal_drop_index_thread = 1
+  }
+  if ($aop == 8)
+  {
+    --let $admin = ANALYZE TABLE ts
+  }
+  if ($aop == 9)
+  {
+    --let $admin = SET GLOBAL rocksdb_create_checkpoint = '$MYSQLTEST_VARDIR/tmp/admin_ops_cp_$r'
+  }
+  --connection cadmin
+  --send_eval $admin
+
+  # DML into a shared column family.
+  --connection cdml
+  --send INSERT INTO td (b) SELECT n % 7 FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500) SELECT n FROM seq) s
+
+  # Meanwhile, create a column family, use it, empty it and drop it.
+  --connection ccf
+  eval CREATE TABLE tcf (a INT, PRIMARY KEY (a) COMMENT 'cfname=cf_tmp_$r') ENGINE=ROCKSDB;
+  INSERT INTO tcf SELECT n FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 200) SELECT n FROM seq) s;
+  DROP TABLE tcf;
+  --error 0,ER_CANT_DROP_CF,ER_GET_ERRMSG,ER_INTERNAL_ERROR
+  eval SET GLOBAL rocksdb_delete_cf = 'cf_tmp_$r';
+
+  # Collect everything.
+  --let $i = 1
+  while ($i <= 3)
+  {
+    --connection c$i
+    --reap
+    inc $i;
+  }
+  --connection cadmin
+  # A manual compaction can be cancelled by rocksdb_cancel_manual_compactions
+  # of an earlier round still being processed.
+  --error 0,ER_INTERNAL_ERROR
+  --reap
+  if ($aop == 9)
+  {
+    --force-rmdir $MYSQLTEST_VARDIR/tmp/admin_ops_cp_$r
+  }
+  --connection cdml
+  --reap
+  --expr $td_rows = $td_rows + $batch
+
+  # Repopulate what TRUNCATE and DROP emptied, then check every table.
+  connection default;
+  --let $tn = 1
+  --let $ddl_op = $op1
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_repair.inc
+  --let $tn = 2
+  --let $ddl_op = $op2
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_repair.inc
+  --let $tn = 3
+  --let $ddl_op = $op3
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_repair.inc
+  --let $chk_table = ts
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_check.inc
+  --let $td_count = `SELECT COUNT(*) FROM td FORCE INDEX (kb) WHERE b >= 0`
+  if ($td_count != $td_rows)
+  {
+    --echo td has $td_count rows through kb, expected $td_rows
+    --die DML table lost rows
+  }
+  inc $r;
+}
+--enable_result_log
+--enable_query_log
+
+--echo # All rounds done; every table kept its rows through every index.
+
+connection default;
+disconnect c1;
+disconnect c2;
+disconnect c3;
+disconnect cadmin;
+disconnect ccf;
+disconnect cdml;
+
+--echo # The drop-index thread removes everything that was dropped.
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+let $wait_timeout = 300;
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+--echo # No column family is left marked as dropped.
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_CFSTATS WHERE CF_NAME LIKE 'cf_tmp_%';
+--source include/wait_condition.inc
+--echo # MyRocks knows exactly the tables and indexes of the server.
+SELECT COUNT(*) AS indexes_only_in_myrocks FROM information_schema.ROCKSDB_DDL r
+  WHERE r.TABLE_SCHEMA = 'test' AND NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS s
+    WHERE s.TABLE_SCHEMA = r.TABLE_SCHEMA AND s.TABLE_NAME = r.TABLE_NAME AND s.INDEX_NAME = r.INDEX_NAME);
+SELECT COUNT(*) AS indexes_only_in_server FROM (SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = 'test') s
+  WHERE NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL r
+    WHERE r.TABLE_SCHEMA = 'test' AND r.TABLE_NAME = s.TABLE_NAME AND r.INDEX_NAME = s.INDEX_NAME);
+SELECT COUNT(*) AS leftover_tables FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME NOT IN ('t1', 't2', 't3', 'ts', 'td');
+
+--echo # Restart with table validation.
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $i = 1
+while ($i <= 3)
+{
+  --let $chk_table = t$i
+  --let $chk_index = kb
+  --let $chk_rows = $nrows
+  --let $chk_sum = $sum
+  --source suite/rocksdb/include/ddl_concurrent_admin_ops_check.inc
+  inc $i;
+}
+--let $chk_table = ts
+--source suite/rocksdb/include/ddl_concurrent_admin_ops_check.inc
+--disable_query_log
+--eval SELECT COUNT(*) = $td_rows AS td_rows_ok FROM td FORCE INDEX (kb) WHERE b >= 0
+--enable_query_log
+
+DROP TABLE t1, t2, t3, ts, td;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,24 @@
+#
+# ddl_concurrent_admin_ops (DDL on several tables in shared column families
+# running alongside manual compaction, flushes, cancelled compactions,
+# drop-index thread wake-ups, ANALYZE, checkpoints and column family drops)
+# run under non-default RocksDB background tuning: a single background job,
+# subcompactions and bottom-priority compactions, the write buffer manager with
+# a small global memtable budget, rate-limited SST file deletion with a short
+# obsolete-file period, and a small WAL budget, few open files and a low
+# delayed-write rate. See ddl_concurrent_bg_tuning_admin_ops.combinations.
+# The write buffer manager combination is in
+# compact_lzero_now_concurrent_compaction, disabled until PS-11747 is fixed.
+#
+
+# With rocksdb_sst_mgr_rate_bytes_per_sec > 0 the RocksDB delete scheduler also
+# handles obsolete WAL files, and RocksDB's own purge sometimes schedules the
+# same WAL file twice; the second rename fails because the file is already gone
+# and RocksDB logs an error. No data is affected and MyRocks only forwards the
+# RocksDB log line, so the message is suppressed here.
+--disable_query_log
+call mtr.add_suppression("Failed to mark .*[.]log as trash -- IO error: No such file or directory");
+--enable_query_log
+
+--let $rounds = 10
+--source suite/rocksdb/t/ddl_concurrent_admin_ops.test

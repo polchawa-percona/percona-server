@@ -1,0 +1,15 @@
+[bg_jobs_1]
+rocksdb_max_background_jobs=1
+
+[subcompactions]
+rocksdb_max_subcompactions=4
+rocksdb_max_bottom_pri_background_compactions=2
+
+[sst_file_manager]
+rocksdb_sst_mgr_rate_bytes_per_sec=1048576
+rocksdb_delete_obsolete_files_period_micros=1000000
+
+[wal_open_files]
+rocksdb_max_total_wal_size=1048576
+rocksdb_max_open_files=32
+rocksdb_delayed_write_rate=1048576
