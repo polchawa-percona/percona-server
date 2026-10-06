@@ -9239,11 +9239,13 @@ int ha_rocksdb::create_table(const std::string &table_name,
       goto error;
     }
 
+    DBUG_EXECUTE_IF("rocksdb_crash_before_create_table", DBUG_SUICIDE(););
     err = local_dict_manager->commit(batch);
     if (err != HA_EXIT_SUCCESS) {
       goto error;
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_create_table", DBUG_SUICIDE(););
 
   rdb_mark_indexes_published(*m_tbl_def);
 
@@ -13081,6 +13083,7 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
       DBUG_RETURN(err);
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_delete_table", DBUG_SUICIDE(););
 
   DBUG_EXECUTE_IF("rocksdb_after_delete_table", {
     static constexpr char act[] =
@@ -13231,6 +13234,13 @@ int ha_rocksdb::rename_table(
   } else {
     rc = local_dict_manager->commit(batch);
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename", {
+    if (rc == HA_EXIT_SUCCESS) DBUG_SUICIDE();
+  });
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename_from_tmp", {
+    if (rc == HA_EXIT_SUCCESS && strstr(from, tmp_file_prefix) != nullptr)
+      DBUG_SUICIDE();
+  });
 
   /*
     Renaming a temporary #sql table to a user-visible name is the last step of
@@ -15302,6 +15312,9 @@ bool ha_rocksdb::commit_inplace_alter_table(
         */
         assert(0);
       }
+
+      DBUG_EXECUTE_IF("rocksdb_crash_before_finish_create_index",
+                      DBUG_SUICIDE(););
 
       /* Mark ongoing create indexes as finished/remove from data dictionary */
       local_dict_manager->finish_indexes_operation(

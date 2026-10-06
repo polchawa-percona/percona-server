@@ -1,0 +1,50 @@
+#
+# Finding 47 (port-findings.md): a crash inside RENAME TABLE after the MyRocks
+# dictionary rename is committed and before the server's data dictionary is.
+# MyRocks refuses to start with the default rocksdb_validate_tables=1. With
+# =2 the server knows the table only by its old name and MyRocks only by its
+# new one: the table cannot be opened and its data cannot be reached or
+# dropped with SQL.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and the
+# table exists under exactly one of the two names, with all its rows.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+CREATE DATABASE db2;
+
+--let $i = 0
+while ($i < 2)
+{
+  CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+  --let $crash_point = rocksdb_crash_after_rename
+  if ($i == 0)
+  {
+    --echo # RENAME TABLE within the database.
+    --let $crash_stmt = RENAME TABLE t1 TO t2
+    --let $new_db = test
+  }
+  if ($i == 1)
+  {
+    --echo # RENAME TABLE to another database.
+    --let $crash_stmt = RENAME TABLE t1 TO db2.t2
+    --let $new_db = db2
+  }
+  --source suite/rocksdb/include/ddl_crash.inc
+  SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+    WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+  --eval SELECT COUNT(*) AS names_in_dd FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('$new_db','t2'))
+  --eval SELECT COUNT(DISTINCT TABLE_SCHEMA, TABLE_NAME) AS names_in_myrocks FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('$new_db','t2'))
+  --let $name = `SELECT CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('$new_db','t2'))`
+  --replace_result $name TABLE
+  --eval SELECT COUNT(*) AS row_count FROM $name
+  --replace_result $name TABLE
+  --eval CHECK TABLE $name
+  --replace_result $name TABLE
+  --eval DROP TABLE $name
+  --inc $i
+}
+DROP DATABASE db2;
