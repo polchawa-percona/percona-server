@@ -1,0 +1,101 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1);
+# rocksdb_deadlock_detect=OFF
+SET SESSION rocksdb_deadlock_detect = OFF;
+SET SESSION rocksdb_deadlock_detect = OFF;
+SET SESSION rocksdb_deadlock_detect = OFF;
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+SET DEBUG_SYNC = 'rocksdb_row_lock_wait_begin SIGNAL con2_sleeps EXECUTE 2';
+SET DEBUG_SYNC = 'rocksdb_row_lock_wait_woken SIGNAL con2_woken WAIT_FOR con2_recheck';
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode
+con1	S
+con3	S
+COMMIT;
+# con1's COMMIT wakes con2 although con3 still holds S.
+SET DEBUG_SYNC = 'now WAIT_FOR con2_woken';
+# con2 is stopped before its re-check; it still shows as waiting.
+# (ROCKSDB_LOCKS cannot be read here: con2 holds the lock stripe.)
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+# Let con2 re-check: con3's S lock blocks it, so it waits again.
+SET DEBUG_SYNC = 'now SIGNAL con2_recheck';
+SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode
+con3	S
+COMMIT;
+id
+1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# rocksdb_deadlock_detect=ON
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect = ON;
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+SET DEBUG_SYNC = 'rocksdb_row_lock_wait_begin SIGNAL con2_sleeps EXECUTE 2';
+SET DEBUG_SYNC = 'rocksdb_row_lock_wait_woken SIGNAL con2_woken WAIT_FOR con2_recheck';
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+BEGIN;
+SELECT * FROM t1 WHERE id=1 FOR SHARE;
+id
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode
+con1	S
+con3	S
+COMMIT;
+# con1's COMMIT wakes con2 although con3 still holds S.
+SET DEBUG_SYNC = 'now WAIT_FOR con2_woken';
+# con2 is stopped before its re-check; it still shows as waiting.
+# (ROCKSDB_LOCKS cannot be read here: con2 holds the lock stripe.)
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+# Let con2 re-check: con3's S lock blocks it, so it waits again.
+SET DEBUG_SYNC = 'now SIGNAL con2_recheck';
+SET DEBUG_SYNC = 'now WAIT_FOR con2_sleeps';
+SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE thread_id = CON2 AND waiting_key != '';
+con2_waiting
+1
+SELECT CASE t.thread_id WHEN CON1 THEN 'con1' WHEN CON2 THEN 'con2' WHEN CON3 THEN 'con3' END AS conn, l.mode FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode;
+conn	mode
+con3	S
+COMMIT;
+id
+1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+SELECT * FROM t1;
+id
+1
+DROP TABLE t1;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
