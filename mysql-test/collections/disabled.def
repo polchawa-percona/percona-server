@@ -141,6 +141,7 @@ rocksdb.ddl_crash_rename_mismatch : BUG#0 PS-11667 RENAME crash
 rocksdb.ddl_crash_truncate : BUG#0 PS-11668 TRUNCATE crash
 rocksdb.ddl_crash_add_index : BUG#0 PS-11669 ADD INDEX crash
 rocksdb.ddl_crash_drop_index : BUG#0 PS-11670 DROP INDEX crash
+rocksdb.alter_copy_crash_rename : BUG#0 PS-11681 crash between COPY ALTER renames
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

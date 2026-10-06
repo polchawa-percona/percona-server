@@ -1,0 +1,198 @@
+call mtr.add_suppression("is a leftover of an interrupted ALTER TABLE");
+call mtr.add_suppression("Schema mismatch - A DD table exists for table test.t1");
+call mtr.add_suppression("Attempt to open a table that is not present in RocksDB-SE");
+call mtr.add_suppression("Schema mismatch - Table test.t1 is registered in RocksDB but does not have a corresponding DD table");
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(100), KEY ka(a))
+ENGINE=ROCKSDB;
+#
+# Window B: crash after the copy commits, before the renames.
+#
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+# Kill the server
+# restart
+# The table is the old version, data unchanged.
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(100) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+# The intermediate table is left in the MyRocks dictionary only.
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+# It is reported at startup, with the statement that drops it.
+include/assert_grep.inc [The leftover of window B is reported once at startup]
+# It can be dropped, and is no longer reported after a restart.
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+# restart
+include/assert_grep.inc [The dropped leftover is not reported again]
+# The ALTER can be retried.
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(id), COUNT(c) FROM t1;
+COUNT(*)	SUM(id)	COUNT(c)
+1000	500500	0
+ALTER TABLE t1 DROP COLUMN c, ALGORITHM=COPY;
+#
+# Window A: crash during the row copy. The intermediate table is empty.
+#
+SET SESSION debug='+d,crash_copy_before_commit';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The leftover of window A is reported once at startup]
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+#
+# Window B with each rocksdb_validate_tables value: the leftover is
+# reported in every mode, never as a validation mismatch, and the
+# server starts.
+#
+# rocksdb_validate_tables=0
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+# Kill the server
+# restart: --rocksdb_validate_tables=0
+SELECT @@global.rocksdb_validate_tables;
+@@global.rocksdb_validate_tables
+0
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The leftover is reported once at startup]
+include/assert_grep.inc [The leftover is not a validation mismatch]
+include/assert_grep.inc [Validation reports no problem]
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+# rocksdb_validate_tables=1
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+# Kill the server
+# restart: --rocksdb_validate_tables=1
+SELECT @@global.rocksdb_validate_tables;
+@@global.rocksdb_validate_tables
+1
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The leftover is reported once at startup]
+include/assert_grep.inc [The leftover is not a validation mismatch]
+include/assert_grep.inc [Validation reports no problem]
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+# rocksdb_validate_tables=2
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+# Kill the server
+# restart: --rocksdb_validate_tables=2
+SELECT @@global.rocksdb_validate_tables;
+@@global.rocksdb_validate_tables
+2
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The leftover is reported once at startup]
+include/assert_grep.inc [The leftover is not a validation mismatch]
+include/assert_grep.inc [Validation reports no problem]
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+# restart
+#
+# Window B with a partitioned table: one warning for the whole table.
+#
+ALTER TABLE t1 PARTITION BY HASH(id) PARTITIONS 3;
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+# Kill the server
+# restart
+include/assert.inc [Table data is unchanged after the interrupted ALTER]
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The partitioned leftover is reported once, with all its indexes]
+DROP TABLE `test`.`#sql-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+DROP TABLE t1;
+#
+# Window C1: crash after the original is renamed to "#sql2-...". MyRocks
+# does not start with the default rocksdb_validate_tables=1 (finding 37,
+# see alter_copy_crash_rename.test), so restart with =2 to see the
+# warnings. "#sql2-..." has no DD table and holds the table before the
+# ALTER. SQL cannot repair this state, so the data directory is restored
+# from a copy afterwards.
+#
+# restart
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(100), KEY ka(a))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'a'), (2, 2, 'b');
+SET SESSION debug='+d,rocksdb_crash_after_rename';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_validate_tables=2
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+2
+include/assert_grep.inc [The intermediate table of window C1 is reported as droppable]
+include/assert_grep.inc [The original table of window C1 is reported as possibly the only copy]
+# The intermediate table can be dropped, "#sql2-..." cannot.
+DROP TABLE `test`.`#sql-LEFTOVER`;
+DROP TABLE `test`.`#sql2-LEFTOVER`;
+ERROR 42S02: Unknown table 'test.#sql2-LEFTOVER'
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+# restart
+#
+# Window C2: crash after the intermediate table gets the original name.
+# Here "#sql2-..." has a hidden DD table, so the hint has the DROP
+# statement, with a caution.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(100), KEY ka(a))
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'a'), (2, 2, 'b');
+SET SESSION debug='+d,rocksdb_crash_after_rename_from_tmp';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_validate_tables=2
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+1
+include/assert_grep.inc [The original table of window C2 is reported with a cautious DROP hint]
+DROP TABLE `test`.`#sql2-LEFTOVER`;
+SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(DISTINCT TABLE_NAME)
+0
+# restart
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+COUNT(*)
+0
