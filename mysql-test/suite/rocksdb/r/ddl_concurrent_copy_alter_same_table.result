@@ -154,4 +154,3 @@ DROP PROCEDURE read_loop;
 DROP PROCEDURE chaos_loop;
 SET GLOBAL rocksdb_pause_background_work = OFF;
 DROP TABLE t1, t2, t3, t4, t5, t6;
-SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;

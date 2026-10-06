@@ -25,6 +25,7 @@
 #   $chaos_iters  its iterations (about 0.5 s each)
 #   $chaos_pause  1 to also pause background work for 2 s at times
 
+--let $save_instant_append = `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
 SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
 --disable_query_log
 SET SESSION cte_max_recursion_depth = 1000000;
@@ -181,5 +182,7 @@ DROP PROCEDURE read_loop;
 DROP PROCEDURE chaos_loop;
 SET GLOBAL rocksdb_pause_background_work = OFF;
 DROP TABLE t1, t2, t3, t4, t5, t6;
-SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+--disable_query_log
+--eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $save_instant_append
+--enable_query_log
 --source include/wait_until_count_sessions.inc
