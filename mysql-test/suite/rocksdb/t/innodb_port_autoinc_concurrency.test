@@ -1,0 +1,106 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# Ports of innodb.autoinc_debug and innodb.innodb_deadlock_with_autoinc to
+# MyRocks: concurrent AUTO_INCREMENT inserts.
+#
+# Changes from the InnoDB originals:
+#   - ENGINE=ROCKSDB.
+#   - InnoDB's ib_after_row_insert / ib_after_row_insert_step pause points
+#     are replaced by MyRocks' rocksdb.after_unique_pk_check, which an INSERT
+#     reaches after its AUTO_INCREMENT value has been assigned and the new
+#     primary key has been locked, before the row is written.
+#   - MyRocks has no table-level AUTO_INCREMENT lock (InnoDB's
+#     innodb_autoinc_lock_mode), so the 40 concurrent inserts of
+#     Bug #21983865 do not wait for the paused one at all; the test checks
+#     that each of them gets a distinct value and that the counter is right
+#     afterwards.
+#   - The two-thread interleaving without a restart is already covered by
+#     rocksdb.autoinc_vars_thread; this test covers the first inserts after a
+#     restart, when the counter is initialized from the table.
+#
+
+--echo #
+--echo # autoinc_debug: two parallel inserts with auto_increment_increment=2,
+--echo # right after a restart.
+--echo #
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=ROCKSDB;
+
+SET AUTO_INCREMENT_INCREMENT = 1;
+INSERT INTO t1 VALUES(NULL);
+SELECT * FROM t1;
+SHOW CREATE TABLE t1;
+
+--source include/restart_mysqld.inc
+
+SET AUTO_INCREMENT_INCREMENT = 2;
+SET DEBUG_SYNC= 'rocksdb.after_unique_pk_check SIGNAL opened WAIT_FOR flushed1';
+--send INSERT INTO t1 VALUES(NULL)
+
+connect(con1, localhost, root,,);
+SET AUTO_INCREMENT_INCREMENT = 2;
+SET DEBUG_SYNC= 'now WAIT_FOR opened';
+--echo # con1 is not blocked by the paused insert and gets the next value.
+INSERT INTO t1 VALUES(NULL);
+SET DEBUG_SYNC= 'now SIGNAL flushed1';
+
+connection default;
+reap;
+SELECT * FROM t1;
+SHOW CREATE TABLE t1;
+connection con1;
+INSERT INTO t1 VALUES(NULL);
+SELECT * FROM t1;
+connection default;
+disconnect con1;
+SET AUTO_INCREMENT_INCREMENT = 1;
+SET DEBUG_SYNC= 'RESET';
+DROP TABLE t1;
+
+--echo #
+--echo # Bug #21983865 UNEXPECTED DEADLOCK WITH INNODB_AUTOINC_LOCK_MODE=0
+--echo #
+create table t1(f1 int not null auto_increment primary key) engine=rocksdb;
+
+--echo # con1 pauses after its value is assigned
+connect (con1, localhost, root);
+set debug_sync='rocksdb.after_unique_pk_check SIGNAL others WAIT_FOR continue_others';
+--send insert into t1 values(NULL)
+
+connection default;
+--echo # 39 more connections insert while con1 is paused; none of them waits.
+--disable_query_log
+set debug_sync='now WAIT_FOR others';
+let $1=2;
+while ($1 <= 40) {
+ connect (con$1,localhost,root);
+ insert into t1 values(NULL);
+ inc $1;
+ connection default;
+}
+--enable_query_log
+SELECT COUNT(*), COUNT(DISTINCT f1), MIN(f1), MAX(f1) FROM t1;
+--echo # Release con1
+set debug_sync='now SIGNAL continue_others';
+
+connection con1;
+--reap
+connection default;
+SELECT COUNT(*), COUNT(DISTINCT f1), MIN(f1), MAX(f1) FROM t1;
+insert into t1 values(NULL);
+SELECT MAX(f1) FROM t1;
+SHOW CREATE TABLE t1;
+
+disconnect con1;
+--disable_query_log
+let $1=2;
+while ($1 <= 40) {
+ disconnect con$1;
+ inc $1;
+}
+--enable_query_log
+SET DEBUG_SYNC= 'RESET';
+drop table t1;
+--source include/wait_until_count_sessions.inc
