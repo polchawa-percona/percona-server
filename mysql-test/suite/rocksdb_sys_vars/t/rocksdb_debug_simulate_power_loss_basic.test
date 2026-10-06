@@ -1,0 +1,29 @@
+--source include/have_rocksdb.inc
+
+# Setting the variable to ON kills the server, so it is only accepted when
+# the server runs with rocksdb_fault_injection_options={"power_loss":true}.
+# The rocksdb suite covers that case (power_loss_*.test).
+
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+
+--error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SELECT @@session.rocksdb_debug_simulate_power_loss;
+
+SET @@global.rocksdb_debug_simulate_power_loss = OFF;
+SET @@global.rocksdb_debug_simulate_power_loss = 0;
+SET @@global.rocksdb_debug_simulate_power_loss = DEFAULT;
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+
+--error ER_WRONG_ARGUMENTS
+SET @@global.rocksdb_debug_simulate_power_loss = ON;
+--error ER_WRONG_ARGUMENTS
+SET @@global.rocksdb_debug_simulate_power_loss = 1;
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+
+--error ER_GLOBAL_VARIABLE
+SET @@session.rocksdb_debug_simulate_power_loss = OFF;
+
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_simulate_power_loss = 'aaa';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_simulate_power_loss = 2;

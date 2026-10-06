@@ -1,0 +1,24 @@
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+@@global.rocksdb_debug_simulate_power_loss
+0
+SELECT @@session.rocksdb_debug_simulate_power_loss;
+ERROR HY000: Variable 'rocksdb_debug_simulate_power_loss' is a GLOBAL variable
+SET @@global.rocksdb_debug_simulate_power_loss = OFF;
+SET @@global.rocksdb_debug_simulate_power_loss = 0;
+SET @@global.rocksdb_debug_simulate_power_loss = DEFAULT;
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+@@global.rocksdb_debug_simulate_power_loss
+0
+SET @@global.rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Incorrect arguments to rocksdb_debug_simulate_power_loss (requires rocksdb_fault_injection_options with "power_loss":true)
+SET @@global.rocksdb_debug_simulate_power_loss = 1;
+ERROR HY000: Incorrect arguments to rocksdb_debug_simulate_power_loss (requires rocksdb_fault_injection_options with "power_loss":true)
+SELECT @@global.rocksdb_debug_simulate_power_loss;
+@@global.rocksdb_debug_simulate_power_loss
+0
+SET @@session.rocksdb_debug_simulate_power_loss = OFF;
+ERROR HY000: Variable 'rocksdb_debug_simulate_power_loss' is a GLOBAL variable and should be set with SET GLOBAL
+SET @@global.rocksdb_debug_simulate_power_loss = 'aaa';
+ERROR 42000: Variable 'rocksdb_debug_simulate_power_loss' can't be set to the value of 'aaa'
+SET @@global.rocksdb_debug_simulate_power_loss = 2;
+ERROR 42000: Variable 'rocksdb_debug_simulate_power_loss' can't be set to the value of '2'

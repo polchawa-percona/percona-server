@@ -1,0 +1,70 @@
+#
+# A finished bulk load must survive a power cut, and a power cut during a
+# bulk load must leave the table as it was before the load, with no
+# temporary SST files left behind and a working retry.
+#
+# The combinations run it with a simulated power cut and with a plain kill,
+# and both must give the same result. rocksdb_flush_log_at_trx_commit=2 is in
+# power_loss_bulk_load_flush_log_lazy.test: there a power cut after the load
+# loses the secondary key entries.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--let $rocksdb_dir = `SELECT CONCAT(@@datadir, '.rocksdb')`
+
+SET SESSION cte_max_recursion_depth = 10000;
+--let $_pl_mode = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (100000, 1);
+--disable_query_log
+eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $_pl_mode;
+--enable_query_log
+
+--let $load = INSERT INTO t1 SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x
+--let $load_unsorted = INSERT INTO t2 SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x
+
+--echo #
+--echo # 1. Crash in the middle of a bulk load: nothing of it is visible.
+--echo #    t1 has no secondary key: with one, a crash here leaves the
+--echo #    secondary key without the rows (PS-11696).
+--echo #
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+--disable_query_log
+eval $load;
+--enable_query_log
+--source ../include/power_loss_or_kill.inc
+SET SESSION cte_max_recursion_depth = 10000;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t2 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t2 FORCE INDEX (ka) WHERE a >= 0;
+--echo # Temporary bulk load files left:
+--exec ls $rocksdb_dir | grep -c 'bulk_load.tmp' || true
+
+--echo #
+--echo # 2. Bulk loads that finished before the crash are kept whole.
+--echo #
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+--disable_query_log
+eval $load;
+--enable_query_log
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+--disable_query_log
+eval $load_unsorted;
+--enable_query_log
+SET SESSION rocksdb_bulk_load = 0;
+--source ../include/power_loss_or_kill.inc
+SET SESSION cte_max_recursion_depth = 10000;
+SELECT COUNT(*), SUM(id), SUM(a) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(id), SUM(a) FROM t2 FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (ka) WHERE a >= 0;
+--replace_column 2 # 3 #
+CHECK TABLE t1, t2;
+
+DROP TABLE t1, t2;
