@@ -1,0 +1,108 @@
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+CREATE TABLE t (
+a INT,
+b INT,
+c INT GENERATED ALWAYS AS(a+b),
+d INT GENERATED ALWAYS AS(a+b+b),
+KEY idxa (a),
+KEY vidxcd (c, d)
+) ENGINE=ROCKSDB;
+INSERT INTO t (a,b) VALUES (1, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxa	2
+vidxcd	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxa	1	a	1
+vidxcd	1	c	1
+vidxcd	2	d	1
+ALTER TABLE t ADD COLUMN e INT GENERATED ALWAYS AS(a+a+b), ADD INDEX idxb (b), ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+ALTER TABLE t ADD COLUMN e INT GENERATED ALWAYS AS(a+a+b), ADD INDEX idxb (b);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxa	2
+idxb	2
+vidxcd	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxa	1	a	1
+idxb	1	b	1
+vidxcd	1	c	1
+vidxcd	2	d	1
+ALTER TABLE t DROP COLUMN c, DROP INDEX idxa;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxb	2
+vidxcd	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxb	1	b	1
+vidxcd	1	d	1
+ALTER TABLE t ADD INDEX vidxe (e), ALGORITHM=INPLACE;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxb	2
+vidxcd	2
+vidxe	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxb	1	b	1
+vidxcd	1	d	1
+vidxe	1	e	1
+ALTER TABLE t ADD COLUMN f INT GENERATED ALWAYS AS(a + a), ADD INDEX vidxf (f);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxb	2
+vidxcd	2
+vidxe	2
+vidxf	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxb	1	b	1
+vidxcd	1	d	1
+vidxe	1	e	1
+vidxf	1	f	1
+ALTER TABLE t DROP INDEX vidxcd;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT index_name, index_type FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	index_type
+HIDDEN_PK_ID	3
+idxb	2
+vidxe	2
+vidxf	2
+SELECT index_name, seq_in_index, column_name, cardinality FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+idxb	1	b	1
+vidxe	1	e	1
+vidxf	1	f	1
+DROP TABLE t;

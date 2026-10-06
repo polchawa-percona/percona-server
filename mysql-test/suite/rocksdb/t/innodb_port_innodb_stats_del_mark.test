@@ -1,0 +1,131 @@
+#
+# Port of innodb.innodb_stats_del_mark
+# (mysql-test/suite/innodb/t/innodb_stats_del_mark.test) to MyRocks.
+#
+# Bug#23333990: persistent index statistics were updated before the
+# transaction was committed. ANALYZE TABLE must not count rows deleted by
+# another, uncommitted transaction as gone.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB, READ COMMITTED (-master.opt): at REPEATABLE READ,
+#     MyRocks refuses INSERT ... SELECT from the same table (gap-lock rule).
+#   - 2^12 rows instead of 2^18, so the test is not a big test; the thresholds
+#     are scaled accordingly. The memtable is flushed before ANALYZE TABLE so
+#     that the estimates do not depend on memtable approximations.
+#   - Both MyRocks statistics methods are run (SST properties and table scan).
+#   - Test 2 differs on purpose. InnoDB counts the rows inserted by an
+#     uncommitted transaction (it reads them as not delete-marked); MyRocks
+#     keeps uncommitted rows in the transaction's write batch, so ANALYZE
+#     TABLE in another session does not see them. The test checks that, and
+#     that the estimate stays low after the rollback.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+--let $save_sampling_pct = `SELECT @@global.rocksdb_table_stats_sampling_pct`
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+connect (con1, localhost, root,,);
+
+--let $mode = 0
+while ($mode < 2)
+{
+  connection default;
+  eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode;
+
+  --echo Test 1:- Uncommitted delete test
+  CREATE TABLE t1 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                   val INT UNSIGNED NOT NULL,
+                   INDEX (val)) ENGINE=ROCKSDB;
+  INSERT INTO t1 (val) VALUES (4);
+  --let $i = 0
+  while ($i < 12)
+  {
+    INSERT INTO t1 (val) SELECT val FROM t1;
+    --inc $i
+  }
+  SELECT COUNT(*) FROM t1;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+  connection con1;
+  START TRANSACTION;
+  DELETE FROM t1;
+  SELECT COUNT(*) FROM t1;
+
+  connection default;
+  ANALYZE TABLE t1;
+  --let $row_count = query_get_value(EXPLAIN SELECT * FROM t1 WHERE val=4, rows, 1)
+  if ($row_count > 2000)
+  {
+    --echo Test correctly estimates the number of rows as > 2000
+    --echo even when in other uncommitted transaction
+    --echo all rows have been deleted.
+  }
+  if ($row_count <= 2000)
+  {
+    --echo FAIL row count is $row_count
+  }
+
+  connection con1;
+  COMMIT;
+
+  --echo Test 2:- Insert and rollback test
+  connection default;
+  CREATE TABLE t2 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                   val INT UNSIGNED NOT NULL,
+                   INDEX (val)) ENGINE=ROCKSDB;
+
+  connection con1;
+  START TRANSACTION;
+  INSERT INTO t2 (val) VALUES (4);
+  --let $i = 0
+  while ($i < 12)
+  {
+    INSERT INTO t2 (val) SELECT val FROM t2;
+    --inc $i
+  }
+  SELECT COUNT(*) FROM t2;
+
+  connection default;
+  SELECT COUNT(*) FROM t2;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  ANALYZE TABLE t2;
+  --let $row_count = query_get_value(EXPLAIN SELECT * FROM t2 WHERE val=4, rows, 1)
+  if ($row_count <= 1)
+  {
+    --echo Rows inserted by the uncommitted transaction are not counted.
+  }
+  if ($row_count > 1)
+  {
+    --echo FAIL row count is $row_count while the insert is uncommitted
+  }
+
+  connection con1;
+  --echo Rollback the insert
+  ROLLBACK;
+
+  connection default;
+  ANALYZE TABLE t2;
+  --let $row_count = query_get_value(EXPLAIN SELECT * FROM t2 WHERE val=4, rows, 1)
+  if ($row_count <= 1)
+  {
+    --echo Test correctly estimates the number of rows as $row_count
+    --echo after rollback.
+  }
+  if ($row_count > 1)
+  {
+    --echo FAIL row count is $row_count after rollback
+  }
+
+  DROP TABLE t1, t2;
+  --inc $mode
+}
+
+disconnect con1;
+connection default;
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--eval SET GLOBAL rocksdb_table_stats_sampling_pct = $save_sampling_pct
+--enable_query_log
+--source include/wait_until_count_sessions.inc

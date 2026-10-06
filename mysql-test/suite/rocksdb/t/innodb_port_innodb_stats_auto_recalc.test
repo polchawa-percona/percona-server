@@ -1,0 +1,111 @@
+#
+# Port of innodb.innodb_stats_auto_recalc
+# (mysql-test/suite/innodb/t/innodb_stats_auto_recalc.test) to MyRocks.
+#
+# The original checks that the statistics are recalculated in the background,
+# without ANALYZE TABLE, after enough rows were inserted or deleted.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB. MyRocks recalculates statistics in the background only
+#     with rocksdb_table_stats_use_table_scan=ON: every write increments a
+#     per-table counter, and once it exceeds
+#     max(rocksdb_table_stats_recalc_threshold_count,
+#         rows * rocksdb_table_stats_recalc_threshold_pct / 100)
+#     the table is queued for the index statistics thread. The thresholds are
+#     set to InnoDB's auto-recalc rule (10% of the rows, no minimum count).
+#   - mysql.innodb_table_stats / innodb_index_stats do not exist. The test
+#     waits for INFORMATION_SCHEMA.STATISTICS cardinality and
+#     INFORMATION_SCHEMA.TABLES row count instead; the table is reopened with
+#     FLUSH TABLE so that the handler picks up the new statistics.
+#   - The statistics thread recalculates a table at most once every 10
+#     seconds (RDB_MIN_RECALC_INTERVAL), so each wait allows 60 seconds.
+#   - ANALYZE TABLE right after CREATE TABLE records the time of the last
+#     recalculation, so the background recalculation of the following
+#     changes runs at least 10 seconds later, after they are committed, as in
+#     InnoDB.
+#   - rocksdb_table_stats_sampling_pct=100: with the default 10% sampling a
+#     two-row table usually has no sampled key and a cardinality of NULL.
+#   - After the changes only the cardinality is checked. In table-scan mode
+#     the row count comes from SST properties plus an approximate memtable
+#     entry count, and still includes deleted rows until compaction (finding
+#     #40, rocksdb.innodb_port_innodb_stats_table_scan_rows, disabled).
+#
+--source include/have_rocksdb.inc
+
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_threshold_count = @@global.rocksdb_table_stats_recalc_threshold_count;
+SET @save_threshold_pct = @@global.rocksdb_table_stats_recalc_threshold_pct;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 0;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 10;
+
+--let $check_stats1 = SELECT table_rows FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'autorecalc'
+--let $check_stats2 = SELECT index_name, column_name, cardinality FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'autorecalc' ORDER BY index_name, seq_in_index
+
+CREATE TABLE autorecalc (a INT, PRIMARY KEY (a)) ENGINE=ROCKSDB;
+ANALYZE TABLE autorecalc;
+
+--eval $check_stats1
+--eval $check_stats2
+
+INSERT INTO autorecalc VALUES (1);
+INSERT INTO autorecalc VALUES (2);
+
+--echo # Wait for the background recalculation to see 2 rows.
+--let $tries = 60
+--let $done = 0
+--disable_query_log
+while (!$done)
+{
+  FLUSH TABLE autorecalc;
+  --let $done = `SELECT cardinality = 2 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'autorecalc' AND index_name = 'PRIMARY'`
+  if (!$done)
+  {
+    --dec $tries
+    if (!$tries)
+    {
+      --eval $check_stats2
+      SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats%';
+      --die Statistics were not recalculated after the inserts
+    }
+    --sleep 1
+  }
+}
+--enable_query_log
+
+--eval $check_stats2
+
+DELETE FROM autorecalc;
+
+--echo # Wait for the background recalculation to see an empty table.
+--let $tries = 60
+--let $done = 0
+--disable_query_log
+while (!$done)
+{
+  FLUSH TABLE autorecalc;
+  --let $done = `SELECT IFNULL(cardinality, 0) = 0 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'autorecalc' AND index_name = 'PRIMARY'`
+  if (!$done)
+  {
+    --dec $tries
+    if (!$tries)
+    {
+      --eval $check_stats2
+      SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats%';
+      --die Statistics were not recalculated after the delete
+    }
+    --sleep 1
+  }
+}
+--enable_query_log
+
+--eval $check_stats2
+
+DROP TABLE autorecalc;
+
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = @save_threshold_count;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = @save_threshold_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;

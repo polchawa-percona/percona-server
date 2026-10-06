@@ -1,0 +1,430 @@
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+CREATE TABLE test_innodb_stats (
+a INT,
+KEY a_key (a)
+) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 0;
+TRUNCATE TABLE test_innodb_stats;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+0	0
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	NULL
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+0
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+1	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+1
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+2	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+2
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1), (1), (1), (1), (1), (1), (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+10	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+10
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+2	2
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	2
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+2
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	2
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	2
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	3
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	3
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2), (3), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+5	3
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	3
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+5
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3), (4), (5), (1), (2), (3), (4), (5);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+10	5
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	5
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+10
+SET GLOBAL rocksdb_table_stats_use_table_scan = 1;
+TRUNCATE TABLE test_innodb_stats;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+0	0
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	NULL
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+0
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+1	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+1
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+2	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+2
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (1), (1), (1), (1), (1), (1), (1), (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+10	1
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	1
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+10
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+2	2
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	2
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+2
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	2
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	2
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+3	3
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	3
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+3
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (1), (2), (3), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+5	3
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	3
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+5
+TRUNCATE TABLE test_innodb_stats;
+INSERT INTO test_innodb_stats (a) VALUES (1), (2), (3), (4), (5), (1), (2), (3), (4), (5);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE test_innodb_stats;
+Table	Op	Msg_type	Msg_text
+test.test_innodb_stats	analyze	status	OK
+FLUSH TABLE test_innodb_stats;
+SELECT COUNT(*) AS row_count, COUNT(DISTINCT a) AS distinct_a
+FROM test_innodb_stats;
+row_count	distinct_a
+10	5
+SELECT index_name, seq_in_index, column_name, cardinality
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats'
+      ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	CARDINALITY
+a_key	1	a	5
+SELECT table_rows FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'test_innodb_stats';
+TABLE_ROWS
+10
+DROP TABLE test_innodb_stats;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;

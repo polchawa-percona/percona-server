@@ -1,0 +1,71 @@
+#
+# Port of innodb.innodb_stats_long_names
+# (mysql-test/suite/innodb/t/innodb_stats_long_names.test) to MyRocks.
+#
+# The original checks that persistent statistics are stored for a
+# subpartitioned table whose table, partition and subpartition names are 64
+# characters long.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB. mysql.innodb_table_stats / innodb_index_stats do not
+#     exist; MyRocks keeps statistics per index id. The test inserts one row
+#     per non-empty subpartition, flushes the memtable, runs ANALYZE TABLE and
+#     checks the per-subpartition row counts in INFORMATION_SCHEMA.PARTITIONS,
+#     for both MyRocks statistics methods. The whole-table row count is not
+#     printed: like InnoDB, the handler reports an empty partition as 1 row,
+#     so the total is higher than the number of rows.
+#   - Long (sub)partition names beyond these lengths are covered by
+#     rocksdb.partition_long_names (finding #5).
+#
+--source include/have_rocksdb.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+--let $save_sampling_pct = `SELECT @@global.rocksdb_table_stats_sampling_pct`
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+--let $mode = 0
+while ($mode < 2)
+{
+  eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode;
+
+CREATE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+(a INT, b INT) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+SUBPARTITION BY HASH(b)
+(
+  PARTITION p1_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+    VALUES LESS THAN (100)
+    (
+      SUBPARTITION
+        p1s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+      SUBPARTITION
+        p1s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+    ),
+  PARTITION p2_defgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+    VALUES LESS THAN (200)
+    (
+      SUBPARTITION
+        p2s1_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd,
+      SUBPARTITION
+        p2s2_fgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+    )
+);
+
+  INSERT INTO t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd
+    VALUES (1, 1), (150, 2);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  ANALYZE TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;
+
+  SELECT partition_name, subpartition_name, table_rows
+    FROM information_schema.partitions
+    WHERE table_schema = DATABASE() AND table_name LIKE 't_cde%'
+    ORDER BY partition_name, subpartition_name;
+
+  DROP TABLE t_cdefgh10abcdefgh20abcdefgh30abcdefgh40abcdefgh50abcdefgh60abcd;
+  --inc $mode
+}
+
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--eval SET GLOBAL rocksdb_table_stats_sampling_pct = $save_sampling_pct
+--enable_query_log
