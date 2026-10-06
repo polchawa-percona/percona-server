@@ -1,0 +1,270 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Port of innodb.avoid_deadlock_with_blocked to MyRocks: how lock requests
+# queue behind a waiting request.
+#
+# Changes from the InnoDB original:
+#   - ENGINE=ROCKSDB; rocksdb_deadlock_detect=ON and a 30 s lock wait
+#     timeout, so a real deadlock is reported and a wrong wait shows up.
+#   - The locking reads use the primary key (id=1): a full-table locking read
+#     inside BEGIN would be refused by the gap-lock rule at REPEATABLE READ.
+#   - InnoDB's show_locks() reads performance_schema.data_locks, which is
+#     empty for MyRocks; the locks are listed from ROCKSDB_LOCKS instead.
+#   - InnoDB's "lock_wait_will_wait" debug sync point does not exist in
+#     MyRocks; a session is known to wait when ROCKSDB_TRX shows a WAITING_KEY.
+#
+# MyRocks differs from InnoDB in these scenarios:
+#   - It has no gap or insert-intention locks, so inserting another key
+#     never conflicts with locks on id=1 (scenarios 2 and 3 do not deadlock).
+#   - A transaction that is the only holder of a shared lock can upgrade it
+#     to exclusive even when another transaction waits for an exclusive lock
+#     (scenarios 1 and 5), as InnoDB's "bypass waiters blocked by us" does.
+#   - A shared request is granted while an exclusive request waits behind an
+#     earlier shared holder, so writers can be starved by a stream of readers
+#     (scenario 6). InnoDB queues the shared request behind the waiter.
+#
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+
+--connect (con1,localhost,root,,)
+--let $con1 = `SELECT CONNECTION_ID()`
+--connect (con2,localhost,root,,)
+--let $con2 = `SELECT CONNECTION_ID()`
+--connect (con3,localhost,root,,)
+--let $con3 = `SELECT CONNECTION_ID()`
+
+--connection default
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 (id) VALUES (1);
+
+--let $show_locks = SELECT CASE t.thread_id WHEN $con1 THEN 'con1' WHEN $con2 THEN 'con2' WHEN $con3 THEN 'con3' END AS conn, l.mode, IF(t.waiting_key != '', 'waiting', '') AS state FROM information_schema.rocksdb_locks l JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id ORDER BY conn, l.mode
+
+--echo #
+--echo # Scenario 1: con1 S granted, con2 X waiting, con1 asks for X.
+--echo # The upgrade is granted to the only shared holder: no deadlock.
+--echo #
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con2
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+  COMMIT;
+
+--connection con2
+  --reap
+  COMMIT;
+
+--echo #
+--echo # Scenario 2: con1 X on id=1, con2 S waiting, con1 inserts id=0.
+--echo # InnoDB: deadlock (the insert intention lock waits behind con2).
+--echo # MyRocks: no gap locks, the insert succeeds.
+--echo #
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+
+--connection con2
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR SHARE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  INSERT INTO t1 VALUES (0);
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  ROLLBACK;
+
+--connection con2
+  --reap
+  COMMIT;
+
+--echo #
+--echo # Scenario 3: con1 S, con2 S, con3 X waiting, con1 inserts id=0.
+--echo # InnoDB: con3 is the deadlock victim. MyRocks: no conflict; con3 gets
+--echo # its lock when both shared holders are gone.
+--echo #
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con2
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con3
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  INSERT INTO t1 VALUES (0);
+
+--connection con2
+  COMMIT;
+
+--connection con1
+  ROLLBACK;
+
+--connection con3
+  --reap
+  COMMIT;
+
+--echo #
+--echo # Scenario 4: con1 S, con2 S, con3 X waiting, con1 asks for X. con1
+--echo # waits for con2 (the other shared holder); when con2 commits, con1 gets
+--echo # its exclusive lock before con3, and con3 gets it after con1 commits.
+--echo # con1 runs with rocksdb_deadlock_detect=OFF: with it ON, con1's request
+--echo # fails with a false ER_LOCK_DEADLOCK (finding 58, tested separately in
+--echo # rocksdb.lock_upgrade_false_deadlock).
+--echo #
+--connection con1
+  SET SESSION rocksdb_deadlock_detect = OFF;
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con2
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con3
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con2
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con1 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  COMMIT;
+
+--connection con1
+  --reap
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  COMMIT;
+
+--connection con3
+  --reap
+  COMMIT;
+
+--connection con1
+  SET SESSION rocksdb_deadlock_detect = ON;
+
+--echo #
+--echo # Scenario 5: con1 S, con2 X waiting, con3 X waiting, con1 asks for X.
+--echo # The upgrade is granted to the only shared holder.
+--echo #
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con2
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con3
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con1
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+  --source include/wait_condition.inc
+  SELECT * FROM t1 WHERE id=1 FOR UPDATE;
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+  COMMIT;
+  --echo # One of the two waiters gets the lock; MyRocks does not grant waiting
+  --echo # requests in arrival order, so either may be first.
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE waiting_key != ''
+  --source include/wait_condition.inc
+  --let $con2_first = `SELECT COUNT(*) = 0 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''`
+
+if ($con2_first)
+{
+  --connection con2
+    --reap
+    COMMIT;
+  --connection con3
+    --reap
+    COMMIT;
+}
+if (!$con2_first)
+{
+  --connection con3
+    --reap
+    COMMIT;
+  --connection con2
+    --reap
+    COMMIT;
+}
+
+--echo #
+--echo # Scenario 6: con1 S granted, con2 X waiting, con3 asks for S.
+--echo # MyRocks grants con3's shared lock at once (InnoDB queues it behind
+--echo # con2), so con2 waits for both readers.
+--echo #
+--connection con1
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+
+--connection con2
+  BEGIN;
+  --send SELECT * FROM t1 WHERE id=1 FOR UPDATE
+
+--connection con3
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+  --source include/wait_condition.inc
+  BEGIN;
+  SELECT * FROM t1 WHERE id=1 FOR SHARE;
+  --replace_result $con1 CON1 $con2 CON2 $con3 CON3
+  --eval $show_locks
+
+--connection con1
+  COMMIT;
+  --echo # con2 still waits for con3.
+  SELECT COUNT(*) AS con2_waiting FROM information_schema.rocksdb_trx WHERE waiting_key != '';
+
+--connection con3
+  COMMIT;
+
+--connection con2
+  --reap
+  COMMIT;
+
+--connection default
+--disconnect con1
+--disconnect con2
+--disconnect con3
+
+SELECT * FROM t1;
+DROP TABLE t1;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc

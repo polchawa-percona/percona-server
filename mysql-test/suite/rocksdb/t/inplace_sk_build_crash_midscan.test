@@ -1,0 +1,74 @@
+#
+# A server crash in the middle of an INPLACE ADD INDEX. The ALTER is paused at
+# each MyRocks build point and the server is killed:
+#   rocksdb.inplace_populate_sk_scan_row     in the primary key scan
+#   rocksdb.inplace_populate_sk_before_merge scan done, merge sort not started
+#   rocksdb.bulk_load_before_ingest          SST files written, not ingested
+# After the restart the index must not exist, the table must be unchanged, the
+# incomplete index must be removed from the MyRocks dictionary, no temporary
+# bulk-load SST file may be left, and the same index must be creatable again.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 VARCHAR(20)) ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 5000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, n % 100, CONCAT('row', n) FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SELECT COUNT(*), SUM(c2) FROM t1;
+--let $rocksdb_dir= `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+--let $indexes_before= `SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't1'`
+
+--let $i= 1
+while ($i <= 3)
+{
+  if ($i == 1)
+  {
+    --let $point= rocksdb.inplace_populate_sk_scan_row
+  }
+  if ($i == 2)
+  {
+    --let $point= rocksdb.inplace_populate_sk_before_merge
+  }
+  if ($i == 3)
+  {
+    --let $point= rocksdb.bulk_load_before_ingest
+  }
+  --echo # Crash while an INPLACE ADD INDEX is paused at $point
+  connect (con1,localhost,root,,);
+  eval SET DEBUG_SYNC = '$point SIGNAL paused WAIT_FOR never';
+  --send ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR paused';
+  --source include/kill_and_restart_mysqld.inc
+  disconnect con1;
+  connection default;
+
+  SHOW CREATE TABLE t1;
+  SELECT COUNT(*), SUM(c2) FROM t1;
+  CHECK TABLE t1;
+  --let $indexes_after= `SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't1'`
+  --let $no_leftover= `SELECT $indexes_after = $indexes_before`
+  --echo # No leftover index in the MyRocks dictionary: $no_leftover
+  --echo # Leftover bulk-load SST files (none expected):
+  --list_files $rocksdb_dir *.bulk_load.tmp.sst
+
+  ALTER TABLE t1 ADD INDEX k_c2(c2), ADD INDEX k_c3(c3), ALGORITHM = INPLACE;
+  SELECT
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+    AS k_c2_matches_table;
+  SELECT
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+    AS k_c3_matches_table;
+  ALTER TABLE t1 DROP INDEX k_c2, DROP INDEX k_c3;
+  --inc $i
+}
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

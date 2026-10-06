@@ -1,0 +1,74 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# A rolled-back INPLACE ADD INDEX must be dropped promptly: the index must
+# leave DDL_DROP_INDEX_ONGOING and its ingested data must be deleted, as after
+# a successful DROP INDEX. PS-11665: the rollback path records the
+# drop but never signals the drop-index thread, which can sleep for 24 hours.
+#
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 5000) {
+  eval INSERT INTO t VALUES ($i, $i % 4000);
+  inc $i;
+}
+--enable_query_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+let $wait_timeout = 60;
+let $orphans = SELECT COUNT(*) FROM information_schema.rocksdb_index_file_map m
+  LEFT JOIN information_schema.rocksdb_ddl d
+  ON d.INDEX_NUMBER = m.INDEX_NUMBER AND d.COLUMN_FAMILY = m.COLUMN_FAMILY
+  WHERE d.INDEX_NUMBER IS NULL AND m.COLUMN_FAMILY = 0;
+
+--echo # Case 1: INPLACE ADD UNIQUE INDEX fails on duplicate values.
+--replace_regex /#sql-[0-9a-f_]+/#sql-X/
+--error ER_DUP_ENTRY
+ALTER TABLE t ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE;
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+
+--echo # Case 2: the index is built and ingested, then the commit MDL upgrade
+--echo # times out because a reader started a transaction during the build.
+connect (rd, localhost, root,,);
+connection default;
+SET SESSION lock_wait_timeout = 3;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL built WAIT_FOR go';
+--send ALTER TABLE t ADD INDEX kb(b), ALGORITHM=INPLACE
+connection rd;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+BEGIN;
+SELECT COUNT(*) FROM t;
+SET DEBUG_SYNC = 'now SIGNAL go';
+connection default;
+--error ER_LOCK_WAIT_TIMEOUT
+--reap
+SET SESSION lock_wait_timeout = DEFAULT;
+SET DEBUG_SYNC = 'RESET';
+connection rd;
+COMMIT;
+disconnect rd;
+connection default;
+
+--echo # The rolled-back index is dropped and its data deleted without a
+--echo # manual compaction.
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+let $wait_condition = SELECT ($orphans) = 0;
+--source include/wait_condition.inc
+eval SELECT ($orphans) AS orphan_sst_entries;
+
+SHOW CREATE TABLE t;
+SELECT COUNT(*) FROM t;
+DROP TABLE t;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,44 @@
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 60;
+SET SESSION rocksdb_lock_wait_timeout = 60;
+CREATE TABLE bug51920 (id INT PRIMARY KEY, i INT) ENGINE=ROCKSDB;
+INSERT INTO bug51920 VALUES (1, 1);
+BEGIN;
+SELECT * FROM bug51920 WHERE id = 1 FOR UPDATE;
+id	i
+1	1
+# KILL CONNECTION of a session waiting for a row lock
+UPDATE bug51920 SET i=2 WHERE id = 1;
+SELECT ID FROM INFORMATION_SCHEMA.PROCESSLIST
+WHERE INFO="UPDATE bug51920 SET i=2 WHERE id = 1"
+INTO @thread_id;
+Warnings:
+Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
+SET @start = NOW(6);
+KILL @thread_id;
+SELECT TIMESTAMPDIFF(SECOND, @start, NOW(6)) < 30 AS ended_before_timeout;
+ended_before_timeout
+1
+Got one of the listed errors
+# KILL QUERY of a session waiting for a row lock
+SET SESSION rocksdb_lock_wait_timeout = 60;
+UPDATE bug51920 SET i=3 WHERE id = 1;
+SET @start = NOW(6);
+KILL QUERY CON2_ID;
+ERROR 70100: Query execution was interrupted
+SELECT TIMESTAMPDIFF(SECOND, @start, NOW(6)) < 30 AS ended_before_timeout;
+ended_before_timeout
+1
+# The killed session holds no lock and still works.
+SELECT COUNT(*) AS locks_of_killed_session FROM information_schema.rocksdb_locks l
+JOIN information_schema.rocksdb_trx t ON l.transaction_id = t.transaction_id
+WHERE t.thread_id = CON2_ID;
+locks_of_killed_session
+0
+COMMIT;
+UPDATE bug51920 SET i=3 WHERE id = 1;
+SELECT * FROM bug51920;
+id	i
+1	3
+DROP TABLE bug51920;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;

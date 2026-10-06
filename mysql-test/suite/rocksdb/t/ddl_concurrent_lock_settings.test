@@ -1,0 +1,276 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# DML transactions that hit MyRocks row-lock limits while DDL on the same
+# table waits for their metadata locks, under the non-default lock and
+# rollback settings:
+#   rocksdb_rollback_on_timeout, rocksdb_lock_wait_timeout,
+#   rocksdb_max_row_locks, rocksdb_lock_scanned_rows,
+#   rocksdb_deadlock_detect / rocksdb_deadlock_detect_depth,
+#   rocksdb_skip_locks_if_skip_unique_check (with unique_checks=0).
+#
+# Each case checks what the failing statement rolls back (statement or
+# whole transaction), that the metadata lock is kept until the transaction
+# ends (the queued ALTER waits for COMMIT/ROLLBACK, not for the error),
+# that the ALTER then completes, and that the table stays consistent: rows
+# through the primary and the secondary key agree, CHECK TABLE is OK, and
+# no #sql table is left behind.
+#
+
+SET @save_rot = @@global.rocksdb_rollback_on_timeout;
+SET @save_skip = @@global.rocksdb_skip_locks_if_skip_unique_check;
+
+CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(10,10);
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,0);
+
+--let $check_sql= SELECT COUNT(*) AS n, SUM(a) AS sa, (SELECT COUNT(*) FROM t FORCE INDEX(ka)) AS n_ka FROM t
+--let $check_leftover= SELECT COUNT(*) AS sql_leftovers FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%'
+
+connect (holder,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+connect (victim,localhost,root,,);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION rocksdb_lock_wait_timeout = 1;
+connect (ddl,localhost,root,,);
+SET SESSION lock_wait_timeout = 60;
+connection default;
+
+--echo #
+--echo # 1. Row-lock timeout while a COPY ALTER is queued, rollback_on_timeout
+--echo #    OFF (statement rollback) and ON (transaction rollback).
+--echo #
+--let $rot= 0
+while ($rot <= 1) {
+  eval SET GLOBAL rocksdb_rollback_on_timeout = $rot;
+  connection victim;
+  # The setting is read at the start of each transaction's statement.
+  eval SET SESSION rocksdb_lock_wait_timeout = 1;
+  connection holder;
+  BEGIN;
+  UPDATE t SET a = a + 100 WHERE id = 1;
+  connection victim;
+  BEGIN;
+  UPDATE t2 SET v = v + 1 WHERE id = 1;
+  UPDATE t SET a = a + 1 WHERE id = 2;
+  connection ddl;
+  --send_eval ALTER TABLE t ADD COLUMN c$rot INT, ALGORITHM=COPY
+  connection victim;
+  let $wait_condition= SELECT COUNT(*) = 1 FROM performance_schema.processlist
+    WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN%';
+  --source include/wait_condition.inc
+  --error ER_LOCK_WAIT_TIMEOUT
+  UPDATE t SET a = a + 10 WHERE id = 1;
+  --echo # Earlier writes of the victim kept (OFF) or rolled back (ON):
+  SELECT v AS victim_t2 FROM t2 WHERE id = 1;
+  SELECT a AS victim_id2 FROM t WHERE id = 2;
+  --echo # The ALTER still waits: the victim's metadata lock is kept
+  --echo # (OFF) or, after the transaction rollback, only the holder's (ON).
+  SELECT COUNT(*) AS alter_waiting FROM performance_schema.processlist
+    WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN%';
+  COMMIT;
+  connection holder;
+  COMMIT;
+  connection ddl;
+  --reap
+  connection default;
+  eval $check_sql;
+  SELECT * FROM t2;
+  UPDATE t SET a = id;
+  UPDATE t2 SET v = 0;
+  inc $rot;
+}
+SET GLOBAL rocksdb_rollback_on_timeout = @save_rot;
+CHECK TABLE t;
+eval $check_leftover;
+
+--echo #
+--echo # 2. rocksdb_max_row_locks exceeded by a DML transaction while a COPY
+--echo #    ALTER is queued: the statement fails, the transaction and its
+--echo #    metadata lock stay until ROLLBACK.
+--echo #
+connection victim;
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+UPDATE t SET a = a WHERE id = 1;
+SET SESSION rocksdb_max_row_locks = 3;
+connection ddl;
+--send ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY
+connection victim;
+let $wait_condition= SELECT COUNT(*) = 1 FROM performance_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN d%';
+--source include/wait_condition.inc
+--error ER_GET_ERRMSG
+UPDATE t SET a = a + 1;
+SELECT v AS victim_t2 FROM t2 WHERE id = 1;
+SELECT COUNT(*) AS alter_waiting FROM performance_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN d%';
+ROLLBACK;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+connection ddl;
+--reap
+connection default;
+eval $check_sql;
+SELECT * FROM t2;
+
+--echo #
+--echo # 3. rocksdb_max_row_locks applies to the DDL session itself: a COPY
+--echo #    ALTER that needs more row locks fails, the table is unchanged and
+--echo #    no #sql table is left; INPLACE ADD INDEX takes no row locks.
+--echo #
+connection ddl;
+SET SESSION rocksdb_max_row_locks = 3;
+--error ER_GET_ERRMSG
+ALTER TABLE t ADD COLUMN e INT, ALGORITHM=COPY;
+ALTER TABLE t ADD INDEX kx (a, id), ALGORITHM=INPLACE;
+SET SESSION rocksdb_lock_scanned_rows = ON;
+--error ER_GET_ERRMSG
+ALTER TABLE t ADD COLUMN e INT, ALGORITHM=COPY;
+SET SESSION rocksdb_lock_scanned_rows = DEFAULT;
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+connection default;
+SHOW CREATE TABLE t;
+eval $check_sql;
+eval $check_leftover;
+CHECK TABLE t;
+
+--echo #
+--echo # 4. rocksdb_lock_scanned_rows: an UPDATE that scans the whole table
+--echo #    keeps the locks of rows it did not change (ON) or releases them
+--echo #    (OFF); a writer of such a row waits only with ON.
+--echo #
+--let $lsr= 0
+while ($lsr <= 1) {
+  connection holder;
+  eval SET SESSION rocksdb_lock_scanned_rows = $lsr;
+  BEGIN;
+  UPDATE t SET a = a + 1 WHERE a + 0 = 9;
+  connection victim;
+  BEGIN;
+  if ($lsr) {
+    --error ER_LOCK_WAIT_TIMEOUT
+    UPDATE t SET a = a + 1 WHERE id = 2;
+  }
+  if (!$lsr) {
+    UPDATE t SET a = a + 1 WHERE id = 2;
+  }
+  COMMIT;
+  connection holder;
+  COMMIT;
+  inc $lsr;
+}
+SET SESSION rocksdb_lock_scanned_rows = DEFAULT;
+connection default;
+eval $check_sql;
+
+--echo #
+--echo # 5. rocksdb_deadlock_detect with a small depth: a deadlock between two
+--echo #    DML transactions while a COPY ALTER waits for both; the victim is
+--echo #    rolled back, the ALTER completes after the survivor commits.
+--echo #
+connection holder;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 3;
+connection victim;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_deadlock_detect_depth = 2;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+BEGIN;
+UPDATE t SET a = a + 1 WHERE id = 4;
+connection ddl;
+--send ALTER TABLE t ADD COLUMN f INT, ALGORITHM=COPY
+connection holder;
+let $wait_condition= SELECT COUNT(*) = 1 FROM performance_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE t ADD COLUMN f%';
+--source include/wait_condition.inc
+--send UPDATE t SET a = a + 1 WHERE id = 4
+connection victim;
+let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE WAITING_KEY <> '';
+--source include/wait_condition.inc
+--error ER_LOCK_DEADLOCK
+UPDATE t SET a = a + 1 WHERE id = 3;
+ROLLBACK;
+connection holder;
+--reap
+COMMIT;
+SET SESSION rocksdb_deadlock_detect = DEFAULT;
+SET SESSION rocksdb_deadlock_detect_depth = DEFAULT;
+connection ddl;
+--reap
+connection default;
+eval $check_sql;
+SELECT id, a FROM t WHERE id IN (3, 4);
+
+--echo #
+--echo # 6. rocksdb_skip_locks_if_skip_unique_check with unique_checks=0: on a
+--echo #    table with only a primary key, INSERT takes no row lock and does no
+--echo #    duplicate check, so a concurrent insert of the same key does not
+--echo #    wait and the last committer silently wins (documented: the user
+--echo #    guarantees there are no duplicates). Without the setting the second
+--echo #    insert waits. UPDATE still locks the row when it reads it.
+--echo #
+--let $skip= 0
+while ($skip <= 1) {
+  eval SET GLOBAL rocksdb_skip_locks_if_skip_unique_check = $skip;
+  connection holder;
+  SET SESSION unique_checks = 0;
+  BEGIN;
+  eval INSERT INTO t2 VALUES (10 + $skip, 1);
+  connection victim;
+  SET SESSION unique_checks = 0;
+  SET SESSION rocksdb_lock_wait_timeout = 1;
+  if ($skip) {
+    eval INSERT INTO t2 VALUES (10 + $skip, 2);
+  }
+  if (!$skip) {
+    --error ER_LOCK_WAIT_TIMEOUT
+    eval INSERT INTO t2 VALUES (10 + $skip, 2);
+  }
+  connection holder;
+  COMMIT;
+  SET SESSION unique_checks = 1;
+  connection victim;
+  SET SESSION unique_checks = 1;
+  connection default;
+  eval SELECT * FROM t2 WHERE id = 10 + $skip;
+  inc $skip;
+}
+connection holder;
+SET SESSION unique_checks = 0;
+BEGIN;
+UPDATE t2 SET v = v + 1 WHERE id = 1;
+connection victim;
+SET SESSION unique_checks = 0;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t2 SET v = v + 10 WHERE id = 1;
+connection holder;
+COMMIT;
+SET SESSION unique_checks = 1;
+connection victim;
+SET SESSION unique_checks = 1;
+connection default;
+SET GLOBAL rocksdb_skip_locks_if_skip_unique_check = @save_skip;
+SELECT * FROM t2 ORDER BY id;
+CHECK TABLE t2;
+
+--echo #
+--echo # Final consistency
+--echo #
+SHOW CREATE TABLE t;
+eval $check_sql;
+eval $check_leftover;
+CHECK TABLE t;
+--source include/restart_mysqld.inc
+eval $check_sql;
+CHECK TABLE t;
+
+disconnect holder;
+disconnect victim;
+disconnect ddl;
+DROP TABLE t, t2;
+--source include/wait_until_count_sessions.inc

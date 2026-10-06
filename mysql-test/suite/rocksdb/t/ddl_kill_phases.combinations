@@ -1,0 +1,9 @@
+[default]
+
+[rollback_on_timeout_skip_locks]
+rocksdb_rollback_on_timeout=ON
+rocksdb_skip_locks_if_skip_unique_check=ON
+
+[deadlock_detect_lock_scanned_rows]
+rocksdb_deadlock_detect=ON
+rocksdb_lock_scanned_rows=ON

@@ -1,0 +1,122 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Port of innodb.deadlock_in_subquery to MyRocks.
+# Bug #34616560: assert failure after deadlock detection, when the
+# deadlock is detected for a lock request made by a subquery of an UPDATE.
+#
+# Changes from the InnoDB original:
+#   - ENGINE=ROCKSDB (the tables have no primary key, so MyRocks uses a
+#     hidden one), and rocksdb_deadlock_detect=ON.
+#   - Both sessions run at READ COMMITTED: the UPDATE statements scan whole
+#     tables without a unique key, which the gap-lock rule refuses inside a
+#     multi-statement transaction at REPEATABLE READ.
+#   - The scenario does not deadlock on MyRocks. InnoDB's UPDATE takes
+#     shared locks on the t2 rows its subquery reads, so c0 waits for c1, and
+#     c1's UPDATE of t3 then closes a cycle. MyRocks reads the subquery's rows
+#     without locking them (row-based binlog, READ COMMITTED), so c0's UPDATE
+#     completes while c1 still holds its t2 locks, and c1's UPDATE of t3 just
+#     waits for c0 to commit. The test keeps the original statements and
+#     checks that both transactions finish with the expected data.
+#
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+
+CREATE TABLE t1 (
+  column1 int NOT NULL
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 VALUES (80);
+
+CREATE TABLE t2 (
+  column1 int DEFAULT NULL,
+  column2 double DEFAULT NULL,
+  column3 text,
+  column4 double DEFAULT NULL
+) ENGINE=ROCKSDB;
+
+INSERT INTO t2 VALUES
+(77,76.1,'abc',NULL),
+(81,NULL,'abcd',86.71),
+(83,95.58,'abcde',67.74);
+
+CREATE TABLE t3 (
+  column1 int DEFAULT NULL,
+  x text
+) ENGINE=ROCKSDB;
+
+INSERT INTO t3 VALUES
+(76,''),
+(82,'');
+
+--connect(c0,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+--connect(c1,localhost,root,,)
+  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+--connection c1
+  START TRANSACTION;
+  update t2 set column1 = 125;
+
+--connection c0
+  START TRANSACTION;
+  update t3 set x = case when exists ( select ref_2.column2 as c0 from t2 as ref_2 window w_cc03ob as ( partition by ref_2.column3 order by ref_2.column4 desc)) then null else 24 end where exists (select distinct * from t1);
+  --echo # c0's UPDATE did not wait for c1's locks on t2.
+
+--connection c1
+  --let $c1 = `SELECT CONNECTION_ID()`
+  update t2 set column1 = 122;
+  --send update t3 set column1 = 123
+
+--connection c0
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $c1 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --echo # c1 waits for c0's locks on t3; there is no cycle.
+  COMMIT;
+
+--connection c1
+  --reap
+  COMMIT;
+
+--echo #
+--echo # Scenario 2: the original bug was an assertion when the deadlock is
+--echo # detected for a lock request made inside a subquery. With an explicit
+--echo # FOR SHARE in the subquery, c0's subquery request closes the cycle and
+--echo # c0 is the victim.
+--echo #
+--connection c0
+  START TRANSACTION;
+  SELECT COUNT(*) FROM t3 FOR UPDATE;
+
+--connection c1
+  START TRANSACTION;
+  update t2 set column1 = 130;
+  --send update t3 set column1 = 131
+
+--connection c0
+  --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $c1 AND waiting_key != ''
+  --source include/wait_condition.inc
+  --error ER_LOCK_DEADLOCK
+  update t1 set column1 = 81 where exists (select * from t2 where column1 = 130 for share);
+  --echo # The deadlock rolled back c0's whole transaction, so c1 continues.
+
+--connection c1
+  --reap
+  COMMIT;
+
+--connection default
+SELECT * FROM t2 ORDER BY column3;
+SELECT * FROM t3 ORDER BY column1;
+
+--disconnect c0
+--disconnect c1
+drop table t1;
+drop table t2;
+drop table t3;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+--source include/wait_until_count_sessions.inc
