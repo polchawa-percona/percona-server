@@ -1,0 +1,33 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/count_sessions.inc
+
+#
+# The stall-prone concurrent COPY and INSTANT ALTER loops of
+# ddl_concurrent_copy_alter_stall (tiny write buffer, low L0 slowdown and stop
+# triggers, background work paused at times), run under non-default RocksDB
+# background tuning: a single background job, subcompactions and bottom-priority
+# compactions, the write buffer manager with a small global memtable budget,
+# rate-limited SST file deletion with a short obsolete-file period, and a small
+# WAL budget, few open files and a low delayed-write rate. These settings change
+# when flushes and compactions run, so ALTERs holding their metadata locks wait
+# on stalled writes in different ways. No ALTER may hang, and every table must
+# keep all of its rows. See ddl_concurrent_bg_tuning_copy_alter.combinations.
+#
+
+# With rocksdb_sst_mgr_rate_bytes_per_sec > 0 the RocksDB delete scheduler also
+# handles obsolete WAL files, and RocksDB's own purge sometimes schedules the
+# same WAL file twice; the second rename fails because the file is already gone
+# and RocksDB logs an error. No data is affected and MyRocks only forwards the
+# RocksDB log line, so the message is suppressed here.
+--disable_query_log
+call mtr.add_suppression("Failed to mark .*[.]log as trash -- IO error: No such file or directory");
+--enable_query_log
+
+--let $ntab= 4
+--let $nrows= 20000
+--let $iters= 8
+--let $chaos= 1
+--let $chaos_iters= 40
+--let $chaos_pause= 1
+--source suite/rocksdb/include/ddl_concurrent_copy_alter.inc
