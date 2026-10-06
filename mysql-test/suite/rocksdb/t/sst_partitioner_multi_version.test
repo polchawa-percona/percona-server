@@ -1,0 +1,46 @@
+#
+# PS-11725: with rocksdb_bulk_load_use_sst_partitioner=ON, a session that bulk
+# loads (or builds an index INPLACE) registers its index ids in the column
+# family's SST partitioner, which then runs in every compaction into the bottom
+# level of that column family. Rdb_index_boundary_sst_partitioner::
+# ShouldPartition() asserted that the current user key is strictly greater than
+# the previous one, but a compaction passes several versions of the same user
+# key when an open snapshot (another transaction, or the index build itself)
+# still needs the older versions, so debug builds aborted in the compaction
+# thread.
+# Expected: the compaction completes and both tables have their rows.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (bl,localhost,root,,);
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 VALUES (1, 1), (2, 2);
+
+connect (snap,localhost,root,,);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t1;
+
+connection default;
+--echo # two more versions of every t1 row, kept for the open snapshot
+UPDATE t1 SET a = a + 10;
+UPDATE t1 SET a = a + 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT * FROM t1;
+
+connection snap;
+SELECT * FROM t1;
+COMMIT;
+connection bl;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM t2;
+connection default;
+disconnect bl;
+disconnect snap;
+DROP TABLE t1, t2;

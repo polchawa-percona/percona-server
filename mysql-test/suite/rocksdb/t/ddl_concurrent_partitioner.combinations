@@ -1,0 +1,11 @@
+[partitioner]
+rocksdb_bulk_load_use_sst_partitioner=ON
+
+[partitioner_bottommost]
+rocksdb_bulk_load_use_sst_partitioner=ON
+rocksdb_bulk_load_fail_if_not_bottommost_level=ON
+
+[partitioner_small_sst]
+rocksdb_bulk_load_use_sst_partitioner=ON
+rocksdb_bulk_load_fail_if_not_bottommost_level=ON
+rocksdb_default_cf_options=write_buffer_size=64k;target_file_size_base=64k;level0_file_num_compaction_trigger=2;max_bytes_for_level_base=256k
