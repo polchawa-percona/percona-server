@@ -4794,6 +4794,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
   }
 
   void do_rollback_to_savepoint() override {
+    // Simulates a failed RollbackToSavePoint() that left the statement's
+    // writes in place (possible with write_unprepared).
+    DBUG_EXECUTE_IF("myrocks_rollback_to_savepoint_error", return;);
     m_rocksdb_tx->RollbackToSavePoint();
   }
 
@@ -12752,6 +12755,8 @@ static int delete_range(const std::unordered_set<GL_INDEX_ID> &indices) {
   optimize.skip_duplicate_key_check = true;
   rocksdb::Status status =
       rdb->Write(rocksdb::WriteOptions(), optimize, &batch);
+  DBUG_EXECUTE_IF("myrocks_delete_range_write_error",
+                  { status = rocksdb::Status::IOError("debug"); });
 
   if (status.ok()) {
     if (!rdb_sync_wal_supported()) {

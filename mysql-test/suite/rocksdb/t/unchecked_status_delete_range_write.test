@@ -1,0 +1,49 @@
+#
+# DROP TABLE with rocksdb_enable_delete_range_for_drop_index=ON writes the
+# DeleteRange batch for the table's indexes with rdb->Write() in
+# delete_range(), and ignores the returned status. If that write fails, DROP
+# TABLE still succeeds and removes the table from both dictionaries, so the
+# rows stay in the column family forever under index ids nobody owns.
+#
+# The correct behaviour is that the failure is not silent: with
+# rocksdb_io_error_action=IGNORE_ERROR (no server abort), DROP TABLE must fail
+# and the table must stay intact.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+SET @saved_delete_range = @@global.rocksdb_enable_delete_range_for_drop_index;
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+SET GLOBAL rocksdb_io_error_action = IGNORE_ERROR;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, KEY k_v (v)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE seq (n) AS
+  (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+  SELECT n, n * 10 FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--echo # The DeleteRange write fails.
+SET SESSION debug = '+d,myrocks_delete_range_write_error';
+--disable_result_log
+--disable_abort_on_error
+DROP TABLE t1;
+--enable_abort_on_error
+--enable_result_log
+--let $drop_errno = $mysql_errno
+SET SESSION debug = '-d,myrocks_delete_range_write_error';
+
+--let $assert_text = DROP TABLE reports the failed DeleteRange write
+--let $assert_cond = $drop_errno != 0
+--source include/assert.inc
+
+--echo # The table and all its rows are still there.
+SELECT COUNT(*) FROM information_schema.tables
+  WHERE table_schema = 'test' AND table_name = 't1';
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (k_v);
+CHECK TABLE t1;
+
+DROP TABLE IF EXISTS t1;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @saved_delete_range;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
