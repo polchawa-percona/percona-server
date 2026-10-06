@@ -1,0 +1,86 @@
+#
+# rocksdb_validate_tables=0 turns off the startup check that the MyRocks
+# dictionary agrees with the server's data dictionary. With 1 (the default)
+# MyRocks refuses to start on a mismatch, with 2 it logs it and continues.
+#
+# This test leaves a mismatch after a DDL crash and checks that with 0:
+# - MyRocks starts and logs no validation error;
+# - leftover "#sql-..." tables of an interrupted COPY ALTER are still
+#   reported with a warning, because that report does not depend on the
+#   validation; they remain visible in INFORMATION_SCHEMA.ROCKSDB_DDL and can
+#   be dropped;
+# - a table that the server still lists but MyRocks no longer has can be
+#   removed with DROP TABLE IF EXISTS and created again.
+# The mismatches themselves are bugs (PS-11666, PS-11680/PS-11681) and are
+# asserted by their own tests; only the behaviour of the setting is pinned here.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Schema mismatch");
+call mtr.add_suppression("Attempt to open a table that is not present in RocksDB-SE");
+call mtr.add_suppression("is a leftover of an interrupted ALTER TABLE");
+
+--let $error_log= $MYSQLTEST_VARDIR/log/mysqld.1.err
+SELECT @@global.rocksdb_validate_tables;
+
+--echo #
+--echo # 1. Interrupted COPY ALTER: the copy has committed, the server dies
+--echo #    before the renames. The intermediate table stays in MyRocks only.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+connect (con1,localhost,root,,test);
+SET DEBUG_SYNC='alter_table_before_rename_result_table SIGNAL at_rename WAIT_FOR never';
+--send ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR at_rename';
+--source include/kill_mysqld.inc
+disconnect con1;
+--source include/start_mysqld.inc
+SELECT * FROM t1 ORDER BY id;
+SELECT COUNT(DISTINCT TABLE_NAME) AS leftovers FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+--let $assert_file= $error_log
+--let $assert_select= is a leftover of an interrupted ALTER TABLE
+--let $assert_count= 1
+--let $assert_text= With validate_tables=0 the leftover is still reported
+--source include/assert_grep.inc
+--let $leftover= `SELECT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%' LIMIT 1`
+--replace_result $leftover #sql-LEFTOVER
+--eval DROP TABLE `test`.`$leftover`
+SELECT COUNT(*) AS leftovers FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+DROP TABLE t1;
+
+--echo #
+--echo # 2. DROP TABLE: crash after the MyRocks dictionary commit, before the
+--echo #    server's data dictionary commit (PS-11666 window).
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+--let $assert_select= Problems validating
+--let $assert_count= 0
+--let $assert_text= With validate_tables=0 no validation error is logged
+--source include/assert_grep.inc
+--disable_warnings
+DROP TABLE IF EXISTS t1;
+--enable_warnings
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (4,4);
+SELECT * FROM t1;
+DROP TABLE t1;
+--echo # Both dictionaries agree again: MyRocks starts with validate_tables=1.
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+--let $restart_parameters =
+--source include/restart_mysqld.inc

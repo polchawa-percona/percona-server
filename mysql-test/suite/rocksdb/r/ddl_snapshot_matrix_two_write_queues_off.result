@@ -1,0 +1,407 @@
+CREATE TABLE t_base (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_base VALUES (1);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+#
+# 1. DDL kinds against an older snapshot. Mode 0: START TRANSACTION WITH
+#    CONSISTENT SNAPSHOT; mode 1: BEGIN and a first read; mode 2: READ
+#    COMMITTED.
+#
+CREATE TABLE t_di (id INT PRIMARY KEY, v INT, w INT, KEY kv (v), KEY kw (w)) ENGINE=ROCKSDB;
+INSERT INTO t_di VALUES (1,10,100),(2,20,200),(3,30,300);
+CREATE TABLE t_ri (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t_ri VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t_tp (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t_tp VALUES (1,1),(2,2),(11,11),(12,12),(21,21);
+CREATE TABLE t_rp (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t_rp VALUES (1,1),(2,2),(11,11),(12,12),(21,21);
+CREATE TABLE t_cs (id INT PRIMARY KEY, s VARCHAR(20), KEY ks (s)) ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t_cs VALUES (1,'a'),(2,'b'),(3,'c');
+CREATE TABLE t_dc (id INT PRIMARY KEY, v INT, w INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t_dc VALUES (1,10,100),(2,20,200),(3,30,300);
+# Mode 0: consistent snapshot
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t_di DROP INDEX kw, ALGORITHM=INPLACE;
+ALTER TABLE t_ri RENAME INDEX kv TO kv2;
+ALTER TABLE t_tp TRUNCATE PARTITION p1;
+ALTER TABLE t_rp REORGANIZE PARTITION p1 INTO
+(PARTITION p1a VALUES LESS THAN (15), PARTITION p1b VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE t_cs CONVERT TO CHARACTER SET utf8mb4;
+ALTER TABLE t_dc DROP COLUMN w, ALGORITHM=COPY;
+# An INPLACE ADD/DROP INDEX keeps the other indexes readable.
+SELECT * FROM t_di ORDER BY id;
+id	v	w
+1	10	100
+2	20	200
+3	30	300
+# RENAME INDEX rebuilds the table.
+SELECT * FROM t_ri FORCE INDEX (PRIMARY) ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT v FROM t_ri FORCE INDEX (kv2) ORDER BY v;
+ERROR HY000: Table definition has changed, please retry transaction
+# TRUNCATE PARTITION: the untouched partition stays readable.
+SELECT * FROM t_tp ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_tp PARTITION (p0) ORDER BY id;
+id	v
+1	1
+2	2
+# REORGANIZE PARTITION rebuilds the whole table.
+SELECT * FROM t_rp ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_rp WHERE id < 10 ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+# CONVERT TO CHARACTER SET and COPY ALTER rebuild the table.
+SELECT * FROM t_cs ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_dc ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT COUNT(*) FROM t_di;
+COUNT(*)
+3
+SELECT * FROM t_tp ORDER BY id;
+id	v
+1	1
+2	2
+21	21
+SELECT * FROM t_rp ORDER BY id;
+id	v
+1	1
+2	2
+11	11
+12	12
+21	21
+SELECT * FROM t_cs ORDER BY id;
+id	s
+1	a
+2	b
+3	c
+SELECT * FROM t_dc ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+# Mode 1: BEGIN and a first read
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t_di DROP INDEX kv, ALGORITHM=INPLACE;
+ALTER TABLE t_ri RENAME INDEX kv2 TO kv;
+ALTER TABLE t_tp TRUNCATE PARTITION p2;
+ALTER TABLE t_rp REORGANIZE PARTITION p1a, p1b INTO
+(PARTITION p1 VALUES LESS THAN (20));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE t_cs CONVERT TO CHARACTER SET latin1;
+ALTER TABLE t_dc ADD COLUMN w INT, ALGORITHM=COPY;
+# An INPLACE ADD/DROP INDEX keeps the other indexes readable.
+SELECT * FROM t_di ORDER BY id;
+id	v	w
+1	10	100
+2	20	200
+3	30	300
+# RENAME INDEX rebuilds the table.
+SELECT * FROM t_ri FORCE INDEX (PRIMARY) ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT v FROM t_ri FORCE INDEX (kv) ORDER BY v;
+ERROR HY000: Table definition has changed, please retry transaction
+# TRUNCATE PARTITION: the untouched partition stays readable.
+SELECT * FROM t_tp ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_tp PARTITION (p0) ORDER BY id;
+id	v
+1	1
+2	2
+# REORGANIZE PARTITION rebuilds the whole table.
+SELECT * FROM t_rp ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_rp WHERE id < 10 ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+# CONVERT TO CHARACTER SET and COPY ALTER rebuild the table.
+SELECT * FROM t_cs ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT * FROM t_dc ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT COUNT(*) FROM t_di;
+COUNT(*)
+3
+SELECT * FROM t_tp ORDER BY id;
+id	v
+1	1
+2	2
+SELECT * FROM t_rp ORDER BY id;
+id	v
+1	1
+2	2
+11	11
+12	12
+21	21
+SELECT * FROM t_cs ORDER BY id;
+id	s
+1	a
+2	b
+3	c
+SELECT * FROM t_dc ORDER BY id;
+id	v	w
+1	10	NULL
+2	20	NULL
+3	30	NULL
+# Mode 2: READ COMMITTED
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+ALTER TABLE t_di ADD INDEX kw (w), ALGORITHM=INPLACE;
+ALTER TABLE t_ri RENAME INDEX kv TO kv2;
+ALTER TABLE t_tp TRUNCATE PARTITION p0;
+ALTER TABLE t_rp REORGANIZE PARTITION p2 INTO
+(PARTITION p2a VALUES LESS THAN (30), PARTITION p2b VALUES LESS THAN MAXVALUE);
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE t_cs CONVERT TO CHARACTER SET utf8mb4;
+ALTER TABLE t_dc DROP COLUMN w, ALGORITHM=COPY;
+# An INPLACE ADD/DROP INDEX keeps the other indexes readable.
+SELECT * FROM t_di ORDER BY id;
+id	v	w
+1	10	100
+2	20	200
+3	30	300
+# RENAME INDEX rebuilds the table.
+SELECT * FROM t_ri FORCE INDEX (PRIMARY) ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SELECT v FROM t_ri FORCE INDEX (kv2) ORDER BY v;
+v
+10
+20
+30
+# TRUNCATE PARTITION: the untouched partition stays readable.
+SELECT * FROM t_tp ORDER BY id;
+id	v
+SELECT * FROM t_tp PARTITION (p0) ORDER BY id;
+id	v
+# REORGANIZE PARTITION rebuilds the whole table.
+SELECT * FROM t_rp ORDER BY id;
+id	v
+1	1
+2	2
+11	11
+12	12
+21	21
+SELECT * FROM t_rp WHERE id < 10 ORDER BY id;
+id	v
+1	1
+2	2
+# CONVERT TO CHARACTER SET and COPY ALTER rebuild the table.
+SELECT * FROM t_cs ORDER BY id;
+id	s
+1	a
+2	b
+3	c
+SELECT * FROM t_dc ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT COUNT(*) FROM t_di;
+COUNT(*)
+3
+SELECT * FROM t_tp ORDER BY id;
+id	v
+SELECT * FROM t_rp ORDER BY id;
+id	v
+1	1
+2	2
+11	11
+12	12
+21	21
+SELECT * FROM t_cs ORDER BY id;
+id	s
+1	a
+2	b
+3	c
+SELECT * FROM t_dc ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+DROP TABLE t_di, t_ri, t_tp, t_rp, t_cs, t_dc;
+#
+# 2. Bulk load: a session with loaded but not yet ingested rows
+#    (rocksdb_bulk_load=1) and DDL from another session. A COPY ALTER in
+#    this window loses the rows; that case is in the disabled
+#    rocksdb.ddl_bulk_load_copy_alter.
+#
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11),(12,12);
+# INPLACE ADD INDEX: the new index also gets the ingested rows.
+ALTER TABLE tb ADD INDEX kv (v), ALGORITHM=INPLACE;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM tb FORCE INDEX (PRIMARY) ORDER BY id;
+id	v
+1	1
+10	10
+11	11
+12	12
+SELECT v FROM tb FORCE INDEX (kv) ORDER BY v;
+v
+1
+10
+11
+12
+CHECK TABLE tb;
+Table	Op	Msg_type	Msg_text
+test.tb	check	status	OK
+DROP TABLE tb;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11);
+# TRUNCATE after the loaded rows: the table ends up empty.
+TRUNCATE TABLE tb;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM tb ORDER BY id;
+id	v
+DROP TABLE tb;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11);
+# DROP and re-CREATE: the loaded rows do not reach the new table.
+DROP TABLE tb;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM tb ORDER BY id;
+id	v
+DROP TABLE tb;
+#
+# 3. A snapshot held while the drop-index thread reclaims indexes.
+#
+CREATE TABLE t (id INT PRIMARY KEY, v INT, w INT, KEY kv (v)) ENGINE=ROCKSDB;
+INSERT INTO t SELECT seq, seq % 100, seq FROM
+(WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 1000)
+SELECT seq FROM s) x;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+UPDATE t SET w = w + 1 WHERE id <= 10;
+# INPLACE DROP INDEX, reclaimed while the snapshot is held.
+ALTER TABLE t DROP INDEX kv, ALGORITHM=INPLACE;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# The snapshot still sees the rows from before the UPDATE.
+SELECT COUNT(*), SUM(w) FROM t;
+COUNT(*)	SUM(w)
+1000	500500
+SELECT w FROM t WHERE id = 5;
+w
+5
+COMMIT;
+SELECT COUNT(*), SUM(w) FROM t;
+COUNT(*)	SUM(w)
+1000	500510
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+COUNT(*)
+1
+# COPY ALTER, its old indexes reclaimed while the snapshot is held.
+ALTER TABLE t ADD INDEX kv (v), ALGORITHM=COPY;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t;
+ERROR HY000: Table definition has changed, please retry transaction
+COMMIT;
+SELECT COUNT(*) FROM t FORCE INDEX (kv);
+COUNT(*)
+1000
+#
+# 4. DDL with a large pending transaction (under write_unprepared its
+#    batches are already written), and failed DDL.
+#
+BEGIN;
+INSERT INTO t SELECT id + 10000, v, w FROM t;
+SET SESSION lock_wait_timeout = 1;
+# The pending transaction holds the metadata lock, so DDL times out.
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ALTER TABLE t ADD COLUMN x INT, ALGORITHM=COPY;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t FORCE INDEX (kv);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+COUNT(*)
+2000
+BEGIN;
+DELETE FROM t WHERE id > 10000;
+UPDATE t SET w = w + 1000000;
+ALTER TABLE t DROP INDEX kw, ALGORITHM=INPLACE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# The pending transaction rolls back after the failed DDL.
+ROLLBACK;
+ALTER TABLE t ADD COLUMN x INT, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(w) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(w)
+2000	1001020
+SELECT COUNT(*), SUM(w) FROM t FORCE INDEX (kw);
+COUNT(*)	SUM(w)
+2000	1001020
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+# A large pending transaction on another table does not block DDL.
+BEGIN;
+INSERT INTO t2 SELECT seq, seq FROM
+(WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 1000)
+SELECT seq FROM s) x;
+ALTER TABLE t DROP COLUMN x, ALGORITHM=COPY;
+ALTER TABLE t DROP INDEX kw, ALGORITHM=INPLACE;
+ALTER TABLE t ADD INDEX kw (w), ALGORITHM=INPLACE;
+COMMIT;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1000
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+COUNT(*)
+2000
+# Failed DDL leaves no index behind.
+ALTER TABLE t ADD UNIQUE INDEX uv (v), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-tmp.uv'
+ALTER TABLE t ADD UNIQUE INDEX uv (v), ALGORITHM=COPY;
+ERROR 23000: Duplicate entry '1' for key 't.uv'
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME = 't';
+COUNT(*)
+3
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t FORCE INDEX (kw);
+COUNT(*)
+2000
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t_base, t, t2;

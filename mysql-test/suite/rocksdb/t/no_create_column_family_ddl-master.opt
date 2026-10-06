@@ -1,0 +1,1 @@
+--rocksdb_no_create_column_family=1

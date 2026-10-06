@@ -11,3 +11,6 @@ rocksdb_compaction_sequential_deletes_window=2000
 [write_unprepared]
 rocksdb_write_policy=write_unprepared
 rocksdb_write_batch_flush_threshold=1
+
+[keep_orphaned_dropped_cfs]
+rocksdb_enable_remove_orphaned_dropped_cfs=OFF
