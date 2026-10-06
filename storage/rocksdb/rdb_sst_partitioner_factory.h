@@ -123,8 +123,11 @@ class Rdb_index_boundary_sst_partitioner : public rocksdb::SstPartitioner {
 
   rocksdb::PartitionerResult ShouldPartition(
       const rocksdb::PartitionerRequest &request) override {
+    // A compaction passes every version of a user key that a snapshot still
+    // needs, and CanDoTrivialMove() passes a file whose smallest and largest
+    // keys may be equal, so consecutive user keys can be equal.
     assert(m_comparator->Compare(*request.current_user_key,
-                                 *request.prev_user_key) > 0);
+                                 *request.prev_user_key) >= 0);
 
     if (m_comparator->Compare(*request.prev_user_key, m_max_index_key) > 0 ||
         m_comparator->Compare(*request.current_user_key, m_min_index_key) < 0) {
