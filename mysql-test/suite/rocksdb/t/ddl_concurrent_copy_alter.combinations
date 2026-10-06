@@ -7,3 +7,11 @@ rocksdb_write_policy=write_prepared
 [write_unprepared]
 rocksdb_write_policy=write_unprepared
 rocksdb_write_batch_flush_threshold=65536
+
+[instant_all]
+rocksdb_write_policy=write_committed
+rocksdb_enable_instant_ddl_for_append_column=ON
+rocksdb_enable_instant_ddl_for_column_default_changes=ON
+rocksdb_enable_instant_ddl_for_table_comment_changes=ON
+rocksdb_enable_instant_ddl_for_drop_index_changes=ON
+rocksdb_alter_table_comment_inplace=ON

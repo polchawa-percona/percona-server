@@ -1,0 +1,238 @@
+CREATE PROCEDURE alter_loop(tn VARCHAR(10), iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE CONTINUE HANDLER FOR 1213 SET @deadlocks = IFNULL(@deadlocks, 0) + 1;
+SET @me = CONNECTION_ID();
+WHILE i < iters DO
+SET @s = CONCAT('ALTER TABLE ', tn, ' ALTER COLUMN d SET DEFAULT ', i);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' COMMENT=''c', @me, '_', i, '''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' ADD COLUMN x', @me, '_', i, ' INT DEFAULT ', i);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' ADD INDEX k', @me, ' (a)');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' DROP COLUMN x', @me, '_', i);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE ', tn, ' DROP INDEX k', @me);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE part_loop(iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE CONTINUE HANDLER FOR 1213 SET @deadlocks = IFNULL(@deadlocks, 0) + 1;
+WHILE i < iters DO
+SET @s = CONCAT('ALTER TABLE t4 ADD PARTITION (PARTITION px', i, ' VALUES LESS THAN (', 1000001 + i, '))');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('ALTER TABLE t4 DROP PARTITION px', i);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE dml_loop(iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < iters DO
+UPDATE t2 SET c = c + 1 WHERE id = 1 + (i * 37) % 3000;
+UPDATE t3 SET c = c + 1 WHERE id = 1 + (i * 53) % 3000;
+UPDATE t5 SET c = c + 1 WHERE id = 1 + (i * 71) % 3000;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE PROCEDURE rc_loop(iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE t INT;
+SET @rc_bad = 0;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+WHILE i < iters DO
+SET t = 1;
+WHILE t <= 4 DO
+SET @s = CONCAT('SELECT COUNT(*), SUM(id) INTO @cnt, @sid FROM t', t);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('SELECT COUNT(*) INTO @cntb FROM t', t, ' FORCE INDEX(kb)');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+IF @cnt <> 3000 OR @cntb <> 3000 OR @sid <> 4501500 THEN
+SET @rc_bad = @rc_bad + 1;
+END IF;
+SET t = t + 1;
+END WHILE;
+SET i = i + 1;
+END WHILE;
+SELECT @rc_bad AS rc_bad_reads;
+END|
+CREATE PROCEDURE rr_loop(iters INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE t INT;
+DECLARE CONTINUE HANDLER FOR 1412 SET @rr_def_changed = @rr_def_changed + 1, @cnt = -1, @cntb = -1, @sid = -1;
+SET @rr_bad = 0, @rr_empty = 0, @rr_def_changed = 0;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+WHILE i < iters DO
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SET t = 1;
+WHILE t <= 3 DO
+DO SLEEP(0.05);
+SET @s = CONCAT('SELECT COUNT(*), SUM(id) INTO @cnt, @sid FROM t', t);
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+SET @s = CONCAT('SELECT COUNT(*) INTO @cntb FROM t', t, ' FORCE INDEX(kb)');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+IF @cnt = -1 OR @cntb = -1 THEN
+SET @cnt = -1;
+ELSEIF @cnt = 0 OR @cntb = 0 THEN
+SET @rr_empty = @rr_empty + 1;
+ELSEIF @cnt <> 3000 OR @cntb <> 3000 OR @sid <> 4501500 THEN
+SET @rr_bad = @rr_bad + 1;
+END IF;
+SET t = t + 1;
+END WHILE;
+COMMIT;
+SET i = i + 1;
+END WHILE;
+SELECT @rr_bad AS rr_bad_reads;
+END|
+SET SESSION lock_wait_timeout = 300;
+CALL alter_loop('t1', 6);
+SET SESSION lock_wait_timeout = 300;
+CALL alter_loop('t1', 6);
+SET SESSION lock_wait_timeout = 300;
+CALL alter_loop('t2', 6);
+SET SESSION lock_wait_timeout = 300;
+CALL alter_loop('t3', 6);
+SET SESSION lock_wait_timeout = 300;
+CALL part_loop(6);
+CALL dml_loop(2000);
+CALL rc_loop(150);
+CALL rr_loop(150);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT SUM(c) INTO @snap_c FROM t5;
+rc_bad_reads
+0
+rr_bad_reads
+0
+SELECT SUM(c) = @snap_c AS old_snapshot_of_t5_unchanged FROM t5;
+old_snapshot_of_t5_unchanged
+1
+COMMIT;
+# Final state: the same definition whatever algorithm each ALTER used.
+SELECT '1' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t1 FORCE INDEX(kb)) kb FROM t1;
+t	COUNT(*)	SUM(id)	kb
+1	3000	4501500	3000
+SELECT '2' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t2 FORCE INDEX(kb)) kb FROM t2;
+t	COUNT(*)	SUM(id)	kb
+2	3000	4501500	3000
+SELECT '3' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t3 FORCE INDEX(kb)) kb FROM t3;
+t	COUNT(*)	SUM(id)	kb
+3	3000	4501500	3000
+SELECT '4' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t4 FORCE INDEX(kb)) kb FROM t4;
+t	COUNT(*)	SUM(id)	kb
+4	3000	4501500	3000
+SELECT SUM(c) AS t2_t3_t5_updates FROM (SELECT c FROM t2 UNION ALL SELECT c FROM t3 UNION ALL SELECT c FROM t5) u;
+t2_t3_t5_updates
+6000
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(32) DEFAULT NULL,
+  `c` int NOT NULL,
+  `d` int DEFAULT '5',
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='c<conn>_5'
+SHOW CREATE TABLE t2;
+Table	Create Table
+t2	CREATE TABLE `t2` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(32) DEFAULT NULL,
+  `c` int NOT NULL,
+  `d` int DEFAULT '5',
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='c<conn>_5'
+SHOW CREATE TABLE t3;
+Table	Create Table
+t3	CREATE TABLE `t3` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` varchar(32) DEFAULT NULL,
+  `c` int NOT NULL,
+  `d` int DEFAULT '5',
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='c<conn>_5'
+SHOW CREATE TABLE t4;
+Table	Create Table
+t4	CREATE TABLE `t4` (
+  `id` int NOT NULL,
+  `b` varchar(32) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (`id`)
+(PARTITION p0 VALUES LESS THAN (1000000) ENGINE = ROCKSDB) */
+# An added column keeps its default across a restart, whatever the algorithm.
+ALTER TABLE t1 ADD COLUMN z INT DEFAULT 7;
+INSERT INTO t1 (id, a, b, c) VALUES (3001, 1, 'v3001', 0);
+SELECT COUNT(*), SUM(z) FROM t1;
+COUNT(*)	SUM(z)
+3001	21007
+SELECT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME LIKE '#sql%';
+TABLE_NAME
+SELECT COUNT(*) AS rocksdb_ddl_indexes_not_in_server
+FROM information_schema.ROCKSDB_DDL r
+WHERE r.TABLE_SCHEMA = 'test' AND NOT EXISTS
+(SELECT 1 FROM information_schema.STATISTICS s
+WHERE s.TABLE_SCHEMA = 'test' AND s.TABLE_NAME = SUBSTRING_INDEX(r.TABLE_NAME, '#', 1)
+AND (s.INDEX_NAME = r.INDEX_NAME OR r.INDEX_NAME = 'HIDDEN_PK_ID'));
+rocksdb_ddl_indexes_not_in_server
+0
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+SELECT COUNT(*) AS drop_ongoing FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+drop_ongoing
+0
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) AS orphan_sst_index_entries FROM
+(SELECT DISTINCT INDEX_NUMBER FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE COLUMN_FAMILY = 0) m
+WHERE INDEX_NUMBER NOT IN (SELECT INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+orphan_sst_index_entries
+0
+# restart
+SELECT COUNT(*), SUM(z), SUM(z = 7) FROM t1;
+COUNT(*)	SUM(z)	SUM(z = 7)
+3001	21007	3001
+SELECT '1' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t1 FORCE INDEX(kb)) kb FROM t1;
+t	COUNT(*)	SUM(id)	kb
+1	3001	4504501	3001
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT '2' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t2 FORCE INDEX(kb)) kb FROM t2;
+t	COUNT(*)	SUM(id)	kb
+2	3000	4501500	3000
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+SELECT '3' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t3 FORCE INDEX(kb)) kb FROM t3;
+t	COUNT(*)	SUM(id)	kb
+3	3000	4501500	3000
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+SELECT '4' t, COUNT(*), SUM(id), (SELECT COUNT(*) FROM t4 FORCE INDEX(kb)) kb FROM t4;
+t	COUNT(*)	SUM(id)	kb
+4	3000	4501500	3000
+CHECK TABLE t4;
+Table	Op	Msg_type	Msg_text
+test.t4	check	status	OK
+DROP PROCEDURE alter_loop;
+DROP PROCEDURE part_loop;
+DROP PROCEDURE dml_loop;
+DROP PROCEDURE rc_loop;
+DROP PROCEDURE rr_loop;
+DROP TABLE t1, t2, t3, t4, t5;
