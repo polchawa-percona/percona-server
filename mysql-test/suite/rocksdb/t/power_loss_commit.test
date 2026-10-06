@@ -1,0 +1,129 @@
+#
+# Commits must survive a power cut as promised by
+# rocksdb_flush_log_at_trx_commit, and what is lost with the lazy settings
+# must be a prefix of the most recent commits, never part of a transaction.
+#
+# The server runs on a file system that keeps unsynced writes to RocksDB
+# files in memory (rocksdb_fault_injection_options with "power_loss":true),
+# so a crash loses them as a power cut would. A plain kill does not lose
+# anything that was written to the OS, which is why the other crash tests
+# cannot tell a synced commit from an unsynced one.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, KEY k_v (v)) ENGINE=ROCKSDB;
+
+--let $check_rows = SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1
+
+--echo #
+--echo # 1. rocksdb_flush_log_at_trx_commit=1: every commit is synced and
+--echo #    survives.
+--echo #
+--disable_query_log
+--let $i = 1
+while ($i <= 100) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+BEGIN;
+while ($i <= 150) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+COMMIT;
+--enable_query_log
+--source ../include/simulate_power_loss.inc
+eval $check_rows;
+
+--echo #
+--echo # 2. For comparison, a plain kill on the normal file system loses
+--echo #    nothing with rocksdb_flush_log_at_trx_commit=2, even with no
+--echo #    background sync: the writes already reached the OS.
+--echo #
+--let $restart_parameters = restart: --rocksdb_fault_injection_options=
+--source include/restart_mysqld.inc
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+--disable_query_log
+while ($i <= 200) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+--enable_query_log
+--let $restart_parameters = restart
+--source include/kill_and_restart_mysqld.inc
+eval $check_rows;
+
+--echo #
+--echo # 3. rocksdb_flush_log_at_trx_commit=2 and 0 with the background sync
+--echo #    held back: the unsynced commits are lost on power loss, the synced
+--echo #    ones are kept.
+--echo #
+--let $mode = 2
+while ($mode >= 0) {
+  --echo # rocksdb_flush_log_at_trx_commit = $mode
+  SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+  eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $mode;
+  --disable_query_log
+  --let $j = 1
+  while ($j <= 50) {
+    eval INSERT INTO t1 VALUES (1000 * ($mode + 1) + $j, $j);
+    --inc $j
+  }
+  --enable_query_log
+  --source ../include/simulate_power_loss.inc
+  eval $check_rows;
+  --dec $mode
+  --dec $mode
+}
+
+--echo #
+--echo # 4. rocksdb_write_disable_wal=ON: rows that were only in the memtable
+--echo #    are lost, rows flushed to an SST file are kept.
+--echo #
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_write_disable_wal = ON;
+INSERT INTO t1 VALUES (5001, 1), (5002, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (5003, 3), (5004, 4);
+SET SESSION rocksdb_write_disable_wal = OFF;
+--source ../include/simulate_power_loss.inc
+SELECT id FROM t1 WHERE id > 5000 ORDER BY id;
+
+--echo #
+--echo # 5. rocksdb_flush_log_at_trx_commit=2 with the background sync running:
+--echo #    whatever is lost must be the most recent commits, and a
+--echo #    multi-statement transaction is kept whole or lost whole. The
+--echo #    server must also start with rocksdb_wal_recovery_mode=1 (absolute
+--echo #    consistency).
+--echo #
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+--disable_query_log
+--let $j = 1
+while ($j <= 300) {
+  eval INSERT INTO t1 VALUES (10000 + $j, $j);
+  if ($j == 150) {
+    BEGIN;
+    INSERT INTO t1 SELECT 20000 + seq, seq FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 40) SELECT seq FROM s) AS x;
+    COMMIT;
+  }
+  --inc $j
+}
+--enable_query_log
+--let $restart_parameters = restart: --rocksdb_wal_recovery_mode=1
+--source ../include/simulate_power_loss.inc
+--let $restart_parameters =
+SELECT COUNT(*) = IFNULL(MAX(id) - 10000, 0) AS prefix_kept
+  FROM t1 WHERE id BETWEEN 10001 AND 19999;
+--disable_query_log
+SELECT IFNULL(MAX(id), 10000) - 10000 INTO @last FROM t1
+  WHERE id BETWEEN 10001 AND 19999;
+SELECT COUNT(*) INTO @trx FROM t1 WHERE id > 20000;
+--enable_query_log
+SELECT @trx IN (0, 40) AS trx_whole,
+       (@last < 151 OR @trx = 40) AND (@trx = 0 OR @last >= 150) AS trx_in_order;
+SELECT (SELECT COUNT(*) FROM t1) = (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS sk_matches_pk;
+CHECK TABLE t1;
+
+DROP TABLE t1;
