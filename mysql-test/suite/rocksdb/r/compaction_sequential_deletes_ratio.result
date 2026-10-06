@@ -1,0 +1,39 @@
+SET @save_window = @@global.rocksdb_compaction_sequential_deletes_window;
+SET @save_deletes = @@global.rocksdb_compaction_sequential_deletes;
+SET @save_file_size = @@global.rocksdb_compaction_sequential_deletes_file_size;
+SET GLOBAL rocksdb_compaction_sequential_deletes_window = 1000;
+SET GLOBAL rocksdb_compaction_sequential_deletes = 500;
+SET GLOBAL rocksdb_compaction_sequential_deletes_file_size = 0;
+CREATE TABLE t (a INT PRIMARY KEY, b VARCHAR(100)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# File with 300 deletes only (100% deletes): marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+DELETE FROM t WHERE a <= 300;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+files_marked
+1
+# File with 200 puts and 400 deletes (67% deletes, threshold 50%): marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+DELETE FROM t WHERE a > 300 AND a <= 700;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+files_marked
+1
+# File with 450 puts and 150 deletes (25% deletes): not marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+DELETE FROM t WHERE a > 700 AND a <= 850;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+files_marked
+0
+DROP TABLE t;
+SET GLOBAL rocksdb_compaction_sequential_deletes_window = @save_window;
+SET GLOBAL rocksdb_compaction_sequential_deletes = @save_deletes;
+SET GLOBAL rocksdb_compaction_sequential_deletes_file_size = @save_file_size;

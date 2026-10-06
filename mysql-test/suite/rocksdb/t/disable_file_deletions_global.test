@@ -1,0 +1,84 @@
+#
+# rocksdb_disable_file_deletions is a session variable whose update function
+# calls DB::DisableFileDeletions() and remembers that in the connection's
+# MyRocks data; the connection re-enables deletions when it turns the variable
+# off or disconnects. SET GLOBAL runs the same update function: it disables
+# deletions on behalf of the connection that issued it, and the global value
+# stays ON after that connection has gone (or turned its session value off),
+# although obsolete SST files are being deleted again. A backup tool that
+# checks the global value from another connection is told that file deletions
+# are disabled while they are not.
+#
+# Correct behaviour: while @@global.rocksdb_disable_file_deletions is ON,
+# obsolete SST files are kept (or SET GLOBAL is rejected and the global value
+# stays OFF).
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (a INT PRIMARY KEY, b VARCHAR(100)) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 300)
+{
+  inc $i;
+  eval INSERT INTO t VALUES ($i, REPEAT('x', 100));
+}
+--enable_query_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Session scope: obsolete files are kept until the session turns it off.
+connect (con1,localhost,root,,);
+SET SESSION rocksdb_disable_file_deletions = ON;
+connection default;
+DELETE FROM t WHERE a <= 100;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--source suite/rocksdb/include/sst_files_on_disk.inc
+--let $assert_text = Obsolete SST files are kept while con1 disables deletions
+--let $assert_cond = $sst_on_disk > $sst_live
+--source include/assert.inc
+connection con1;
+SET SESSION rocksdb_disable_file_deletions = OFF;
+connection default;
+--source suite/rocksdb/include/wait_obsolete_sst_files.inc
+--let $assert_text = Obsolete SST files are deleted after con1 turns it off
+--let $assert_cond = $sst_on_disk = $sst_live
+--source include/assert.inc
+
+--echo # Global scope set by a connection that then disconnects.
+connection con1;
+--error 0,ER_LOCAL_VARIABLE,ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET GLOBAL rocksdb_disable_file_deletions = ON;
+disconnect con1;
+connection default;
+--source include/wait_until_count_sessions.inc
+DELETE FROM t WHERE a <= 200;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--sleep 2
+--source suite/rocksdb/include/sst_files_on_disk.inc
+--let $global_on = `SELECT @@global.rocksdb_disable_file_deletions`
+--let $assert_text = While the global value is ON obsolete SST files are kept
+--let $assert_cond = $global_on = 0 OR $sst_on_disk > $sst_live
+--source include/assert.inc
+SET GLOBAL rocksdb_disable_file_deletions = OFF;
+
+--echo # Global scope set, then the same connection turns its session value off.
+--error 0,ER_LOCAL_VARIABLE,ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET GLOBAL rocksdb_disable_file_deletions = ON;
+SET SESSION rocksdb_disable_file_deletions = OFF;
+DELETE FROM t WHERE a <= 300;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--sleep 2
+--source suite/rocksdb/include/sst_files_on_disk.inc
+--let $global_on = `SELECT @@global.rocksdb_disable_file_deletions`
+--let $assert_text = While the global value is ON obsolete SST files are kept
+--let $assert_cond = $global_on = 0 OR $sst_on_disk > $sst_live
+--source include/assert.inc
+--error 0,ER_LOCAL_VARIABLE,ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET GLOBAL rocksdb_disable_file_deletions = OFF;
+
+DROP TABLE t;
+--source suite/rocksdb/include/wait_obsolete_sst_files.inc
