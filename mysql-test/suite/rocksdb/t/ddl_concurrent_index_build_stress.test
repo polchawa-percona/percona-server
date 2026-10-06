@@ -1,0 +1,155 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+#
+# Four sessions repeatedly build (ADD INDEX + ADD UNIQUE INDEX, INPLACE) and drop
+# indexes on their own tables at the same time, two tables in the default column
+# family and two in a named one, while a fifth session runs point DML on another
+# table of the default column family and a sixth flushes the memtable and compacts
+# the default column family. After every round each index must hold exactly its
+# primary key's rows. At the end: CHECK TABLE, no data of dropped indexes after
+# the drop thread and a compaction, no leftover bulk-load files, and a clean
+# restart with rocksdb_validate_tables=1.
+# Combinations: default settings; small merge buffers (many merge chunks, merge
+# tmp file truncated in steps); DROP INDEX through DeleteRange; a session
+# rocksdb_write_batch_max_bytes for the concurrent DML; the minimal
+# rocksdb_merge_buf_size.
+#
+
+--let $cc3_iter = 4
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 (pk INT, a INT NOT NULL, b VARCHAR(32) NOT NULL, PRIMARY KEY(pk) COMMENT 'cfname=cc3a') ENGINE=ROCKSDB;
+CREATE TABLE t4 LIKE t3;
+CREATE TABLE w (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka(a)) ENGINE=ROCKSDB;
+--let $i = 1
+while ($i <= 4)
+{
+  --let $t = t$i
+  eval INSERT INTO $t WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 5000)
+    SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+  --inc $i
+}
+INSERT INTO w WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 5000) SELECT n, n FROM v;
+
+DELIMITER |;
+CREATE PROCEDURE wdml(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    UPDATE w SET a = a + 1 WHERE pk = 1 + (i * 37) % 5000;
+    DELETE FROM w WHERE pk = 1 + (i * 53) % 5000;
+    INSERT INTO w VALUES (1 + (i * 53) % 5000, i) ON DUPLICATE KEY UPDATE a = i;
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+
+--let $i = 1
+while ($i <= 6)
+{
+  connect (c$i,localhost,root,,);
+  --inc $i
+}
+
+--let $it = 1
+while ($it <= $cc3_iter)
+{
+  --let $i = 1
+  while ($i <= 4)
+  {
+    --let $t = t$i
+    --let $cmt =
+    if ($i > 2)
+    {
+      --let $cmt = COMMENT 'cfname=cc3a'
+    }
+    connection c$i;
+    --send_eval ALTER TABLE $t ADD INDEX ka(a) $cmt, ADD UNIQUE INDEX ub(b) $cmt, ALGORITHM=INPLACE
+    --inc $i
+  }
+  connection c5;
+  --send CALL wdml(300)
+  connection c6;
+  --send SET GLOBAL rocksdb_force_flush_memtable_now = 1
+  connection c6;
+  --reap
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  --let $i = 1
+  while ($i <= 5)
+  {
+    connection c$i;
+    --reap
+    --inc $i
+  }
+  connection default;
+  --let $i = 1
+  while ($i <= 4)
+  {
+    --let $ccic_table = t$i
+    --let $ccic_col = a
+    --let $ccic_key = ka
+    --let $r1 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(a))) FROM $ccic_table FORCE INDEX (ka)`
+    --let $r2 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(a))) FROM $ccic_table FORCE INDEX (PRIMARY)`
+    --let $r3 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(b))) FROM $ccic_table FORCE INDEX (ub)`
+    --let $r4 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(b))) FROM $ccic_table FORCE INDEX (PRIMARY)`
+    if ($r1 != $r2)
+    {
+      --echo # MISMATCH iteration $it $ccic_table.ka $r1 vs $r2
+    }
+    if ($r3 != $r4)
+    {
+      --echo # MISMATCH iteration $it $ccic_table.ub $r3 vs $r4
+    }
+    --inc $i
+  }
+  --let $wr1 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(a))) FROM w FORCE INDEX (ka)`
+  --let $wr2 = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(a))) FROM w FORCE INDEX (PRIMARY)`
+  if ($wr1 != $wr2)
+  {
+    --echo # MISMATCH iteration $it w.ka $wr1 vs $wr2
+  }
+  --let $i = 1
+  while ($i <= 4)
+  {
+    --let $t = t$i
+    connection c$i;
+    --send_eval ALTER TABLE $t DROP INDEX ka, DROP INDEX ub, ALGORITHM=INPLACE
+    --inc $i
+  }
+  connection c5;
+  --send CALL wdml(100)
+  --let $i = 1
+  while ($i <= 5)
+  {
+    connection c$i;
+    --reap
+    --inc $i
+  }
+  --inc $it
+}
+connection default;
+--echo # done $cc3_iter iterations
+CHECK TABLE t1, t2, t3, t4, w;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cc3a';
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--let $wait_timeout = 300
+--source include/wait_condition.inc
+SELECT COUNT(*) AS orphan_index_entries FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+  WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+--let $datadir = `SELECT @@datadir`
+--echo # leftover bulk-load files
+--exec ls $datadir/.rocksdb | grep -c bulk_load || true
+--let $restart_parameters = restart:--rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+CHECK TABLE t1, t2, t3, t4, w;
+--let $i = 1
+while ($i <= 6)
+{
+  disconnect c$i;
+  --inc $i
+}
+DROP PROCEDURE wdml;
+DROP TABLE t1, t2, t3, t4, w;

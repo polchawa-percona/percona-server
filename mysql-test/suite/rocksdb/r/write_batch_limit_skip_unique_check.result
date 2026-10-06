@@ -1,0 +1,29 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+# unique_checks=0, INSERT ... SELECT
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+SET SESSION unique_checks = 0;
+INSERT INTO t1 SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+# unique_checks=0, LOAD DATA
+SET SESSION unique_checks = 0;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+# Bulk load into a table without a primary key
+CREATE TABLE t2 (v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 SELECT v, k FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+0
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+DROP TABLE t1, t2, src;

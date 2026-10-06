@@ -1,0 +1,58 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11745: statements that take the skip-unique-check write path
+# (unique_checks=0 on a table whose only index is the primary key, bulk load
+# into a table without a primary key) must fail when the write batch exceeds
+# rocksdb_write_batch_max_bytes, as the same statements do without
+# unique_checks=0 or bulk load. ha_rocksdb::update_write_pk() ignores the
+# status of the Put on that path, so the statements succeed and keep only the
+# rows that fitted in the batch. PS-11683 is the same unchecked call reached
+# through DDL transactions.
+#
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--disable_query_log
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
+  inc $i;
+}
+--let $file = $MYSQLTEST_VARDIR/tmp/write_batch_limit_skip_unique_check.txt
+eval SELECT * INTO OUTFILE '$file' FROM src;
+--enable_query_log
+
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+
+--echo # unique_checks=0, INSERT ... SELECT
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+SET SESSION unique_checks = 0;
+--error ER_GET_ERRMSG
+INSERT INTO t1 SELECT * FROM src;
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t1;
+
+--echo # unique_checks=0, LOAD DATA
+SET SESSION unique_checks = 0;
+--disable_query_log
+--error ER_GET_ERRMSG
+eval LOAD DATA INFILE '$file' INTO TABLE t1;
+--enable_query_log
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t1;
+
+--echo # Bulk load into a table without a primary key
+CREATE TABLE t2 (v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+--error ER_GET_ERRMSG
+INSERT INTO t2 SELECT v, k FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t2;
+
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+--remove_file $file
+DROP TABLE t1, t2, src;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,161 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Session write-path limits must be enforced on every write path: a
+# statement that exceeds rocksdb_write_batch_max_bytes or
+# rocksdb_max_row_locks fails as a whole and leaves the table unchanged;
+# with rocksdb_commit_in_the_middle the limit applies per committed chunk
+# and the statement succeeds; a too small merge buffer makes INPLACE ADD
+# INDEX fail cleanly.
+#
+# Paths that do not honour rocksdb_write_batch_max_bytes are covered by
+# disabled tests:
+#   - DDL transactions (COPY ALTER, also partition reorganization):
+#     rocksdb.copy_alter_write_batch_max_bytes (PS-11683)
+#   - secondary index writes: rocksdb.write_batch_limit_sk_missing (PS-11744)
+#   - unique_checks=0 and bulk load without a primary key:
+#     rocksdb.write_batch_limit_skip_unique_check (PS-11745)
+# The statements below avoid those paths: tables written with a batch limit
+# either have no secondary index, or fail on a primary key write first.
+#
+
+# Multi-table statements and INSERT ... SELECT need READ COMMITTED (gap-lock
+# rule at REPEATABLE READ).
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--disable_query_log
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
+  inc $i;
+}
+--enable_query_log
+
+--echo #
+--echo # rocksdb_write_batch_max_bytes
+--echo #
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+--error ER_GET_ERRMSG
+INSERT INTO t1 SELECT * FROM src;
+SELECT COUNT(*) FROM t1;
+
+--error ER_GET_ERRMSG
+CREATE TABLE t2 ENGINE=ROCKSDB SELECT * FROM src;
+SHOW TABLES LIKE 't2';
+
+--error ER_GET_ERRMSG
+REPLACE INTO t1 SELECT * FROM src;
+SELECT COUNT(*) FROM t1;
+
+--let $file = $MYSQLTEST_VARDIR/tmp/write_limits_all_paths.txt
+--disable_query_log
+eval SELECT * INTO OUTFILE '$file' FROM src;
+--error ER_GET_ERRMSG
+eval LOAD DATA INFILE '$file' INTO TABLE t1;
+--enable_query_log
+--remove_file $file
+SELECT COUNT(*) FROM t1;
+
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+INSERT INTO t1 SELECT * FROM src;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+
+--error ER_GET_ERRMSG
+UPDATE t1, src SET t1.v = REPEAT('y', 150) WHERE t1.id = src.id;
+SELECT COUNT(*) FROM t1 WHERE v LIKE 'y%';
+
+--error ER_GET_ERRMSG
+DELETE t1 FROM t1, src WHERE t1.id = src.id;
+SELECT COUNT(*) FROM t1;
+
+--echo # INPLACE ADD INDEX writes SST files, not the write batch
+ALTER TABLE t1 ADD INDEX k (k), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k);
+CHECK TABLE t1;
+
+--echo # Bulk load with an explicit primary key writes SST files
+CREATE TABLE t3 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t3 SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t3 FORCE INDEX (k);
+
+TRUNCATE TABLE t3;
+SELECT COUNT(*) FROM t3;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+
+--echo #
+--echo # rocksdb_max_row_locks
+--echo #
+SET SESSION rocksdb_max_row_locks = 10;
+
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+--error ER_GET_ERRMSG
+INSERT INTO t4 SELECT * FROM src;
+SELECT COUNT(*) FROM t4;
+
+SET SESSION unique_checks = 0;
+CREATE TABLE t5 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+--error ER_GET_ERRMSG
+INSERT INTO t5 SELECT * FROM src;
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t5;
+
+--error ER_GET_ERRMSG
+CREATE TABLE t6 ENGINE=ROCKSDB SELECT * FROM src;
+SHOW TABLES LIKE 't6';
+
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+CREATE TABLE t7 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB
+  PARTITION BY HASH (id) PARTITIONS 2;
+INSERT INTO t7 SELECT * FROM src;
+SET SESSION rocksdb_max_row_locks = 10;
+--error ER_GET_ERRMSG
+ALTER TABLE t7 COALESCE PARTITION 1;
+SELECT COUNT(*) FROM t7 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t7 FORCE INDEX (k);
+--error ER_GET_ERRMSG
+UPDATE t7 SET v = 'q';
+SELECT COUNT(*) FROM t7 WHERE v = 'q';
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+
+--echo #
+--echo # rocksdb_commit_in_the_middle with small chunks under both limits
+--echo #
+SET SESSION rocksdb_commit_in_the_middle = ON, rocksdb_bulk_load_size = 10,
+            rocksdb_write_batch_max_bytes = 16384, rocksdb_max_row_locks = 50;
+CREATE TABLE t8 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t8 SELECT * FROM src;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+ALTER TABLE t8 FORCE, ALGORITHM=COPY;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+UPDATE t8 SET k = k + 10000;
+SELECT COUNT(*) FROM t8 FORCE INDEX (k) WHERE k >= 10000;
+DELETE FROM t8;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT, rocksdb_bulk_load_size = DEFAULT,
+            rocksdb_write_batch_max_bytes = DEFAULT, rocksdb_max_row_locks = DEFAULT;
+
+--echo #
+--echo # Minimal merge sort buffer for INPLACE ADD INDEX (many sorted chunks).
+--echo # A small rocksdb_merge_combine_read_size is PS-11637, not tested here.
+--echo #
+SET SESSION rocksdb_merge_buf_size = 100;
+SELECT @@SESSION.rocksdb_merge_buf_size;
+CREATE TABLE t9 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+INSERT INTO t9 SELECT * FROM src;
+ALTER TABLE t9 ADD INDEX k (k), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t9 FORCE INDEX (k);
+CHECK TABLE t9;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+
+DROP TABLE src, t1, t3, t4, t5, t7, t8, t9;
+--source include/wait_until_count_sessions.inc

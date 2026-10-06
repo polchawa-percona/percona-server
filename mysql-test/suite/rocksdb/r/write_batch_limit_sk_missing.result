@@ -1,0 +1,55 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Autocommit INSERT: the secondary key entry crosses the limit
+CREATE TABLE t1 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+INSERT INTO t1 VALUES (1, REPEAT('a', 300));
+INSERT INTO t1 VALUES (2, REPEAT('b', 450));
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (w);
+COUNT(*)
+1
+# UPDATE of the indexed column: the new entry crosses the limit
+CREATE TABLE t2 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t2 VALUES (1, 'a'), (2, 'b');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+UPDATE t2 SET w = REPEAT('z', 480) WHERE id = 1;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT id, w FROM t2 FORCE INDEX (PRIMARY) ORDER BY id;
+id	w
+1	a
+2	b
+SELECT COUNT(*) FROM t2 FORCE INDEX (w);
+COUNT(*)
+2
+# Multi-statement transaction: no row may lack its secondary key entry
+CREATE TABLE t3 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+BEGIN;
+COMMIT;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) =
+(SELECT COUNT(*) FROM t3 FORCE INDEX (w)) AS pk_equals_sk;
+pk_equals_sk
+1
+# Bulk load without SST files for secondary keys and without
+# commit in the middle: the secondary keys go to the write batch
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384, rocksdb_bulk_load_size = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t4 SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_write_batch_max_bytes = 0, rocksdb_bulk_load_size = DEFAULT;
+SELECT (SELECT COUNT(*) FROM t4 FORCE INDEX (PRIMARY)) =
+(SELECT COUNT(*) FROM t4 FORCE INDEX (k)) AS pk_equals_sk;
+pk_equals_sk
+1
+DROP TABLE t1, t2, t3, t4, src;
