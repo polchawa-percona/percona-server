@@ -1,0 +1,29 @@
+#
+# Systematic error injection into the RocksDB writes made by DML statements
+# and transactions (see suite/rocksdb/include/errinj_loop.inc). Every
+# Put/Delete/SingleDelete of each workload fails in turn; the statement must
+# then fail and leave the table unchanged, or succeed with the same result as
+# without the failure.
+#
+# PS-11744: update_write_sk() ignores the status of the secondary-index Put,
+# so a failed secondary-index write is lost and the statement succeeds.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+
+--source suite/rocksdb/include/errinj_dml_setup.inc
+
+--let $errinj_class = WRITE
+--let $errinj_status = BUSY
+--source suite/rocksdb/include/errinj_dml_workloads.inc
+--let $errinj_status = TIMEDOUT
+--source suite/rocksdb/include/errinj_dml_workloads.inc
+--let $errinj_status = MEMORYLIMIT
+--source suite/rocksdb/include/errinj_dml_workloads.inc
+
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;
