@@ -1,0 +1,87 @@
+#########
+# Begin upgrade testing with mysql_upgrade
+###
+# Copy the remote tablespace & DB zip files from suite location to working location.
+# Check that the file exists in the working folder.
+# Stop DB server which was created by MTR default
+# Unzip the zip file.
+# Remove copied files
+# restart
+#########
+# Performing test specific validation
+###
+# The prepared transactions are recovered.
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	16	0	upg_rocks_commit
+1	18	0	upg_rocks_rollback
+1	9	0	upg_mixed
+# Their changes are not visible yet.
+SELECT * FROM upgx.t_r ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+10	10
+SELECT * FROM upgx.t_i ORDER BY id;
+id	a
+1	1
+XA COMMIT 'upg_rocks_commit';
+XA ROLLBACK 'upg_rocks_rollback';
+XA COMMIT 'upg_mixed';
+XA RECOVER;
+SELECT * FROM upgx.t_r ORDER BY id;
+id	a
+1	1
+2	200
+3	3
+10	10
+20	20
+40	40
+SELECT * FROM upgx.t_r FORCE INDEX (ka) ORDER BY a;
+id	a
+1	1
+3	3
+10	10
+20	20
+40	40
+2	200
+SELECT * FROM upgx.t_i ORDER BY id;
+id	a
+1	1
+40	40
+CHECK TABLE upgx.t_r, upgx.t_i;
+Table	Op	Msg_type	Msg_text
+upgx.t_r	check	status	OK
+upgx.t_i	check	status	OK
+# New transactions work after the upgrade.
+INSERT INTO upgx.t_r VALUES (50, 50);
+XA START 'after_upgrade';
+INSERT INTO upgx.t_r VALUES (60, 60);
+XA END 'after_upgrade';
+XA PREPARE 'after_upgrade';
+XA COMMIT 'after_upgrade';
+SELECT * FROM upgx.t_r WHERE id >= 50 ORDER BY id;
+id	a
+50	50
+60	60
+# The resolved transactions stay resolved after a restart.
+# restart
+XA RECOVER;
+SELECT * FROM upgx.t_r ORDER BY id;
+id	a
+1	1
+2	200
+3	3
+10	10
+20	20
+40	40
+50	50
+60	60
+#########
+# End upgrade testing with mysql_upgrade
+###
+# Stop the server
+# Remove temp datadir
+# Restart the server with default options.
+# restart
