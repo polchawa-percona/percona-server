@@ -1,0 +1,154 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+#
+# rocksdb_write_batch_max_bytes
+#
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+INSERT INTO t1 SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+CREATE TABLE t2 ENGINE=ROCKSDB SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SHOW TABLES LIKE 't2';
+Tables_in_test (t2)
+REPLACE INTO t1 SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+INSERT INTO t1 SELECT * FROM src;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+UPDATE t1, src SET t1.v = REPEAT('y', 150) WHERE t1.id = src.id;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*) FROM t1 WHERE v LIKE 'y%';
+COUNT(*)
+0
+DELETE t1 FROM t1, src WHERE t1.id = src.id;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2000
+# INPLACE ADD INDEX writes SST files, not the write batch
+ALTER TABLE t1 ADD INDEX k (k), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k);
+COUNT(*)
+2000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Bulk load with an explicit primary key writes SST files
+CREATE TABLE t3 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t3 SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t3 FORCE INDEX (k);
+COUNT(*)
+2000
+TRUNCATE TABLE t3;
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+0
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+#
+# rocksdb_max_row_locks
+#
+SET SESSION rocksdb_max_row_locks = 10;
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t4 SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SELECT COUNT(*) FROM t4;
+COUNT(*)
+0
+SET SESSION unique_checks = 0;
+CREATE TABLE t5 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+INSERT INTO t5 SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SET SESSION unique_checks = 1;
+SELECT COUNT(*) FROM t5;
+COUNT(*)
+0
+CREATE TABLE t6 ENGINE=ROCKSDB SELECT * FROM src;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SHOW TABLES LIKE 't6';
+Tables_in_test (t6)
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+CREATE TABLE t7 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB
+PARTITION BY HASH (id) PARTITIONS 2;
+INSERT INTO t7 SELECT * FROM src;
+SET SESSION rocksdb_max_row_locks = 10;
+ALTER TABLE t7 COALESCE PARTITION 1;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SELECT COUNT(*) FROM t7 FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t7 FORCE INDEX (k);
+COUNT(*)
+2000
+UPDATE t7 SET v = 'q';
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+SELECT COUNT(*) FROM t7 WHERE v = 'q';
+COUNT(*)
+0
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+#
+# rocksdb_commit_in_the_middle with small chunks under both limits
+#
+SET SESSION rocksdb_commit_in_the_middle = ON, rocksdb_bulk_load_size = 10,
+rocksdb_write_batch_max_bytes = 16384, rocksdb_max_row_locks = 50;
+CREATE TABLE t8 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t8 SELECT * FROM src;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+COUNT(*)
+2000
+ALTER TABLE t8 FORCE, ALGORITHM=COPY;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+COUNT(*)
+2000
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+COUNT(*)
+2000
+UPDATE t8 SET k = k + 10000;
+SELECT COUNT(*) FROM t8 FORCE INDEX (k) WHERE k >= 10000;
+COUNT(*)
+2000
+DELETE FROM t8;
+SELECT COUNT(*) FROM t8 FORCE INDEX (PRIMARY);
+COUNT(*)
+0
+SELECT COUNT(*) FROM t8 FORCE INDEX (k);
+COUNT(*)
+0
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT, rocksdb_bulk_load_size = DEFAULT,
+rocksdb_write_batch_max_bytes = DEFAULT, rocksdb_max_row_locks = DEFAULT;
+#
+# Minimal merge sort buffer for INPLACE ADD INDEX (many sorted chunks).
+# A small rocksdb_merge_combine_read_size is PS-11637, not tested here.
+#
+SET SESSION rocksdb_merge_buf_size = 100;
+SELECT @@SESSION.rocksdb_merge_buf_size;
+@@SESSION.rocksdb_merge_buf_size
+100
+CREATE TABLE t9 (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+INSERT INTO t9 SELECT * FROM src;
+ALTER TABLE t9 ADD INDEX k (k), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t9 FORCE INDEX (k);
+COUNT(*)
+2000
+CHECK TABLE t9;
+Table	Op	Msg_type	Msg_text
+test.t9	check	status	OK
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+DROP TABLE src, t1, t3, t4, t5, t7, t8, t9;

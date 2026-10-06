@@ -10,7 +10,9 @@
 # the drop thread and a compaction, no leftover bulk-load files, and a clean
 # restart with rocksdb_validate_tables=1.
 # Combinations: default settings; small merge buffers (many merge chunks, merge
-# tmp file truncated in steps); DROP INDEX through DeleteRange.
+# tmp file truncated in steps); DROP INDEX through DeleteRange; a session
+# rocksdb_write_batch_max_bytes for the concurrent DML; the minimal
+# rocksdb_merge_buf_size.
 #
 
 --let $cc3_iter = 4

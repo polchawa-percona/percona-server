@@ -8,6 +8,11 @@
 # metadata lock and their copies commit in batches; a reader reads that
 # table throughout. See include/ddl_concurrent_copy_alter.inc.
 #
+# Combinations: a session rocksdb_write_batch_max_bytes larger than one
+# commit_in_the_middle chunk, and write_unprepared with a small flush
+# threshold (commit_in_the_middle is ignored there). A write batch limit with
+# write_unprepared is not combined: the COPY ALTER loses rows (PS-11683).
+#
 
 --let $ntab= 4
 --let $nrows= 20000

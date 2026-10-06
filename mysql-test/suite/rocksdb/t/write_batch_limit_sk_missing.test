@@ -1,0 +1,82 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11744: a statement whose secondary index write exceeds
+# rocksdb_write_batch_max_bytes must fail with the write batch limit error and
+# leave the table unchanged. ha_rocksdb::update_write_sk() ignores the status
+# of the secondary key Put, so the statement succeeds with the primary key row
+# written and the secondary key entry missing, and CHECK TABLE does not notice.
+#
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # Autocommit INSERT: the secondary key entry crosses the limit
+CREATE TABLE t1 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+INSERT INTO t1 VALUES (1, REPEAT('a', 300));
+--error ER_GET_ERRMSG
+INSERT INTO t1 VALUES (2, REPEAT('b', 450));
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (w);
+
+--echo # UPDATE of the indexed column: the new entry crosses the limit
+CREATE TABLE t2 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t2 VALUES (1, 'a'), (2, 'b');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+UPDATE t2 SET w = REPEAT('z', 480) WHERE id = 1;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT id, w FROM t2 FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT COUNT(*) FROM t2 FORCE INDEX (w);
+
+--echo # Multi-statement transaction: no row may lack its secondary key entry
+CREATE TABLE t3 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+BEGIN;
+--disable_query_log
+let $i = 0;
+let $stop = 0;
+while (!$stop) {
+  --error 0,ER_GET_ERRMSG
+  eval INSERT INTO t3 VALUES ($i, REPEAT(CHAR(65 + ($i % 26)), 690));
+  if ($mysql_errno) {
+    let $stop = 1;
+  }
+  inc $i;
+  if ($i > 400) {
+    let $stop = 1;
+  }
+}
+--enable_query_log
+COMMIT;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) =
+       (SELECT COUNT(*) FROM t3 FORCE INDEX (w)) AS pk_equals_sk;
+
+--echo # Bulk load without SST files for secondary keys and without
+--echo # commit in the middle: the secondary keys go to the write batch
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
+  inc $i;
+}
+--enable_query_log
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384, rocksdb_bulk_load_size = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+--error 0,ER_GET_ERRMSG
+INSERT INTO t4 SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_write_batch_max_bytes = 0, rocksdb_bulk_load_size = DEFAULT;
+SELECT (SELECT COUNT(*) FROM t4 FORCE INDEX (PRIMARY)) =
+       (SELECT COUNT(*) FROM t4 FORCE INDEX (k)) AS pk_equals_sk;
+
+DROP TABLE t1, t2, t3, t4, src;
+--source include/wait_until_count_sessions.inc
