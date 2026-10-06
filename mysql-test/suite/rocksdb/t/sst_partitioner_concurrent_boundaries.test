@@ -1,0 +1,168 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# rocksdb_bulk_load_use_sst_partitioner=ON with two concurrent bulk loads and
+# concurrent updates under an open snapshot, in a normal and in a reverse
+# column family.
+#
+# Tables are created in the order lo, mid1, mid2, hi, so the index ids of mid1
+# and mid2 lie between those of lo and hi, in the same column families. lo
+# and hi are filled and compacted first, so one bottommost SST file per column
+# family holds keys of both lo and hi and therefore spans the (still empty)
+# key ranges of mid1 and mid2.
+#
+# Two sessions then start bulk loads into mid1 and mid2, which registers the
+# mid1 and mid2 index ids in each column family's SST partitioner. While both
+# bulk loads are open, another session updates lo and hi twice under an open
+# snapshot (so compactions see several versions of the same keys) and the
+# column families are compacted. With the partitioner, the compaction output
+# must be cut at the registered index boundaries:
+#  - no SST file may contain keys of an index below mid1 and of an index above
+#    mid2 at the same time,
+#  - both bulk loads must then ingest into the bottom level even with
+#    rocksdb_bulk_load_fail_if_not_bottommost_level=ON, without the
+#    compact-and-retry fallback,
+#  - every table must have its rows through the primary and the secondary key.
+#
+
+--disable_query_log
+call mtr.add_suppression("MyRocks: failed to bulk load");
+--enable_query_log
+
+# Remember the size of the error log, so that only this test's messages are
+# searched at the end (the log is shared with earlier tests of the worker).
+--let ERR_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let OFFSET_FILE = $MYSQLTEST_VARDIR/tmp/sst_partitioner_boundaries.offset
+--perl
+  my $size = -s $ENV{ERR_FILE} || 0;
+  open(my $fh, ">", $ENV{OFFSET_FILE}) or die;
+  print $fh $size;
+  close($fh);
+EOF
+
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0)
+  {
+    --let $cf = cp_cf1
+  }
+  if ($i == 1)
+  {
+    --let $cf = rev:cp_cf2
+  }
+  --echo # column family $cf
+
+  --eval CREATE TABLE lo (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=$cf', KEY sk (k) COMMENT 'cfname=$cf') ENGINE=ROCKSDB
+  --eval CREATE TABLE mid1 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=$cf', KEY sk (k) COMMENT 'cfname=$cf') ENGINE=ROCKSDB
+  --eval CREATE TABLE mid2 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=$cf', KEY sk (k) COMMENT 'cfname=$cf') ENGINE=ROCKSDB
+  --eval CREATE TABLE hi (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=$cf', KEY sk (k) COMMENT 'cfname=$cf') ENGINE=ROCKSDB
+
+  INSERT INTO lo WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+  INSERT INTO hi WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --eval SET GLOBAL rocksdb_compact_cf = '$cf'
+
+  --let $lo_min = `SELECT MIN(index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 'lo'`
+  --let $mid_min = `SELECT MIN(index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 'mid1'`
+  --let $mid_max = `SELECT MAX(index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 'mid2'`
+  --let $hi_max = `SELECT MAX(index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 'hi'`
+  --let $cf_id = `SELECT DISTINCT column_family FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 'lo'`
+
+  --echo # before the bulk loads, some SST file spans the mid1/mid2 key ranges
+  --disable_query_log
+  --eval SELECT COUNT(*) > 0 AS spanning_files FROM (SELECT sst_name FROM information_schema.rocksdb_index_file_map WHERE column_family = $cf_id AND num_rows > 0 GROUP BY sst_name HAVING MIN(index_number) < $mid_min AND MAX(index_number) > $mid_max) s
+  --enable_query_log
+
+  connect (bl1,localhost,root,,);
+  SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+  SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+  SET SESSION rocksdb_bulk_load_allow_sk = 1;
+  SET SESSION rocksdb_bulk_load = 1;
+  INSERT INTO mid1 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 50) SELECT seq, seq * 7 % 101 FROM seq;
+
+  connect (bl2,localhost,root,,);
+  SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+  SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+  SET SESSION rocksdb_bulk_load_allow_sk = 1;
+  SET SESSION rocksdb_bulk_load = 1;
+  INSERT INTO mid2 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 60) SELECT seq, seq * 7 % 101 FROM seq;
+
+  connect (snap,localhost,root,,);
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  SELECT COUNT(*) FROM lo;
+
+  connection default;
+  --echo # two more versions of lo and hi rows, kept for the open snapshot
+  UPDATE lo SET k = k + 1;
+  UPDATE hi SET k = k + 1;
+  UPDATE lo SET k = k - 1;
+  UPDATE hi SET k = k - 1;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --eval SET GLOBAL rocksdb_compact_cf = '$cf'
+
+  --echo # with the partitioner, no SST file spans the registered key ranges
+  --disable_query_log
+  --eval SELECT COUNT(*) AS spanning_files FROM (SELECT sst_name FROM information_schema.rocksdb_index_file_map WHERE column_family = $cf_id AND num_rows > 0 GROUP BY sst_name HAVING MIN(index_number) < $mid_min AND MAX(index_number) > $mid_max) s
+  --enable_query_log
+
+  connection snap;
+  SELECT COUNT(*), SUM(k) FROM lo;
+  COMMIT;
+
+  --echo # both bulk loads ingest into the bottom level
+  connection bl1;
+  SET SESSION rocksdb_bulk_load = 0;
+  connection bl2;
+  SET SESSION rocksdb_bulk_load = 0;
+  connection default;
+  disconnect bl1;
+  disconnect bl2;
+  disconnect snap;
+
+  --let $t = 4
+  while ($t)
+  {
+    if ($t == 4)
+    {
+      --let $tn = lo
+    }
+    if ($t == 3)
+    {
+      --let $tn = mid1
+    }
+    if ($t == 2)
+    {
+      --let $tn = mid2
+    }
+    if ($t == 1)
+    {
+      --let $tn = hi
+    }
+    --eval SELECT '$tn' AS t, COUNT(*), SUM(id), SUM(k) FROM $tn FORCE INDEX(PRIMARY)
+    --eval SELECT '$tn' AS t, COUNT(*), SUM(id), SUM(k) FROM $tn FORCE INDEX(sk)
+    --dec $t
+  }
+  CHECK TABLE lo, mid1, mid2, hi;
+  DROP TABLE lo, mid1, mid2, hi;
+  --inc $i
+}
+
+--echo # the bulk loads did not need the compact-and-retry fallback
+--perl
+  open(my $fh, "<", $ENV{OFFSET_FILE}) or die;
+  my $offset = <$fh>;
+  close($fh);
+  open(my $log, "<", $ENV{ERR_FILE}) or die;
+  seek($log, $offset, 0);
+  my $retries = 0;
+  while (<$log>) {
+    $retries++ if /MyRocks: failed to bulk load, retry with compaction/;
+  }
+  close($log);
+  print "bulk load retries: $retries\n";
+EOF
+--remove_file $MYSQLTEST_VARDIR/tmp/sst_partitioner_boundaries.offset
+
+--source include/wait_until_count_sessions.inc

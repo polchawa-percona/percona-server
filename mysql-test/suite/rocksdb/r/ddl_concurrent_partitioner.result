@@ -1,0 +1,59 @@
+call mtr.add_suppression("MyRocks: failed to bulk load");
+call mtr.add_suppression("Failed to bulk load. status code = 13");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING';
+drop_index_ongoing
+0
+SELECT COUNT(*) AS orphan_sst_index_entries
+FROM information_schema.rocksdb_index_file_map m
+WHERE m.column_family IN (SELECT DISTINCT column_family
+FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE 'survivor%')
+AND m.num_rows > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = m.column_family
+AND d.index_number = m.index_number);
+orphan_sst_index_entries
+0
+t	pk_ok
+survivor_0	1
+t	sk_ok
+survivor_0	1
+Table	Op	Msg_type	Msg_text
+test.survivor_0	check	status	OK
+t	pk_ok
+survivor_1	1
+t	sk_ok
+survivor_1	1
+Table	Op	Msg_type	Msg_text
+test.survivor_1	check	status	OK
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING';
+drop_index_ongoing
+0
+SELECT COUNT(*) AS orphan_sst_index_entries
+FROM information_schema.rocksdb_index_file_map m
+WHERE m.column_family IN (SELECT DISTINCT column_family
+FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE 'survivor%')
+AND m.num_rows > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = m.column_family
+AND d.index_number = m.index_number);
+orphan_sst_index_entries
+0
+t	pk_ok
+survivor_0	1
+t	sk_ok
+survivor_0	1
+Table	Op	Msg_type	Msg_text
+test.survivor_0	check	status	OK
+t	pk_ok
+survivor_1	1
+t	sk_ok
+survivor_1	1
+Table	Op	Msg_type	Msg_text
+test.survivor_1	check	status	OK
+DROP TABLE survivor_0, survivor_1;

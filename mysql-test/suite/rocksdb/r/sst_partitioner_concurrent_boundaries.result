@@ -1,0 +1,150 @@
+# column family cp_cf1
+CREATE TABLE lo (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cp_cf1', KEY sk (k) COMMENT 'cfname=cp_cf1') ENGINE=ROCKSDB;
+CREATE TABLE mid1 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cp_cf1', KEY sk (k) COMMENT 'cfname=cp_cf1') ENGINE=ROCKSDB;
+CREATE TABLE mid2 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cp_cf1', KEY sk (k) COMMENT 'cfname=cp_cf1') ENGINE=ROCKSDB;
+CREATE TABLE hi (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cp_cf1', KEY sk (k) COMMENT 'cfname=cp_cf1') ENGINE=ROCKSDB;
+INSERT INTO lo WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+INSERT INTO hi WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cp_cf1';
+# before the bulk loads, some SST file spans the mid1/mid2 key ranges
+spanning_files
+1
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid1 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 50) SELECT seq, seq * 7 % 101 FROM seq;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid2 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 60) SELECT seq, seq * 7 % 101 FROM seq;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM lo;
+COUNT(*)
+100
+# two more versions of lo and hi rows, kept for the open snapshot
+UPDATE lo SET k = k + 1;
+UPDATE hi SET k = k + 1;
+UPDATE lo SET k = k - 1;
+UPDATE hi SET k = k - 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cp_cf1';
+# with the partitioner, no SST file spans the registered key ranges
+spanning_files
+0
+SELECT COUNT(*), SUM(k) FROM lo;
+COUNT(*)	SUM(k)
+100	5050
+COMMIT;
+# both bulk loads ingest into the bottom level
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT 'lo' AS t, COUNT(*), SUM(id), SUM(k) FROM lo FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+lo	100	5050	5050
+SELECT 'lo' AS t, COUNT(*), SUM(id), SUM(k) FROM lo FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+lo	100	5050	5050
+SELECT 'mid1' AS t, COUNT(*), SUM(id), SUM(k) FROM mid1 FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid1	50	1275	2360
+SELECT 'mid1' AS t, COUNT(*), SUM(id), SUM(k) FROM mid1 FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid1	50	1275	2360
+SELECT 'mid2' AS t, COUNT(*), SUM(id), SUM(k) FROM mid2 FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid2	60	1830	2912
+SELECT 'mid2' AS t, COUNT(*), SUM(id), SUM(k) FROM mid2 FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid2	60	1830	2912
+SELECT 'hi' AS t, COUNT(*), SUM(id), SUM(k) FROM hi FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+hi	100	5050	5050
+SELECT 'hi' AS t, COUNT(*), SUM(id), SUM(k) FROM hi FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+hi	100	5050	5050
+CHECK TABLE lo, mid1, mid2, hi;
+Table	Op	Msg_type	Msg_text
+test.lo	check	status	OK
+test.mid1	check	status	OK
+test.mid2	check	status	OK
+test.hi	check	status	OK
+DROP TABLE lo, mid1, mid2, hi;
+# column family rev:cp_cf2
+CREATE TABLE lo (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=rev:cp_cf2', KEY sk (k) COMMENT 'cfname=rev:cp_cf2') ENGINE=ROCKSDB;
+CREATE TABLE mid1 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=rev:cp_cf2', KEY sk (k) COMMENT 'cfname=rev:cp_cf2') ENGINE=ROCKSDB;
+CREATE TABLE mid2 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=rev:cp_cf2', KEY sk (k) COMMENT 'cfname=rev:cp_cf2') ENGINE=ROCKSDB;
+CREATE TABLE hi (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=rev:cp_cf2', KEY sk (k) COMMENT 'cfname=rev:cp_cf2') ENGINE=ROCKSDB;
+INSERT INTO lo WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+INSERT INTO hi WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 100) SELECT seq, seq * 7 % 101 FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'rev:cp_cf2';
+# before the bulk loads, some SST file spans the mid1/mid2 key ranges
+spanning_files
+1
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid1 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 50) SELECT seq, seq * 7 % 101 FROM seq;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid2 WITH RECURSIVE seq(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM seq WHERE seq < 60) SELECT seq, seq * 7 % 101 FROM seq;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM lo;
+COUNT(*)
+100
+# two more versions of lo and hi rows, kept for the open snapshot
+UPDATE lo SET k = k + 1;
+UPDATE hi SET k = k + 1;
+UPDATE lo SET k = k - 1;
+UPDATE hi SET k = k - 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'rev:cp_cf2';
+# with the partitioner, no SST file spans the registered key ranges
+spanning_files
+0
+SELECT COUNT(*), SUM(k) FROM lo;
+COUNT(*)	SUM(k)
+100	5050
+COMMIT;
+# both bulk loads ingest into the bottom level
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT 'lo' AS t, COUNT(*), SUM(id), SUM(k) FROM lo FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+lo	100	5050	5050
+SELECT 'lo' AS t, COUNT(*), SUM(id), SUM(k) FROM lo FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+lo	100	5050	5050
+SELECT 'mid1' AS t, COUNT(*), SUM(id), SUM(k) FROM mid1 FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid1	50	1275	2360
+SELECT 'mid1' AS t, COUNT(*), SUM(id), SUM(k) FROM mid1 FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid1	50	1275	2360
+SELECT 'mid2' AS t, COUNT(*), SUM(id), SUM(k) FROM mid2 FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid2	60	1830	2912
+SELECT 'mid2' AS t, COUNT(*), SUM(id), SUM(k) FROM mid2 FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+mid2	60	1830	2912
+SELECT 'hi' AS t, COUNT(*), SUM(id), SUM(k) FROM hi FORCE INDEX(PRIMARY);
+t	COUNT(*)	SUM(id)	SUM(k)
+hi	100	5050	5050
+SELECT 'hi' AS t, COUNT(*), SUM(id), SUM(k) FROM hi FORCE INDEX(sk);
+t	COUNT(*)	SUM(id)	SUM(k)
+hi	100	5050	5050
+CHECK TABLE lo, mid1, mid2, hi;
+Table	Op	Msg_type	Msg_text
+test.lo	check	status	OK
+test.mid1	check	status	OK
+test.mid2	check	status	OK
+test.hi	check	status	OK
+DROP TABLE lo, mid1, mid2, hi;
+# the bulk loads did not need the compact-and-retry fallback
+bulk load retries: 0
