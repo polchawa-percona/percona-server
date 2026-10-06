@@ -142,6 +142,8 @@ rocksdb.ddl_crash_truncate : BUG#0 PS-11668 TRUNCATE crash
 rocksdb.ddl_crash_add_index : BUG#0 PS-11669 ADD INDEX crash
 rocksdb.ddl_crash_drop_index : BUG#0 PS-11670 DROP INDEX crash
 rocksdb.alter_copy_crash_rename : BUG#0 PS-11681 crash between COPY ALTER renames
+rocksdb.shutdown_paused_background_work : BUG#0 PS-11729 shutdown hangs when background paused
+rocksdb.ddl_concurrent_admin_ops_stats : BUG#0 PS-11730 stats lost after concurrent DDL
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
