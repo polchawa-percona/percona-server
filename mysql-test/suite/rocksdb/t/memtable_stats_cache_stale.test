@@ -1,0 +1,43 @@
+#
+# The memtable part of the table statistics is cached for
+# rocksdb_force_compute_memtable_stats_cachetime microseconds (default 60 s;
+# the rocksdb suite runs with 0). The cache is not refreshed when the memtable
+# is flushed, when the table is rebuilt by a COPY ALTER, or by ANALYZE TABLE,
+# so for up to the cache time the row estimate counts flushed rows again.
+#
+# Expected: after a COPY ALTER, a memtable flush and ANALYZE TABLE, the row
+# estimate of a 2000-row table is close to 2000. Today it is about twice that
+# until the cache expires. Disabled until fixed.
+#
+--source include/have_rocksdb.inc
+
+SET @save_cachetime = @@global.rocksdb_force_compute_memtable_stats_cachetime;
+SET GLOBAL rocksdb_force_compute_memtable_stats_cachetime = 60000000;
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t
+  WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 1999)
+  SELECT n, n % 100 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+# The first row estimate after the ALTER caches the memtable count.
+--disable_result_log
+SELECT table_rows FROM information_schema.tables WHERE table_name = 't';
+--enable_result_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--disable_result_log
+ANALYZE TABLE t;
+--enable_result_log
+
+--echo # Row estimate within 25% of the 2000 rows
+SELECT table_rows BETWEEN 1500 AND 2500 AS rows_ok
+  FROM information_schema.tables WHERE table_name = 't';
+--echo # Cardinality of ka (100 distinct values) at most the row count
+SELECT cardinality <= 2500 AS cardinality_ok
+  FROM information_schema.statistics
+  WHERE table_name = 't' AND index_name = 'ka';
+SELECT COUNT(*) FROM t;
+
+DROP TABLE t;
+SET GLOBAL rocksdb_force_compute_memtable_stats_cachetime = @save_cachetime;

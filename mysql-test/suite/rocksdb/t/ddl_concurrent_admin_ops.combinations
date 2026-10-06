@@ -11,3 +11,12 @@ rocksdb_compaction_sequential_deletes_window=2000
 [write_unprepared]
 rocksdb_write_policy=write_unprepared
 rocksdb_write_batch_flush_threshold=1
+
+[stats_settings]
+rocksdb_table_stats_use_table_scan=ON
+rocksdb_table_stats_recalc_threshold_count=0
+rocksdb_table_stats_sampling_pct=1
+rocksdb_stats_recalc_rate=100
+rocksdb_seconds_between_stat_computes=0
+rocksdb_table_stats_skip_system_cf=ON
+rocksdb_force_compute_memtable_stats=OFF
