@@ -5506,6 +5506,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
   }
 
   void do_rollback_to_savepoint() override {
+    // Simulates a failed RollbackToSavePoint() that left the statement's
+    // writes in place (possible with write_unprepared).
+    DBUG_EXECUTE_IF("myrocks_rollback_to_savepoint_error", return;);
     m_xa_written_keys.clear();
     m_xa_written_keys_valid = false;
     m_rocksdb_tx->RollbackToSavePoint();
