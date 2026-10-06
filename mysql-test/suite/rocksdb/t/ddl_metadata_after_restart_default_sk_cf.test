@@ -1,0 +1,7 @@
+#
+# rocksdb.ddl_metadata_after_restart with rocksdb_use_default_sk_cf=ON: every
+# secondary index without an explicit column family goes to "default_sk".
+# The MyRocks dictionary must still agree with the server's data dictionary
+# after each DDL kind and after a restart.
+#
+--source suite/rocksdb/t/ddl_metadata_after_restart.test
