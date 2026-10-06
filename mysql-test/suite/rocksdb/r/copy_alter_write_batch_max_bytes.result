@@ -1,0 +1,54 @@
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c VARCHAR(20), KEY kc (c))
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 4096;
+# The same limit applied to a non-DDL statement
+CREATE TABLE t2 LIKE t;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO t2 SELECT * FROM t;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+0
+DROP TABLE t2;
+# COPY ALTER, rocksdb_commit_in_the_middle=OFF
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+COUNT(*)	SUM(a)	SUM(LENGTH(c))
+2000	1999000	6000
+SELECT COUNT(*) FROM t FORCE INDEX (kc) WHERE c >= '';
+COUNT(*)
+2000
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  `c` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kc` (`c`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+COUNT(*)	SUM(a)	SUM(LENGTH(c))
+2000	1999000	6000
+# COPY ALTER, rocksdb_commit_in_the_middle=ON
+SET SESSION rocksdb_commit_in_the_middle = ON;
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+ERROR HY000: Got error 10 'Operation aborted: Memory limit reached' from ROCKSDB
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+COUNT(*)	SUM(a)	SUM(LENGTH(c))
+2000	1999000	6000
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+# With the default limit the ALTER succeeds and keeps every row
+ALTER TABLE t ADD COLUMN d INT, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(a), SUM(LENGTH(c)) FROM t;
+COUNT(*)	SUM(a)	SUM(LENGTH(c))
+2000	1999000	6000
+SELECT COUNT(*) FROM t FORCE INDEX (kc) WHERE c >= '';
+COUNT(*)
+2000
+DROP TABLE t;
