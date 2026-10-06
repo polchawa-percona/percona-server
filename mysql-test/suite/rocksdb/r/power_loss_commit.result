@@ -1,0 +1,89 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, KEY k_v (v)) ENGINE=ROCKSDB;
+#
+# 1. rocksdb_flush_log_at_trx_commit=1: every commit is synced and
+#    survives.
+#
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1;
+cnt	min_id	max_id	cnt_sk
+150	1	150	150
+#
+# 2. For comparison, a plain kill on the normal file system loses
+#    nothing with rocksdb_flush_log_at_trx_commit=2, even with no
+#    background sync: the writes already reached the OS.
+#
+# restart: --rocksdb_fault_injection_options=
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+# Kill and restart
+SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1;
+cnt	min_id	max_id	cnt_sk
+200	1	200	200
+#
+# 3. rocksdb_flush_log_at_trx_commit=2 and 0 with the background sync
+#    held back: the unsynced commits are lost on power loss, the synced
+#    ones are kept.
+#
+# rocksdb_flush_log_at_trx_commit = 2
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1;
+cnt	min_id	max_id	cnt_sk
+200	1	200	200
+# rocksdb_flush_log_at_trx_commit = 0
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 0;
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1;
+cnt	min_id	max_id	cnt_sk
+200	1	200	200
+#
+# 4. rocksdb_write_disable_wal=ON: rows that were only in the memtable
+#    are lost, rows flushed to an SST file are kept.
+#
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_write_disable_wal = ON;
+INSERT INTO t1 VALUES (5001, 1), (5002, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (5003, 3), (5004, 4);
+SET SESSION rocksdb_write_disable_wal = OFF;
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT id FROM t1 WHERE id > 5000 ORDER BY id;
+id
+5001
+5002
+#
+# 5. rocksdb_flush_log_at_trx_commit=2 with the background sync running:
+#    whatever is lost must be the most recent commits, and a
+#    multi-statement transaction is kept whole or lost whole. The
+#    server must also start with rocksdb_wal_recovery_mode=1 (absolute
+#    consistency).
+#
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_wal_recovery_mode=1
+SELECT COUNT(*) = IFNULL(MAX(id) - 10000, 0) AS prefix_kept
+FROM t1 WHERE id BETWEEN 10001 AND 19999;
+prefix_kept
+1
+SELECT @trx IN (0, 40) AS trx_whole,
+(@last < 151 OR @trx = 40) AND (@trx = 0 OR @last >= 150) AS trx_in_order;
+trx_whole	trx_in_order
+1	1
+SELECT (SELECT COUNT(*) FROM t1) = (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS sk_matches_pk;
+sk_matches_pk
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

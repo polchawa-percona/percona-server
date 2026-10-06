@@ -1,0 +1,37 @@
+#
+# A bulk load must keep the primary key and the secondary keys of a table
+# consistent across a power cut also with rocksdb_flush_log_at_trx_commit=2.
+# With rocksdb_bulk_load_allow_sk=OFF the primary key rows go to SST files
+# that are ingested and synced, while the secondary key entries go through
+# the WAL with the lazy setting. A power cut after the load then keeps every
+# row in the primary key but loses its secondary key entries.
+#
+# The background WAL sync is held back to make the window deterministic. See
+# power_loss_commit.test for the power cut simulation.
+#
+# Disabled until PS-11696 is fixed (mysql-test/collections/disabled.def).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t_sorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_unsorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sorted SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_unsorted SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+
+--source ../include/simulate_power_loss.inc
+
+--echo # Each table must have as many secondary key entries as rows.
+SELECT (SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)) =
+       (SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0) AS sorted_consistent,
+       (SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)) =
+       (SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0) AS unsorted_consistent;
+
+DROP TABLE t_sorted, t_unsorted;
