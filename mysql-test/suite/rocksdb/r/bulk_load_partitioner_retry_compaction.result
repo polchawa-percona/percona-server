@@ -1,0 +1,40 @@
+CREATE TABLE lo (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+CREATE TABLE mid (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+CREATE TABLE hi (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+# a bottommost file that spans the key range of mid
+INSERT INTO lo VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO hi VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'bl_cf';
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+SET DEBUG_SYNC = 'rocksdb.bulk_load_after_retry_compaction SIGNAL retried WAIT_FOR go';
+SET SESSION rocksdb_bulk_load = 0;
+SET DEBUG_SYNC = 'now WAIT_FOR retried';
+# a compaction over the key range of mid, held while it runs
+INSERT INTO lo VALUES (4, 4);
+INSERT INTO hi VALUES (4, 4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+SET GLOBAL rocksdb_compact_cf = 'bl_cf';
+include/wait_for_pattern_in_file.inc [MyRocks: test: compaction paused]
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*), SUM(id), SUM(k) FROM mid FORCE INDEX(PRIMARY);
+COUNT(*)	SUM(id)	SUM(k)
+5	15	150
+SELECT COUNT(*), SUM(id), SUM(k) FROM mid FORCE INDEX(sk);
+COUNT(*)	SUM(id)	SUM(k)
+5	15	150
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM lo;
+COUNT(*)
+4
+SELECT COUNT(*) FROM hi;
+COUNT(*)
+4
+DROP TABLE lo, mid, hi;

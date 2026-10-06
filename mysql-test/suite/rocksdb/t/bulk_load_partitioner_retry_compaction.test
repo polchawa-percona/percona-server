@@ -1,0 +1,105 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+#
+# A bulk load with rocksdb_bulk_load_use_sst_partitioner=ON and
+# rocksdb_bulk_load_fail_if_not_bottommost_level=ON must not fail because a
+# compaction of the same column family is running when the files are ingested.
+#
+# When the first ingest of the bulk-load files fails, MyRocks compacts the
+# ranges of the registered indexes (the SST partitioner cuts the output at the
+# index boundaries) and retries the ingest exactly once. A compaction into the
+# bottommost level that starts between the retry compaction and the second
+# ingest and whose key range covers the loaded indexes makes RocksDB refuse to
+# place the files in the bottommost level, so the second ingest fails with
+# "Files cannot be ingested to Lmax" and the whole bulk load fails.
+#
+# Tables lo, mid and hi are created in this order, so the index ids of mid lie
+# between those of lo and hi in the same column family, and an SST file with
+# rows of lo and hi spans the key range of mid. The sync point
+# rocksdb.bulk_load_after_retry_compaction holds the bulk load after the retry
+# compaction. Meanwhile a manual compaction of the column family is started
+# and held while it runs by the debug point rocksdb_pause_compaction, which
+# holds only manual compactions.
+#
+# Expected: the bulk load succeeds and mid has all its rows through both
+# indexes.
+#
+
+CREATE TABLE lo (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+CREATE TABLE mid (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+CREATE TABLE hi (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=bl_cf', KEY sk (k) COMMENT 'cfname=bl_cf') ENGINE=ROCKSDB;
+
+--echo # a bottommost file that spans the key range of mid
+INSERT INTO lo VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO hi VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'bl_cf';
+
+connect (bl,localhost,root,,);
+SET SESSION rocksdb_bulk_load_use_sst_partitioner = ON;
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO mid VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+SET DEBUG_SYNC = 'rocksdb.bulk_load_after_retry_compaction SIGNAL retried WAIT_FOR go';
+--send SET SESSION rocksdb_bulk_load = 0
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR retried';
+
+--echo # a compaction over the key range of mid, held while it runs
+INSERT INTO lo VALUES (4, 4);
+INSERT INTO hi VALUES (4, 4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+connect (comp,localhost,root,,);
+--send SET GLOBAL rocksdb_compact_cf = 'bl_cf'
+
+connection default;
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = MyRocks: test: compaction paused
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+SET DEBUG_SYNC = 'now SIGNAL go';
+
+# Release the compaction once the bulk load has failed, or after 10 seconds
+# if it has not (it may be waiting for the compaction to finish).
+--perl
+  use strict;
+  my $file = "$ENV{MYSQLTEST_VARDIR}/log/mysqld.1.err";
+  for (my $i = 0; $i < 100; $i++) {
+    open(my $fh, '<', $file) or die "Cannot open $file: $!";
+    my $failed = 0;
+    while (<$fh>) {
+      $failed = 0 if /^CURRENT_TEST: /;
+      $failed = 1 if /Failed to bulk load/;
+    }
+    close($fh);
+    last if $failed;
+    select(undef, undef, undef, 0.1);
+  }
+EOF
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+
+connection bl;
+--reap
+
+connection comp;
+--reap
+disconnect comp;
+
+connection bl;
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*), SUM(id), SUM(k) FROM mid FORCE INDEX(PRIMARY);
+SELECT COUNT(*), SUM(id), SUM(k) FROM mid FORCE INDEX(sk);
+
+connection default;
+disconnect bl;
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM lo;
+SELECT COUNT(*) FROM hi;
+DROP TABLE lo, mid, hi;
+--source include/wait_until_count_sessions.inc
