@@ -14906,6 +14906,7 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
     */
     ddl_manager.remove(tbl, batch, table_default_cf_id, true);
 
+    DBUG_EXECUTE_IF("rocksdb_crash_before_drop_dict_commit", DBUG_SUICIDE(););
     int err = local_dict_manager->commit(batch);
     if (err) {
       DBUG_RETURN(err);
@@ -17066,6 +17067,7 @@ bool ha_rocksdb::commit_inplace_alter_table(
         ddl_manager.remove_uncommitted_keydefs(ctx->m_added_indexes);
       }
 
+      DBUG_EXECUTE_IF("rocksdb_crash_before_drop_dict_commit", DBUG_SUICIDE(););
       if (local_dict_manager->commit(batch)) {
         /*
           Should never reach here. We assume MyRocks will abort if commit
