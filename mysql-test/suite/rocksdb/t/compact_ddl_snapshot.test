@@ -1,0 +1,138 @@
+#
+# Snapshots that predate table DDL, with manual compaction in between.
+#
+# con_rr starts START TRANSACTION WITH CONSISTENT SNAPSHOT at REPEATABLE
+# READ without touching the table, so it holds no metadata lock. Another
+# session then rebuilds the table (TRUNCATE, COPY ALTER, DROP + CREATE),
+# changes a second table in the same column families, and runs every
+# manual compaction trigger while the old indexes are dropped (drop-index
+# thread held, or delete-range mode). Then:
+# - con_rr reads the rebuilt table through each index. The new indexes hold
+#   only rows written after the snapshot, so the read is empty; with the
+#   PS-11627 fix it fails with ER_TABLE_DEF_CHANGED. Both are accepted;
+#   seeing rows written after the snapshot is not.
+# - con_rr reads the second table and must see it as of the snapshot,
+#   although the rows it sees were deleted or updated and compacted.
+# - con_rc (READ COMMITTED, statement snapshots) sees the new table.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+--remove_files_wildcard $MYSQLTEST_VARDIR/tmp mc3_outcomes.txt
+
+--let $mc3_rows = 400
+--let $mc3_t = mc3.t_other
+--let $mc3_shape = live
+--let $mc3_off = 900000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_off = 0
+
+connect (con_rr, localhost, root,,);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+connect (con_rc, localhost, root,,);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+connection default;
+SET @old_debug = @@global.debug;
+
+--let $i = 0
+while ($i < 3)
+{
+  if ($i == 0) {
+    --let $mc3_scenario = truncate
+  }
+  if ($i == 1) {
+    --let $mc3_scenario = copy_alter
+  }
+  if ($i == 2) {
+    --let $mc3_scenario = drop_create
+  }
+  --echo # Scenario: $mc3_scenario
+  --let $mc3_rows = 300
+  --let $mc3_t = mc3.t_s
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_create.inc
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --let $other_before = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, u, CRC32(b))))) FROM mc3.t_other`
+
+  connection con_rr;
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+  connection default;
+  SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+  CALL mc3.mark_dropped('mc3', 't_s');
+  if ($mc3_scenario == truncate) {
+    TRUNCATE TABLE mc3.t_s;
+    --let $mc3_rows = 50
+    --let $mc3_off = 5000
+    --source suite/rocksdb/include/mc3_fill.inc
+  }
+  if ($mc3_scenario == copy_alter) {
+    ALTER TABLE mc3.t_s FORCE, ALGORITHM=COPY;
+  }
+  if ($mc3_scenario == drop_create) {
+    DROP TABLE mc3.t_s;
+    --let $mc3_rows = 50
+    --let $mc3_off = 5000
+    --source suite/rocksdb/include/mc3_create.inc
+  }
+  --let $mc3_off = 0
+  --echo # Rows the snapshot must still see are deleted or changed.
+  DELETE FROM mc3.t_other WHERE id % 4 = 0;
+  UPDATE mc3.t_other SET a = 'changed', b = NULL WHERE id % 4 = 1;
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --disable_result_log
+  OPTIMIZE TABLE mc3.t_s, mc3.t_other;
+  --enable_result_log
+
+  connection con_rr;
+  --let $mc3_level = RR_snapshot
+  --let $mc3_t = mc3.t_s
+  --let $mc3_idx = PRIMARY
+  --source suite/rocksdb/include/mc3_snap_read.inc
+  --let $mc3_idx = ka
+  --source suite/rocksdb/include/mc3_snap_read.inc
+  --let $mc3_idx = ku
+  --source suite/rocksdb/include/mc3_snap_read.inc
+  --let $other_rr = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, u, CRC32(b))))) FROM mc3.t_other`
+  --let $other_rr_sk = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, u, CRC32(b))))) FROM mc3.t_other FORCE INDEX (ka)`
+  --let $ok = `SELECT '$other_rr' = '$other_before' AND '$other_rr_sk' = '$other_before'`
+  --echo # RR snapshot read of mc3.t_other unchanged: $ok
+  COMMIT;
+
+  connection con_rc;
+  BEGIN;
+  --let $mc3_level = RC
+  --let $mc3_t = mc3.t_s
+  --let $mc3_idx = PRIMARY
+  --source suite/rocksdb/include/mc3_snap_read.inc
+  --let $mc3_idx = ku
+  --source suite/rocksdb/include/mc3_snap_read.inc
+  SELECT COUNT(*) FROM mc3.t_other;
+  COMMIT;
+
+  connection default;
+  --source suite/rocksdb/include/mc3_reclaimed.inc
+  DROP TABLE mc3.t_s;
+  --disable_query_log
+  DELETE FROM mc3.dropped;
+  DELETE FROM mc3.t_other;
+  --enable_query_log
+  --let $mc3_rows = 400
+  --let $mc3_t = mc3.t_other
+  --let $mc3_off = 900000
+  --source suite/rocksdb/include/mc3_fill.inc
+  --let $mc3_off = 0
+  --inc $i
+}
+
+disconnect con_rr;
+disconnect con_rc;
+SET GLOBAL debug = @old_debug;
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+SELECT COUNT(*) FROM mc3.t_other;
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc

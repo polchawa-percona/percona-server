@@ -22,7 +22,10 @@
 
 /* C++ system header files */
 #ifndef NDEBUG
+#include <chrono>
+#include <cstring>
 #include <ctime>
+#include <thread>
 #endif
 #include <string>
 
@@ -40,7 +43,8 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
   Rdb_compact_filter(const Rdb_compact_filter &) = delete;
   Rdb_compact_filter &operator=(const Rdb_compact_filter &) = delete;
 
-  explicit Rdb_compact_filter(uint32_t _cf_id) : m_cf_id(_cf_id) {}
+  explicit Rdb_compact_filter(uint32_t _cf_id, bool is_manual = false)
+      : m_cf_id(_cf_id), m_is_manual(is_manual) {}
   ~Rdb_compact_filter() {
     // Increment stats by num expired at the end of compaction
     rdb_update_global_stats(ROWS_EXPIRED, m_num_expired);
@@ -93,6 +97,9 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
       }
 
       m_prev_index = gl_index_id;
+#ifndef NDEBUG
+      pause_if_requested();
+#endif
     }
 
     if (m_should_delete) {
@@ -198,6 +205,38 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
   mutable uint32 m_ttl_offset = 0;
   // Oldest snapshot timestamp at the time a TTL index is discovered
   mutable uint64_t m_snapshot_timestamp = 0;
+
+  // Whether this filter runs in a manual compaction.
+  [[maybe_unused]] const bool m_is_manual;
+
+#ifndef NDEBUG
+  mutable bool m_paused = false;
+
+  // Hold a manual compaction once, right after the filter has decided
+  // whether to drop the keys of the first index it sees, so a test can run
+  // DDL while the compaction is in progress. RocksDB background threads have
+  // no DBUG thread state, so only the global debug settings are checked.
+  void pause_if_requested() const {
+    const auto pause_set = []() {
+      char buf[1024];
+      return DBUG_EXPLAIN_INITIAL(buf, sizeof(buf)) == 0 &&
+             strstr(buf, "rocksdb_compaction_filter_pause") != nullptr;
+    };
+    if (!m_is_manual || m_paused || !pause_set()) return;
+    m_paused = true;
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: compaction filter paused, cf id %u, "
+                    "index id %u, drop %d",
+                    m_prev_index.cf_id, m_prev_index.index_id,
+                    m_should_delete ? 1 : 0);
+    while (pause_set())
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: compaction filter resumed");
+  }
+#endif
 };
 
 class Rdb_compact_filter_factory : public rocksdb::CompactionFilterFactory {
@@ -213,8 +252,8 @@ class Rdb_compact_filter_factory : public rocksdb::CompactionFilterFactory {
 
   std::unique_ptr<rocksdb::CompactionFilter> CreateCompactionFilter(
       const rocksdb::CompactionFilter::Context &context) override {
-    return std::unique_ptr<rocksdb::CompactionFilter>(
-        new Rdb_compact_filter(context.column_family_id));
+    return std::unique_ptr<rocksdb::CompactionFilter>(new Rdb_compact_filter(
+        context.column_family_id, context.is_manual_compaction));
   }
 };
 

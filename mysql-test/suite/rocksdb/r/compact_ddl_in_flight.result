@@ -1,0 +1,72 @@
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET @old_debug = @@global.debug;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+SET GLOBAL debug = '+d,rocksdb_compaction_filter_pause';
+# con_compact: manual compaction of the shared CF, held in the filter.
+SET GLOBAL rocksdb_compact_cf = 'mc3_cf';
+include/wait_for_pattern_in_file.inc [MyRocks: test: compaction filter paused]
+# DDL on tables whose keys are being compacted.
+CALL mc3.mark_dropped('mc3', 't_drop');
+CALL mc3.mark_dropped('mc3', 't_trunc');
+CALL mc3.mark_dropped('mc3', 't_alter');
+DROP TABLE mc3.t_drop;
+TRUNCATE TABLE mc3.t_trunc;
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+RENAME TABLE mc3.t_hid TO mc3b.t_hid;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Let the compaction finish.
+SET GLOBAL debug = '-d,rocksdb_compaction_filter_pause';
+# Compact again with the DDL committed.
+OPTIMIZE TABLE mc3.t_live, mc3.t_alter, mc3.t_new, mc3.t_trunc, mc3b.t_hid;
+UPDATE mc3.chk SET tbl = 'mc3b.t_hid' WHERE tbl = 'mc3.t_hid';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	400
+mc3.t_live	1	400
+mc3b.t_hid	1	300
+# Compare new_before with new_after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_new	1	80
+mc3.t_trunc	1	80
+CHECK TABLE mc3.t_live, mc3.t_alter, mc3.t_new, mc3.t_trunc, mc3b.t_hid;
+Table	Op	Msg_type	Msg_text
+mc3.t_live	check	status	OK
+mc3.t_alter	check	status	OK
+mc3.t_new	check	status	OK
+mc3.t_trunc	check	status	OK
+mc3b.t_hid	check	status	OK
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+SET GLOBAL debug = @old_debug;
+# restart: --rocksdb_validate_tables=1
+# Compare all with restarted
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	400
+mc3.t_live	1	400
+mc3.t_new	1	80
+mc3.t_trunc	1	80
+mc3b.t_hid	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+DROP DATABASE mc3;
+DROP DATABASE mc3b;

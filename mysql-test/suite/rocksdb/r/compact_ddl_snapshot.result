@@ -1,0 +1,109 @@
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET @old_debug = @@global.debug;
+# Scenario: truncate
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+CALL mc3.mark_dropped('mc3', 't_s');
+TRUNCATE TABLE mc3.t_s;
+# Rows the snapshot must still see are deleted or changed.
+DELETE FROM mc3.t_other WHERE id % 4 = 0;
+UPDATE mc3.t_other SET a = 'changed', b = NULL WHERE id % 4 = 1;
+OPTIMIZE TABLE mc3.t_s, mc3.t_other;
+# RR_snapshot read of mc3.t_s via PRIMARY: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ka: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ku: empty_or_def_changed
+# RR snapshot read of mc3.t_other unchanged: 1
+COMMIT;
+BEGIN;
+# RC read of mc3.t_s via PRIMARY: rows=50
+# RC read of mc3.t_s via ku: rows=50
+SELECT COUNT(*) FROM mc3.t_other;
+COUNT(*)
+300
+COMMIT;
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+DROP TABLE mc3.t_s;
+# Scenario: copy_alter
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+CALL mc3.mark_dropped('mc3', 't_s');
+ALTER TABLE mc3.t_s FORCE, ALGORITHM=COPY;
+# Rows the snapshot must still see are deleted or changed.
+DELETE FROM mc3.t_other WHERE id % 4 = 0;
+UPDATE mc3.t_other SET a = 'changed', b = NULL WHERE id % 4 = 1;
+OPTIMIZE TABLE mc3.t_s, mc3.t_other;
+# RR_snapshot read of mc3.t_s via PRIMARY: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ka: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ku: empty_or_def_changed
+# RR snapshot read of mc3.t_other unchanged: 1
+COMMIT;
+BEGIN;
+# RC read of mc3.t_s via PRIMARY: rows=300
+# RC read of mc3.t_s via ku: rows=300
+SELECT COUNT(*) FROM mc3.t_other;
+COUNT(*)
+300
+COMMIT;
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+DROP TABLE mc3.t_s;
+# Scenario: drop_create
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+CALL mc3.mark_dropped('mc3', 't_s');
+DROP TABLE mc3.t_s;
+# Rows the snapshot must still see are deleted or changed.
+DELETE FROM mc3.t_other WHERE id % 4 = 0;
+UPDATE mc3.t_other SET a = 'changed', b = NULL WHERE id % 4 = 1;
+OPTIMIZE TABLE mc3.t_s, mc3.t_other;
+# RR_snapshot read of mc3.t_s via PRIMARY: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ka: empty_or_def_changed
+# RR_snapshot read of mc3.t_s via ku: empty_or_def_changed
+# RR snapshot read of mc3.t_other unchanged: 1
+COMMIT;
+BEGIN;
+# RC read of mc3.t_s via PRIMARY: rows=50
+# RC read of mc3.t_s via ku: rows=50
+SELECT COUNT(*) FROM mc3.t_other;
+COUNT(*)
+300
+COMMIT;
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+DROP TABLE mc3.t_s;
+SET GLOBAL debug = @old_debug;
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*) FROM mc3.t_other;
+COUNT(*)
+400
+DROP DATABASE mc3;
+DROP DATABASE mc3b;

@@ -1,0 +1,208 @@
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION rocksdb_bulk_load_size = 50;
+# COPY ALTER held at copy_data_between_tables_before
+CALL mc3.mark_dropped('mc3', 't_alter');
+CALL mc3.mark_dropped('mc3', 't_alter_hid');
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+OPTIMIZE TABLE mc3.t_live;
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+SET DEBUG_SYNC = 'copy_data_between_tables_before SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter_hid FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	300
+mc3.t_alter_hid	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# COPY ALTER held at rocksdb.flush_batch
+CALL mc3.mark_dropped('mc3', 't_alter');
+CALL mc3.mark_dropped('mc3', 't_alter_hid');
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+OPTIMIZE TABLE mc3.t_live;
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter_hid FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	300
+mc3.t_alter_hid	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# COPY ALTER held at alter_table_before_rename_result_table
+CALL mc3.mark_dropped('mc3', 't_alter');
+CALL mc3.mark_dropped('mc3', 't_alter_hid');
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+OPTIMIZE TABLE mc3.t_live;
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter_hid FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	300
+mc3.t_alter_hid	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# Neighbour table after all COPY ALTERs (300 + 3 * 40 rows).
+# Compare live with live
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	420
+# COPY ALTER that fails on a duplicate key after a committed batch.
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter ADD UNIQUE KEY ua (a), ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+sql_table_registered
+1
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+ERROR 23000: Duplicate entry 'Äb 11' for key 't_alter.ua'
+# COPY ALTER killed after a committed batch.
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+KILL QUERY CON_DDL_ID;
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+ERROR 70100: Query execution was interrupted
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# Engine change to InnoDB and back.
+CALL mc3.mark_dropped('mc3', 't_alter');
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter ENGINE=InnoDB;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+ALTER TABLE mc3.t_alter ENGINE=ROCKSDB;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_alter	1	300
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# CREATE TABLE ... SELECT held after a committed batch.
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL ctas_held WAIT_FOR ctas_go';
+CREATE TABLE mc3.t_ctas (id INT PRIMARY KEY COMMENT 'cfname=mc3_cf',
+a VARCHAR(64) COLLATE utf8mb4_0900_ai_ci, u INT, b BLOB,
+KEY ka (a) COMMENT 'cfname=rev:mc3_rcf',
+UNIQUE KEY ku (u) COMMENT 'cfname=mc3_cf') ENGINE=ROCKSDB
+SELECT id, a, u, b FROM mc3.t_live;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_held';
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+UPDATE mc3.chk SET tbl = 'mc3.t_live' WHERE label = 'ctas';
+# Compare live with ctas
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	420
+# CREATE TABLE ... SELECT that fails on a duplicate key.
+SET SESSION rocksdb_bulk_load_size = 20;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL ctas_held WAIT_FOR ctas_go';
+CREATE TABLE mc3.t_ctas_dup (a VARCHAR(64) COLLATE utf8mb4_0900_ai_ci
+PRIMARY KEY COMMENT 'cfname=mc3_cf', id INT) ENGINE=ROCKSDB
+SELECT a, id FROM mc3.t_live ORDER BY id;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_held';
+CALL mc3.mark_dropped('mc3', 't_ctas_dup');
+SELECT COUNT(*) > 0 AS ctas_table_registered FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'mc3' AND table_name = 't_ctas_dup';
+ctas_table_registered
+1
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+ERROR 23000: Duplicate entry 'Äb 1' for key 't_ctas_dup.PRIMARY'
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_schema = 'mc3' AND table_name = 't_ctas_dup';
+COUNT(*)
+0
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+CHECK TABLE mc3.t_live, mc3.t_alter, mc3.t_alter_hid, mc3.t_ctas;
+Table	Op	Msg_type	Msg_text
+mc3.t_live	check	status	OK
+mc3.t_alter	check	status	OK
+mc3.t_alter_hid	check	status	OK
+mc3.t_ctas	check	status	OK
+SET DEBUG_SYNC = 'RESET';
+# restart: --rocksdb_validate_tables=1
+# Compare live with restarted
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	420
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
