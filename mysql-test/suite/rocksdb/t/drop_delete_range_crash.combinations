@@ -1,0 +1,5 @@
+[delete_range_off]
+rocksdb_enable_delete_range_for_drop_index=OFF
+
+[delete_range_on]
+rocksdb_enable_delete_range_for_drop_index=ON
