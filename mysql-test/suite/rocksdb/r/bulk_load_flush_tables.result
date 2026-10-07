@@ -1,0 +1,17 @@
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("finalizing bulk load while closing handler");
+call mtr.add_suppression("finalizing last SST file while setting bulk loading variable");
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1), (10);
+SET rocksdb_bulk_load = 0;
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (5), (20);
+FLUSH TABLES;
+SET rocksdb_bulk_load = 0;
+ERROR HY000: Rows inserted during bulk load must not overlap existing rows
+SELECT * FROM t1;
+pk
+1
+10
+DROP TABLE t1;
