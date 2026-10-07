@@ -3985,6 +3985,8 @@ class Rdb_transaction {
           file_count);
     }
 
+    DEBUG_SYNC(m_thd, "rocksdb.bulk_load_before_ingest");
+
     const rocksdb::Status s = ingest_bulk_load_files(args);
     if (THDVAR(m_thd, trace_sst_api)) {
       LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
@@ -12827,6 +12829,28 @@ void Rdb_drop_index_thread::run() {
     // make sure, no program error is returned
     assert(ret == 0 || ret == ETIMEDOUT);
     RDB_MUTEX_UNLOCK_CHECK(m_signal_mutex);
+#ifndef NDEBUG
+    // Hold the drop-index thread before it processes the ongoing drops, so a
+    // test can run other operations while a dropped index is not reclaimed
+    // yet. The thread has no DBUG thread state, so only the global debug
+    // settings are checked.
+    {
+      const auto pause_set = []() {
+        char buf[1024];
+        return DBUG_EXPLAIN_INITIAL(buf, sizeof(buf)) == 0 &&
+               strstr(buf, "rocksdb_pause_drop_index_thread") != nullptr;
+      };
+      if (pause_set()) {
+        // NO_LINT_DEBUG
+        LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                        "MyRocks: test: drop-index thread paused");
+        while (pause_set() && !m_killed) my_sleep(100000);
+        // NO_LINT_DEBUG
+        LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                        "MyRocks: test: drop-index thread resumed");
+      }
+    }
+#endif
     for (Rdb_dict_manager *local_dict_manager : dict_manager_list) {
       std::unordered_set<GL_INDEX_ID> indices;
       local_dict_manager->get_ongoing_drop_indexes(&indices);
@@ -14977,6 +15001,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {
@@ -14987,6 +15014,9 @@ int ha_rocksdb::inplace_populate_sk(
     }
 
     ha_rnd_end();
+
+    /* The scan is done; the merge sort and SST ingestion have not started. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_before_merge");
 
     bool is_critical_error;
     res = tx->finish_bulk_load(&is_critical_error, true, new_table_arg,
@@ -15002,6 +15032,9 @@ int ha_rocksdb::inplace_populate_sk(
       LogPluginErrMsg(ERROR_LEVEL, 0, "Error finishing bulk load.");
       DBUG_RETURN(res);
     }
+
+    /* The SST files of this index are ingested (or its build failed). */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_after_ingest");
   }
 
   /*
@@ -15234,6 +15267,9 @@ bool ha_rocksdb::commit_inplace_alter_table(
       local_dict_manager->finish_indexes_operation(
           create_index_ids, Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
     }
+
+    /* The MyRocks dictionary changes of the ALTER are committed. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.commit_in_place_alter_table_dict_committed");
 
     DBUG_EXECUTE_IF("rocksdb_delete_index", {
       static constexpr char act[] =

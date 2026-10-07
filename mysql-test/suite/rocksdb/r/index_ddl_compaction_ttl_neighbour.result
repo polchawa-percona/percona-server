@@ -1,0 +1,38 @@
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n, CONCAT('Val', n) FROM v;
+CREATE TABLE t1 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB COMMENT='ttl_duration=3600';
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p0 WAIT_FOR g0';
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t2 ADD INDEX k (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p0';
+CREATE TABLE t3 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 1), (2, 2);
+UPDATE t1 SET c = c + 1 WHERE pk <= 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET DEBUG_SYNC = 'now SIGNAL g0';
+# The new index is ingested, its dictionary entry is not committed yet
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM t2 FORCE INDEX (k);
+COUNT(*)
+1000
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t2 FORCE INDEX (k);
+COUNT(*)
+1000
+DROP TABLE t1, t2, t3;
