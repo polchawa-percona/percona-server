@@ -1,0 +1,47 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--echo #
+--echo # PS-11794: when MyRocks hits data corruption it creates the
+--echo # .rocksdb/ROCKSDB_CORRUPTED marker and aborts the server. If the marker
+--echo # cannot be created, rdb_persist_corruption_marker() still calls Close()
+--echo # on the null file handle, so the server dies with SIGSEGV before it logs
+--echo # "aborting because of data corruption" and aborts cleanly.
+--echo # A directory placed at the marker path makes the creation fail.
+--echo #
+
+--let LOG=$MYSQLTEST_VARDIR/tmp/corruption_marker_fail.err
+--let SEARCH_FILE=$LOG
+--let $restart_parameters=restart:--log-error=$LOG
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--source include/restart_mysqld.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+
+--let $MYSQLD_DATADIR=`SELECT @@datadir`
+--mkdir $MYSQLD_DATADIR/.rocksdb/ROCKSDB_CORRUPTED
+
+SET SESSION debug = "+d,rocksdb_return_status_corrupted";
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+SELECT * FROM t1 WHERE pk = 1;
+--source include/wait_until_disconnected.inc
+
+--let SEARCH_PATTERN=data corruption detected
+--source include/search_pattern.inc
+--let SEARCH_PATTERN=Can't create file .*ROCKSDB_CORRUPTED to mark rocksdb as corrupted
+--source include/search_pattern.inc
+--let SEARCH_PATTERN=aborting because of data corruption
+--source include/search_pattern.inc
+--let SEARCH_PATTERN=got signal 6
+--source include/search_pattern.inc
+
+--rmdir $MYSQLD_DATADIR/.rocksdb/ROCKSDB_CORRUPTED
+--remove_file $LOG
+--let $restart_parameters=
+--source include/start_mysqld.inc
+
+SELECT * FROM t1;
+DROP TABLE t1;
