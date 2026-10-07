@@ -96,3 +96,5 @@ delimiter ;|
 --let $errinj_state_proc = CALL errinj_ddl_state()
 --let $errinj_state = SELECT @errinj_state
 --let $errinj_tables =
+--let $errinj_source = suite/rocksdb/include/errinj_stmt.inc
+--let $errinj_after_restart = suite/rocksdb/include/errinj_noop.inc

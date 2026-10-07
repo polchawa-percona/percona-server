@@ -29,6 +29,18 @@
 #   $errinj_max      upper bound for N (default 200)
 #   $errinj_crash    1 if the injected failure may abort the server
 #   $errinj_label    text used in the output (default class/status)
+#   $errinj_source   include file that runs the statement; the default,
+#                    errinj_stmt.inc, runs $errinj_stmt. Others serve statement
+#                    sequences that cannot run in a procedure (XA) or that use
+#                    other connections. It must arm the injection with
+#                    errinj_arm.inc in the connection to test (only when
+#                    $errinj_arm is 1), and on return be on connection default
+#                    and set $errinj_err (first error, 2013 if the server
+#                    aborted), $errinj_left (the counter left in the armed
+#                    connection) and, optionally, $errinj_must_be_after = 1
+#                    when an abort may only recover the final state.
+#   $errinj_after_restart  include run after a restart, before the state is
+#                    read (default errinj_noop.inc)
 #
 # Output: one line per violation, then one summary line without counts, so
 # that the result does not depend on how many RocksDB calls are made.
@@ -48,7 +60,8 @@ if (!$errinj_label) {
 eval $errinj_reset;
 --source suite/rocksdb/include/errinj_state_proc.inc
 --let $errinj_before = `$errinj_state`
-eval $errinj_stmt;
+--let $errinj_arm = 0
+--source $errinj_source
 --source suite/rocksdb/include/errinj_state_proc.inc
 --let $errinj_after = `$errinj_state`
 if ($errinj_before == $errinj_after) {
@@ -63,17 +76,13 @@ if ($errinj_before == $errinj_after) {
 --let $errinj_crashes = 0
 while (!$errinj_done) {
   eval $errinj_reset;
-  eval SET SESSION rocksdb_debug_inject_error_class = '$errinj_class';
-  eval SET SESSION rocksdb_debug_inject_error_status = '$errinj_status';
   if ($errinj_crash) {
     --exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
   }
-  eval SET SESSION rocksdb_debug_inject_error_nth = $errinj_n;
-
-  --disable_abort_on_error
-  eval $errinj_stmt;
-  --let $errinj_err = $mysql_errno
-  --enable_abort_on_error
+  --let $errinj_must_be_after = 0
+  --let $errinj_arm = 1
+  --source $errinj_source
+  --let $errinj_arm = 0
 
   --let $errinj_crashed = 0
   if ($errinj_err == 2013) {
@@ -96,11 +105,14 @@ while (!$errinj_done) {
     # The include files above turn the query and result logs back on.
     --disable_query_log
     --disable_result_log
+    --source $errinj_after_restart
     --source suite/rocksdb/include/errinj_state_proc.inc
     --let $errinj_state_now = `$errinj_state`
     --let $errinj_ok = 0
     if ($errinj_state_now == $errinj_before) {
-      --let $errinj_ok = 1
+      if (!$errinj_must_be_after) {
+        --let $errinj_ok = 1
+      }
     }
     if ($errinj_state_now == $errinj_after) {
       --let $errinj_ok = 1
@@ -118,9 +130,6 @@ while (!$errinj_done) {
     if ($errinj_crash) {
       --remove_file $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
     }
-    ROLLBACK;
-    --let $errinj_left = `SELECT @@session.rocksdb_debug_inject_error_nth`
-    SET SESSION rocksdb_debug_inject_error_nth = 0;
     if ($errinj_left) {
       # Fewer than N calls: nothing was injected, the loop is complete.
       --let $errinj_done = 1
