@@ -5488,7 +5488,8 @@ static xa_status_code rocksdb_commit_by_xid(handlerton *const hton,
     DBUG_RETURN(XAER_NOTA);
   }
 
-  const rocksdb::Status s = trx->Commit();
+  const rocksdb::Status s = RDB_INJECT_ERROR(Rdb_inject_class::COMMIT,
+                                             "xa_commit_by_xid", trx->Commit());
 
   if (!s.ok()) {
     rdb_log_status_error(s);
@@ -5519,7 +5520,8 @@ static xa_status_code rocksdb_rollback_by_xid(
     DBUG_RETURN(XAER_NOTA);
   }
 
-  const rocksdb::Status s = trx->Rollback();
+  const rocksdb::Status s = RDB_INJECT_ERROR(
+      Rdb_inject_class::COMMIT, "xa_rollback_by_xid", trx->Rollback());
 
   if (!s.ok()) {
     rdb_log_status_error(s);

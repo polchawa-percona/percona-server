@@ -141,6 +141,12 @@ rocksdb.errinj_bulk_load : BUG#11759 PS-11759 orphan SK entries
 rocksdb.bulk_load_failed_ingest_sk : BUG#11759 PS-11759 orphan SK entries
 rocksdb.errinj_ddl_dict_crash : BUG#11669 PS-11669 ADD INDEX crash window
 rocksdb.flush_wal_error_group_commit : BUG#11761 PS-11761 WAL flush error
+rocksdb.errinj_xa : BUG#11631 PS-11631 PS-11773 XA crash, by-XID commit error
+rocksdb.xa_commit_by_xid_error : BUG#11773 PS-11773 PS-11631 commit error
+rocksdb.errinj_part_write : BUG#11745 PS-11745 partition DDL write status
+rocksdb.errinj_part_iterator : BUG#11704 PS-11704 iterator error ends scan
+rocksdb.errinj_ttl_write : BUG#11745 PS-11745 COPY ALTER write status
+rocksdb.errinj_ttl_iterator : BUG#11704 PS-11704 iterator error ends scan
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 

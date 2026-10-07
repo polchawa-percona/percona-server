@@ -68,3 +68,5 @@ delimiter ;|
 --let $errinj_reset = CALL errinj_reset()
 --let $errinj_tables = t1
 --let $errinj_state = SELECT CONCAT_WS(':', (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)), (SELECT COUNT(*) FROM t1 FORCE INDEX (ua)), (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)), (SELECT COUNT(*) FROM t1 FORCE INDEX (kc)), (SELECT IFNULL(SUM(CRC32(CONCAT_WS(',', pk, a, b, c))), 0) FROM t1 FORCE INDEX (PRIMARY)), (SELECT IFNULL(SUM(CRC32(CONCAT_WS(',', a, pk))), 0) FROM t1 FORCE INDEX (ua)), (SELECT IFNULL(SUM(CRC32(CONCAT_WS(',', b, pk))), 0) FROM t1 FORCE INDEX (kb)), (SELECT IFNULL(SUM(CRC32(CONCAT_WS(',', c, pk))), 0) FROM t1 FORCE INDEX (kc)), (SELECT COUNT(*) FROM t_out), (SELECT IFNULL(SUM(CRC32(CONCAT_WS(',', pk, a, b, c))), 0) FROM t_out))
+--let $errinj_source = suite/rocksdb/include/errinj_stmt.inc
+--let $errinj_after_restart = suite/rocksdb/include/errinj_noop.inc

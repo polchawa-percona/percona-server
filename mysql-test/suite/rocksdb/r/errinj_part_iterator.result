@@ -1,0 +1,35 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# ITERATOR/INCOMPLETE INSERT into every HASH partition: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE UPDATE moving rows between partitions: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE UPDATE in two partitions: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE DELETE in every partition: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE REPLACE into HASH partitions: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE pruned range read: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE read of explicit partitions: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE point reads into HASH partitions: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE ADD PARTITION: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE DROP PARTITION: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE TRUNCATE PARTITION: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE REORGANIZE PARTITION: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE COALESCE PARTITION: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE ADD HASH PARTITIONS: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE INPLACE ADD INDEX on a partitioned table: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE OPTIMIZE PARTITION: the statement does not change the state
+# ITERATOR/INCOMPLETE OPTIMIZE PARTITION: no RocksDB call of this class was made
+DROP TABLE IF EXISTS tp, th;
+DROP TABLE t_outp;
+DROP PROCEDURE errinj_part_reset;
+DROP PROCEDURE errinj_tables_state;

@@ -1,0 +1,54 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# WRITE/BUSY INSERT into every HASH partition: every injected failure was handled correctly
+# WRITE/BUSY UPDATE moving rows between partitions: every injected failure was handled correctly
+# WRITE/BUSY UPDATE in two partitions: the statement does not change the state
+# WRITE/BUSY UPDATE in two partitions: every injected failure was handled correctly
+# WRITE/BUSY DELETE in every partition: every injected failure was handled correctly
+# WRITE/BUSY REPLACE into HASH partitions: every injected failure was handled correctly
+# WRITE/BUSY pruned range read: no RocksDB call of this class was made
+# WRITE/BUSY read of explicit partitions: no RocksDB call of this class was made
+# WRITE/BUSY point reads into HASH partitions: no RocksDB call of this class was made
+# WRITE/BUSY ADD PARTITION: every injected failure was handled correctly
+# WRITE/BUSY DROP PARTITION: every injected failure was handled correctly
+# WRITE/BUSY TRUNCATE PARTITION: no RocksDB call of this class was made
+# WRITE/BUSY REORGANIZE PARTITION: every injected failure was handled correctly
+# WRITE/BUSY COALESCE PARTITION: every injected failure was handled correctly
+# WRITE/BUSY ADD HASH PARTITIONS: every injected failure was handled correctly
+# WRITE/BUSY INPLACE ADD INDEX on a partitioned table: no RocksDB call of this class was made
+# WRITE/BUSY OPTIMIZE PARTITION: the statement does not change the state
+# WRITE/BUSY OPTIMIZE PARTITION: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT INSERT into every HASH partition: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT UPDATE moving rows between partitions: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT UPDATE in two partitions: the statement does not change the state
+# WRITE/MEMORYLIMIT UPDATE in two partitions: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT DELETE in every partition: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT REPLACE into HASH partitions: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT pruned range read: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT read of explicit partitions: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT point reads into HASH partitions: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT ADD PARTITION: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT DROP PARTITION: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT TRUNCATE PARTITION: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT REORGANIZE PARTITION: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT COALESCE PARTITION: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT ADD HASH PARTITIONS: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT INPLACE ADD INDEX on a partitioned table: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT OPTIMIZE PARTITION: the statement does not change the state
+# WRITE/MEMORYLIMIT OPTIMIZE PARTITION: no RocksDB call of this class was made
+DROP TABLE IF EXISTS tp, th;
+DROP TABLE t_outp;
+DROP PROCEDURE errinj_part_reset;
+DROP PROCEDURE errinj_tables_state;
