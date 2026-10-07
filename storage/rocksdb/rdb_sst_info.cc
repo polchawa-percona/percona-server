@@ -82,7 +82,8 @@ rocksdb::Status Rdb_sst_file_ordered::Rdb_sst_file::open() {
                                  rocksdb::Env::IOPriority::IO_TOTAL,
                                  cf_descr.options.optimize_filters_for_hits);
 
-  s = m_sst_file_writer->Open(m_name);
+  s = RDB_INJECT_ERROR(Rdb_inject_class::SST, "sst_open",
+                       m_sst_file_writer->Open(m_name));
   if (m_tracing) {
     LogPluginErrMsg(INFORMATION_LEVEL, 0, "SST Tracing: Open(%s) returned %s",
                     m_name.c_str(), s.ok() ? "ok" : "not ok");
@@ -103,7 +104,8 @@ rocksdb::Status Rdb_sst_file_ordered::Rdb_sst_file::put(
   // Add the specified key/value to the sst file writer
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  return m_sst_file_writer->Add(key, value);
+  return RDB_INJECT_ERROR(Rdb_inject_class::SST, "sst_add",
+                          m_sst_file_writer->Add(key, value));
 #pragma GCC diagnostic pop
 }
 
@@ -132,7 +134,8 @@ rocksdb::Status Rdb_sst_file_ordered::Rdb_sst_file::commit() {
   rocksdb::ExternalSstFileInfo fileinfo;  /// Finish may should be modified
 
   // Close out the sst file
-  s = m_sst_file_writer->Finish(&fileinfo);
+  s = RDB_INJECT_ERROR(Rdb_inject_class::SST, "sst_finish",
+                       m_sst_file_writer->Finish(&fileinfo));
   if (m_tracing) {
     LogPluginErrMsg(INFORMATION_LEVEL, 0, "SST Tracing: Finish returned %s",
                     s.ok() ? "ok" : "not ok");

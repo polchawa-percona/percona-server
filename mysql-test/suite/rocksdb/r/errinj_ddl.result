@@ -1,0 +1,59 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+# READ/BUSY INPLACE ADD INDEX: no RocksDB call of this class was made
+# READ/BUSY INPLACE ADD UNIQUE INDEX: no RocksDB call of this class was made
+# READ/BUSY INPLACE DROP INDEX: no RocksDB call of this class was made
+# READ/BUSY COPY ALTER: every injected failure was handled correctly
+# READ/BUSY TRUNCATE: no RocksDB call of this class was made
+# READ/BUSY OPTIMIZE TABLE: the statement does not change the state
+# READ/BUSY OPTIMIZE TABLE: no RocksDB call of this class was made
+# READ/BUSY ANALYZE TABLE: the statement does not change the state
+# READ/BUSY ANALYZE TABLE: every injected failure was handled correctly
+# READ/BUSY RENAME TABLE: the statement does not change the state
+# READ/BUSY RENAME TABLE: no RocksDB call of this class was made
+# READ/BUSY DROP TABLE: no RocksDB call of this class was made
+# SST/ABORTED INPLACE ADD INDEX: every injected failure was handled correctly
+# SST/ABORTED INPLACE ADD UNIQUE INDEX: every injected failure was handled correctly
+# SST/ABORTED INPLACE DROP INDEX: no RocksDB call of this class was made
+# SST/ABORTED COPY ALTER: no RocksDB call of this class was made
+# SST/ABORTED TRUNCATE: no RocksDB call of this class was made
+# SST/ABORTED OPTIMIZE TABLE: the statement does not change the state
+# SST/ABORTED OPTIMIZE TABLE: no RocksDB call of this class was made
+# SST/ABORTED ANALYZE TABLE: the statement does not change the state
+# SST/ABORTED ANALYZE TABLE: no RocksDB call of this class was made
+# SST/ABORTED RENAME TABLE: the statement does not change the state
+# SST/ABORTED RENAME TABLE: no RocksDB call of this class was made
+# SST/ABORTED DROP TABLE: no RocksDB call of this class was made
+# INGEST/ABORTED INPLACE ADD INDEX: every injected failure was handled correctly
+# INGEST/ABORTED INPLACE ADD UNIQUE INDEX: every injected failure was handled correctly
+# INGEST/ABORTED INPLACE DROP INDEX: no RocksDB call of this class was made
+# INGEST/ABORTED COPY ALTER: no RocksDB call of this class was made
+# INGEST/ABORTED TRUNCATE: no RocksDB call of this class was made
+# INGEST/ABORTED OPTIMIZE TABLE: the statement does not change the state
+# INGEST/ABORTED OPTIMIZE TABLE: no RocksDB call of this class was made
+# INGEST/ABORTED ANALYZE TABLE: the statement does not change the state
+# INGEST/ABORTED ANALYZE TABLE: no RocksDB call of this class was made
+# INGEST/ABORTED RENAME TABLE: the statement does not change the state
+# INGEST/ABORTED RENAME TABLE: no RocksDB call of this class was made
+# INGEST/ABORTED DROP TABLE: no RocksDB call of this class was made
+# COMPACT/ABORTED INPLACE ADD INDEX: no RocksDB call of this class was made
+# COMPACT/ABORTED INPLACE ADD UNIQUE INDEX: no RocksDB call of this class was made
+# COMPACT/ABORTED INPLACE DROP INDEX: no RocksDB call of this class was made
+# COMPACT/ABORTED COPY ALTER: no RocksDB call of this class was made
+# COMPACT/ABORTED TRUNCATE: no RocksDB call of this class was made
+# COMPACT/ABORTED OPTIMIZE TABLE: the statement does not change the state
+# COMPACT/ABORTED OPTIMIZE TABLE: every injected failure was handled correctly
+# COMPACT/ABORTED ANALYZE TABLE: the statement does not change the state
+# COMPACT/ABORTED ANALYZE TABLE: no RocksDB call of this class was made
+# COMPACT/ABORTED RENAME TABLE: the statement does not change the state
+# COMPACT/ABORTED RENAME TABLE: no RocksDB call of this class was made
+# COMPACT/ABORTED DROP TABLE: no RocksDB call of this class was made
+DROP TABLE IF EXISTS t2;
+Warnings:
+Note	1051	Unknown table 'test.t2'
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;
