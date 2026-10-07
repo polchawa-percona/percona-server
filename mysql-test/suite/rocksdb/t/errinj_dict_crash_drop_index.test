@@ -1,0 +1,46 @@
+#
+# Systematic I/O errors at the data dictionary reads and commits of
+# INPLACE and INSTANT DROP INDEX (see suite/rocksdb/include/errinj_loop.inc). A failed
+# dictionary commit aborts the server by design; after the restart the server
+# data dictionary and the MyRocks data dictionary must agree, and every table
+# must be in its state from before or after the statement.
+#
+# PS-11670: an abort between the two dictionary commits leaves an index that
+# every open of the table crashes on.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("RocksDB: ");
+call mtr.add_suppression("MyRocks: ");
+call mtr.add_suppression("Plugin .ROCKSDB.");
+call mtr.add_suppression("Couldn.t stop the");
+call mtr.add_suppression("Failed to initialize DDL manager");
+call mtr.add_suppression("Incorrect information in file");
+call mtr.add_suppression("Failed to get column family info from index id");
+call mtr.add_suppression("Could not get index information for Index Number");
+call mtr.add_suppression("Failed to get column family flags");
+call mtr.add_suppression("Removing truncated leftover table");
+
+--source suite/rocksdb/include/errinj_dict_setup.inc
+--let $errinj_dict_group = drop_index
+--let $errinj_class = DICT
+--let $errinj_status = IOERROR
+--source suite/rocksdb/include/errinj_dict_workloads.inc
+
+--let $errinj_crash = 0
+--let $errinj_state_proc =
+DROP TABLE IF EXISTS t2, t3, tp, tc;
+DROP PROCEDURE errinj_dict_reset;
+DROP PROCEDURE errinj_dict_state;

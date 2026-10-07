@@ -55,6 +55,7 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
                       std::string *new_value,
                       bool *value_changed) const override {
     assert(key.size() >= sizeof(uint32));
+    RDB_BG_THREAD_SCOPE(Rdb_bg_thread::COMPACTION_FILTER);
 
     GL_INDEX_ID gl_index_id;
     gl_index_id.cf_id = m_cf_id;

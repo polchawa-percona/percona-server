@@ -1,0 +1,64 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("RocksDB: ");
+call mtr.add_suppression("MyRocks: ");
+call mtr.add_suppression("Plugin .ROCKSDB.");
+call mtr.add_suppression("Couldn.t stop the");
+call mtr.add_suppression("Failed to initialize DDL manager");
+call mtr.add_suppression("Incorrect information in file");
+call mtr.add_suppression("Failed to get column family info from index id");
+call mtr.add_suppression("Could not get index information for Index Number");
+call mtr.add_suppression("Failed to get column family flags");
+call mtr.add_suppression("Removing truncated leftover table");
+# DICT_READ/BUSY CREATE TABLE: every injected failure was handled correctly
+# DICT_READ/BUSY CREATE partitioned TABLE: every injected failure was handled correctly
+# DICT_READ/BUSY CREATE TABLE in new column families: every injected failure was handled correctly
+# DICT_READ/BUSY DROP TABLE: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+# DICT_READ/BUSY DROP TABLE with delete range: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = DEFAULT;
+# DICT_READ/BUSY DROP TABLE in own column families: every injected failure was handled correctly
+# DICT_READ/BUSY RENAME TABLE: every injected failure was handled correctly
+# DICT_READ/BUSY TRUNCATE: every injected failure was handled correctly
+# DICT_READ/BUSY INPLACE DROP INDEX: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl = ON, GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = ON;
+# DICT_READ/BUSY DROP INDEX with instant DDL on: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = ON, GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+# DICT_READ/BUSY INSTANT ADD COLUMN: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = DEFAULT;
+# DICT_READ/IOERROR CREATE TABLE: every injected failure was handled correctly
+# DICT_READ/IOERROR CREATE partitioned TABLE: every injected failure was handled correctly
+# DICT_READ/IOERROR CREATE TABLE in new column families: every injected failure was handled correctly
+# DICT_READ/IOERROR DROP TABLE: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+# DICT_READ/IOERROR DROP TABLE with delete range: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = DEFAULT;
+# DICT_READ/IOERROR DROP TABLE in own column families: every injected failure was handled correctly
+# DICT_READ/IOERROR RENAME TABLE: every injected failure was handled correctly
+# DICT_READ/IOERROR TRUNCATE: every injected failure was handled correctly
+# DICT_READ/IOERROR INPLACE DROP INDEX: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl = ON, GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = ON;
+# DICT_READ/IOERROR DROP INDEX with instant DDL on: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = ON, GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+# DICT_READ/IOERROR INSTANT ADD COLUMN: every injected failure was handled correctly
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+SET GLOBAL rocksdb_enable_instant_ddl = DEFAULT;
+DROP TABLE IF EXISTS t2, t3, tp, tc;
+Warnings:
+Note	1051	Unknown table 'test.t3'
+Note	1051	Unknown table 'test.tp'
+Note	1051	Unknown table 'test.tc'
+DROP PROCEDURE errinj_dict_reset;
+DROP PROCEDURE errinj_dict_state;

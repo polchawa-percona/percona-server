@@ -5560,7 +5560,7 @@ rocksdb::Status Rdb_dict_manager::get_value(const rocksdb::Slice &key,
                                             std::string *const value) const {
   rocksdb::ReadOptions options;
   options.total_order_seek = true;
-  return RDB_INJECT_ERROR(Rdb_inject_class::DICT, "dict_get",
+  return RDB_INJECT_ERROR(Rdb_inject_class::DICT_READ, "dict_get",
                           m_db->Get(options, m_system_cfh, key, value));
 }
 
