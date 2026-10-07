@@ -1,0 +1,290 @@
+#
+# Manual compaction during COPY ALTER and CREATE TABLE ... SELECT.
+#
+# A copying ALTER writes the rows into a #sql table with new index ids in
+# the same column families, then renames it over the original and drops
+# the old indexes. A manual compaction (and DML on a neighbour table in the
+# same column families) runs while the statement is held:
+# - before the copy starts (empty #sql table exists);
+# - in the middle of the copy, after a commit-in-the-middle batch, so part
+#   of the #sql table is committed;
+# - after the copy, before the #sql table is renamed.
+# Also covered: the copy failing on a duplicate key and being killed while
+# part of it is committed (the #sql table must be dropped and reclaimed),
+# changing the engine to InnoDB and back, and CREATE TABLE ... SELECT that
+# succeeds or fails on a duplicate key.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+
+--let $mc3_rows = 300
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_alter
+--let $mc3_off = 10000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_alter_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_off = 0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (con_ddl, localhost, root,,);
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION rocksdb_bulk_load_size = 50;
+connection default;
+
+--let $i = 0
+while ($i < 3)
+{
+  if ($i == 0) {
+    --let $mc3_point = copy_data_between_tables_before
+    --let $mc3_held_off = 100000
+  }
+  if ($i == 1) {
+    --let $mc3_point = rocksdb.flush_batch
+    --let $mc3_held_off = 110000
+  }
+  if ($i == 2) {
+    --let $mc3_point = alter_table_before_rename_result_table
+    --let $mc3_held_off = 120000
+  }
+  --echo # COPY ALTER held at $mc3_point
+  --disable_query_log
+  DELETE FROM mc3.chk;
+  --enable_query_log
+  --let $mc3_label = before
+  --let $mc3_t = mc3.t_alter
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_alter_hid
+  --let $mc3_shape = hid
+  --source suite/rocksdb/include/mc3_snap.inc
+  CALL mc3.mark_dropped('mc3', 't_alter');
+  CALL mc3.mark_dropped('mc3', 't_alter_hid');
+
+  connection con_ddl;
+  eval SET DEBUG_SYNC = '$mc3_point SIGNAL alter_held WAIT_FOR alter_go';
+  send ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+  --let $mc3_rows = 40
+  --let $mc3_off = $mc3_held_off
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_fill.inc
+  --let $mc3_off = 0
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --disable_result_log
+  OPTIMIZE TABLE mc3.t_live;
+  --enable_result_log
+  SET DEBUG_SYNC = 'now SIGNAL alter_go';
+  connection con_ddl;
+  reap;
+
+  eval SET DEBUG_SYNC = '$mc3_point SIGNAL alter_held WAIT_FOR alter_go';
+  send ALTER TABLE mc3.t_alter_hid FORCE, ALGORITHM=COPY;
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  SET DEBUG_SYNC = 'now SIGNAL alter_go';
+  connection con_ddl;
+  reap;
+  connection default;
+
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --let $mc3_label = after
+  --let $mc3_t = mc3.t_alter
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_alter_hid
+  --let $mc3_shape = hid
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_from = before
+  --let $mc3_to = after
+  --source suite/rocksdb/include/mc3_compare.inc
+  --source suite/rocksdb/include/mc3_reclaimed.inc
+  --inc $i
+}
+
+--echo # Neighbour table after all COPY ALTERs (300 + 3 * 40 rows).
+--disable_query_log
+DELETE FROM mc3.chk;
+--enable_query_log
+--let $mc3_label = live
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = live
+--let $mc3_to = live
+--source suite/rocksdb/include/mc3_compare.inc
+
+--echo # COPY ALTER that fails on a duplicate key after a committed batch.
+--disable_query_log
+DELETE FROM mc3.chk WHERE label <> 'live';
+--enable_query_log
+--let $mc3_label = before
+--let $mc3_t = mc3.t_alter
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+connection con_ddl;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+send ALTER TABLE mc3.t_alter ADD UNIQUE KEY ua (a), ALGORITHM=COPY;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+--disable_query_log
+INSERT IGNORE INTO mc3.dropped
+  SELECT column_family, index_number FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'mc3' AND table_name LIKE '#sql%';
+SELECT COUNT(*) > 0 AS sql_table_registered FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'mc3' AND table_name LIKE '#sql%';
+--enable_query_log
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+connection con_ddl;
+--error ER_DUP_ENTRY
+reap;
+
+--echo # COPY ALTER killed after a committed batch.
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+--let $con_ddl_id = `SELECT CONNECTION_ID()`
+send ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+--disable_query_log
+INSERT IGNORE INTO mc3.dropped
+  SELECT column_family, index_number FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'mc3' AND table_name LIKE '#sql%';
+--enable_query_log
+--source suite/rocksdb/include/mc3_compact_all.inc
+--replace_result $con_ddl_id CON_DDL_ID
+eval KILL QUERY $con_ddl_id;
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+connection con_ddl;
+--error ER_QUERY_INTERRUPTED
+reap;
+connection default;
+--source suite/rocksdb/include/mc3_compact_all.inc
+--let $mc3_label = after
+--let $mc3_t = mc3.t_alter
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = before
+--let $mc3_to = after
+--source suite/rocksdb/include/mc3_compare.inc
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+--echo # Engine change to InnoDB and back.
+--disable_query_log
+DELETE FROM mc3.chk WHERE label <> 'live';
+--enable_query_log
+--let $mc3_label = before
+--let $mc3_t = mc3.t_alter
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+CALL mc3.mark_dropped('mc3', 't_alter');
+connection con_ddl;
+SET DEBUG_SYNC = 'alter_table_before_rename_result_table SIGNAL alter_held WAIT_FOR alter_go';
+send ALTER TABLE mc3.t_alter ENGINE=InnoDB;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+connection con_ddl;
+reap;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL alter_held WAIT_FOR alter_go';
+send ALTER TABLE mc3.t_alter ENGINE=ROCKSDB;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_held';
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL alter_go';
+connection con_ddl;
+reap;
+connection default;
+--source suite/rocksdb/include/mc3_compact_all.inc
+--let $mc3_label = after
+--let $mc3_t = mc3.t_alter
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = before
+--let $mc3_to = after
+--source suite/rocksdb/include/mc3_compare.inc
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+--echo # CREATE TABLE ... SELECT held after a committed batch.
+--disable_query_log
+DELETE FROM mc3.chk WHERE label <> 'live';
+--enable_query_log
+connection con_ddl;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL ctas_held WAIT_FOR ctas_go';
+send CREATE TABLE mc3.t_ctas (id INT PRIMARY KEY COMMENT 'cfname=mc3_cf',
+  a VARCHAR(64) COLLATE utf8mb4_0900_ai_ci, u INT, b BLOB,
+  KEY ka (a) COMMENT 'cfname=rev:mc3_rcf',
+  UNIQUE KEY ku (u) COMMENT 'cfname=mc3_cf') ENGINE=ROCKSDB
+  SELECT id, a, u, b FROM mc3.t_live;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_held';
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+connection con_ddl;
+reap;
+connection default;
+--source suite/rocksdb/include/mc3_compact_all.inc
+--let $mc3_label = ctas
+--let $mc3_t = mc3.t_ctas
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+UPDATE mc3.chk SET tbl = 'mc3.t_live' WHERE label = 'ctas';
+--let $mc3_from = live
+--let $mc3_to = ctas
+--source suite/rocksdb/include/mc3_compare.inc
+
+--echo # CREATE TABLE ... SELECT that fails on a duplicate key.
+connection con_ddl;
+# The first duplicate is the 38th row; commit a batch before it.
+SET SESSION rocksdb_bulk_load_size = 20;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL ctas_held WAIT_FOR ctas_go';
+send CREATE TABLE mc3.t_ctas_dup (a VARCHAR(64) COLLATE utf8mb4_0900_ai_ci
+  PRIMARY KEY COMMENT 'cfname=mc3_cf', id INT) ENGINE=ROCKSDB
+  SELECT a, id FROM mc3.t_live ORDER BY id;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR ctas_held';
+CALL mc3.mark_dropped('mc3', 't_ctas_dup');
+SELECT COUNT(*) > 0 AS ctas_table_registered FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'mc3' AND table_name = 't_ctas_dup';
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL ctas_go';
+connection con_ddl;
+--error ER_DUP_ENTRY
+reap;
+connection default;
+SELECT COUNT(*) FROM information_schema.tables
+  WHERE table_schema = 'mc3' AND table_name = 't_ctas_dup';
+--source suite/rocksdb/include/mc3_reclaimed.inc
+CHECK TABLE mc3.t_live, mc3.t_alter, mc3.t_alter_hid, mc3.t_ctas;
+
+disconnect con_ddl;
+SET DEBUG_SYNC = 'RESET';
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--disable_query_log
+DELETE FROM mc3.chk WHERE label <> 'live';
+--enable_query_log
+--let $mc3_label = restarted
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = live
+--let $mc3_to = restarted
+--source suite/rocksdb/include/mc3_compare.inc
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc

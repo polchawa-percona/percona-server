@@ -1,0 +1,165 @@
+#
+# Table DDL while a manual compaction is in progress.
+#
+# A manual compaction of the shared column family is held inside the
+# compaction filter, after it has decided whether to keep the keys of the
+# first index it reads. While it is held, other sessions drop, truncate,
+# create, rebuild (COPY ALTER) and rename tables whose keys are in the
+# files being compacted. The compaction then finishes with decisions taken
+# before the DDL. The test checks that live tables keep all rows, that
+# the keys of the dropped indexes are still reclaimed afterwards, and that
+# a restart with validate_tables=1 is clean.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+
+--let $mc3_rows = 300
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_alter
+--let $mc3_off = 10000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_drop
+--let $mc3_off = 20000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc
+--let $mc3_off = 30000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_hid
+--let $mc3_shape = hid
+--let $mc3_off = 0
+--source suite/rocksdb/include/mc3_create.inc
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# A second set of files, so the compaction has several inputs.
+--let $mc3_rows = 100
+--let $mc3_off = 50000
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_drop
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_alter
+--source suite/rocksdb/include/mc3_fill.inc
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $mc3_off = 0
+
+--let $mc3_label = before
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_alter
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+
+SET @old_debug = @@global.debug;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+SET GLOBAL debug = '+d,rocksdb_compaction_filter_pause';
+
+connect (con_compact, localhost, root,,);
+--echo # con_compact: manual compaction of the shared CF, held in the filter.
+send SET GLOBAL rocksdb_compact_cf = 'mc3_cf';
+
+connection default;
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = MyRocks: test: compaction filter paused
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+
+--echo # DDL on tables whose keys are being compacted.
+CALL mc3.mark_dropped('mc3', 't_drop');
+CALL mc3.mark_dropped('mc3', 't_trunc');
+CALL mc3.mark_dropped('mc3', 't_alter');
+DROP TABLE mc3.t_drop;
+TRUNCATE TABLE mc3.t_trunc;
+ALTER TABLE mc3.t_alter FORCE, ALGORITHM=COPY;
+RENAME TABLE mc3.t_hid TO mc3b.t_hid;
+--let $mc3_rows = 80
+--let $mc3_off = 70000
+--let $mc3_t = mc3.t_new
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_off = 0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Let the compaction finish.
+SET GLOBAL debug = '-d,rocksdb_compaction_filter_pause';
+connection con_compact;
+reap;
+disconnect con_compact;
+connection default;
+
+--let $mc3_label = new_before
+--let $mc3_t = mc3.t_new
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+
+--echo # Compact again with the DDL committed.
+--source suite/rocksdb/include/mc3_compact_all.inc
+--disable_result_log
+OPTIMIZE TABLE mc3.t_live, mc3.t_alter, mc3.t_new, mc3.t_trunc, mc3b.t_hid;
+--enable_result_log
+
+--let $mc3_label = after
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_alter
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3b.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_label = new_after
+--let $mc3_t = mc3.t_new
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+UPDATE mc3.chk SET tbl = 'mc3b.t_hid' WHERE tbl = 'mc3.t_hid';
+--let $mc3_from = before
+--let $mc3_to = after
+--source suite/rocksdb/include/mc3_compare.inc
+--let $mc3_from = new_before
+--let $mc3_to = new_after
+--source suite/rocksdb/include/mc3_compare.inc
+CHECK TABLE mc3.t_live, mc3.t_alter, mc3.t_new, mc3.t_trunc, mc3b.t_hid;
+
+--source suite/rocksdb/include/mc3_reclaimed.inc
+SET GLOBAL debug = @old_debug;
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--disable_query_log
+INSERT INTO mc3.chk SELECT 'all', tbl, idx, cnt, crc FROM mc3.chk
+  WHERE label IN ('after', 'new_after');
+--enable_query_log
+--let $mc3_label = restarted
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_alter
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_new
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3b.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = all
+--let $mc3_to = restarted
+--source suite/rocksdb/include/mc3_compare.inc
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc

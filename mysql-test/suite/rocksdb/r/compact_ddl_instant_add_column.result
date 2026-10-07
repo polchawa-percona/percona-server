@@ -1,0 +1,68 @@
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Old-format rows in the memtable too.
+ALTER TABLE mc3.t_inst ADD COLUMN c1 INT NOT NULL DEFAULT 7,
+ADD COLUMN c2 VARCHAR(20) DEFAULT 'def', ALGORITHM=INSTANT;
+ALTER TABLE mc3.t_inst_hid ADD COLUMN c1 INT DEFAULT 5, ALGORITHM=INSTANT;
+INSERT INTO mc3.t_inst VALUES (30001, 'new row', 30001, 'blob', 1, 'one'),
+(30002, 'new row 2', 30002, NULL, 2, NULL);
+INSERT INTO mc3.t_inst_hid VALUES (40001, 'Cnew', 9);
+UPDATE mc3.t_inst SET c1 = 70, c2 = 'upd' WHERE id % 10 = 0 AND id < 30000;
+UPDATE mc3.t_inst_hid SET c1 = 50 WHERE a % 10 = 0;
+OPTIMIZE TABLE mc3.t_inst, mc3.t_inst_hid, mc3.t_live;
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_inst	1	332
+mc3.t_inst_hid	1	331
+mc3.t_live	1	300
+SELECT c1, c2, COUNT(*) FROM mc3.t_inst GROUP BY c1, c2 ORDER BY c1, c2;
+c1	c2	COUNT(*)
+1	one	1
+2	def	1
+7	def	297
+70	upd	33
+SELECT c1, COUNT(*) FROM mc3.t_inst_hid GROUP BY c1 ORDER BY c1;
+c1	COUNT(*)
+5	297
+9	1
+50	33
+# A second instant ADD COLUMN on top of the compacted rows.
+ALTER TABLE mc3.t_inst ADD COLUMN c3 INT DEFAULT 3, ALGORITHM=INSTANT;
+SELECT c3, COUNT(*) FROM mc3.t_inst GROUP BY c3;
+c3	COUNT(*)
+3	332
+# restart: --rocksdb_validate_tables=1
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+OPTIMIZE TABLE mc3.t_inst, mc3.t_inst_hid, mc3.t_live;
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_inst	1	332
+mc3.t_inst_hid	1	331
+mc3.t_live	1	300
+SELECT c1, c2, COUNT(*) FROM mc3.t_inst GROUP BY c1, c2 ORDER BY c1, c2;
+c1	c2	COUNT(*)
+1	one	1
+2	def	1
+7	def	297
+70	upd	33
+SELECT c1, COUNT(*) FROM mc3.t_inst_hid GROUP BY c1 ORDER BY c1;
+c1	COUNT(*)
+5	297
+9	1
+50	33
+# COPY ALTER rewrites every row in the newest format.
+ALTER TABLE mc3.t_inst FORCE, ALGORITHM=COPY;
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_inst	1	332
+CHECK TABLE mc3.t_inst, mc3.t_inst_hid, mc3.t_live;
+Table	Op	Msg_type	Msg_text
+mc3.t_inst	check	status	OK
+mc3.t_inst_hid	check	status	OK
+mc3.t_live	check	status	OK
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+DROP DATABASE mc3;
+DROP DATABASE mc3b;

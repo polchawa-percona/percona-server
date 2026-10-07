@@ -1,0 +1,181 @@
+#
+# Manual compaction while dropped and truncated tables are waiting for the
+# drop-index thread.
+#
+# DROP TABLE and TRUNCATE TABLE put the old index ids on the ongoing drop
+# list (or, with rocksdb_enable_delete_range_for_drop_index=ON, write range
+# tombstones). Until the drop-index thread reclaims them, every manual
+# compaction runs the compaction filter over SST files that mix their keys
+# with keys of live tables in the same column families. The drop-index
+# thread is held, every manual compaction trigger is run, and the test
+# checks that:
+# - live tables sharing the column families keep every row in every index
+#   (reverse CF, unique SK, unpack info, BLOB, hidden PK, partial index);
+# - a truncated table keeps the rows inserted after TRUNCATE;
+# - tables renamed across schemas keep their data;
+# - once the drop-index thread runs, no SST file holds keys of the dropped
+#   indexes, and the same holds after a restart with validate_tables=1.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+
+--let $mc3_rows = 400
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_rows = 300
+--let $mc3_t = mc3.t_drop
+--let $mc3_shape = live
+--let $mc3_off = 100000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_drop_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc
+--let $mc3_shape = live
+--let $mc3_off = 200000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_create.inc
+
+--echo # Keys of all tables interleave in the same SST files.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $mc3_rows = 50
+--let $mc3_off = 500000
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_drop
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_off = 0
+
+--let $mc3_label = before
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+
+--echo # Hold the drop-index thread.
+SET @old_debug = @@global.debug;
+SET GLOBAL debug = '+d,rocksdb_drop_index_thread_pause';
+
+CALL mc3.mark_dropped('mc3', 't_drop');
+CALL mc3.mark_dropped('mc3', 't_drop_hid');
+CALL mc3.mark_dropped('mc3', 't_trunc');
+CALL mc3.mark_dropped('mc3', 't_trunc_pidx');
+DROP TABLE mc3.t_drop, mc3.t_drop_hid;
+TRUNCATE TABLE mc3.t_trunc;
+TRUNCATE TABLE mc3.t_trunc_pidx;
+RENAME TABLE mc3.t_hid TO mc3b.t_hid;
+
+--echo # New rows in the truncated tables use new index ids in the same CFs.
+--let $mc3_rows = 120
+--let $mc3_off = 300000
+--let $mc3_t = mc3.t_trunc
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_off = 0
+--let $mc3_label = trunc_before
+--let $mc3_t = mc3.t_trunc
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+
+--echo # Every manual compaction trigger while the drops are pending.
+--source suite/rocksdb/include/mc3_compact_all.inc
+--disable_result_log
+OPTIMIZE TABLE mc3.t_live, mc3b.t_hid, mc3.t_pidx, mc3.t_trunc,
+  mc3.t_trunc_pidx;
+--enable_result_log
+
+--echo # The drops are still pending unless delete-range mode is on.
+SELECT COUNT(*) > 0 OR @@global.rocksdb_enable_delete_range_for_drop_index
+  AS drops_pending_or_delete_range
+  FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING';
+
+--let $mc3_label = compacted
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3b.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_label = trunc_compacted
+--let $mc3_t = mc3.t_trunc
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+# The renamed table is recorded under its new name.
+UPDATE mc3.chk SET tbl = 'mc3b.t_hid' WHERE tbl = 'mc3.t_hid';
+--let $mc3_from = before
+--let $mc3_to = compacted
+--source suite/rocksdb/include/mc3_compare.inc
+--let $mc3_from = trunc_before
+--let $mc3_to = trunc_compacted
+--source suite/rocksdb/include/mc3_compare.inc
+CHECK TABLE mc3.t_live, mc3b.t_hid, mc3.t_pidx, mc3.t_trunc, mc3.t_trunc_pidx;
+
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+
+--let $mc3_label = restarted
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3b.t_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_snap.inc
+--disable_query_log
+INSERT INTO mc3.chk SELECT 'compacted_all', tbl, idx, cnt, crc FROM mc3.chk
+  WHERE label IN ('compacted', 'trunc_compacted');
+--enable_query_log
+--let $mc3_from = compacted_all
+--let $mc3_to = restarted
+--source suite/rocksdb/include/mc3_compare.inc
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc
