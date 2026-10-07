@@ -1,0 +1,35 @@
+# Checks every partition of every table through every index against the
+# InnoDB mirrors, then CHECK TABLE.
+--echo # Check: rows of every partition through every index.
+--let $cp_t = tr
+--let $cp_idx = PRIMARY
+--let $cp_expr = CONCAT_WS('#', id, u, c, MD5(b))
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_idx = uk
+--let $cp_expr = CONCAT_WS('#', u, id)
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_idx = kc
+--let $cp_expr = id
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_t = tl
+--let $cp_idx = PRIMARY
+--let $cp_expr = CONCAT_WS('#', id, c, MD5(b))
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_idx = kc
+--let $cp_expr = id
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_t = th
+--let $cp_idx =
+--let $cp_expr = CONCAT_WS('#', id, u, c)
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_idx = ku
+--let $cp_expr = u
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_idx = kc
+--let $cp_expr = 1
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+--let $cp_t = tk
+--let $cp_idx = PRIMARY
+--let $cp_expr = CONCAT_WS('#', id, MD5(b))
+--source suite/rocksdb/include/compaction_partition_cmp.inc
+CHECK TABLE tr, tl, th, tk;

@@ -1,0 +1,338 @@
+call mtr.add_suppression("RocksDB: compact L0");
+call mtr.add_suppression("MyRocks: compact L0");
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 4 partitions match the mirror
+tr index 'uk': 4 partitions match the mirror
+tr index 'kc': 4 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 4 partitions match the mirror
+th index 'ku': 4 partitions match the mirror
+th index 'kc': 4 partitions match the mirror
+tk index 'PRIMARY': 3 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 1. OPTIMIZE TABLE tk is held while it compacts mc4_shared, the column
+#    family it shares with tr p3. tr drops p3 and runs DML on p0 and p1.
+#
+UPDATE tk SET b = CONCAT(b, 'x') WHERE id < 50;
+UPDATE tk_ref SET b = CONCAT(b, 'x') WHERE id < 50;
+UPDATE tr SET c = CONCAT(c, '+') WHERE id >= 300;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: OPTIMIZE TABLE tk (held while it runs)
+OPTIMIZE TABLE tk;
+ALTER TABLE tr DROP PARTITION p3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE tr_ref DROP PARTITION p3;
+UPDATE tr SET u = u + 1 WHERE id BETWEEN 0 AND 49;
+UPDATE tr_ref SET u = u + 1 WHERE id BETWEEN 0 AND 49;
+DELETE FROM tr WHERE id BETWEEN 150 AND 159;
+DELETE FROM tr_ref WHERE id BETWEEN 150 AND 159;
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+Table	Op	Msg_type	Msg_text
+test.tk	optimize	status	OK
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 4 partitions match the mirror
+th index 'ku': 4 partitions match the mirror
+th index 'kc': 4 partitions match the mirror
+tk index 'PRIMARY': 3 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 2. rocksdb_compact_cf = 'mc4_p0' is held while it compacts tr p0's
+#    primary key. tr p0 is truncated and refilled with other values.
+#
+UPDATE tr SET c = CONCAT(c, '*') WHERE id < 100;
+UPDATE tr_ref SET c = CONCAT(c, '*') WHERE id < 100;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: SET GLOBAL rocksdb_compact_cf = 'mc4_p0' (held while it runs)
+SET GLOBAL rocksdb_compact_cf = 'mc4_p0';
+ALTER TABLE tr TRUNCATE PARTITION p0;
+ALTER TABLE tr_ref TRUNCATE PARTITION p0;
+INSERT INTO tr SELECT n, n * 11, CONCAT('t-', n), REPEAT('T', 80 + n % 9) FROM seq WHERE n < 100;
+INSERT INTO tr_ref SELECT n, n * 11, CONCAT('t-', n), REPEAT('T', 80 + n % 9) FROM seq WHERE n < 100;
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 4 partitions match the mirror
+th index 'ku': 4 partitions match the mirror
+th index 'kc': 4 partitions match the mirror
+tk index 'PRIMARY': 3 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 3. rocksdb_compact_cf = 'default' is held while REORGANIZE PARTITION
+#    copies tr p1 and p2. The compaction finishes after the copy and
+#    before the ALTER drops the old partitions.
+#
+UPDATE tr SET c = CONCAT(c, '#') WHERE id BETWEEN 200 AND 299;
+UPDATE tr_ref SET c = CONCAT(c, '#') WHERE id BETWEEN 200 AND 299;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: SET GLOBAL rocksdb_compact_cf = 'default' (held while it runs)
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'alter_after_copy_table SIGNAL copied WAIT_FOR go';
+ALTER TABLE tr REORGANIZE PARTITION p1, p2 INTO (PARTITION p1 VALUES LESS THAN (150), PARTITION p2 VALUES LESS THAN (300));
+SET DEBUG_SYNC = 'now WAIT_FOR copied';
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+SET DEBUG_SYNC = 'now SIGNAL go';
+Warnings:
+Warning	138	Inplace partition altering is not supported
+SET DEBUG_SYNC = 'RESET';
+ALTER TABLE tr_ref REORGANIZE PARTITION p1, p2 INTO (PARTITION p1 VALUES LESS THAN (150), PARTITION p2 VALUES LESS THAN (300));
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 4 partitions match the mirror
+th index 'ku': 4 partitions match the mirror
+th index 'kc': 4 partitions match the mirror
+tk index 'PRIMARY': 3 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 4. rocksdb_compact_lzero_now is held while HASH, LIST and KEY tables
+#    add, drop and coalesce partitions.
+#
+UPDATE th SET u = u + 1 WHERE id % 3 = 0;
+UPDATE th_ref SET u = u + 1 WHERE id % 3 = 0;
+UPDATE tl SET c = CONCAT(c, '!') WHERE id % 4 = 0;
+UPDATE tl_ref SET c = CONCAT(c, '!') WHERE id % 4 = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: SET GLOBAL rocksdb_compact_lzero_now = 1 (held while it runs)
+SET GLOBAL rocksdb_compact_lzero_now = 1;
+ALTER TABLE th ADD PARTITION PARTITIONS 2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE th COALESCE PARTITION 3;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE tl ADD PARTITION (PARTITION p4 VALUES IN (4));
+Warnings:
+Warning	138	Inplace partition altering is not supported
+INSERT INTO tl SELECT n, CONCAT('l4-', n), REPEAT('q', n % 40) FROM seq WHERE n BETWEEN 400 AND 449;
+ALTER TABLE tl DROP PARTITION p0;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE tk ADD PARTITION PARTITIONS 1;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE th_ref ADD PARTITION PARTITIONS 2;
+ALTER TABLE th_ref COALESCE PARTITION 3;
+ALTER TABLE tl_ref ADD PARTITION (PARTITION p4 VALUES IN (4));
+INSERT INTO tl_ref SELECT n, CONCAT('l4-', n), REPEAT('q', n % 40) FROM seq WHERE n BETWEEN 400 AND 449;
+ALTER TABLE tl_ref DROP PARTITION p0;
+ALTER TABLE tk_ref ADD PARTITION PARTITIONS 1;
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 3 partitions match the mirror
+th index 'ku': 3 partitions match the mirror
+th index 'kc': 3 partitions match the mirror
+tk index 'PRIMARY': 4 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 5. rocksdb_force_flush_memtable_and_lzero_now is held while tl
+#    rebuilds a partition and DML changes rows in several partitions.
+#
+UPDATE tk SET b = CONCAT(b, 'y') WHERE id % 5 = 0;
+UPDATE tk_ref SET b = CONCAT(b, 'y') WHERE id % 5 = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1 (held while it runs)
+SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1;
+ALTER TABLE tl REBUILD PARTITION p1;
+UPDATE th SET c = CONCAT(c, 'u') WHERE id % 5 = 0;
+DELETE FROM th WHERE id % 11 = 0;
+REPLACE INTO tr SELECT n, n * 13, CONCAT('r-', n), REPEAT('R', 30) FROM seq WHERE n BETWEEN 140 AND 169;
+INSERT INTO tr SELECT n, n * 3, 'new', NULL FROM seq WHERE n BETWEEN 250 AND 259 ON DUPLICATE KEY UPDATE c = 'dup', b = NULL;
+ALTER TABLE tl_ref REBUILD PARTITION p1;
+UPDATE th_ref SET c = CONCAT(c, 'u') WHERE id % 5 = 0;
+DELETE FROM th_ref WHERE id % 11 = 0;
+REPLACE INTO tr_ref SELECT n, n * 13, CONCAT('r-', n), REPEAT('R', 30) FROM seq WHERE n BETWEEN 140 AND 169;
+INSERT INTO tr_ref SELECT n, n * 3, 'new', NULL FROM seq WHERE n BETWEEN 250 AND 259 ON DUPLICATE KEY UPDATE c = 'dup', b = NULL;
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 3 partitions match the mirror
+th index 'ku': 3 partitions match the mirror
+th index 'kc': 3 partitions match the mirror
+tk index 'PRIMARY': 4 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 6. ALTER TABLE tr OPTIMIZE PARTITION p1 is held while it runs. DML on
+#    another table proceeds. Reads and writes of tr, in the optimized and
+#    in another partition, wait for the OPTIMIZE: it holds a metadata
+#    lock on the whole table that blocks both.
+#
+UPDATE tr SET c = CONCAT(c, '~') WHERE id BETWEEN 100 AND 149;
+UPDATE tr_ref SET c = CONCAT(c, '~') WHERE id BETWEEN 100 AND 149;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL debug = '+d,rocksdb_pause_compaction';
+# con_mc: ALTER TABLE tr OPTIMIZE PARTITION p1 (held while it runs)
+ALTER TABLE tr OPTIMIZE PARTITION p1;
+UPDATE th SET u = u * 2 WHERE id < 40;
+UPDATE th_ref SET u = u * 2 WHERE id < 40;
+SET SESSION lock_wait_timeout = 1;
+UPDATE tr SET u = u + 1 WHERE id = 120;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE tr SET u = u + 1 WHERE id = 220;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT COUNT(*) FROM tr PARTITION (p2);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION lock_wait_timeout = DEFAULT;
+SET GLOBAL debug = '-d,rocksdb_pause_compaction';
+# con_mc: reap
+Table	Op	Msg_type	Msg_text
+test.tr	optimize	status	OK
+UPDATE tr SET u = u + 1 WHERE id IN (120, 220);
+UPDATE tr_ref SET u = u + 1 WHERE id IN (120, 220);
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 3 partitions match the mirror
+tr index 'uk': 3 partitions match the mirror
+tr index 'kc': 3 partitions match the mirror
+tl index 'PRIMARY': 4 partitions match the mirror
+tl index 'kc': 4 partitions match the mirror
+th index '': 3 partitions match the mirror
+th index 'ku': 3 partitions match the mirror
+th index 'kc': 3 partitions match the mirror
+tk index 'PRIMARY': 4 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+#
+# 7. The drop-index thread is held after tr drops p2 and tl drops p2.
+#    Every manual compaction trigger runs in the window between the
+#    drops' dictionary commit and their reclaim, with DML on the
+#    remaining partitions.
+#
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE tr DROP PARTITION p2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE tr_ref DROP PARTITION p2;
+ALTER TABLE tl DROP PARTITION p2;
+Warnings:
+Warning	138	Inplace partition altering is not supported
+ALTER TABLE tl_ref DROP PARTITION p2;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+UPDATE tr SET c = CONCAT(c, '%') WHERE id < 150;
+UPDATE tr_ref SET c = CONCAT(c, '%') WHERE id < 150;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+OPTIMIZE TABLE tk;
+Table	Op	Msg_type	Msg_text
+test.tk	optimize	status	OK
+ALTER TABLE tl OPTIMIZE PARTITION p1, p3;
+Table	Op	Msg_type	Msg_text
+test.tl	optimize	status	OK
+SET GLOBAL rocksdb_compact_cf = 'mc4_p0';
+SET GLOBAL rocksdb_compact_cf = 'mc4_p0_sk';
+SET GLOBAL rocksdb_compact_cf = 'rev:mc4_l2';
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_lzero_now = 1;
+SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1;
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 2 partitions match the mirror
+tr index 'uk': 2 partitions match the mirror
+tr index 'kc': 2 partitions match the mirror
+tl index 'PRIMARY': 3 partitions match the mirror
+tl index 'kc': 3 partitions match the mirror
+th index '': 3 partitions match the mirror
+th index 'ku': 3 partitions match the mirror
+th index 'kc': 3 partitions match the mirror
+tk index 'PRIMARY': 4 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# Reclaim of dropped partitions.
+index data in SST files that belongs to no index: 0
+# MyRocks indexes per table (one per partition per index).
+TABLE_NAME	COUNT(*)
+th	9
+tk	4
+tl	6
+tr	6
+#
+# Restart with rocksdb_validate_tables=1 and check again.
+#
+# restart: --rocksdb_validate_tables=1
+# Check: rows of every partition through every index.
+tr index 'PRIMARY': 2 partitions match the mirror
+tr index 'uk': 2 partitions match the mirror
+tr index 'kc': 2 partitions match the mirror
+tl index 'PRIMARY': 3 partitions match the mirror
+tl index 'kc': 3 partitions match the mirror
+th index '': 3 partitions match the mirror
+th index 'ku': 3 partitions match the mirror
+th index 'kc': 3 partitions match the mirror
+tk index 'PRIMARY': 4 partitions match the mirror
+CHECK TABLE tr, tl, th, tk;
+Table	Op	Msg_type	Msg_text
+test.tr	check	status	OK
+test.tl	check	status	OK
+test.th	check	status	OK
+test.tk	check	status	OK
+DROP TABLE tr, tl, th, tk, tr_ref, tl_ref, th_ref, tk_ref, seq;
