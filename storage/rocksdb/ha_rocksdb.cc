@@ -34,6 +34,8 @@
 
 /* C++ standard header files */
 #include <inttypes.h>
+#include <signal.h>
+#include <unistd.h>
 #include <algorithm>
 #include <deque>
 #include <limits>
@@ -395,9 +397,54 @@ static void rocksdb_max_compaction_history_update(
     my_core::THD *const thd, my_core::SYS_VAR *const /* unused */,
     void *const var_ptr, const void *const save);
 
-static bool parse_fault_injection_params(bool *retryable,
+static bool parse_fault_injection_params(bool *inject_errors, bool *retryable,
                                          uint32_t *failure_ratio,
-                                         std::vector<rocksdb::FileType> *types);
+                                         std::vector<rocksdb::FileType> *types,
+                                         bool *power_loss);
+
+/*
+  File system that keeps unsynced writes of RocksDB files in memory, set up
+  when rocksdb_fault_injection_options has "power_loss":true. Any crash of the
+  server then loses what a power cut would lose: data that was written but
+  not synced. Used by tests only.
+*/
+static std::shared_ptr<rocksdb::FaultInjectionTestFS> rdb_power_loss_fs;
+
+static int rocksdb_debug_simulate_power_loss(
+    THD *const thd MY_ATTRIBUTE((__unused__)),
+    struct SYS_VAR *const var MY_ATTRIBUTE((__unused__)),
+    void *const var_ptr MY_ATTRIBUTE((__unused__)),
+    struct st_mysql_value *const value) {
+  bool parsed_value = false;
+  if (mysql_value_to_bool(value, &parsed_value) != 0) {
+    return 1;
+  } else if (!parsed_value) {
+    return HA_EXIT_SUCCESS;
+  }
+
+  if (!rdb_power_loss_fs) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "rocksdb_debug_simulate_power_loss (requires "
+             "rocksdb_fault_injection_options with \"power_loss\":true)");
+    return HA_EXIT_FAILURE;
+  }
+
+  /*
+    Remove the files whose directory entries were never synced and restore
+    the previous contents of small files replaced by an unsynced rename, then
+    kill the process: unsynced file data lives only in the memory of
+    rdb_power_loss_fs and is lost with it.
+  */
+  const rocksdb::IOStatus s =
+      rdb_power_loss_fs->DeleteFilesCreatedAfterLastDirSync(
+          rocksdb::IOOptions(), nullptr);
+  rdb_power_loss_fs->SetFilesystemActive(false);
+  fprintf(stderr, "MyRocks: simulating power loss (%s), SIGKILL myself\n",
+          s.ToString().c_str());
+  fflush(stderr);
+  kill(getpid(), SIGKILL);
+  return HA_EXIT_SUCCESS;
+}
 
 static int delete_range(const std::unordered_set<GL_INDEX_ID> &indices);
 
@@ -760,6 +807,7 @@ static bool rocksdb_collect_sst_properties = true;
 static bool rocksdb_force_flush_memtable_now_var = true;
 static bool rocksdb_force_flush_memtable_and_lzero_now_var = false;
 static bool rocksdb_compact_lzero_now_var = false;
+static bool rocksdb_debug_simulate_power_loss_var = false;
 static bool rocksdb_cancel_manual_compactions_var = false;
 static bool rocksdb_enable_ttl = true;
 static bool rocksdb_enable_ttl_read_filtering = true;
@@ -2359,6 +2407,14 @@ static MYSQL_SYSVAR_BOOL(compact_lzero_now, rocksdb_compact_lzero_now_var,
                          rocksdb_rw_sysvar_update_noop, false);
 
 static MYSQL_SYSVAR_BOOL(
+    debug_simulate_power_loss, rocksdb_debug_simulate_power_loss_var,
+    PLUGIN_VAR_RQCMDARG,
+    "For testing purposes only. Setting it to ON kills the server and loses "
+    "all unsynced writes to RocksDB files, as a power cut does. Requires "
+    "rocksdb_fault_injection_options with \"power_loss\":true.",
+    rocksdb_debug_simulate_power_loss, rocksdb_rw_sysvar_update_noop, false);
+
+static MYSQL_SYSVAR_BOOL(
     force_flush_memtable_and_lzero_now,
     rocksdb_force_flush_memtable_and_lzero_now_var, PLUGIN_VAR_RQCMDARG,
     "Acts similar to force_flush_memtable_now, but also compacts all L0 files.",
@@ -2907,6 +2963,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(no_create_column_family),
     MYSQL_SYSVAR(stats_recalc_rate),
     MYSQL_SYSVAR(debug_manual_compaction_delay),
+    MYSQL_SYSVAR(debug_simulate_power_loss),
     MYSQL_SYSVAR(max_manual_compactions),
     MYSQL_SYSVAR(manual_compaction_threads),
     MYSQL_SYSVAR(manual_compaction_bottommost_level),
@@ -6462,27 +6519,39 @@ static int rocksdb_init_internal(void *const p) {
 
   if (opt_rocksdb_fault_injection_options != nullptr &&
       *opt_rocksdb_fault_injection_options != '\0') {
+    bool inject_errors = false;
     bool retryable = false;
     uint32_t failure_ratio = 0;
     std::vector<rocksdb::FileType> types;
-    if (parse_fault_injection_params(&retryable, &failure_ratio, &types)) {
+    bool power_loss = false;
+    if (parse_fault_injection_params(&inject_errors, &retryable, &failure_ratio,
+                                     &types, &power_loss)) {
       DBUG_RETURN(HA_EXIT_FAILURE);
     }
 
     auto fs = std::make_shared<rocksdb::FaultInjectionTestFS>(
         rocksdb_db_options->env->GetFileSystem());
 
-    rocksdb::IOStatus error_msg = rocksdb::IOStatus::IOError("IO Error");
-    error_msg.SetRetryable(retryable);
+    if (inject_errors) {
+      rocksdb::IOStatus error_msg = rocksdb::IOStatus::IOError("IO Error");
+      error_msg.SetRetryable(retryable);
 
-    uint32_t seed = rand();
-    LogPluginErrMsg(INFORMATION_LEVEL, 0,
-                    "Initializing fault injection with params (retry=%d, "
-                    "failure_ratio=%d, seed=%d)",
-                    retryable, failure_ratio, seed);
-    fs->SetRandomWriteError(seed, failure_ratio, error_msg,
-                            /* inject_for_all_file_types */ false, types);
-    fs->EnableWriteErrorInjection();
+      uint32_t seed = rand();
+      LogPluginErrMsg(INFORMATION_LEVEL, 0,
+                      "Initializing fault injection with params (retry=%d, "
+                      "failure_ratio=%d, seed=%d)",
+                      retryable, failure_ratio, seed);
+      fs->SetRandomWriteError(seed, failure_ratio, error_msg,
+                              /* inject_for_all_file_types */ false, types);
+      fs->EnableWriteErrorInjection();
+    }
+
+    if (power_loss) {
+      LogPluginErrMsg(INFORMATION_LEVEL, 0,
+                      "Initializing power loss simulation: unsynced writes "
+                      "to RocksDB files are lost when the server dies");
+      rdb_power_loss_fs = fs;
+    }
 
     static auto fault_env_guard =
         std::make_shared<rocksdb::CompositeEnvWrapper>(rocksdb_db_options->env,
@@ -15892,8 +15961,11 @@ void Rdb_background_thread::run() {
     // InnoDB's behavior. For mode never, the wal file isn't even written,
     // whereas background writes to the wal file, but issues the syncs in a
     // background thread.
+    // rocksdb_skip_background_wal_sync lets power loss tests keep commits
+    // made with rocksdb_flush_log_at_trx_commit=0/2 unsynced.
     if (rdb && (rocksdb_flush_log_at_trx_commit != FLUSH_LOG_SYNC) &&
-        !rocksdb_db_options->allow_mmap_writes) {
+        !rocksdb_db_options->allow_mmap_writes &&
+        !DBUG_EVALUATE_IF("rocksdb_skip_background_wal_sync", true, false)) {
       bool sync = rdb_sync_wal_supported();
       const rocksdb::Status s = rdb->FlushWAL(sync);
       if (!s.ok()) {
@@ -17631,9 +17703,10 @@ static bool parse_fault_injection_file_type(const std::string &type_str,
   return true;
 }
 
-static bool parse_fault_injection_params(
-    bool *retryable, uint32_t *failure_ratio,
-    std::vector<rocksdb::FileType> *types) {
+static bool parse_fault_injection_params(bool *inject_errors, bool *retryable,
+                                         uint32_t *failure_ratio,
+                                         std::vector<rocksdb::FileType> *types,
+                                         bool *power_loss) {
   rapidjson::Document doc;
   rapidjson::ParseResult ok = doc.Parse(opt_rocksdb_fault_injection_options);
   if (!ok) {
@@ -17645,9 +17718,35 @@ static bool parse_fault_injection_params(
     return true;
   }
 
+  if (!doc.IsObject()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "rocksdb_fault_injection_options=%s schema not valid",
+                    opt_rocksdb_fault_injection_options);
+    return true;
+  }
+
+  auto pl_it = doc.FindMember("power_loss");
+  if (pl_it != doc.MemberEnd()) {
+    if (!pl_it->value.IsBool()) {
+      LogPluginErrMsg(ERROR_LEVEL, 0,
+                      "rocksdb_fault_injection_options=%s schema not valid "
+                      "(wrong types)",
+                      opt_rocksdb_fault_injection_options);
+      return true;
+    }
+    *power_loss = pl_it->value.GetBool();
+  }
+
   auto retry_it = doc.FindMember("retry");
   auto fr_it = doc.FindMember("failure_ratio");
   auto ft_it = doc.FindMember("filetypes");
+
+  // The error injection keys may be left out when only power loss is wanted.
+  if (pl_it != doc.MemberEnd() && retry_it == doc.MemberEnd() &&
+      fr_it == doc.MemberEnd() && ft_it == doc.MemberEnd()) {
+    *inject_errors = false;
+    return false;
+  }
 
   if (retry_it == doc.MemberEnd() || fr_it == doc.MemberEnd() ||
       ft_it == doc.MemberEnd()) {
@@ -17667,6 +17766,7 @@ static bool parse_fault_injection_params(
     return true;
   }
 
+  *inject_errors = true;
   *retryable = retry_it->value.GetBool();
   *failure_ratio = fr_it->value.GetInt();
   for (rapidjson::SizeType i = 0; i < ft_it->value.Size(); i++) {

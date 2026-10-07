@@ -1,0 +1,1 @@
+--rocksdb_fault_injection_options="{"power_loss":true}" --rocksdb_flush_log_at_trx_commit=2 --debug=+d,rocksdb_skip_background_wal_sync

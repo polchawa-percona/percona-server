@@ -1,0 +1,324 @@
+# ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# DROP TABLE t2, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# TRUNCATE TABLE t2, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 FORCE, ALGORITHM=COPY, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp TRUNCATE PARTITION p1, compaction held at start
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp DROP PARTITION p1, compaction held at start
+Warnings:
+Warning	138	Inplace partition altering is not supported
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE), compaction held at start
+Warnings:
+Warning	138	Inplace partition altering is not supported
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# DROP TABLE t2, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# TRUNCATE TABLE t2, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 FORCE, ALGORITHM=COPY, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp TRUNCATE PARTITION p1, compaction held at middle
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp DROP PARTITION p1, compaction held at middle
+Warnings:
+Warning	138	Inplace partition altering is not supported
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE), compaction held at middle
+Warnings:
+Warning	138	Inplace partition altering is not supported
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc

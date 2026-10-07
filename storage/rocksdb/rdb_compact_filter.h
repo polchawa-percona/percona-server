@@ -22,7 +22,10 @@
 
 /* C++ system header files */
 #ifndef NDEBUG
+#include <chrono>
+#include <cstring>
 #include <ctime>
+#include <thread>
 #endif
 #include <string>
 
@@ -35,12 +38,44 @@
 
 namespace myrocks {
 
+#ifndef NDEBUG
+/*
+  Test hook: while the global debug keyword is set, hold a manual compaction
+  at the given point, so that a test can run other statements against it or
+  crash the server. RocksDB background threads have no DBUG thread state, so
+  only the global debug settings are checked. The DB mutex is not held at any
+  of the points where this is called.
+*/
+inline bool rdb_dbug_global_keyword_set(const char *const keyword) {
+  char buf[1024];
+  return DBUG_EXPLAIN_INITIAL(buf, sizeof(buf)) == 0 &&
+         strstr(buf, keyword) != nullptr;
+}
+
+inline void rdb_dbug_pause_manual_compaction(const char *const keyword,
+                                             const char *const point,
+                                             const uint32_t cf_id) {
+  if (!rdb_dbug_global_keyword_set(keyword)) return;
+  // NO_LINT_DEBUG
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: test: manual compaction paused at %s, cf id %u",
+                  point, cf_id);
+  while (rdb_dbug_global_keyword_set(keyword))
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // NO_LINT_DEBUG
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: test: manual compaction resumed at %s", point);
+}
+#endif  // !defined(NDEBUG)
+
 class Rdb_compact_filter : public rocksdb::CompactionFilter {
  public:
   Rdb_compact_filter(const Rdb_compact_filter &) = delete;
   Rdb_compact_filter &operator=(const Rdb_compact_filter &) = delete;
 
-  explicit Rdb_compact_filter(uint32_t _cf_id) : m_cf_id(_cf_id) {}
+  explicit Rdb_compact_filter(uint32_t _cf_id,
+                              bool _is_manual_compaction = false)
+      : m_cf_id(_cf_id), m_is_manual_compaction(_is_manual_compaction) {}
   ~Rdb_compact_filter() {
     // Increment stats by num expired at the end of compaction
     rdb_update_global_stats(ROWS_EXPIRED, m_num_expired);
@@ -55,6 +90,15 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
                       std::string *new_value,
                       bool *value_changed) const override {
     assert(key.size() >= sizeof(uint32));
+
+#ifndef NDEBUG
+    // Hold a manual compaction after it has processed some keys, so part of
+    // its output is already written.
+    if (m_is_manual_compaction && ++m_dbug_num_keys == 1000) {
+      rdb_dbug_pause_manual_compaction("rocksdb_mc_pause_middle", "middle",
+                                       m_cf_id);
+    }
+#endif
 
     GL_INDEX_ID gl_index_id;
     gl_index_id.cf_id = m_cf_id;
@@ -184,6 +228,12 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
  private:
   // Column family for this compaction filter
   const uint32_t m_cf_id;
+  // Whether the compaction is a manual one
+  const bool m_is_manual_compaction;
+#ifndef NDEBUG
+  // Number of keys seen, for the rocksdb_mc_pause_middle test hook
+  mutable uint64 m_dbug_num_keys = 0;
+#endif
   // Index id of the previous record
   mutable GL_INDEX_ID m_prev_index = {0, 0};
   // Number of rows deleted for the same index id
@@ -213,8 +263,14 @@ class Rdb_compact_filter_factory : public rocksdb::CompactionFilterFactory {
 
   std::unique_ptr<rocksdb::CompactionFilter> CreateCompactionFilter(
       const rocksdb::CompactionFilter::Context &context) override {
-    return std::unique_ptr<rocksdb::CompactionFilter>(
-        new Rdb_compact_filter(context.column_family_id));
+#ifndef NDEBUG
+    if (context.is_manual_compaction) {
+      rdb_dbug_pause_manual_compaction("rocksdb_mc_pause_start", "start",
+                                       context.column_family_id);
+    }
+#endif
+    return std::unique_ptr<rocksdb::CompactionFilter>(new Rdb_compact_filter(
+        context.column_family_id, context.is_manual_compaction));
   }
 };
 
