@@ -1,0 +1,72 @@
+#
+# Race between a connection close that finishes a bulk load and an INPLACE
+# ADD INDEX on another connection. Moved out of add_index_inplace, where it
+# depended on timing and made that test fail intermittently (PS-11772).
+#
+# The disconnecting thread finishes the bulk load in rocksdb_close_connection().
+# Rdb_sst_info::finish() takes the SST files and marks the load done, and the
+# files are ingested afterwards. The ALTER also finishes the bulk load when it
+# closes the cached handler of con1 (ha_rocksdb::finalize_bulk_load()), but if
+# the disconnecting thread got there first, it finds the load done and returns
+# before the rows are ingested. The ALTER then builds the new index without the
+# rows. Here the disconnecting thread is always held in that window with the
+# global debug keyword rocksdb_bulk_load_pause_before_ingest, and the test
+# asserts the correct result: the new index has the row. Disabled until
+# PS-11772 is fixed.
+#
+# Once the ALTER waits for the ingest, it cannot reach the
+# alter_table_inplace_before_commit sync point while the disconnecting thread
+# is held, so that wait has a timeout and the keyword is cleared after it.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+SET @saved_rocksdb_bulk_load = @@global.rocksdb_bulk_load;
+SET GLOBAL rocksdb_bulk_load = 1;
+
+--echo # Establish connection con1 (user=root)
+connect (con1,localhost,root,,);
+
+CREATE TABLE t1 (i INT, j INT, PRIMARY KEY (i)) ENGINE = ROCKSDB;
+
+INSERT INTO t1 VALUES (1,1);
+
+--let $con1_id = `SELECT CONNECTION_ID()`
+SET GLOBAL debug = '+d,rocksdb_bulk_load_pause_before_ingest';
+SET DEBUG_SYNC = 'rocksdb.bulk_load_finished_before_ingest SIGNAL finished';
+--echo # Disconnecting on con1 finishes its bulk load
+disconnect con1;
+
+--echo # Establish connection con2 (user=root)
+connect (con2,localhost,root,,);
+SET DEBUG_SYNC = 'now WAIT_FOR finished';
+SET DEBUG_SYNC = 'alter_table_inplace_before_commit SIGNAL populated';
+--send ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE
+
+connection default;
+--disable_warnings
+SET DEBUG_SYNC = 'now WAIT_FOR populated TIMEOUT 10';
+--enable_warnings
+--echo # Let the disconnecting thread ingest its bulk load
+SET GLOBAL debug = '-d,rocksdb_bulk_load_pause_before_ingest';
+
+connection con2;
+--reap
+--echo # Wait until con1 is gone, its bulk load is ingested by then
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.processlist WHERE ID = $con1_id
+--source include/wait_condition.inc
+
+--echo # The new index must have an entry for every row
+SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX(kj);
+CHECK TABLE t1;
+
+DROP TABLE t1;
+disconnect con2;
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+SET GLOBAL rocksdb_bulk_load = @saved_rocksdb_bulk_load;
+--source include/wait_until_count_sessions.inc
