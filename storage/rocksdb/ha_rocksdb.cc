@@ -13934,6 +13934,10 @@ int ha_rocksdb::adjust_handler_stats_sst_and_memtable(ha_statistics *ha_stats,
                                                       Rdb_tbl_def *tbl_def) {
   DBUG_ENTER_FUNC();
 
+  /* Test only: simulate a failed recalculation of bad cached stats */
+  DBUG_EXECUTE_IF("myrocks_simulate_stats_recalc_failure",
+                  DBUG_RETURN(HA_EXIT_FAILURE););
+
   /*
     If any stats are negative due to bad cached stats, re-run analyze table
     and re-retrieve the stats.
