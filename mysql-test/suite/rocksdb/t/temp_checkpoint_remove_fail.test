@@ -1,0 +1,42 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # PS-11795: when a session that created a temporary checkpoint
+--echo # (rocksdb_create_temporary_checkpoint) disconnects, MyRocks removes the
+--echo # checkpoint with DestroyDB(). If that fails, the error goes only to the
+--echo # diagnostics area of the disconnecting session, which nobody reads: the
+--echo # error log has no failure line and the checkpoint (hard links to live
+--echo # SST files) is left behind silently.
+--echo # A directory placed at <checkpoint>/LOCK makes DestroyDB() fail.
+--echo #
+
+call mtr.add_suppression("ckpt_remove_failure/LOCK: Is a directory");
+
+--let $ckpt=$MYSQLTEST_VARDIR/tmp/ckpt_remove_failure
+
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--source include/count_sessions.inc
+connect (con1,localhost,root,,);
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt'
+--file_exists $ckpt/CURRENT
+--mkdir $ckpt/LOCK
+disconnect con1;
+
+connection default;
+--source include/wait_until_count_sessions.inc
+
+--echo # DestroyDB() failed, so the checkpoint is still there.
+--file_exists $ckpt/CURRENT
+
+--echo # The failure to remove the checkpoint must be in the error log.
+--let SEARCH_FILE=$MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN=ckpt_remove_failure/LOCK: Is a directory
+--source include/search_pattern.inc
+
+--rmdir $ckpt/LOCK
+--force-rmdir $ckpt
+DROP TABLE t1;
