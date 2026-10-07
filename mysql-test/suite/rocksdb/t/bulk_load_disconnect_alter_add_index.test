@@ -1,0 +1,49 @@
+#
+# An INPLACE ADD INDEX must index every row of the table, also rows of a bulk
+# load that another connection left unfinished when it disconnected.
+#
+# A bulk load is finished when its connection disconnects, by the
+# disconnecting thread (rocksdb_close_connection()). An ALTER on the table
+# also finishes pending bulk loads, through the destructor of the cached
+# handler that did the load (ha_rocksdb::finalize_bulk_load()). Both share the
+# same Rdb_sst_info: whoever calls finish() first takes the SST files, the
+# other finds no work and returns at once. If the disconnecting thread wins
+# but has not ingested the files yet, the ALTER goes on, scans the primary key
+# without the bulk-loaded rows and builds the new index without them. The
+# rows are ingested right after, so the table has rows the new index does not
+# have (PS-11772, disabled until the fix).
+#
+# The disconnecting thread is held between finish() and the ingest with the
+# global debug keyword rocksdb_bulk_load_pause_before_ingest: DEBUG_SYNC cannot
+# wait there because the session is already killed.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (i INT, j INT, PRIMARY KEY (i)) ENGINE = ROCKSDB;
+
+connect (con1, localhost, root,,);
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL debug = '+d,rocksdb_bulk_load_pause_before_ingest';
+SET DEBUG_SYNC = 'rocksdb.bulk_load_finished_before_ingest SIGNAL finished';
+--echo # Disconnecting con1 finishes its bulk load.
+disconnect con1;
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR finished';
+ALTER TABLE t1 ADD INDEX kj (j), ALGORITHM = INPLACE;
+--echo # Let con1 ingest its bulk load.
+SET GLOBAL debug = '-d,rocksdb_bulk_load_pause_before_ingest';
+--source include/wait_until_count_sessions.inc
+
+--echo # The new index must have an entry for every row.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kj);
+SELECT * FROM t1 FORCE INDEX (kj) ORDER BY j;
+CHECK TABLE t1;
+
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
