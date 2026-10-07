@@ -1,0 +1,18 @@
+#
+# PS-11795: when a session that created a temporary checkpoint
+# (rocksdb_create_temporary_checkpoint) disconnects, MyRocks removes the
+# checkpoint with DestroyDB(). If that fails, the error goes only to the
+# diagnostics area of the disconnecting session, which nobody reads: the
+# error log has no failure line and the checkpoint (hard links to live
+# SST files) is left behind silently.
+# A directory placed at <checkpoint>/LOCK makes DestroyDB() fail.
+#
+call mtr.add_suppression("ckpt_remove_failure/LOCK: Is a directory");
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_remove_failure';
+# DestroyDB() failed, so the checkpoint is still there.
+# The failure to remove the checkpoint must be in the error log.
+Pattern "ckpt_remove_failure/LOCK: Is a directory" found
+DROP TABLE t1;
