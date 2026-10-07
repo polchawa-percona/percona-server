@@ -1,0 +1,44 @@
+SET @orig_delete_range = @@global.rocksdb_enable_delete_range_for_drop_index;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+# DROP TABLE of a table without TTL created after a TTL table
+CREATE TABLE t_ttl (a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cft') ENGINE=ROCKSDB
+COMMENT='ttl_duration=100000;';
+CREATE TABLE t_plain (a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cft') ENGINE=ROCKSDB;
+INSERT INTO t_ttl VALUES (1,1),(2,2),(3,3);
+INSERT INTO t_plain VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_plain;
+SET GLOBAL rocksdb_compact_cf = 'cft';
+SELECT COUNT(*) FROM t_ttl;
+COUNT(*)
+3
+# DROP INDEX of a secondary index that directly follows a TTL index
+CREATE TABLE t_sk (a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cfs') ENGINE=ROCKSDB;
+CREATE TABLE t_ttl2 (a INT NOT NULL, PRIMARY KEY (a) COMMENT 'cfname=cfs')
+ENGINE=ROCKSDB COMMENT='ttl_duration=100000;';
+ALTER TABLE t_sk ADD INDEX kb (b) COMMENT 'cfname=cfs', ALGORITHM=INPLACE;
+INSERT INTO t_sk VALUES (1,1),(2,2),(3,3);
+INSERT INTO t_ttl2 VALUES (1),(2),(3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ALTER TABLE t_sk DROP INDEX kb, ALGORITHM=INPLACE;
+SET GLOBAL rocksdb_compact_cf = 'cfs';
+SELECT COUNT(*) FROM t_sk;
+COUNT(*)
+3
+SELECT COUNT(*) FROM t_ttl2;
+COUNT(*)
+3
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*) FROM t_ttl;
+COUNT(*)
+3
+SELECT COUNT(*) FROM t_sk;
+COUNT(*)
+3
+# restart
+DROP TABLE t_ttl, t_sk, t_ttl2;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @orig_delete_range;

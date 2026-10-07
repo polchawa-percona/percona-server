@@ -1,0 +1,316 @@
+#
+# DDL on TTL tables while a manual compaction of their column families is
+# held in the compaction filter factory (debug point rocksdb_pause_compaction),
+# at READ COMMITTED and REPEATABLE READ (see the .combinations file).
+#
+# The TTL tables hold expired and live rows (fixed timestamps, no real-time
+# expiry). Each scenario holds one manual compaction trigger, runs one DDL
+# statement, releases the compaction and checks every index of the changed
+# table: read filtering must hide the expired rows, the live rows must all be
+# there, and the primary key and secondary indexes must agree. The DDL covers
+# INPLACE ADD and DROP INDEX, TRUNCATE TABLE, COPY ALTER, a COPY ALTER that
+# changes ttl_duration, TRUNCATE, ADD and DROP PARTITION with per-partition
+# TTL, and CREATE/DROP TABLE. The held triggers are rocksdb_compact_cf (also
+# with a forced bottommost level), rocksdb_force_flush_memtable_and_lzero_now
+# and rocksdb_compact_lzero_now. OPTIMIZE TABLE and OPTIMIZE PARTITION are not
+# held here: they compact only the table's own key range, which may already be
+# compacted and then start no job to hold; compaction_ttl_snapshot uses them.
+#
+# A transaction opened before the scenarios reads a TTL table that the DDL
+# does not touch but that gets a new row: at REPEATABLE READ it must keep its
+# snapshot across all the compactions, at READ COMMITTED it sees the new row.
+#
+# At the end a forced bottommost compaction must leave exactly the live rows
+# in every index (checked with read filtering off), and the result must
+# survive a restart with rocksdb_validate_tables=1.
+#
+# Tables whose dropped indexes would directly follow a TTL index in a column
+# family all have TTL themselves, to stay clear of PS-11785 with
+# rocksdb_enable_delete_range_for_drop_index=ON; compaction_ttl_dropped_index
+# covers that bug.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/count_sessions.inc
+
+--let $rr = `SELECT @@global.transaction_isolation = 'REPEATABLE-READ'`
+SET @orig_rec_ts = @@global.rocksdb_debug_ttl_rec_ts;
+
+CREATE TABLE t_col (
+  a INT NOT NULL, b INT NOT NULL, c VARCHAR(32), d BLOB,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  UNIQUE KEY ub (b) COMMENT 'cfname=rev:cft2',
+  KEY kc (c(4)) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=100;ttl_col=ts;';
+
+CREATE TABLE t_hid (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=100;';
+
+CREATE TABLE t_part (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'p0_cfname=cfp0;p1_cfname=cfp1;',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=100000;p0_ttl_duration=100;'
+  PARTITION BY RANGE (a) (
+    PARTITION p0 VALUES LESS THAN (10),
+    PARTITION p1 VALUES LESS THAN (100));
+
+CREATE TABLE t_plain (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB;
+
+# Gets a row before each held compaction, see compaction_ttl_pause.inc.
+CREATE TABLE t_fill (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'p0_cfname=cfp0;p1_cfname=cfp1;',
+  KEY kb (b) COMMENT 'cfname=cft',
+  UNIQUE KEY ub (b, a) COMMENT 'cfname=rev:cft2'
+) ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 2;
+--let $ctp_n = 0
+
+CREATE TABLE t_live (
+  a INT NOT NULL, PRIMARY KEY (a) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=100000;';
+
+--echo # Rows 1-4 have expired, rows 5-8 live long.
+INSERT INTO t_col
+  SELECT n, n, REPEAT(CHAR(96 + n), 8), REPEAT('x', 1000),
+         IF(n <= 4, 1, UNIX_TIMESTAMP() + 100000)
+  FROM (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION
+        SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8) s;
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -1000;
+INSERT INTO t_hid VALUES (1,1),(2,2),(3,3),(4,4);
+INSERT INTO t_part VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+INSERT INTO t_hid VALUES (5,5),(6,6),(7,7),(8,8);
+INSERT INTO t_part VALUES (4,4),(5,5),(6,6),(11,11),(12,12),(13,13);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+INSERT INTO t_plain VALUES (1,1),(2,2),(3,3),(4,4);
+INSERT INTO t_live VALUES (1),(2),(3),(4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (con_compact,localhost,root,,);
+connect (con_r,localhost,root,,);
+--disable_warnings
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--enable_warnings
+connection default;
+INSERT INTO t_live VALUES (5);
+if ($rr)
+{
+  --let $exp_reader = 4
+}
+if (!$rr)
+{
+  --let $exp_reader = 5
+}
+
+--let $exp_col = 4
+--let $exp_hid = 4
+--let $exp_part = 6
+--let $exp_plain = 4
+
+--echo #
+--echo # 1. INPLACE ADD INDEX during rocksdb_compact_cf
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cft'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_col ADD INDEX kd (b, a) COMMENT 'cfname=cft', ALGORITHM=INPLACE;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $ct_label = 1.
+--let $ct_table = t_col
+--let $ct_expect = $exp_col
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = ub
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kc
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kd
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 2. INPLACE DROP INDEX during rocksdb_force_flush_memtable_and_lzero_now
+INSERT INTO t_plain VALUES (5,5);
+--inc $exp_plain
+--let $ctp_trigger = SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_col DROP INDEX kc, ALGORITHM=INPLACE;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $ct_label = 2.
+--let $ct_table = t_col
+--let $ct_expect = $exp_col
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = ub
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kd
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_table = t_plain
+--let $ct_expect = $exp_plain
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 3. TRUNCATE TABLE during rocksdb_compact_cf of the reverse column family
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'rev:cft2'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+TRUNCATE TABLE t_hid;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -1000;
+INSERT INTO t_hid VALUES (1,1),(2,2),(3,3),(4,4);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+INSERT INTO t_hid VALUES (5,5),(6,6),(7,7),(8,8);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+--let $ct_label = 3.
+--let $ct_table = t_hid
+--let $ct_expect = $exp_hid
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 4. COPY ALTER during a forced bottommost rocksdb_compact_cf
+connection con_compact;
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+connection default;
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cft'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_col FORCE, ALGORITHM=COPY;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+connection con_compact;
+SET SESSION rocksdb_manual_compaction_bottommost_level = DEFAULT;
+connection default;
+--let $ct_label = 4.
+--let $ct_table = t_col
+--let $ct_expect = $exp_col
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = ub
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kd
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 5. COPY ALTER that changes ttl_duration during rocksdb_compact_lzero_now.
+--echo #    The copy reads the old table with TTL read filtering, so the expired
+--echo #    rows are not copied even though the new duration would cover them.
+INSERT INTO t_plain VALUES (6,6);
+--inc $exp_plain
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_lzero_now = 1
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_hid COMMENT='ttl_duration=100000;', ALGORITHM=COPY;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $ct_label = 5.
+--let $ct_table = t_hid
+--let $ct_expect = $exp_hid
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 6. TRUNCATE PARTITION of the short-TTL partition during
+--echo #    rocksdb_compact_cf of its column family
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cfp0'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_part TRUNCATE PARTITION p0;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $exp_part = 3
+--let $ct_label = 6.
+--let $ct_table = t_part
+--let $ct_expect = $exp_part
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 7. ADD PARTITION, then DROP PARTITION, each during rocksdb_compact_cf
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cft'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_part ADD PARTITION (PARTITION p2 VALUES LESS THAN (1000));
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+INSERT INTO t_part VALUES (101,101),(102,102);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $ct_label = 7a.
+--let $ct_table = t_part
+--let $ct_expect = 5
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cft'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+ALTER TABLE t_part DROP PARTITION p2;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $ct_label = 7b.
+--let $ct_expect = $exp_part
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--let $ct_index = kb
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+--echo #
+--echo # 8. CREATE and DROP TABLE during a forced bottommost rocksdb_compact_cf
+--echo #    of a partition's column family
+connection con_compact;
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+connection default;
+--let $ctp_trigger = SET GLOBAL rocksdb_compact_cf = 'cfp1'
+--source suite/rocksdb/include/compaction_ttl_pause.inc
+CREATE TABLE t_tmp (a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft', KEY kb (b) COMMENT 'cfname=cft')
+  ENGINE=ROCKSDB COMMENT='ttl_duration=100;';
+INSERT INTO t_tmp VALUES (1,1),(2,2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_tmp;
+--source suite/rocksdb/include/compaction_ttl_resume.inc
+--let $ct_label = 8.
+--let $ct_table = t_part
+--let $ct_expect = $exp_part
+--let $ct_index = PRIMARY
+--source suite/rocksdb/include/compaction_ttl_check.inc
+--source suite/rocksdb/include/compaction_ttl_reader.inc
+
+connection con_r;
+COMMIT;
+disconnect con_r;
+disconnect con_compact;
+connection default;
+
+--echo #
+--echo # A forced bottommost compaction leaves exactly the live rows.
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+--source suite/rocksdb/include/compaction_ttl_compact_all.inc
+SET SESSION rocksdb_manual_compaction_bottommost_level = DEFAULT;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+--let $ct_label = read filtering off:
+--source suite/rocksdb/include/compaction_ttl_check_ddl.inc
+SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+CHECK TABLE t_col, t_hid, t_part, t_plain, t_live, t_fill;
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $ct_label = after restart:
+--source suite/rocksdb/include/compaction_ttl_check_ddl.inc
+CHECK TABLE t_col, t_hid, t_part, t_plain, t_live, t_fill;
+
+--let $restart_parameters =
+--source include/restart_mysqld.inc
+DROP TABLE t_col, t_hid, t_part, t_plain, t_live, t_fill;
+--source include/wait_until_count_sessions.inc
