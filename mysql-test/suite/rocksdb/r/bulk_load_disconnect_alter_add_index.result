@@ -1,0 +1,27 @@
+CREATE TABLE t1 (i INT, j INT, PRIMARY KEY (i)) ENGINE = ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL debug = '+d,rocksdb_bulk_load_pause_before_ingest';
+SET DEBUG_SYNC = 'rocksdb.bulk_load_finished_before_ingest SIGNAL finished';
+# Disconnecting con1 finishes its bulk load.
+SET DEBUG_SYNC = 'now WAIT_FOR finished';
+ALTER TABLE t1 ADD INDEX kj (j), ALGORITHM = INPLACE;
+# Let con1 ingest its bulk load.
+SET GLOBAL debug = '-d,rocksdb_bulk_load_pause_before_ingest';
+# The new index must have an entry for every row.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+3
+SELECT COUNT(*) FROM t1 FORCE INDEX (kj);
+COUNT(*)
+3
+SELECT * FROM t1 FORCE INDEX (kj) ORDER BY j;
+i	j
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
