@@ -947,6 +947,7 @@ rocksdb_db_write_buffer_size	0
 rocksdb_deadlock_detect	OFF
 rocksdb_deadlock_detect_depth	50
 rocksdb_debug_cardinality_multiplier	2
+rocksdb_debug_inject_bg_error	
 rocksdb_debug_inject_error_class	ANY
 rocksdb_debug_inject_error_nth	0
 rocksdb_debug_inject_error_status	IOERROR

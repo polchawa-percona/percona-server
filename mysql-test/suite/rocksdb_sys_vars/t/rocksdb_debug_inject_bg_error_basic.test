@@ -1,0 +1,56 @@
+--source include/have_rocksdb.inc
+
+# Values are '<thread> <class> <status> <n>' lists, so they are set quoted
+# here instead of through rocksdb_sys_var.inc.
+
+SET @start_global_value = @@global.rocksdb_debug_inject_bg_error;
+SELECT @start_global_value;
+
+# The thread kinds, upper and lower case. n is large, so that nothing fires.
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+SET @@global.rocksdb_debug_inject_bg_error = 'background commit ioerror 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+SET @@global.rocksdb_debug_inject_bg_error = 'INDEX_STATS ITERATOR INCOMPLETE 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+SET @@global.rocksdb_debug_inject_bg_error = 'MANUAL_COMPACTION ANY ABORTED 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+SET @@global.rocksdb_debug_inject_bg_error = 'COMPACTION_FILTER DICT TIMEDOUT 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+
+# Up to four comma-separated specifications.
+SET @@global.rocksdb_debug_inject_bg_error =
+  'DROP_INDEX COMPACT BUSY 1000000, DROP_INDEX ITERATOR INCOMPLETE 1000000,BACKGROUND READ NOSPACE 1000000 , INDEX_STATS SST EXPIRED 1000000';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+
+SET @@global.rocksdb_debug_inject_bg_error = '';
+SELECT @@global.rocksdb_debug_inject_bg_error;
+
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'aaa';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'NONE COMPACT BUSY 1';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX FOO BUSY 1';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT FOO 1';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 0';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 1 2';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 1,';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error =
+  'DROP_INDEX COMPACT BUSY 1, DROP_INDEX COMPACT BUSY 1, DROP_INDEX COMPACT BUSY 1, DROP_INDEX COMPACT BUSY 1, DROP_INDEX COMPACT BUSY 1';
+--error ER_WRONG_TYPE_FOR_VAR
+SET @@global.rocksdb_debug_inject_bg_error = 1;
+SELECT @@global.rocksdb_debug_inject_bg_error;
+
+--error ER_GLOBAL_VARIABLE
+SET @@session.rocksdb_debug_inject_bg_error = '';
+
+SET @@global.rocksdb_debug_inject_bg_error = DEFAULT;
+SELECT @@global.rocksdb_debug_inject_bg_error;
+SET @@global.rocksdb_debug_inject_bg_error = @start_global_value;
+SELECT @@global.rocksdb_debug_inject_bg_error;

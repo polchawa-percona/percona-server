@@ -1,0 +1,31 @@
+#
+# PS-11775: the drop-index thread decides that a dropped index is gone when an iterator
+# positioned at the index finds no key of it, without checking the iterator
+# status. A failed iterator therefore ends the drop while rows of the index
+# are still in SST files: the index leaves the drop queue, the compaction
+# filter stops removing its rows, and they are never reclaimed.
+#
+# Here the compaction of the dropped range fails (so the rows stay) and the
+# following emptiness check fails too. Correct behaviour: the index stays in
+# the drop queue until its rows are gone.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Failed to read/write in RocksDB");
+
+--let $errinj_bg_table = t1
+--let $errinj_bg_keys =
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error =
+  'DROP_INDEX COMPACT BUSY 2, DROP_INDEX ITERATOR INCOMPLETE 1';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_site = drop_index_empty_check
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--echo # After a restart the rows are still not reclaimed.
+--source include/restart_mysqld.inc
+--source suite/rocksdb/include/errinj_bg_check.inc

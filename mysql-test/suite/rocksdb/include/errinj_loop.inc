@@ -16,7 +16,7 @@
 #
 # Parameters:
 #   $errinj_class    ANY, WRITE, READ, ITERATOR, COMMIT, DICT, SST, INGEST,
-#                    COMPACT
+#                    COMPACT, DICT_READ
 #   $errinj_status   IOERROR, NOSPACE, CORRUPTION, BUSY, TIMEDOUT, TRYAGAIN,
 #                    INCOMPLETE, ABORTED, MEMORYLIMIT, EXPIRED,
 #                    INVALIDARGUMENT
@@ -29,6 +29,8 @@
 #   $errinj_max      upper bound for N (default 200)
 #   $errinj_crash    1 if the injected failure may abort the server
 #   $errinj_label    text used in the output (default class/status)
+#   $errinj_after_restart optional statement run after every restart, for
+#                    example to set global variables again
 #
 # Output: one line per violation, then one summary line without counts, so
 # that the result does not depend on how many RocksDB calls are made.
@@ -96,6 +98,22 @@ while (!$errinj_done) {
     # The include files above turn the query and result logs back on.
     --disable_query_log
     --disable_result_log
+    # MyRocks may refuse to start when the dictionaries disagree; restart
+    # without table validation so that the loop can go on.
+    --let $errinj_engine = `SELECT COUNT(*) FROM information_schema.engines WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT')`
+    if (!$errinj_engine) {
+      --echo VIOLATION $errinj_label n=$errinj_n: MyRocks did not start after the abort
+      --inc $errinj_violations
+      --let $restart_parameters = restart: --rocksdb_validate_tables=2
+      --source include/restart_mysqld.inc
+      --let $restart_parameters =
+      --disable_query_log
+      --disable_result_log
+    }
+    # Global settings are lost on restart.
+    if ($errinj_after_restart) {
+      eval $errinj_after_restart;
+    }
     --source suite/rocksdb/include/errinj_state_proc.inc
     --let $errinj_state_now = `$errinj_state`
     --let $errinj_ok = 0

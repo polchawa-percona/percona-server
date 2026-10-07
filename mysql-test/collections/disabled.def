@@ -140,6 +140,12 @@ rocksdb.errinj_ddl_iterator : BUG#11704 PS-11704 iterator error ends scan
 rocksdb.errinj_bulk_load : BUG#11759 PS-11759 orphan SK entries
 rocksdb.bulk_load_failed_ingest_sk : BUG#11759 PS-11759 orphan SK entries
 rocksdb.errinj_ddl_dict_crash : BUG#11669 PS-11669 ADD INDEX crash window
+rocksdb.errinj_bg_drop_index_empty_check : BUG#11775 PS-11775 rows not reclaimed
+rocksdb.errinj_bg_index_stats_iterator : BUG#11704 PS-11704 truncated scan
+rocksdb.errinj_dict_crash_create_drop : BUG#11666 PS-11666 crash window
+rocksdb.errinj_dict_crash_truncate : BUG#11668 PS-11668 TRUNCATE crash window
+rocksdb.errinj_dict_crash_drop_index : BUG#11670 PS-11670 crash window
+rocksdb.errinj_dict_crash_copy_alter : BUG#11681 PS-11681 crash window
 rocksdb.flush_wal_error_group_commit : BUG#11761 PS-11761 WAL flush error
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
