@@ -1,0 +1,27 @@
+#
+# PS-11796: ha_rocksdb::info() is the only place that sets ref_length,
+# and it returns early, with a plain return instead of DBUG_RETURN, when
+# update_stats() fails (e.g. the recalculation of bad cached stats
+# fails). ha_rocksdb::open() ignores the result. A debug server then
+# aborts with "missing DBUG_RETURN"; a release server keeps the default
+# ref_length of 8 bytes for the opened handler, while a BIGINT primary
+# key needs 12. A partitioned table fixes its own ref_length at open
+# from these 8 bytes, so later rowid access (position()) on it breaks.
+#
+CREATE TABLE t1 (pk BIGINT PRIMARY KEY, a INT) ENGINE=ROCKSDB
+PARTITION BY HASH(pk) PARTITIONS 2;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+# Open t1 while the stats recalculation fails.
+FLUSH TABLES;
+SET SESSION debug = "+d,myrocks_simulate_stats_recalc_failure";
+LOCK TABLES t1 READ;
+UNLOCK TABLES;
+SET SESSION debug = "-d,myrocks_simulate_stats_recalc_failure";
+# An UPDATE of the scanned key buffers row ids with position().
+UPDATE t1 SET pk = pk + 10 WHERE pk BETWEEN 1 AND 3;
+SELECT * FROM t1 ORDER BY pk;
+pk	a
+11	1
+12	2
+13	3
+DROP TABLE t1;
