@@ -1,0 +1,60 @@
+#
+# PS-11773: a RocksDB failure while committing a prepared XA transaction by
+# XID (XA COMMIT from another connection) must abort the server like every
+# other commit failure in MyRocks, not return XAER_RMERR, which the server
+# cannot handle (debug builds assert in MYSQL_BIN_LOG::finish_commit). After
+# the restart the transaction must be committed or still prepared.
+#
+# Also needs PS-11631: without that fix the prepared transaction does not
+# survive the disconnect of its connection.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("Failed to write to WAL");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+
+connect (con1, localhost, root,,);
+XA START 'x';
+INSERT INTO t1 VALUES (2, 2);
+XA END 'x';
+--disable_warnings
+XA PREPARE 'x';
+--enable_warnings
+disconnect con1;
+
+connect (con2, localhost, root,,);
+--echo # The first COMMIT-class call is the WAL flush of the binary log flush
+--echo # stage, the second the commit of the prepared transaction.
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'ABORTED';
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+XA COMMIT 'x';
+disconnect con2;
+connection default;
+--source include/start_mysqld.inc
+
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN = injected error at xa_commit_by_xid
+--source include/search_pattern.inc
+--let SEARCH_PATTERN = aborting on WAL write error
+--source include/search_pattern.inc
+
+--echo # The transaction is committed, or still prepared and committed now.
+--let $xid = query_get_value(XA RECOVER, data, 1)
+if ($xid == x) {
+  XA COMMIT 'x';
+}
+SELECT * FROM t1;
+
+DROP TABLE t1;

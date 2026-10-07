@@ -59,7 +59,8 @@ enum class Rdb_inject_class : ulong {
   WRITE,     // row Put/Delete/SingleDelete into a transaction or write batch
   READ,      // point Get/GetForUpdate
   ITERATOR,  // a valid iterator turns invalid with the injected status
-  COMMIT,    // Prepare/Commit/Write of a transaction, FlushWAL
+  COMMIT,    // Prepare/Commit/Write of a transaction, FlushWAL, XA COMMIT and
+             // XA ROLLBACK of a prepared transaction by XID
   DICT,      // data dictionary Get and commit
   SST,       // SstFileWriter Open/Add/Finish
   INGEST,    // IngestExternalFile(s)

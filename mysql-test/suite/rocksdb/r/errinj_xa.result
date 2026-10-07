@@ -1,0 +1,48 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# READ/BUSY XA PREPARE and XA COMMIT: every injected failure was handled correctly
+# READ/BUSY XA COMMIT ONE PHASE: every injected failure was handled correctly
+# READ/BUSY XA PREPARE, XA COMMIT from another connection: every injected failure was handled correctly
+# READ/BUSY XA COMMIT of a prepared transaction from another connection: no RocksDB call of this class was made
+# READ/BUSY XA PREPARE and XA ROLLBACK: the statement does not change the state
+# READ/BUSY XA PREPARE and XA ROLLBACK: every injected failure was handled correctly
+# READ/BUSY XA ROLLBACK of a prepared transaction from another connection: the statement does not change the state
+# READ/BUSY XA ROLLBACK of a prepared transaction from another connection: no RocksDB call of this class was made
+# WRITE/BUSY XA PREPARE and XA COMMIT: every injected failure was handled correctly
+# WRITE/BUSY XA COMMIT ONE PHASE: every injected failure was handled correctly
+# WRITE/BUSY XA PREPARE, XA COMMIT from another connection: every injected failure was handled correctly
+# WRITE/BUSY XA COMMIT of a prepared transaction from another connection: no RocksDB call of this class was made
+# WRITE/BUSY XA PREPARE and XA ROLLBACK: the statement does not change the state
+# WRITE/BUSY XA PREPARE and XA ROLLBACK: every injected failure was handled correctly
+# WRITE/BUSY XA ROLLBACK of a prepared transaction from another connection: the statement does not change the state
+# WRITE/BUSY XA ROLLBACK of a prepared transaction from another connection: no RocksDB call of this class was made
+# COMMIT/ABORTED XA PREPARE and XA COMMIT: every injected failure was handled correctly
+# COMMIT/ABORTED XA COMMIT ONE PHASE: every injected failure was handled correctly
+# COMMIT/ABORTED XA PREPARE, XA COMMIT from another connection: every injected failure was handled correctly
+# COMMIT/ABORTED XA COMMIT of a prepared transaction from another connection: every injected failure was handled correctly
+# COMMIT/ABORTED XA PREPARE and XA ROLLBACK: the statement does not change the state
+# COMMIT/ABORTED XA PREPARE and XA ROLLBACK: every injected failure was handled correctly
+# COMMIT/ABORTED XA ROLLBACK of a prepared transaction from another connection: the statement does not change the state
+# COMMIT/ABORTED XA ROLLBACK of a prepared transaction from another connection: every injected failure was handled correctly
+# COMMIT/IOERROR XA PREPARE and XA COMMIT: every injected failure was handled correctly
+# COMMIT/IOERROR XA COMMIT ONE PHASE: every injected failure was handled correctly
+# COMMIT/IOERROR XA PREPARE, XA COMMIT from another connection: every injected failure was handled correctly
+# COMMIT/IOERROR XA COMMIT of a prepared transaction from another connection: every injected failure was handled correctly
+# COMMIT/IOERROR XA PREPARE and XA ROLLBACK: the statement does not change the state
+# COMMIT/IOERROR XA PREPARE and XA ROLLBACK: every injected failure was handled correctly
+# COMMIT/IOERROR XA ROLLBACK of a prepared transaction from another connection: the statement does not change the state
+# COMMIT/IOERROR XA ROLLBACK of a prepared transaction from another connection: every injected failure was handled correctly
+DROP PROCEDURE errinj_xa_reset;
+DROP TABLE tx;
