@@ -1,0 +1,49 @@
+#
+# A failed WAL flush in the flush stage of the binary log group commit must
+# stop the commit before the transaction is written to the binary log.
+#
+# With rocksdb_manual_wal_flush=ON (the default) the prepare records of the
+# group are only in the WAL buffer until rocksdb_flush_wal() writes them in
+# the flush stage. When FlushWAL() fails there, MyRocks only logs the error
+# and returns it to the server, which ignores the return value of
+# ha_flush_logs(): the transaction is written to the binary log and reported
+# as committed although its prepare record never reached the WAL. MyRocks
+# aborts the server on every other WAL write error (rdb_handle_io_error()),
+# as InnoDB does on a redo log write error; it must do the same here, so that
+# the binary log never holds a transaction the engine may not have.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+--let $binlog_file = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--let $binlog_start = query_get_value(SHOW BINARY LOG STATUS, Position, 1)
+
+--echo # The second COMMIT-class call of an autocommit INSERT is the WAL flush
+--echo # of the binary log flush stage (after Prepare, before Commit).
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+INSERT INTO t1 VALUES (2, 2);
+--source include/start_mysqld.inc
+
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN = injected error at flush_wal
+--source include/search_pattern.inc
+
+--echo # The INSERT is neither in the table nor in the binary log.
+SELECT * FROM t1;
+--let $event = query_get_value(SHOW BINLOG EVENTS IN '$binlog_file' FROM $binlog_start, Event_type, 1)
+--echo First binary log event after the first INSERT: $event
+
+DROP TABLE t1;

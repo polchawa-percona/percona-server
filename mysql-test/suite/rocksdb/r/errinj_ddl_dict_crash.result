@@ -1,0 +1,15 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+# DICT/IOERROR INPLACE ADD INDEX: every injected failure was handled correctly
+# DICT/IOERROR INPLACE ADD UNIQUE INDEX: every injected failure was handled correctly
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;

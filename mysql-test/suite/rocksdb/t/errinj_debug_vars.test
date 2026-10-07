@@ -1,0 +1,75 @@
+#
+# How the rocksdb_debug_inject_error_* variables select the RocksDB call that
+# fails: only calls of the chosen class made by this session are counted, the
+# counter goes down by one per call, and the call that brings it to 0 fails
+# with the chosen status.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--echo # The default is off.
+SELECT @@session.rocksdb_debug_inject_error_class,
+       @@session.rocksdb_debug_inject_error_status,
+       @@session.rocksdb_debug_inject_error_nth;
+
+--echo # Calls of other classes are not counted.
+SET SESSION rocksdb_debug_inject_error_class = 'COMPACT';
+SET SESSION rocksdb_debug_inject_error_status = 'ABORTED';
+SET SESSION rocksdb_debug_inject_error_nth = 5;
+INSERT INTO t1 VALUES (4, 4);
+SELECT * FROM t1 WHERE pk = 2;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+
+--echo # OPTIMIZE TABLE compacts each of the two indexes: two calls.
+OPTIMIZE TABLE t1;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+
+--echo # The call that brings the counter to 0 fails.
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+OPTIMIZE TABLE t1;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+
+--echo # Another session is not affected.
+SET SESSION rocksdb_debug_inject_error_class = 'READ';
+SET SESSION rocksdb_debug_inject_error_status = 'BUSY';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+connect (con1, localhost, root,,);
+SELECT * FROM t1 WHERE pk = 1;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+disconnect con1;
+connection default;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+
+--echo # The status is the chosen one.
+--error ER_LOCK_DEADLOCK
+SELECT * FROM t1 WHERE pk = 1;
+SET SESSION rocksdb_debug_inject_error_status = 'TIMEDOUT';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 WHERE pk = 1 FOR UPDATE;
+SET SESSION rocksdb_debug_inject_error_status = 'TRYAGAIN';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+--error ER_GET_ERRMSG
+SELECT * FROM t1 WHERE pk = 1;
+SELECT @@session.rocksdb_debug_inject_error_nth;
+
+--echo # ANY counts calls of every class.
+SET SESSION rocksdb_debug_inject_error_class = 'ANY';
+SET SESSION rocksdb_debug_inject_error_nth = 1000;
+INSERT INTO t1 VALUES (5, 5);
+SELECT @@session.rocksdb_debug_inject_error_nth < 1000 AS counted;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+
+--echo # Nothing failed except the injected calls.
+SELECT * FROM t1;
+CHECK TABLE t1;
+
+SET SESSION rocksdb_debug_inject_error_class = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_status = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_nth = DEFAULT;
+DROP TABLE t1;

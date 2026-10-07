@@ -1,0 +1,62 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# READ/BUSY INSERT into every HASH partition: every injected failure was handled correctly
+# READ/BUSY UPDATE moving rows between partitions: every injected failure was handled correctly
+# READ/BUSY UPDATE in two partitions: every injected failure was handled correctly
+# READ/BUSY DELETE in every partition: every injected failure was handled correctly
+# READ/BUSY REPLACE into HASH partitions: every injected failure was handled correctly
+# READ/BUSY pruned range read: no RocksDB call of this class was made
+# READ/BUSY read of explicit partitions: no RocksDB call of this class was made
+# READ/BUSY point reads into HASH partitions: every injected failure was handled correctly
+# READ/BUSY ADD PARTITION: every injected failure was handled correctly
+# READ/BUSY DROP PARTITION: every injected failure was handled correctly
+# READ/BUSY TRUNCATE PARTITION: no RocksDB call of this class was made
+# READ/BUSY REORGANIZE PARTITION: every injected failure was handled correctly
+# READ/BUSY COALESCE PARTITION: every injected failure was handled correctly
+# READ/BUSY ADD HASH PARTITIONS: every injected failure was handled correctly
+# READ/BUSY INPLACE ADD INDEX on a partitioned table: no RocksDB call of this class was made
+# READ/BUSY OPTIMIZE PARTITION: the statement does not change the state
+# READ/BUSY OPTIMIZE PARTITION: no RocksDB call of this class was made
+# SST/ABORTED ADD PARTITION: no RocksDB call of this class was made
+# SST/ABORTED DROP PARTITION: no RocksDB call of this class was made
+# SST/ABORTED TRUNCATE PARTITION: no RocksDB call of this class was made
+# SST/ABORTED REORGANIZE PARTITION: no RocksDB call of this class was made
+# SST/ABORTED COALESCE PARTITION: no RocksDB call of this class was made
+# SST/ABORTED ADD HASH PARTITIONS: no RocksDB call of this class was made
+# SST/ABORTED INPLACE ADD INDEX on a partitioned table: every injected failure was handled correctly
+# SST/ABORTED OPTIMIZE PARTITION: the statement does not change the state
+# SST/ABORTED OPTIMIZE PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED ADD PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED DROP PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED TRUNCATE PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED REORGANIZE PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED COALESCE PARTITION: no RocksDB call of this class was made
+# INGEST/ABORTED ADD HASH PARTITIONS: no RocksDB call of this class was made
+# INGEST/ABORTED INPLACE ADD INDEX on a partitioned table: every injected failure was handled correctly
+# INGEST/ABORTED OPTIMIZE PARTITION: the statement does not change the state
+# INGEST/ABORTED OPTIMIZE PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED ADD PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED DROP PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED TRUNCATE PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED REORGANIZE PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED COALESCE PARTITION: no RocksDB call of this class was made
+# COMPACT/ABORTED ADD HASH PARTITIONS: no RocksDB call of this class was made
+# COMPACT/ABORTED INPLACE ADD INDEX on a partitioned table: no RocksDB call of this class was made
+# COMPACT/ABORTED OPTIMIZE PARTITION: the statement does not change the state
+# COMPACT/ABORTED OPTIMIZE PARTITION: every injected failure was handled correctly
+DROP TABLE IF EXISTS tp, th;
+DROP TABLE t_outp;
+DROP PROCEDURE errinj_part_reset;
+DROP PROCEDURE errinj_tables_state;

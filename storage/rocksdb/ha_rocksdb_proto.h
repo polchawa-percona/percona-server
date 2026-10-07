@@ -48,6 +48,44 @@ enum RDB_IO_ERROR_TYPE {
 void rdb_handle_io_error(const rocksdb::Status status,
                          const RDB_IO_ERROR_TYPE err_type);
 
+/*
+  Error injection into RocksDB calls, for testing only. In debug builds the
+  rocksdb_debug_inject_error_* session variables make the N-th RocksDB call of
+  a class, made by the session's own thread, fail with a chosen status instead
+  of being executed. Release builds compile the calls unchanged.
+*/
+enum class Rdb_inject_class : ulong {
+  ANY = 0,
+  WRITE,     // row Put/Delete/SingleDelete into a transaction or write batch
+  READ,      // point Get/GetForUpdate
+  ITERATOR,  // a valid iterator turns invalid with the injected status
+  COMMIT,    // Prepare/Commit/Write of a transaction, FlushWAL, XA COMMIT and
+             // XA ROLLBACK of a prepared transaction by XID
+  DICT,      // data dictionary Get and commit
+  SST,       // SstFileWriter Open/Add/Finish
+  INGEST,    // IngestExternalFile(s)
+  COMPACT    // CompactRange of OPTIMIZE TABLE
+};
+
+#ifndef NDEBUG
+bool rdb_inject_error(Rdb_inject_class cls, const char *site,
+                      rocksdb::Status *status);
+#define RDB_INJECTED_ERROR(cls, site, status_ptr) \
+  myrocks::rdb_inject_error(cls, site, status_ptr)
+/* Evaluate a RocksDB call that returns rocksdb::Status, unless an error is
+   injected for it, in which case the call is skipped. */
+#define RDB_INJECT_ERROR(cls, site, call)                           \
+  [&]() -> rocksdb::Status {                                        \
+    rocksdb::Status rdb_injected_status;                            \
+    if (myrocks::rdb_inject_error(cls, site, &rdb_injected_status)) \
+      return rdb_injected_status;                                   \
+    return (call);                                                  \
+  }()
+#else
+#define RDB_INJECTED_ERROR(cls, site, status_ptr) false
+#define RDB_INJECT_ERROR(cls, site, call) (call)
+#endif
+
 int rdb_normalize_tablename(const std::string &tablename, std::string *str)
     MY_ATTRIBUTE((__warn_unused_result__));
 

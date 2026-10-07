@@ -1,0 +1,16 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+# ITERATOR/INCOMPLETE multi-row INSERT: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE UPDATE of a secondary key column: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE UPDATE of the primary key: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE DELETE: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE INSERT ... ON DUPLICATE KEY UPDATE: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE REPLACE: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE INSERT ... SELECT: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE read through a secondary key: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE point reads in a join: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE transaction at REPEATABLE READ: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE transaction at READ COMMITTED: every injected failure was handled correctly
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

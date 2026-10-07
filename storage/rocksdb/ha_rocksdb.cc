@@ -1553,6 +1553,60 @@ static MYSQL_THDVAR_ENUM(
     (ulong)rocksdb::BottommostLevelCompaction::kForceOptimized,
     &bottommost_level_compaction_typelib);
 
+/* Error injection into RocksDB calls, for testing (see rdb_inject_error()) */
+static const char *inject_error_class_names[] = {
+    "ANY",  "WRITE", "READ",   "ITERATOR", "COMMIT",
+    "DICT", "SST",   "INGEST", "COMPACT",  NullS};
+
+static TYPELIB inject_error_class_typelib = {
+    array_elements(inject_error_class_names) - 1, "inject_error_class_typelib",
+    inject_error_class_names, nullptr};
+
+enum class Rdb_inject_status : ulong {
+  IOERROR = 0,
+  NOSPACE,
+  CORRUPTION,
+  BUSY,
+  TIMEDOUT,
+  TRYAGAIN,
+  INCOMPLETE,
+  ABORTED,
+  MEMORYLIMIT,
+  EXPIRED,
+  INVALIDARGUMENT
+};
+
+static const char *inject_error_status_names[] = {
+    "IOERROR",     "NOSPACE",  "CORRUPTION",      "BUSY",
+    "TIMEDOUT",    "TRYAGAIN", "INCOMPLETE",      "ABORTED",
+    "MEMORYLIMIT", "EXPIRED",  "INVALIDARGUMENT", NullS};
+
+static TYPELIB inject_error_status_typelib = {
+    array_elements(inject_error_status_names) - 1,
+    "inject_error_status_typelib", inject_error_status_names, nullptr};
+
+static MYSQL_THDVAR_ENUM(
+    debug_inject_error_class, PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: class of RocksDB calls that "
+    "rocksdb_debug_inject_error_nth counts",
+    nullptr, nullptr, static_cast<ulong>(Rdb_inject_class::ANY),
+    &inject_error_class_typelib);
+
+static MYSQL_THDVAR_ENUM(
+    debug_inject_error_status, PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: status returned by the RocksDB call "
+    "that rocksdb_debug_inject_error_nth selects",
+    nullptr, nullptr, static_cast<ulong>(Rdb_inject_status::IOERROR),
+    &inject_error_status_typelib);
+
+static MYSQL_THDVAR_ULONGLONG(
+    debug_inject_error_nth, PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: the N-th following RocksDB call of class "
+    "rocksdb_debug_inject_error_class made by this session fails with "
+    "rocksdb_debug_inject_error_status instead of being executed. Every "
+    "counted call decrements the value; 0 disables injection.",
+    nullptr, nullptr, /* default */ 0, /* min */ 0, /* max */ ULLONG_MAX, 0);
+
 static MYSQL_SYSVAR_BOOL(
     create_if_missing,
     *static_cast<bool *>(&rocksdb_db_options->create_if_missing),
@@ -2910,6 +2964,9 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(max_manual_compactions),
     MYSQL_SYSVAR(manual_compaction_threads),
     MYSQL_SYSVAR(manual_compaction_bottommost_level),
+    MYSQL_SYSVAR(debug_inject_error_class),
+    MYSQL_SYSVAR(debug_inject_error_status),
+    MYSQL_SYSVAR(debug_inject_error_nth),
     MYSQL_SYSVAR(rollback_on_timeout),
 
     MYSQL_SYSVAR(enable_insert_with_update_caching),
@@ -3529,7 +3586,8 @@ class Rdb_transaction {
       const std::vector<rocksdb::IngestExternalFileArg> &args) {
     assert(!is_ac_nl_ro_rc_transaction());
 
-    rocksdb::Status s = rdb->IngestExternalFiles(args);
+    rocksdb::Status s = RDB_INJECT_ERROR(Rdb_inject_class::INGEST, "ingest",
+                                         rdb->IngestExternalFiles(args));
     if (!s.ok() &&
         m_bulk_load_index_registry.index_registered_in_sst_partitioner()) {
       // NO_LINT_DEBUG
@@ -3548,7 +3606,8 @@ class Rdb_transaction {
         return s;
       }
       // try again after compaction
-      s = rdb->IngestExternalFiles(args);
+      s = RDB_INJECT_ERROR(Rdb_inject_class::INGEST, "ingest_retry",
+                           rdb->IngestExternalFiles(args));
     }
     return s;
   }
@@ -4502,7 +4561,8 @@ class Rdb_transaction_impl : public Rdb_transaction {
       return false;
     }
 
-    s = m_rocksdb_tx->Prepare();
+    s = RDB_INJECT_ERROR(Rdb_inject_class::COMMIT, "tx_prepare",
+                         m_rocksdb_tx->Prepare());
     if (!s.ok()) {
       std::string msg = "RocksDB error on COMMIT (Prepare): " + s.ToString();
       my_error(ER_INTERNAL_ERROR, MYF(0), msg.c_str());
@@ -4531,7 +4591,8 @@ class Rdb_transaction_impl : public Rdb_transaction {
     }
 
     release_snapshot();
-    s = m_rocksdb_tx->Commit();
+    s = RDB_INJECT_ERROR(Rdb_inject_class::COMMIT, "tx_commit",
+                         m_rocksdb_tx->Commit());
 #ifndef NDEBUG
     DBUG_EXECUTE_IF("myrocks_commit_io_error",
                     dbug_change_status_to_io_error(&s););
@@ -4615,7 +4676,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    return m_rocksdb_tx->Put(column_family, key, value, assume_tracked);
+    return RDB_INJECT_ERROR(
+        Rdb_inject_class::WRITE, "tx_put",
+        m_rocksdb_tx->Put(column_family, key, value, assume_tracked));
   }
 
   rocksdb::Status delete_key(rocksdb::ColumnFamilyHandle *const column_family,
@@ -4624,7 +4687,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    return m_rocksdb_tx->Delete(column_family, key, assume_tracked);
+    return RDB_INJECT_ERROR(
+        Rdb_inject_class::WRITE, "tx_delete",
+        m_rocksdb_tx->Delete(column_family, key, assume_tracked));
   }
 
   rocksdb::Status single_delete(
@@ -4633,7 +4698,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    return m_rocksdb_tx->SingleDelete(column_family, key, assume_tracked);
+    return RDB_INJECT_ERROR(
+        Rdb_inject_class::WRITE, "tx_single_delete",
+        m_rocksdb_tx->SingleDelete(column_family, key, assume_tracked));
   }
 
   bool has_modifications() const override {
@@ -4665,7 +4732,9 @@ class Rdb_transaction_impl : public Rdb_transaction {
     // handler::reset call
     value->Reset();
     global_stats.queries[QUERIES_POINT].inc();
-    return m_rocksdb_tx->Get(m_read_opts, column_family, key, value);
+    return RDB_INJECT_ERROR(
+        Rdb_inject_class::READ, "tx_get",
+        m_rocksdb_tx->Get(m_read_opts, column_family, key, value));
   }
 
   rocksdb::Status get_for_update(const Rdb_key_def &key_descr,
@@ -4700,16 +4769,20 @@ class Rdb_transaction_impl : public Rdb_transaction {
     // If snapshot is null, pass it to GetForUpdate and snapshot is
     // initialized there. Snapshot validation is skipped in that case.
     if (m_read_opts.snapshot == nullptr || do_validate) {
-      s = m_rocksdb_tx->GetForUpdate(
-          m_read_opts, column_family, key, value, exclusive,
-          m_read_opts.snapshot ? do_validate : false);
+      s = RDB_INJECT_ERROR(
+          Rdb_inject_class::READ, "tx_get_for_update",
+          m_rocksdb_tx->GetForUpdate(
+              m_read_opts, column_family, key, value, exclusive,
+              m_read_opts.snapshot ? do_validate : false));
     } else {
       // If snapshot is set, and if skipping validation,
       // call GetForUpdate without validation and set back old snapshot
       auto saved_snapshot = m_read_opts.snapshot;
       m_read_opts.snapshot = nullptr;
-      s = m_rocksdb_tx->GetForUpdate(m_read_opts, column_family, key, value,
-                                     exclusive, false);
+      s = RDB_INJECT_ERROR(
+          Rdb_inject_class::READ, "tx_get_for_update",
+          m_rocksdb_tx->GetForUpdate(m_read_opts, column_family, key, value,
+                                     exclusive, false));
       m_read_opts.snapshot = saved_snapshot;
     }
 
@@ -4900,7 +4973,9 @@ class Rdb_writebatch_impl : public Rdb_transaction {
 
     release_snapshot();
 
-    s = rdb->Write(write_opts, optimize, m_batch->GetWriteBatch());
+    s = RDB_INJECT_ERROR(
+        Rdb_inject_class::COMMIT, "wb_commit",
+        rdb->Write(write_opts, optimize, m_batch->GetWriteBatch()));
     if (!s.ok()) {
       rdb_handle_io_error(s, RDB_IO_ERROR_TX_COMMIT);
       res = true;
@@ -4972,7 +5047,8 @@ class Rdb_writebatch_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    m_batch->Put(column_family, key, value);
+    RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "wb_put",
+                     m_batch->Put(column_family, key, value));
     // Note Put/Delete in write batch doesn't return any error code. We simply
     // return OK here.
     return rocksdb::Status::OK();
@@ -4984,7 +5060,8 @@ class Rdb_writebatch_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    m_batch->Delete(column_family, key);
+    RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "wb_delete",
+                     m_batch->Delete(column_family, key));
     return rocksdb::Status::OK();
   }
 
@@ -4994,7 +5071,8 @@ class Rdb_writebatch_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     ++m_write_count;
-    return m_batch->SingleDelete(column_family, key);
+    return RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "wb_single_delete",
+                            m_batch->SingleDelete(column_family, key));
   }
 
   bool has_modifications() const override {
@@ -5345,7 +5423,8 @@ static bool rocksdb_flush_wal(handlerton *const hton MY_ATTRIBUTE((__unused__)),
     bool sync = rdb_sync_wal_supported() &&
                 (!binlog_group_flush ||
                  rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC);
-    const rocksdb::Status s = rdb->FlushWAL(sync);
+    const rocksdb::Status s = RDB_INJECT_ERROR(
+        Rdb_inject_class::COMMIT, "flush_wal", rdb->FlushWAL(sync));
 
     if (!s.ok()) {
       rdb_log_status_error(s);
@@ -5409,7 +5488,8 @@ static xa_status_code rocksdb_commit_by_xid(handlerton *const hton,
     DBUG_RETURN(XAER_NOTA);
   }
 
-  const rocksdb::Status s = trx->Commit();
+  const rocksdb::Status s = RDB_INJECT_ERROR(Rdb_inject_class::COMMIT,
+                                             "xa_commit_by_xid", trx->Commit());
 
   if (!s.ok()) {
     rdb_log_status_error(s);
@@ -5440,7 +5520,8 @@ static xa_status_code rocksdb_rollback_by_xid(
     DBUG_RETURN(XAER_NOTA);
   }
 
-  const rocksdb::Status s = trx->Rollback();
+  const rocksdb::Status s = RDB_INJECT_ERROR(
+      Rdb_inject_class::COMMIT, "xa_rollback_by_xid", trx->Rollback());
 
   if (!s.ok()) {
     rdb_log_status_error(s);
@@ -7280,14 +7361,80 @@ static int rocksdb_init_func(void *const p) {
   return ret;
 }
 
+#ifndef NDEBUG
+/*
+  Test infrastructure: decide whether the RocksDB call of class cls at site
+  fails with an injected status instead of being executed. Only calls made by
+  a thread with a THD are counted, so background threads are never affected
+  and a test drives the counter deterministically from its own session.
+*/
+bool rdb_inject_error(Rdb_inject_class cls, const char *site,
+                      rocksdb::Status *status) {
+  THD *const thd = current_thd;
+  if (thd == nullptr) return false;
+  auto &nth = THDVAR(thd, debug_inject_error_nth);
+  if (nth == 0) return false;
+  const auto chosen =
+      static_cast<Rdb_inject_class>(THDVAR(thd, debug_inject_error_class));
+  if (chosen != Rdb_inject_class::ANY && chosen != cls) return false;
+  if (--nth != 0) return false;
+
+  const auto st =
+      static_cast<Rdb_inject_status>(THDVAR(thd, debug_inject_error_status));
+  const rocksdb::Slice msg("injected error");
+  switch (st) {
+    case Rdb_inject_status::IOERROR:
+      *status = rocksdb::Status::IOError(msg);
+      break;
+    case Rdb_inject_status::NOSPACE:
+      *status = rocksdb::Status::NoSpace(msg);
+      break;
+    case Rdb_inject_status::CORRUPTION:
+      *status = rocksdb::Status::Corruption(msg);
+      break;
+    case Rdb_inject_status::BUSY:
+      *status = rocksdb::Status::Busy(msg);
+      break;
+    case Rdb_inject_status::TIMEDOUT:
+      *status = rocksdb::Status::TimedOut(msg);
+      break;
+    case Rdb_inject_status::TRYAGAIN:
+      *status = rocksdb::Status::TryAgain(msg);
+      break;
+    case Rdb_inject_status::INCOMPLETE:
+      *status = rocksdb::Status::Incomplete(msg);
+      break;
+    case Rdb_inject_status::ABORTED:
+      *status = rocksdb::Status::Aborted(msg);
+      break;
+    case Rdb_inject_status::MEMORYLIMIT:
+      *status = rocksdb::Status::MemoryLimit(msg);
+      break;
+    case Rdb_inject_status::EXPIRED:
+      *status = rocksdb::Status::Expired(msg);
+      break;
+    case Rdb_inject_status::INVALIDARGUMENT:
+      *status = rocksdb::Status::InvalidArgument(msg);
+      break;
+  }
+  // NO_LINT_DEBUG
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: injected error %s at %s",
+                  status->ToString().c_str(), site);
+  return true;
+}
+#endif  // !NDEBUG
+
 // If the iterator is not valid it might be because of EOF but might be due
 // to IOError or corruption. The good practice is always check it.
 // https://github.com/facebook/rocksdb/wiki/Iterator#error-handling
 bool is_valid_iterator(rocksdb::Iterator *scan_it) {
-  if (scan_it->Valid()) {
+  rocksdb::Status s;
+  if (scan_it->Valid() &&
+      !RDB_INJECTED_ERROR(Rdb_inject_class::ITERATOR, "iterator", &s)) {
     return true;
   } else {
-    rocksdb::Status s = scan_it->status();
+    if (s.ok()) s = scan_it->status();
     DBUG_EXECUTE_IF("rocksdb_return_status_corrupted",
                     dbug_change_status_to_corrupted(&s););
     if (s.IsIOError() || s.IsCorruption()) {
@@ -11289,8 +11436,10 @@ int ha_rocksdb::finalize_bulk_load(bool print_client_error) {
         const rocksdb::IngestExternalFileOptions opts =
             rocksdb_bulk_load_ingest_external_file_options(table->in_use);
 
-        const rocksdb::Status s = rdb->IngestExternalFile(
-            commit_info.get_cf(), commit_info.get_committed_files(), opts);
+        const rocksdb::Status s = RDB_INJECT_ERROR(
+            Rdb_inject_class::INGEST, "ingest_sk",
+            rdb->IngestExternalFile(commit_info.get_cf(),
+                                    commit_info.get_committed_files(), opts));
         if (!s.ok()) {
           if (print_client_error) {
             Rdb_sst_info::report_error_msg(s, nullptr);
@@ -11373,8 +11522,9 @@ int ha_rocksdb::update_write_pk(const Rdb_key_def &kd,
       It is responsibility of the user to make sure that the data being
       inserted doesn't violate any unique keys.
     */
-    row_info.tx->get_indexed_write_batch()->Put(cf, row_info.new_pk_slice,
-                                                value_slice);
+    RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_put_pk",
+                     row_info.tx->get_indexed_write_batch()->Put(
+                         cf, row_info.new_pk_slice, value_slice));
   } else {
     const bool assume_tracked = can_assume_tracked(ha_thd());
     const auto s = row_info.tx->put(cf, row_info.new_pk_slice, value_slice,
@@ -11519,8 +11669,10 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
       rc = check_partial_index_prefix(table_arg, kd, row_info.tx,
                                       row_info.old_data);
       if (!rc) {
-        const auto s = row_info.tx->get_indexed_write_batch()->SingleDelete(
-            kd.get_cf(), old_key_slice);
+        const auto s = RDB_INJECT_ERROR(
+            Rdb_inject_class::WRITE, "iwb_single_delete_sk",
+            row_info.tx->get_indexed_write_batch()->SingleDelete(
+                kd.get_cf(), old_key_slice));
         if (!s.ok()) {
           return row_info.tx->set_status_error(table->in_use, s, kd, m_tbl_def);
         }
@@ -11529,8 +11681,10 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
       }
     } else {
       // Unconditionally issue SD if rocksdb_partial_index_blind_delete.
-      const auto s = row_info.tx->get_indexed_write_batch()->SingleDelete(
-          kd.get_cf(), old_key_slice);
+      const auto s =
+          RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_single_delete_sk",
+                           row_info.tx->get_indexed_write_batch()->SingleDelete(
+                               kd.get_cf(), old_key_slice));
       if (!s.ok()) {
         return row_info.tx->set_status_error(table->in_use, s, kd, m_tbl_def);
       }
@@ -11557,8 +11711,9 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
   if (bulk_load_sk && row_info.old_data == nullptr) {
     rc = bulk_load_key(row_info.tx, kd, new_key_slice, new_value_slice, true);
   } else {
-    row_info.tx->get_indexed_write_batch()->Put(kd.get_cf(), new_key_slice,
-                                                new_value_slice);
+    RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_put_sk",
+                     row_info.tx->get_indexed_write_batch()->Put(
+                         kd.get_cf(), new_key_slice, new_value_slice));
   }
 
   return rc;
@@ -12072,8 +12227,9 @@ int ha_rocksdb::delete_row(const uchar *const buf) {
                                    nullptr, false, hidden_pk_id);
       rocksdb::Slice secondary_key_slice(
           reinterpret_cast<const char *>(m_sk_packed_tuple), packed_size);
-      s = tx->get_indexed_write_batch()->SingleDelete(kd.get_cf(),
-                                                      secondary_key_slice);
+      s = RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_single_delete_sk",
+                           tx->get_indexed_write_batch()->SingleDelete(
+                               kd.get_cf(), secondary_key_slice));
       if (!s.ok()) {
         DBUG_RETURN(rdb_error_to_mysql(s));
       }
@@ -13547,9 +13703,11 @@ int ha_rocksdb::optimize(THD *const thd, HA_CHECK_OPT *const check_opt) {
   for (uint i = 0; i < table->s->keys; i++) {
     uchar buf[Rdb_key_def::INDEX_NUMBER_SIZE * 2];
     auto range = get_range(i, buf);
-    const rocksdb::Status s = rdb->CompactRange(getCompactRangeOptions(),
-                                                m_key_descr_arr[i]->get_cf(),
-                                                &range.start, &range.limit);
+    const rocksdb::Status s =
+        RDB_INJECT_ERROR(Rdb_inject_class::COMPACT, "optimize_compact_range",
+                         rdb->CompactRange(getCompactRangeOptions(),
+                                           m_key_descr_arr[i]->get_cf(),
+                                           &range.start, &range.limit));
     if (!s.ok()) {
       DBUG_RETURN(rdb_error_to_mysql(s));
     }
