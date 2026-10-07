@@ -52,7 +52,9 @@ void rdb_handle_io_error(const rocksdb::Status status,
   Error injection into RocksDB calls, for testing only. In debug builds the
   rocksdb_debug_inject_error_* session variables make the N-th RocksDB call of
   a class, made by the session's own thread, fail with a chosen status instead
-  of being executed. Release builds compile the calls unchanged.
+  of being executed. The global rocksdb_debug_inject_bg_error does the same
+  for the calls made by one kind of MyRocks background thread (see
+  Rdb_bg_thread). Release builds compile the calls unchanged.
 */
 enum class Rdb_inject_class : ulong {
   ANY = 0,
@@ -63,7 +65,18 @@ enum class Rdb_inject_class : ulong {
   DICT,      // data dictionary Get and commit
   SST,       // SstFileWriter Open/Add/Finish
   INGEST,    // IngestExternalFile(s)
-  COMPACT    // CompactRange of OPTIMIZE TABLE
+  COMPACT,   // CompactRange of OPTIMIZE TABLE
+  DICT_READ  // data dictionary Get only (DICT covers it too)
+};
+
+/* MyRocks threads without a THD whose RocksDB calls can fail on purpose. */
+enum class Rdb_bg_thread : ulong {
+  NONE = 0,
+  DROP_INDEX,         // Rdb_drop_index_thread
+  BACKGROUND,         // Rdb_background_thread: WAL sync, stats persistence
+  INDEX_STATS,        // Rdb_index_stats_thread
+  MANUAL_COMPACTION,  // Rdb_manual_compaction_thread
+  COMPACTION_FILTER   // Rdb_compact_filter in RocksDB compaction threads
 };
 
 #ifndef NDEBUG
@@ -80,7 +93,24 @@ bool rdb_inject_error(Rdb_inject_class cls, const char *site,
       return rdb_injected_status;                                   \
     return (call);                                                  \
   }()
+/* Marks the calling thread as a background thread of the given kind until the
+   end of the enclosing scope. */
+class Rdb_bg_thread_scope {
+ public:
+  explicit Rdb_bg_thread_scope(Rdb_bg_thread kind);
+  ~Rdb_bg_thread_scope();
+  Rdb_bg_thread_scope(const Rdb_bg_thread_scope &) = delete;
+  Rdb_bg_thread_scope &operator=(const Rdb_bg_thread_scope &) = delete;
+
+ private:
+  Rdb_bg_thread m_prev;
+};
+#define RDB_BG_THREAD_SCOPE(kind) \
+  const myrocks::Rdb_bg_thread_scope rdb_bg_thread_scope(kind)
 #else
+#define RDB_BG_THREAD_SCOPE(kind) \
+  do {                            \
+  } while (0)
 #define RDB_INJECTED_ERROR(cls, site, status_ptr) false
 #define RDB_INJECT_ERROR(cls, site, call) (call)
 #endif

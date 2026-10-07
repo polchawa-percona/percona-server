@@ -1,0 +1,174 @@
+#
+# Error injection into the RocksDB calls of the MyRocks background threads
+# (rocksdb_debug_inject_bg_error). Each injected failure must be retried or
+# reported, or abort the server where that is the designed reaction to an I/O
+# error; no data may be lost or come back, and dropped indexes must be
+# reclaimed once the error is gone.
+#
+# Two cases are in disabled tests: a failed emptiness check of the
+# drop-index thread (errinj_bg_drop_index_empty_check) and a failed iterator
+# step of the index statistics thread (errinj_bg_index_stats_iterator).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("BG thread failed to write to RocksDB");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("Failed to get column family flags");
+call mtr.add_suppression("MyRocks data dictionary may get corrupted");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Manual Compaction id [0-9]+ cf .* aborted");
+call mtr.add_suppression("Could not access RocksDB properties");
+
+# A table that no injection touches: it must stay intact throughout.
+--let $errinj_bg_table = t0
+--let $errinj_bg_keys = , KEY ka (a), KEY kb (b)
+--source suite/rocksdb/include/errinj_bg_setup.inc
+--let $assert_t0 = SELECT COUNT(*), SUM(pk), SUM(a) FROM t0
+
+--echo #
+--echo # Drop-index thread
+--echo #
+--let $errinj_bg_table = t1
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 1';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_site = drop_index_delete_files
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 2';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_site = drop_index_compact_range
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT INCOMPLETE 2';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_count = 2
+--source suite/rocksdb/include/errinj_bg_wait.inc
+--let $errinj_bg_count =
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--echo # An I/O error in the compaction aborts the server.
+--source suite/rocksdb/include/errinj_bg_setup.inc
+--let $errinj_bg_spec = DROP_INDEX COMPACT IOERROR 2
+--let $errinj_bg_stmt = DROP TABLE t1
+--source suite/rocksdb/include/errinj_bg_crash.inc
+SHOW TABLES LIKE 't1';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--echo # An I/O error reading the dictionary aborts the server.
+--source suite/rocksdb/include/errinj_bg_setup.inc
+--let $errinj_bg_spec = DROP_INDEX DICT IOERROR 1
+--source suite/rocksdb/include/errinj_bg_crash.inc
+SHOW TABLES LIKE 't1';
+--source suite/rocksdb/include/errinj_bg_check.inc
+eval $assert_t0;
+CHECK TABLE t0;
+
+--echo #
+--echo # Background thread: WAL sync and statistics persistence
+--echo #
+--let $errinj_bg_table = t2
+--let $errinj_bg_keys = , KEY ka (a)
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND COMMIT BUSY 1';
+INSERT INTO t2 VALUES (5001, 1, 'after');
+--let $errinj_bg_site = bg_flush_wal
+--let $errinj_bg_count = 1
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+INSERT INTO t2 VALUES (5002, 2, 'after');
+SELECT COUNT(*) FROM t2;
+
+--echo # An I/O error in the background WAL sync aborts the server.
+--let $errinj_bg_spec = BACKGROUND COMMIT IOERROR 1
+--let $errinj_bg_stmt = INSERT INTO t2 VALUES (5003, 3, 'after')
+--source suite/rocksdb/include/errinj_bg_crash.inc
+SELECT COUNT(*) FROM t2;
+CHECK TABLE t2;
+
+--echo # An I/O error persisting index statistics aborts the server.
+--let $errinj_bg_spec = BACKGROUND DICT IOERROR 1
+--let $errinj_bg_stmt = SET GLOBAL rocksdb_force_flush_memtable_now = 1
+INSERT INTO t2 VALUES (5004, 4, 'after');
+--source suite/rocksdb/include/errinj_bg_crash.inc
+SELECT COUNT(*) FROM t2;
+CHECK TABLE t2;
+eval $assert_t0;
+
+--echo # A failed statistics read in the background recalculation is
+--echo # reported and leaves the statistics unchanged.
+SET GLOBAL rocksdb_stats_recalc_rate = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND READ BUSY 1';
+--let $errinj_bg_site = stats_table_properties
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+SET GLOBAL rocksdb_stats_recalc_rate = DEFAULT;
+
+--echo #
+--echo # Manual compaction thread
+--echo #
+SET GLOBAL rocksdb_debug_inject_bg_error = 'MANUAL_COMPACTION COMPACT BUSY 1';
+--error ER_INTERNAL_ERROR
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+SET GLOBAL rocksdb_compact_cf = 'default';
+--echo # An I/O error in the manual compaction aborts the server.
+--let $errinj_bg_spec = MANUAL_COMPACTION COMPACT IOERROR 1
+--let $errinj_bg_stmt = SET GLOBAL rocksdb_compact_cf = 'default'
+--source suite/rocksdb/include/errinj_bg_crash.inc
+SELECT COUNT(*) FROM t2;
+CHECK TABLE t2;
+
+--echo #
+--echo # Compaction filter
+--echo #
+--let $errinj_bg_table = t3
+--let $errinj_bg_keys = , KEY ka (a)
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = 'COMPACTION_FILTER DICT BUSY 1';
+DROP TABLE t3;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_site = dict_get
+--let $errinj_bg_count = 1
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = 'COMPACTION_FILTER DICT IOERROR 1';
+DROP TABLE t3;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_count = 2
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--echo #
+--echo # Restart with table validation: dictionaries agree, data intact
+--echo #
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+eval $assert_t0;
+CHECK TABLE t0, t2;
+SELECT COUNT(*) FROM t2;
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+DROP TABLE t0, t2;

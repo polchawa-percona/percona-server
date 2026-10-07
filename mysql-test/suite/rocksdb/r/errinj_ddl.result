@@ -11,7 +11,7 @@ call mtr.add_suppression("Error finishing bulk load");
 # READ/BUSY OPTIMIZE TABLE: the statement does not change the state
 # READ/BUSY OPTIMIZE TABLE: no RocksDB call of this class was made
 # READ/BUSY ANALYZE TABLE: the statement does not change the state
-# READ/BUSY ANALYZE TABLE: no RocksDB call of this class was made
+# READ/BUSY ANALYZE TABLE: every injected failure was handled correctly
 # READ/BUSY RENAME TABLE: the statement does not change the state
 # READ/BUSY RENAME TABLE: no RocksDB call of this class was made
 # READ/BUSY DROP TABLE: no RocksDB call of this class was made
