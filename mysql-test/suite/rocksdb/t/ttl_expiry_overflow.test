@@ -1,0 +1,47 @@
+#
+# PS-11790: TTL expiry check overflows uint64 and loses rows.
+#
+# The read filter (ts + ttl_duration <= now, ha_rocksdb.cc) and the
+# compaction filter (ts + ttl_duration <= oldest snapshot time,
+# rdb_compact_filter.h) add the row timestamp and the TTL duration as
+# uint64 without an overflow check. When the sum wraps past 2^64 the row
+# looks expired: reads hide it at once and the next compaction deletes it,
+# even with rocksdb_enable_ttl_read_filtering=0.
+#
+# Two ways to overflow:
+#   t1: ttl_duration=18446744073709551615 (accepted by CREATE TABLE)
+#   t2: ttl_col BIGINT UNSIGNED holding 18446744073709551615
+# The rows must never expire: every SELECT must return all rows.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB
+COMMENT='ttl_duration=18446744073709551615;';
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+CREATE TABLE t2 (a INT PRIMARY KEY, ts BIGINT UNSIGNED NOT NULL) ENGINE=ROCKSDB
+COMMENT='ttl_duration=1;ttl_col=ts;';
+INSERT INTO t2 VALUES (1, 18446744073709551615), (2, 18446744073709551615);
+
+--echo # Read filtering on (default)
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT COUNT(*) FROM t2;
+
+--echo # Read filtering off, before compaction
+SET @save_read_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT COUNT(*) FROM t2;
+
+--echo # Read filtering off, after compaction
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT COUNT(*) FROM t2;
+
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @save_read_filtering;
+DROP TABLE t1, t2;
