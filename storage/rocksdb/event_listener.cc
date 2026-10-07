@@ -28,6 +28,7 @@
 #include "./ha_rocksdb.h"
 #include "./ha_rocksdb_proto.h"
 #include "./properties_collector.h"
+#include "./rdb_compact_filter.h"
 #include "./rdb_datadic.h"
 
 namespace myrocks {
@@ -81,6 +82,14 @@ void Rdb_event_listener::OnCompactionCompleted(
     rocksdb::DB *db, const rocksdb::CompactionJobInfo &ci) {
   assert(db != nullptr);
   assert(m_ddl_manager != nullptr);
+
+#ifndef NDEBUG
+  // Hold a manual compaction after its result is installed.
+  if (ci.stats.is_manual_compaction) {
+    rdb_dbug_pause_manual_compaction("rocksdb_mc_pause_completed", "completed",
+                                     ci.cf_id);
+  }
+#endif
 
   if (rdb_is_table_scan_index_stats_calculation_enabled()) {
     return;

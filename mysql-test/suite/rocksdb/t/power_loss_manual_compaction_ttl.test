@@ -1,0 +1,112 @@
+#
+# A crash while a manual compaction is removing expired TTL rows must not
+# bring expired rows back or remove rows that have not expired.
+#
+# The table has expired and unexpired rows in overlapping L0 files. A manual
+# compaction is held when it starts, or after it has filtered part of the
+# rows; a transaction deletes and updates unexpired rows meanwhile; then the
+# server crashes. The combinations crash with a simulated power cut under
+# rocksdb_flush_log_at_trx_commit=1 and 2, and with a plain kill. After
+# recovery the visible rows must be exactly the unexpired ones plus the
+# transaction (which may be lost only with rocksdb_flush_log_at_trx_commit=2),
+# and after a full compaction the same rows must remain with read filtering
+# turned off, so no expired row is left or resurrected.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+--let $_mc_points = start middle
+while ($_mc_points) {
+  --let $mc_point = `SELECT SUBSTRING_INDEX('$_mc_points', ' ', 1)`
+  --let $_mc_points = `SELECT IF(LOCATE(' ', '$_mc_points'), SUBSTRING('$_mc_points', LOCATE(' ', '$_mc_points') + 1), '')`
+
+  --disable_query_log
+  --let $_mc_mode = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+  SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  CREATE TABLE tt (id INT, a INT, c VARCHAR(200),
+    PRIMARY KEY (id) COMMENT 'cfname=cf_mc', KEY ka (a) COMMENT 'cfname=cf_mc')
+    ENGINE=ROCKSDB COMMENT = 'ttl_duration=100;';
+  CREATE TABLE ttref (id INT PRIMARY KEY, a INT, c VARCHAR(200)) ENGINE=InnoDB;
+  # Batches 0 and 2 expired an hour ago, batches 1 and 3 have not expired.
+  --let $_mc_batch = 0
+  while ($_mc_batch < 4) {
+    if (`SELECT $_mc_batch % 2 = 0`) {
+      SET GLOBAL rocksdb_debug_ttl_rec_ts = -3600;
+    }
+    eval INSERT INTO tt SELECT seq, seq % 97, REPEAT(CHAR(97 + seq % 26), 100)
+      FROM (WITH RECURSIVE s(seq) AS (SELECT $_mc_batch * 1000 + 1 UNION ALL
+            SELECT seq + 1 FROM s WHERE seq < ($_mc_batch + 1) * 1000)
+            SELECT seq FROM s) AS x;
+    SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
+    if (`SELECT $_mc_batch % 2 = 1`) {
+      eval INSERT INTO ttref SELECT * FROM tt WHERE id > $_mc_batch * 1000;
+    }
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    --inc $_mc_batch
+  }
+  eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $_mc_mode;
+  --enable_query_log
+
+  --echo # TTL compaction held at $mc_point
+  connect (con_mc, localhost, root,,);
+  --disable_query_log
+  --source suite/rocksdb/include/mc_pause_mark.inc
+  eval SET GLOBAL debug = '+d,rocksdb_mc_pause_$mc_point';
+  --send SET GLOBAL rocksdb_compact_cf = 'cf_mc'
+  connection default;
+  --source suite/rocksdb/include/mc_pause_wait.inc
+  START TRANSACTION;
+  DELETE FROM tt WHERE id BETWEEN 1001 AND 1010;
+  UPDATE tt SET a = a + 1000 WHERE id BETWEEN 3001 AND 3010;
+  INSERT INTO tt VALUES (9999, 1, 'marker');
+  COMMIT;
+  --source suite/rocksdb/include/power_loss_or_kill.inc
+  --disable_query_log
+  disconnect con_mc;
+
+  # Apply the transaction to the reference table if it was recovered.
+  --let $_mc_trx = `SELECT COUNT(*) FROM tt WHERE id = 9999`
+  --let $_mc_ok = `SELECT @@global.rocksdb_flush_log_at_trx_commit = 2 OR $_mc_trx = 1`
+  if ($_mc_trx) {
+    DELETE FROM ttref WHERE id BETWEEN 1001 AND 1010;
+    UPDATE ttref SET a = a + 1000 WHERE id BETWEEN 3001 AND 3010;
+    INSERT INTO ttref VALUES (9999, 1, 'marker');
+  }
+  --let $_mc_exp = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, c)))) FROM ttref`
+  --enable_query_log
+  if ($_mc_ok) {
+    --echo # Recovered transaction: as expected
+  }
+  if (!$_mc_ok) {
+    --echo # Recovered transaction: lost
+  }
+
+  --disable_query_log
+  --let $_mc_round = 0
+  while ($_mc_round < 2) {
+    if ($_mc_round) {
+      # A full compaction, then read without TTL filtering: only the
+      # unexpired rows may be stored.
+      SET GLOBAL rocksdb_compact_cf = 'cf_mc';
+      SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+    }
+    --let $_mc_got = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, c)))) FROM tt FORCE INDEX (PRIMARY)`
+    if ($_mc_got != $_mc_exp) {
+      --echo # MISMATCH round $_mc_round via PRIMARY: expected $_mc_exp, got $_mc_got
+    }
+    --let $_mc_got = `SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, c)))) FROM tt FORCE INDEX (ka)`
+    if ($_mc_got != $_mc_exp) {
+      --echo # MISMATCH round $_mc_round via ka: expected $_mc_exp, got $_mc_got
+    }
+    --inc $_mc_round
+  }
+  SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+  --enable_query_log
+  --replace_column 2 # 3 #
+  CHECK TABLE tt;
+  --disable_query_log
+  DROP TABLE tt, ttref;
+  --enable_query_log
+}

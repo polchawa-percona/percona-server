@@ -1,0 +1,44 @@
+#
+# A crash while a manual compaction is running must lose nothing that was
+# acknowledged, and must not damage the tables that are being compacted or
+# the tables that share their column family.
+#
+# Each scenario holds a manual compaction at a known point (when it starts,
+# after it has written part of its output, or after its result is
+# installed), commits DML transactions meanwhile, and crashes. The
+# combinations crash with a simulated power cut under
+# rocksdb_flush_log_at_trx_commit=1 and 2 (with the background WAL sync held
+# back), and with a plain kill. After recovery all tables must have the same
+# rows through every index as before, plus the DML transactions: all of them
+# with rocksdb_flush_log_at_trx_commit=1, a prefix of them with 2. Running
+# the same compaction again to the end must not change anything.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/big_test.inc
+
+--let $_mc_points = start middle completed
+while ($_mc_points) {
+  --let $mc_point = `SELECT SUBSTRING_INDEX('$_mc_points', ' ', 1)`
+  --let $_mc_points = `SELECT IF(LOCATE(' ', '$_mc_points'), SUBSTRING('$_mc_points', LOCATE(' ', '$_mc_points') + 1), '')`
+
+  --let $mc_trigger = OPTIMIZE TABLE t1
+  --source suite/rocksdb/include/power_loss_mc_dml.inc
+  --let $mc_trigger = ALTER TABLE tp OPTIMIZE PARTITION p0
+  --source suite/rocksdb/include/power_loss_mc_dml.inc
+  --let $mc_trigger = SET GLOBAL rocksdb_compact_cf = 'cf_mc'
+  --let $mc_flush = 1
+  --source suite/rocksdb/include/power_loss_mc_dml.inc
+  --let $mc_setup = SET SESSION rocksdb_manual_compaction_threads = 2
+  --let $mc_trigger = SET GLOBAL rocksdb_compact_cf = 'cf_mc'
+  --source suite/rocksdb/include/power_loss_mc_dml.inc
+  # CompactFiles, which these two use, does not notify the event listener,
+  # so they cannot be held after the compaction is installed.
+  if ($mc_point != completed) {
+    --let $mc_trigger = SET GLOBAL rocksdb_compact_lzero_now = 1
+    --source suite/rocksdb/include/power_loss_mc_dml.inc
+    --let $mc_trigger = SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1
+    --source suite/rocksdb/include/power_loss_mc_dml.inc
+  }
+}

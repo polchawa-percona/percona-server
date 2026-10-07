@@ -1,0 +1,53 @@
+#
+# DDL that runs while a manual compaction is running must survive a crash,
+# and so must the reclaim of the indexes it drops.
+#
+# Each scenario holds a manual compaction of the column family of the tables
+# at a known point (when it starts, or after it has written part of its
+# output), runs one DDL statement on a table in that column family, and
+# crashes. Dropped indexes make the drop-index thread compact their key
+# ranges, and that compaction is held as well. The combinations crash with a
+# simulated power cut under rocksdb_flush_log_at_trx_commit=1 and 2, and
+# with a plain kill. After recovery (with rocksdb_validate_tables=1, so a
+# mismatch between the data dictionary and MyRocks stops the server) every
+# index must have the expected rows, the drop queue must drain, and a full
+# compaction must leave no data of dropped indexes.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/big_test.inc
+
+--let $_mc_points = start middle
+while ($_mc_points) {
+  --let $mc_point = `SELECT SUBSTRING_INDEX('$_mc_points', ' ', 1)`
+  --let $_mc_points = `SELECT IF(LOCATE(' ', '$_mc_points'), SUBSTRING('$_mc_points', LOCATE(' ', '$_mc_points') + 1), '')`
+
+  --let $mc_ddl = ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+  --let $mc_delete_range = 1
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = DROP TABLE t2
+  --let $mc_t2_keep = GONE
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = DROP TABLE t2
+  --let $mc_t2_keep = GONE
+  --let $mc_delete_range = 1
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = TRUNCATE TABLE t2
+  --let $mc_t2_keep = FALSE
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 FORCE, ALGORITHM=COPY
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE tp TRUNCATE PARTITION p1
+  --let $mc_tp_keep = id < 1001
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE tp DROP PARTITION p1
+  --let $mc_tp_keep = id < 1001
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE)
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+}
