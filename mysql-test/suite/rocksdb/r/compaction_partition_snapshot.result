@@ -1,0 +1,45 @@
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE = InnoDB;
+INSERT INTO seq WITH RECURSIVE s (n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 299) SELECT n FROM s;
+# REPEATABLE-READ
+REPEATABLE-READ TRUNCATE p1 optimize_table: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) snapshot, untouched pruned snapshot
+REPEATABLE-READ TRUNCATE p1 optimize_partition: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) snapshot, untouched pruned snapshot
+REPEATABLE-READ TRUNCATE p1 compact_cf: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) snapshot, untouched pruned snapshot
+REPEATABLE-READ TRUNCATE p1 lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) snapshot, untouched pruned snapshot
+REPEATABLE-READ TRUNCATE p1 flush_lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) snapshot, untouched pruned snapshot
+REPEATABLE-READ DROP p2 optimize_table: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) empty, untouched pruned empty
+REPEATABLE-READ DROP p2 optimize_partition: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) empty, untouched pruned empty
+REPEATABLE-READ DROP p2 compact_cf: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) empty, untouched pruned empty
+REPEATABLE-READ DROP p2 lzero: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) empty, untouched pruned empty
+REPEATABLE-READ DROP p2 flush_lzero: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) empty, untouched pruned empty
+REPEATABLE-READ REORGANIZE p1 optimize_table: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) empty, untouched pruned empty
+REPEATABLE-READ REORGANIZE p1 optimize_partition: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) empty, untouched pruned empty
+REPEATABLE-READ REORGANIZE p1 compact_cf: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) empty, untouched pruned empty
+REPEATABLE-READ REORGANIZE p1 lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) empty, untouched pruned empty
+REPEATABLE-READ REORGANIZE p1 flush_lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) empty, untouched pruned empty
+REPEATABLE-READ COALESCE optimize_table: hs empty, p1 0:0, ku u<200 0
+REPEATABLE-READ COALESCE optimize_partition: hs empty, p1 0:0, ku u<200 0
+REPEATABLE-READ COALESCE compact_cf: hs empty, p1 0:0, ku u<200 0
+REPEATABLE-READ COALESCE lzero: hs empty, p1 0:0, ku u<200 0
+REPEATABLE-READ COALESCE flush_lzero: hs empty, p1 0:0, ku u<200 0
+# READ-COMMITTED
+READ-COMMITTED TRUNCATE p1 optimize_table: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED TRUNCATE p1 optimize_partition: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED TRUNCATE p1 compact_cf: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED TRUNCATE p1 lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED TRUNCATE p1 flush_lzero: p1 0:0, pk range 0:0, ku range 0, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED DROP p2 optimize_table: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) current, untouched pruned current
+READ-COMMITTED DROP p2 optimize_partition: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) current, untouched pruned current
+READ-COMMITTED DROP p2 compact_cf: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) current, untouched pruned current
+READ-COMMITTED DROP p2 lzero: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) current, untouched pruned current
+READ-COMMITTED DROP p2 flush_lzero: p2 ERR 1735, pk range 0:0, ku range 0, untouched (p0, p1) current, untouched pruned current
+READ-COMMITTED REORGANIZE p1 optimize_table: p1 50:106720420899, pk range 100:211866021184, ku range 99, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED REORGANIZE p1 optimize_partition: p1 50:106720420899, pk range 100:211866021184, ku range 99, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED REORGANIZE p1 compact_cf: p1 50:106720420899, pk range 100:211866021184, ku range 99, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED REORGANIZE p1 lzero: p1 50:106720420899, pk range 100:211866021184, ku range 99, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED REORGANIZE p1 flush_lzero: p1 50:106720420899, pk range 100:211866021184, ku range 99, untouched (p0, p2) current, untouched pruned current
+READ-COMMITTED COALESCE optimize_table: hs current, p1 100:214096831874, ku u<200 199
+READ-COMMITTED COALESCE optimize_partition: hs current, p1 100:214096831874, ku u<200 199
+READ-COMMITTED COALESCE compact_cf: hs current, p1 100:214096831874, ku u<200 199
+READ-COMMITTED COALESCE lzero: hs current, p1 100:214096831874, ku u<200 199
+READ-COMMITTED COALESCE flush_lzero: hs current, p1 100:214096831874, ku u<200 199
+DROP TABLE seq;

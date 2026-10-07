@@ -1,0 +1,222 @@
+#
+# Manual compaction concurrent with partition DDL and DML.
+#
+# A manual compaction is held while it runs (debug point
+# rocksdb_pause_compaction, checked in the compaction filter factory), and
+# partition DDL and DML run against the column families it compacts. Every
+# trigger is used: OPTIMIZE TABLE, ALTER TABLE ... OPTIMIZE PARTITION,
+# rocksdb_compact_cf, rocksdb_compact_lzero_now and
+# rocksdb_force_flush_memtable_and_lzero_now. A last scenario holds the
+# drop-index thread (debug point rocksdb_pause_drop_index_thread) after a
+# DROP PARTITION and runs every trigger in the window between the drop's
+# dictionary commit and its reclaim.
+#
+# Partitions are only dropped where no remaining partition accepts their rows:
+# otherwise PS-11634 (DROP PARTITION keeps the rows) would make the tables
+# differ from their mirrors.
+#
+# Every MyRocks table has an InnoDB mirror that gets the same changes. After
+# each scenario, every partition is compared with the mirror through every
+# index, then CHECK TABLE runs. At the end the dropped partitions must be
+# reclaimed, and everything is checked again after a restart with
+# rocksdb_validate_tables=1.
+#
+# The .combinations file repeats the test with rocksdb_manual_compaction_threads,
+# each rocksdb_manual_compaction_bottommost_level value, and
+# rocksdb_enable_delete_range_for_drop_index=ON.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+call mtr.add_suppression("RocksDB: compact L0");
+call mtr.add_suppression("MyRocks: compact L0");
+
+--source suite/rocksdb/include/compaction_partition_setup.inc
+
+connect (con_mc, localhost, root,,);
+connect (con_ddl, localhost, root,,);
+connection default;
+
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 1. OPTIMIZE TABLE tk is held while it compacts mc4_shared, the column
+--echo #    family it shares with tr p3. tr drops p3 and runs DML on p0 and p1.
+--echo #
+UPDATE tk SET b = CONCAT(b, 'x') WHERE id < 50;
+UPDATE tk_ref SET b = CONCAT(b, 'x') WHERE id < 50;
+UPDATE tr SET c = CONCAT(c, '+') WHERE id >= 300;
+--let $cp_trigger = OPTIMIZE TABLE tk
+--source suite/rocksdb/include/compaction_partition_pause.inc
+ALTER TABLE tr DROP PARTITION p3;
+ALTER TABLE tr_ref DROP PARTITION p3;
+UPDATE tr SET u = u + 1 WHERE id BETWEEN 0 AND 49;
+UPDATE tr_ref SET u = u + 1 WHERE id BETWEEN 0 AND 49;
+DELETE FROM tr WHERE id BETWEEN 150 AND 159;
+DELETE FROM tr_ref WHERE id BETWEEN 150 AND 159;
+--source suite/rocksdb/include/compaction_partition_resume.inc
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 2. rocksdb_compact_cf = 'mc4_p0' is held while it compacts tr p0's
+--echo #    primary key. tr p0 is truncated and refilled with other values.
+--echo #
+UPDATE tr SET c = CONCAT(c, '*') WHERE id < 100;
+UPDATE tr_ref SET c = CONCAT(c, '*') WHERE id < 100;
+--let $cp_trigger = SET GLOBAL rocksdb_compact_cf = 'mc4_p0'
+--source suite/rocksdb/include/compaction_partition_pause.inc
+ALTER TABLE tr TRUNCATE PARTITION p0;
+ALTER TABLE tr_ref TRUNCATE PARTITION p0;
+INSERT INTO tr SELECT n, n * 11, CONCAT('t-', n), REPEAT('T', 80 + n % 9) FROM seq WHERE n < 100;
+INSERT INTO tr_ref SELECT n, n * 11, CONCAT('t-', n), REPEAT('T', 80 + n % 9) FROM seq WHERE n < 100;
+--source suite/rocksdb/include/compaction_partition_resume.inc
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 3. rocksdb_compact_cf = 'default' is held while REORGANIZE PARTITION
+--echo #    copies tr p1 and p2. The compaction finishes after the copy and
+--echo #    before the ALTER drops the old partitions.
+--echo #
+UPDATE tr SET c = CONCAT(c, '#') WHERE id BETWEEN 200 AND 299;
+UPDATE tr_ref SET c = CONCAT(c, '#') WHERE id BETWEEN 200 AND 299;
+--let $cp_trigger = SET GLOBAL rocksdb_compact_cf = 'default'
+--source suite/rocksdb/include/compaction_partition_pause.inc
+connection con_ddl;
+SET DEBUG_SYNC = 'alter_after_copy_table SIGNAL copied WAIT_FOR go';
+--send ALTER TABLE tr REORGANIZE PARTITION p1, p2 INTO (PARTITION p1 VALUES LESS THAN (150), PARTITION p2 VALUES LESS THAN (300))
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR copied';
+--source suite/rocksdb/include/compaction_partition_resume.inc
+SET DEBUG_SYNC = 'now SIGNAL go';
+connection con_ddl;
+--reap
+SET DEBUG_SYNC = 'RESET';
+connection default;
+ALTER TABLE tr_ref REORGANIZE PARTITION p1, p2 INTO (PARTITION p1 VALUES LESS THAN (150), PARTITION p2 VALUES LESS THAN (300));
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 4. rocksdb_compact_lzero_now is held while HASH, LIST and KEY tables
+--echo #    add, drop and coalesce partitions.
+--echo #
+UPDATE th SET u = u + 1 WHERE id % 3 = 0;
+UPDATE th_ref SET u = u + 1 WHERE id % 3 = 0;
+UPDATE tl SET c = CONCAT(c, '!') WHERE id % 4 = 0;
+UPDATE tl_ref SET c = CONCAT(c, '!') WHERE id % 4 = 0;
+--let $cp_trigger = SET GLOBAL rocksdb_compact_lzero_now = 1
+--let $cp_lzero_trigger = 1
+--source suite/rocksdb/include/compaction_partition_pause.inc
+let $cp_i = 2;
+while ($cp_i)
+{
+  let $sfx = `SELECT IF($cp_i = 2, '', '_ref')`;
+  eval ALTER TABLE th$sfx ADD PARTITION PARTITIONS 2;
+  eval ALTER TABLE th$sfx COALESCE PARTITION 3;
+  eval ALTER TABLE tl$sfx ADD PARTITION (PARTITION p4 VALUES IN (4));
+  eval INSERT INTO tl$sfx SELECT n, CONCAT('l4-', n), REPEAT('q', n % 40) FROM seq WHERE n BETWEEN 400 AND 449;
+  eval ALTER TABLE tl$sfx DROP PARTITION p0;
+  eval ALTER TABLE tk$sfx ADD PARTITION PARTITIONS 1;
+  dec $cp_i;
+}
+--source suite/rocksdb/include/compaction_partition_resume.inc
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 5. rocksdb_force_flush_memtable_and_lzero_now is held while tl
+--echo #    rebuilds a partition and DML changes rows in several partitions.
+--echo #
+UPDATE tk SET b = CONCAT(b, 'y') WHERE id % 5 = 0;
+UPDATE tk_ref SET b = CONCAT(b, 'y') WHERE id % 5 = 0;
+--let $cp_trigger = SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1
+--let $cp_lzero_trigger = 1
+--source suite/rocksdb/include/compaction_partition_pause.inc
+let $cp_i = 2;
+while ($cp_i)
+{
+  let $sfx = `SELECT IF($cp_i = 2, '', '_ref')`;
+  eval ALTER TABLE tl$sfx REBUILD PARTITION p1;
+  eval UPDATE th$sfx SET c = CONCAT(c, 'u') WHERE id % 5 = 0;
+  eval DELETE FROM th$sfx WHERE id % 11 = 0;
+  eval REPLACE INTO tr$sfx SELECT n, n * 13, CONCAT('r-', n), REPEAT('R', 30) FROM seq WHERE n BETWEEN 140 AND 169;
+  eval INSERT INTO tr$sfx SELECT n, n * 3, 'new', NULL FROM seq WHERE n BETWEEN 250 AND 259 ON DUPLICATE KEY UPDATE c = 'dup', b = NULL;
+  dec $cp_i;
+}
+--source suite/rocksdb/include/compaction_partition_resume.inc
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 6. ALTER TABLE tr OPTIMIZE PARTITION p1 is held while it runs. DML on
+--echo #    another table proceeds. Reads and writes of tr, in the optimized and
+--echo #    in another partition, wait for the OPTIMIZE: it holds a metadata
+--echo #    lock on the whole table that blocks both.
+--echo #
+UPDATE tr SET c = CONCAT(c, '~') WHERE id BETWEEN 100 AND 149;
+UPDATE tr_ref SET c = CONCAT(c, '~') WHERE id BETWEEN 100 AND 149;
+--let $cp_trigger = ALTER TABLE tr OPTIMIZE PARTITION p1
+--source suite/rocksdb/include/compaction_partition_pause.inc
+UPDATE th SET u = u * 2 WHERE id < 40;
+UPDATE th_ref SET u = u * 2 WHERE id < 40;
+connection con_ddl;
+SET SESSION lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE tr SET u = u + 1 WHERE id = 120;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE tr SET u = u + 1 WHERE id = 220;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT COUNT(*) FROM tr PARTITION (p2);
+SET SESSION lock_wait_timeout = DEFAULT;
+connection default;
+--source suite/rocksdb/include/compaction_partition_resume.inc
+UPDATE tr SET u = u + 1 WHERE id IN (120, 220);
+UPDATE tr_ref SET u = u + 1 WHERE id IN (120, 220);
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+--echo #
+--echo # 7. The drop-index thread is held after tr drops p2 and tl drops p2.
+--echo #    Every manual compaction trigger runs in the window between the
+--echo #    drops' dictionary commit and their reclaim, with DML on the
+--echo #    remaining partitions.
+--echo #
+--let $cp_log_pattern = MyRocks: test: drop-index thread paused
+--source suite/rocksdb/include/compaction_partition_log_count.inc
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE tr DROP PARTITION p2;
+ALTER TABLE tr_ref DROP PARTITION p2;
+ALTER TABLE tl DROP PARTITION p2;
+ALTER TABLE tl_ref DROP PARTITION p2;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--source suite/rocksdb/include/compaction_partition_wait_log.inc
+UPDATE tr SET c = CONCAT(c, '%') WHERE id < 150;
+UPDATE tr_ref SET c = CONCAT(c, '%') WHERE id < 150;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+OPTIMIZE TABLE tk;
+ALTER TABLE tl OPTIMIZE PARTITION p1, p3;
+SET GLOBAL rocksdb_compact_cf = 'mc4_p0';
+SET GLOBAL rocksdb_compact_cf = 'mc4_p0_sk';
+SET GLOBAL rocksdb_compact_cf = 'rev:mc4_l2';
+SET GLOBAL rocksdb_compact_cf = 'default';
+--disable_result_log
+--error 0, ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_compact_lzero_now = 1;
+--error 0, ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1;
+--enable_result_log
+--source suite/rocksdb/include/compaction_partition_check.inc
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+
+--source suite/rocksdb/include/compaction_partition_reclaim.inc
+
+--echo #
+--echo # Restart with rocksdb_validate_tables=1 and check again.
+--echo #
+disconnect con_mc;
+disconnect con_ddl;
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--source suite/rocksdb/include/compaction_partition_check.inc
+
+DROP TABLE tr, tl, th, tk, tr_ref, tl_ref, th_ref, tk_ref, seq;
+--let $restart_parameters =
+--source include/wait_until_count_sessions.inc

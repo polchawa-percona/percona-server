@@ -12827,6 +12827,34 @@ void Rdb_drop_index_thread::run() {
     // make sure, no program error is returned
     assert(ret == 0 || ret == ETIMEDOUT);
     RDB_MUTEX_UNLOCK_CHECK(m_signal_mutex);
+#ifndef NDEBUG
+    // Hold the thread before it reclaims dropped indexes, so a test can run
+    // other operations (e.g. manual compactions) in the window between the
+    // dictionary commit of a drop and its reclaim. This thread has no DBUG
+    // thread state, so only the global debug settings are checked.
+    {
+      const auto pause_set = []() {
+        char buf[1024];
+        return DBUG_EXPLAIN_INITIAL(buf, sizeof(buf)) == 0 &&
+               strstr(buf, "rocksdb_pause_drop_index_thread") != nullptr;
+      };
+      if (pause_set()) {
+        // NO_LINT_DEBUG
+        LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                        "MyRocks: test: drop-index thread paused");
+        bool killed = false;
+        while (pause_set() && !killed) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          RDB_MUTEX_LOCK_CHECK(m_signal_mutex);
+          killed = m_killed;
+          RDB_MUTEX_UNLOCK_CHECK(m_signal_mutex);
+        }
+        // NO_LINT_DEBUG
+        LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                        "MyRocks: test: drop-index thread resumed");
+      }
+    }
+#endif
     for (Rdb_dict_manager *local_dict_manager : dict_manager_list) {
       std::unordered_set<GL_INDEX_ID> indices;
       local_dict_manager->get_ongoing_drop_indexes(&indices);

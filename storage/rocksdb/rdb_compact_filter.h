@@ -22,7 +22,10 @@
 
 /* C++ system header files */
 #ifndef NDEBUG
+#include <chrono>
+#include <cstring>
 #include <ctime>
+#include <thread>
 #endif
 #include <string>
 
@@ -213,6 +216,28 @@ class Rdb_compact_filter_factory : public rocksdb::CompactionFilterFactory {
 
   std::unique_ptr<rocksdb::CompactionFilter> CreateCompactionFilter(
       const rocksdb::CompactionFilter::Context &context) override {
+#ifndef NDEBUG
+    // Hold a manual compaction while it is registered as running, so a test
+    // can run other operations against it. The DB mutex is not held here.
+    // RocksDB background threads have no DBUG thread state, so only the
+    // global debug settings are checked.
+    const auto pause_set = []() {
+      char buf[1024];
+      return DBUG_EXPLAIN_INITIAL(buf, sizeof(buf)) == 0 &&
+             strstr(buf, "rocksdb_pause_compaction") != nullptr;
+    };
+    if (context.is_manual_compaction && pause_set()) {
+      // NO_LINT_DEBUG
+      LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                      "MyRocks: test: compaction paused, cf id %u",
+                      context.column_family_id);
+      while (pause_set())
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      // NO_LINT_DEBUG
+      LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                      "MyRocks: test: compaction resumed");
+    }
+#endif
     return std::unique_ptr<rocksdb::CompactionFilter>(
         new Rdb_compact_filter(context.column_family_id));
   }

@@ -1,0 +1,16 @@
+[default]
+
+[mc_threads]
+rocksdb_manual_compaction_threads=4
+
+[bottommost_skip]
+rocksdb_manual_compaction_bottommost_level=kSkip
+
+[bottommost_filter]
+rocksdb_manual_compaction_bottommost_level=kIfHaveCompactionFilter
+
+[bottommost_force]
+rocksdb_manual_compaction_bottommost_level=kForce
+
+[delete_range]
+rocksdb_enable_delete_range_for_drop_index=ON
