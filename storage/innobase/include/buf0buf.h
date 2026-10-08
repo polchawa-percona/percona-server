@@ -1967,11 +1967,11 @@ struct buf_block_t {
   the fields above depends on whether PFS instrumentation of mutex and rw_lock
   is enabled. */
 #if defined(UNIV_PFS_MUTEX) && defined(UNIV_PFS_RWLOCK)
-  byte m_padding[16];
+  byte m_padding[48];
 #elif defined(UNIV_PFS_MUTEX)
-  byte m_padding[24];
+  byte m_padding[56];
 #else
-  byte m_padding[32];
+  byte m_padding[64];
 #endif
 
   /** Get the modified clock (version) value.
@@ -2070,8 +2070,8 @@ blocks, page.m_space and page.m_version, which buf_page_t::was_stale() reads
 on every page lookup, would share the cache line with the lock word of
 buf_block_t::lock, which is modified on every latch acquisition and release.
 Adjust buf_block_t::m_padding when fields of buf_block_t change. */
-//static_assert(sizeof(buf_block_t) == 384,
-//              "sizeof(buf_block_t) must be a multiple of the cache line size");
+static_assert(sizeof(buf_block_t) == 384,
+              "sizeof(buf_block_t) must be a multiple of the cache line size");
 #endif /* !UNIV_DEBUG */
 
 inline bool buf_block_t::is_root() const {
