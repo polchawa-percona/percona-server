@@ -42,7 +42,9 @@ libcoz exports _coz_get_latch_api() returning a table of three functions. */
 #ifndef ut0coz_h
 #define ut0coz_h
 
-#ifdef UNIV_COZ_HOOKS
+/* Not in UNIV_LIBRARY builds (e.g. innodb_zipdecompress for offline tools):
+they have no latch meta data and never run under libcoz. */
+#if defined(UNIV_COZ_HOOKS) && !defined(UNIV_LIBRARY)
 
 #include <dlfcn.h>
 
@@ -143,7 +145,7 @@ inline bool acquired_if(bool ok, const void *latch, const char *file,
   (void)ut_coz::acquired_if(true, (latch), (file), (line), (id), (mode))
 #define UT_COZ_RELEASE(latch) ut_coz::release(latch)
 
-#else /* UNIV_COZ_HOOKS */
+#else /* UNIV_COZ_HOOKS && !UNIV_LIBRARY */
 
 #define UT_COZ_WAIT_GUARD(latch, file, line, id, mode)
 #define UT_COZ_WAIT_BEGIN(latch, file, line, id, mode)
@@ -152,6 +154,6 @@ inline bool acquired_if(bool ok, const void *latch, const char *file,
 #define UT_COZ_TRY_ACQUIRED(latch, file, line, id, mode)
 #define UT_COZ_RELEASE(latch)
 
-#endif /* UNIV_COZ_HOOKS */
+#endif /* UNIV_COZ_HOOKS && !UNIV_LIBRARY */
 
 #endif /* ut0coz_h */
