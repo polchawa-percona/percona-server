@@ -91,6 +91,7 @@
 #include "storage/perfschema/table_events_waits_summary.h"
 #include "storage/perfschema/table_ews_by_account_by_event_name.h"
 #include "storage/perfschema/table_ews_by_host_by_event_name.h"
+#include "storage/perfschema/table_ews_by_source.h" /* Percona */
 #include "storage/perfschema/table_ews_by_thread_by_event_name.h"
 #include "storage/perfschema/table_ews_by_user_by_event_name.h"
 #include "storage/perfschema/table_ews_global_by_event_name.h"
@@ -134,6 +135,7 @@
 #include "storage/perfschema/table_session_status.h"
 #include "storage/perfschema/table_session_variables.h"
 #include "storage/perfschema/table_setup_actors.h"
+#include "storage/perfschema/table_setup_consumer_options.h" /* Percona */
 #include "storage/perfschema/table_setup_consumers.h"
 #include "storage/perfschema/table_setup_instruments.h"
 #include "storage/perfschema/table_setup_loggers.h"
@@ -617,6 +619,9 @@ static PFS_engine_table_share *all_shares[] = {
     &table_keyring_component_status::m_share,
 
     &table_account_failed_login_lock_status::m_share,
+
+    &table_ews_by_source::m_share,
+    &table_setup_consumer_options::m_share,
 
     nullptr};
 

@@ -1,0 +1,15 @@
+# Tests for PERFORMANCE_SCHEMA (Percona, PS-11822)
+
+#setup
+let $select_column = VALUE;
+let $table = performance_schema.setup_consumer_options;
+
+# Test index on CONSUMER, NAME
+
+let $column_count = 2;
+let $col1 = CONSUMER;
+let $col2 = NAME;
+let $col1_act = "latch_source_summary";
+let $col2_act = "granularity";
+
+--source ../include/idx_explain_test.inc

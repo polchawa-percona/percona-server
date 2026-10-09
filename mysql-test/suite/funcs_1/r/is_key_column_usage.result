@@ -284,6 +284,8 @@ def	performance_schema	PRIMARY	def	performance_schema	session_variables	VARIABLE
 def	performance_schema	PRIMARY	def	performance_schema	setup_actors	HOST
 def	performance_schema	PRIMARY	def	performance_schema	setup_actors	ROLE
 def	performance_schema	PRIMARY	def	performance_schema	setup_actors	USER
+def	performance_schema	PRIMARY	def	performance_schema	setup_consumer_options	CONSUMER
+def	performance_schema	PRIMARY	def	performance_schema	setup_consumer_options	NAME
 def	performance_schema	PRIMARY	def	performance_schema	setup_consumers	NAME
 def	performance_schema	PRIMARY	def	performance_schema	setup_instruments	NAME
 def	performance_schema	PRIMARY	def	performance_schema	setup_meters	NAME

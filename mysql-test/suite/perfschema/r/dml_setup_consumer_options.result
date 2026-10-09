@@ -1,0 +1,48 @@
+select * from performance_schema.setup_consumer_options;
+CONSUMER	NAME	VALUE
+latch_source_summary	granularity	NONE
+select * from performance_schema.setup_consumer_options
+where consumer='latch_source_summary' and name='granularity';
+CONSUMER	NAME	VALUE
+latch_source_summary	granularity	NONE
+select * from performance_schema.setup_consumer_options
+where value='NONE';
+CONSUMER	NAME	VALUE
+latch_source_summary	granularity	NONE
+insert into performance_schema.setup_consumer_options
+set consumer='FOO', name='BAR', value='NONE';
+ERROR 42000: INSERT command denied to user 'root'@'localhost' for table 'setup_consumer_options'
+update performance_schema.setup_consumer_options
+set consumer='FOO';
+ERROR HY000: Invalid performance_schema usage.
+update performance_schema.setup_consumer_options
+set name='FOO';
+ERROR HY000: Invalid performance_schema usage.
+update performance_schema.setup_consumer_options
+set value='FOO';
+ERROR HY000: Invalid performance_schema usage.
+update performance_schema.setup_consumer_options
+set value='';
+ERROR HY000: Invalid performance_schema usage.
+update performance_schema.setup_consumer_options
+set value='SOURCES';
+ERROR HY000: Invalid performance_schema usage.
+update performance_schema.setup_consumer_options
+set value='Source';
+select * from performance_schema.setup_consumer_options;
+CONSUMER	NAME	VALUE
+latch_source_summary	granularity	SOURCE
+update performance_schema.setup_consumer_options
+set value='none' where consumer='latch_source_summary';
+select * from performance_schema.setup_consumer_options;
+CONSUMER	NAME	VALUE
+latch_source_summary	granularity	NONE
+delete from performance_schema.setup_consumer_options;
+ERROR 42000: DELETE command denied to user 'root'@'localhost' for table 'setup_consumer_options'
+delete from performance_schema.setup_consumer_options
+where consumer='latch_source_summary';
+ERROR 42000: DELETE command denied to user 'root'@'localhost' for table 'setup_consumer_options'
+LOCK TABLES performance_schema.setup_consumer_options READ;
+UNLOCK TABLES;
+LOCK TABLES performance_schema.setup_consumer_options WRITE;
+UNLOCK TABLES;

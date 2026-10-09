@@ -1,0 +1,56 @@
+# Tests for PERFORMANCE_SCHEMA (Percona, PS-11822)
+
+select * from performance_schema.setup_consumer_options;
+
+select * from performance_schema.setup_consumer_options
+  where consumer='latch_source_summary' and name='granularity';
+
+select * from performance_schema.setup_consumer_options
+  where value='NONE';
+
+--error ER_TABLEACCESS_DENIED_ERROR
+insert into performance_schema.setup_consumer_options
+  set consumer='FOO', name='BAR', value='NONE';
+
+--error ER_WRONG_PERFSCHEMA_USAGE
+update performance_schema.setup_consumer_options
+  set consumer='FOO';
+
+--error ER_WRONG_PERFSCHEMA_USAGE
+update performance_schema.setup_consumer_options
+  set name='FOO';
+
+--error ER_WRONG_PERFSCHEMA_USAGE
+update performance_schema.setup_consumer_options
+  set value='FOO';
+
+--error ER_WRONG_PERFSCHEMA_USAGE
+update performance_schema.setup_consumer_options
+  set value='';
+
+--error ER_WRONG_PERFSCHEMA_USAGE
+update performance_schema.setup_consumer_options
+  set value='SOURCES';
+
+update performance_schema.setup_consumer_options
+  set value='Source';
+
+select * from performance_schema.setup_consumer_options;
+
+update performance_schema.setup_consumer_options
+  set value='none' where consumer='latch_source_summary';
+
+select * from performance_schema.setup_consumer_options;
+
+--error ER_TABLEACCESS_DENIED_ERROR
+delete from performance_schema.setup_consumer_options;
+
+--error ER_TABLEACCESS_DENIED_ERROR
+delete from performance_schema.setup_consumer_options
+  where consumer='latch_source_summary';
+
+LOCK TABLES performance_schema.setup_consumer_options READ;
+UNLOCK TABLES;
+
+LOCK TABLES performance_schema.setup_consumer_options WRITE;
+UNLOCK TABLES;

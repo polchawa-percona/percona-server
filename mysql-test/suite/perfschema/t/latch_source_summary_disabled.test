@@ -1,0 +1,27 @@
+#
+# PS-11822: performance_schema_max_latch_source_summaries = 0 disables
+# events_waits_summary_by_source; granularity SOURCE is accepted and collects
+# nothing.
+#
+
+--source include/have_log_bin.inc
+
+SHOW GLOBAL VARIABLES LIKE 'performance_schema_max_latch_source_summaries';
+
+UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES'
+  WHERE NAME = 'wait/synch/mutex/sql/MYSQL_BIN_LOG::LOCK_log';
+UPDATE performance_schema.setup_consumer_options SET VALUE = 'SOURCE'
+  WHERE CONSUMER = 'latch_source_summary' AND NAME = 'granularity';
+SELECT * FROM performance_schema.setup_consumer_options;
+
+--disable_result_log
+SHOW BINARY LOGS;
+--enable_result_log
+
+SELECT COUNT(*) FROM performance_schema.events_waits_summary_by_source;
+--source ../include/latch_source_counters.inc
+--echo lost: $latch_source_lost, holds_lost: $latch_source_holds_lost
+TRUNCATE TABLE performance_schema.events_waits_summary_by_source;
+
+UPDATE performance_schema.setup_consumer_options SET VALUE = 'NONE'
+  WHERE CONSUMER = 'latch_source_summary' AND NAME = 'granularity';

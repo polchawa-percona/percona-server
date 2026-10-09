@@ -1,0 +1,29 @@
+#
+# PS-11822: --performance-schema-consumer-latch-source-summary=OFF disables the
+# latch_source_summary consumer at startup, so granularity SOURCE collects
+# nothing until the consumer is enabled.
+#
+
+SELECT * FROM performance_schema.setup_consumers
+  WHERE NAME = 'latch_source_summary';
+SELECT * FROM performance_schema.setup_consumer_options;
+
+UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES'
+  WHERE NAME = 'wait/synch/mutex/sql/LOCK_status';
+
+TRUNCATE TABLE performance_schema.events_waits_summary_by_source;
+FLUSH STATUS;
+SHOW GLOBAL STATUS LIKE 'Threads_connected';
+SELECT COUNT(*) FROM performance_schema.events_waits_summary_by_source;
+
+UPDATE performance_schema.setup_consumers SET ENABLED = 'YES'
+  WHERE NAME = 'latch_source_summary';
+FLUSH STATUS;
+SHOW GLOBAL STATUS LIKE 'Threads_connected';
+SELECT COUNT(*) > 0 AS HAS_ROWS, SUM(COUNT_STAR) > 0 AS COUNTED
+  FROM performance_schema.events_waits_summary_by_source
+  WHERE EVENT_NAME = 'wait/synch/mutex/sql/LOCK_status';
+
+UPDATE performance_schema.setup_consumers SET ENABLED = 'NO'
+  WHERE NAME = 'latch_source_summary';
+TRUNCATE TABLE performance_schema.events_waits_summary_by_source;

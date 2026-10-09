@@ -971,6 +971,10 @@ The following options may be given as the first argument:
  Default startup value for the global_instrumentation
  consumer.
  (Defaults to on; use --skip-performance-schema-consumer-global-instrumentation to disable.)
+ --performance-schema-consumer-latch-source-summary 
+ Default startup value for the latch_source_summary
+ consumer.
+ (Defaults to on; use --skip-performance-schema-consumer-latch-source-summary to disable.)
  --performance-schema-consumer-statements-digest 
  Default startup value for the statements_digest consumer.
  (Defaults to on; use --skip-performance-schema-consumer-statements-digest to disable.)
@@ -1013,6 +1017,9 @@ The following options may be given as the first argument:
  --performance-schema-instrument[=name] 
  Default startup value for a performance schema
  instrument.
+ --performance-schema-latch-source-summary-granularity=name 
+ Default startup value for option GRANULARITY of the
+ latch_source_summary consumer: NONE or SOURCE.
  --performance-schema-logger[=name] 
  Default startup value for a performance schema logger.
  --performance-schema-max-cond-classes=# 
@@ -1039,6 +1046,9 @@ The following options may be given as the first argument:
  --performance-schema-max-index-stat=# 
  Maximum number of index statistics for instrumented
  tables. Use 0 to disable, -1 for automated scaling.
+ --performance-schema-max-latch-source-summaries=# 
+ Maximum number of rows in EVENTS_WAITS_SUMMARY_BY_SOURCE.
+ Use 0 to disable, -1 for automated sizing.
  --performance-schema-max-logger-classes=# 
  Maximum number of logger source instruments.
  --performance-schema-max-memory-classes=# 
@@ -2027,6 +2037,7 @@ performance-schema-consumer-events-waits-current FALSE
 performance-schema-consumer-events-waits-history FALSE
 performance-schema-consumer-events-waits-history-long FALSE
 performance-schema-consumer-global-instrumentation TRUE
+performance-schema-consumer-latch-source-summary TRUE
 performance-schema-consumer-statements-digest TRUE
 performance-schema-consumer-thread-instrumentation TRUE
 performance-schema-digests-size -1
@@ -2041,6 +2052,7 @@ performance-schema-events-waits-history-long-size -1
 performance-schema-events-waits-history-size -1
 performance-schema-hosts-size -1
 performance-schema-instrument 
+performance-schema-latch-source-summary-granularity NONE
 performance-schema-logger 
 performance-schema-max-cond-classes 150
 performance-schema-max-cond-instances -1
@@ -2050,6 +2062,7 @@ performance-schema-max-file-classes 80
 performance-schema-max-file-handles 32768
 performance-schema-max-file-instances -1
 performance-schema-max-index-stat -1
+performance-schema-max-latch-source-summaries -1
 performance-schema-max-logger-classes 80
 performance-schema-max-memory-classes 530
 performance-schema-max-metadata-locks -1

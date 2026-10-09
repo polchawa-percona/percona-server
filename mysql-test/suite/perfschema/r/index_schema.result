@@ -110,6 +110,7 @@ session_status	0	performance_schema	PRIMARY	HASH
 session_variables	0	performance_schema	PRIMARY	HASH	
 setup_actors	0	performance_schema	PRIMARY	HASH	
 setup_consumers	0	performance_schema	PRIMARY	HASH	
+setup_consumer_options	0	performance_schema	PRIMARY	HASH	
 setup_instruments	0	performance_schema	PRIMARY	HASH	
 setup_meters	0	performance_schema	PRIMARY	HASH	
 setup_metrics	0	performance_schema	PRIMARY	HASH	
@@ -329,6 +330,8 @@ setup_actors	0	performance_schema	PRIMARY	1	HOST	NULL
 setup_actors	0	performance_schema	PRIMARY	2	USER	NULL	
 setup_actors	0	performance_schema	PRIMARY	3	ROLE	NULL	
 setup_consumers	0	performance_schema	PRIMARY	1	NAME	NULL	
+setup_consumer_options	0	performance_schema	PRIMARY	1	CONSUMER	NULL	
+setup_consumer_options	0	performance_schema	PRIMARY	2	NAME	NULL	
 setup_instruments	0	performance_schema	PRIMARY	1	NAME	NULL	
 setup_meters	0	performance_schema	PRIMARY	1	NAME	NULL	
 setup_metrics	0	performance_schema	PRIMARY	1	NAME	NULL	

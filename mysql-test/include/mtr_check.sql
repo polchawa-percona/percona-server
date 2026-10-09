@@ -48,6 +48,17 @@ BEGIN
     SELECT /*+SET_VAR(use_secondary_engine=OFF)*/ * from performance_schema.setup_consumers
       order by NAME;
 
+    BEGIN
+      -- For tests tampering with performance_schema table structure
+      DECLARE CONTINUE HANDLER for SQLEXCEPTION
+      BEGIN
+      END;
+
+      -- Percona: leave the consumer options in the same state
+      SELECT /*+SET_VAR(use_secondary_engine=OFF)*/ * from performance_schema.setup_consumer_options
+        order by CONSUMER, NAME;
+    END;
+
     -- Leave the actors setup in the same state
     SELECT /*+SET_VAR(use_secondary_engine=OFF)*/ * from performance_schema.setup_actors
       order by USER, HOST;

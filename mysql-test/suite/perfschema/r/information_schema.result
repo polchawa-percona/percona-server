@@ -48,6 +48,7 @@ performance_schema	events_waits_history_long	def
 performance_schema	events_waits_summary_by_account_by_event_name	def
 performance_schema	events_waits_summary_by_host_by_event_name	def
 performance_schema	events_waits_summary_by_instance	def
+performance_schema	events_waits_summary_by_source	def
 performance_schema	events_waits_summary_by_thread_by_event_name	def
 performance_schema	events_waits_summary_by_user_by_event_name	def
 performance_schema	events_waits_summary_global_by_event_name	def
@@ -94,6 +95,7 @@ performance_schema	session_connect_attrs	def
 performance_schema	session_status	def
 performance_schema	session_variables	def
 performance_schema	setup_actors	def
+performance_schema	setup_consumer_options	def
 performance_schema	setup_consumers	def
 performance_schema	setup_instruments	def
 performance_schema	setup_loggers	def
@@ -169,6 +171,7 @@ events_waits_history_long	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_by_account_by_event_name	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_by_host_by_event_name	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_by_instance	BASE TABLE	PERFORMANCE_SCHEMA
+events_waits_summary_by_source	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_by_thread_by_event_name	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_by_user_by_event_name	BASE TABLE	PERFORMANCE_SCHEMA
 events_waits_summary_global_by_event_name	BASE TABLE	PERFORMANCE_SCHEMA
@@ -215,6 +218,7 @@ session_connect_attrs	BASE TABLE	PERFORMANCE_SCHEMA
 session_status	BASE TABLE	PERFORMANCE_SCHEMA
 session_variables	BASE TABLE	PERFORMANCE_SCHEMA
 setup_actors	BASE TABLE	PERFORMANCE_SCHEMA
+setup_consumer_options	BASE TABLE	PERFORMANCE_SCHEMA
 setup_consumers	BASE TABLE	PERFORMANCE_SCHEMA
 setup_instruments	BASE TABLE	PERFORMANCE_SCHEMA
 setup_loggers	BASE TABLE	PERFORMANCE_SCHEMA
@@ -290,6 +294,7 @@ events_waits_history_long	10	Dynamic
 events_waits_summary_by_account_by_event_name	10	Dynamic
 events_waits_summary_by_host_by_event_name	10	Dynamic
 events_waits_summary_by_instance	10	Dynamic
+events_waits_summary_by_source	10	Dynamic
 events_waits_summary_by_thread_by_event_name	10	Dynamic
 events_waits_summary_by_user_by_event_name	10	Dynamic
 events_waits_summary_global_by_event_name	10	Dynamic
@@ -336,6 +341,7 @@ session_connect_attrs	10	Dynamic
 session_status	10	Dynamic
 session_variables	10	Dynamic
 setup_actors	10	Fixed
+setup_consumer_options	10	Dynamic
 setup_consumers	10	Dynamic
 setup_instruments	10	Dynamic
 setup_loggers	10	Dynamic
@@ -412,6 +418,7 @@ events_waits_history_long	0
 events_waits_summary_by_account_by_event_name	0
 events_waits_summary_by_host_by_event_name	0
 events_waits_summary_by_instance	0
+events_waits_summary_by_source	0
 events_waits_summary_by_thread_by_event_name	0
 events_waits_summary_by_user_by_event_name	0
 events_waits_summary_global_by_event_name	0
@@ -453,6 +460,7 @@ rwlock_instances	0
 session_account_connect_attrs	0
 session_connect_attrs	0
 setup_actors	0
+setup_consumer_options	0
 setup_consumers	0
 setup_instruments	0
 setup_loggers	0
@@ -538,6 +546,7 @@ events_waits_history_long	0	0
 events_waits_summary_by_account_by_event_name	0	0
 events_waits_summary_by_host_by_event_name	0	0
 events_waits_summary_by_instance	0	0
+events_waits_summary_by_source	0	0
 events_waits_summary_by_thread_by_event_name	0	0
 events_waits_summary_by_user_by_event_name	0	0
 events_waits_summary_global_by_event_name	0	0
@@ -584,6 +593,7 @@ session_connect_attrs	0	0
 session_status	0	0
 session_variables	0	0
 setup_actors	0	0
+setup_consumer_options	0	0
 setup_consumers	0	0
 setup_instruments	0	0
 setup_loggers	0	0
@@ -659,6 +669,7 @@ events_waits_history_long	0	0	NULL
 events_waits_summary_by_account_by_event_name	0	0	NULL
 events_waits_summary_by_host_by_event_name	0	0	NULL
 events_waits_summary_by_instance	0	0	NULL
+events_waits_summary_by_source	0	0	NULL
 events_waits_summary_by_thread_by_event_name	0	0	NULL
 events_waits_summary_by_user_by_event_name	0	0	NULL
 events_waits_summary_global_by_event_name	0	0	NULL
@@ -705,6 +716,7 @@ session_connect_attrs	0	0	NULL
 session_status	0	0	NULL
 session_variables	0	0	NULL
 setup_actors	0	0	NULL
+setup_consumer_options	0	0	NULL
 setup_consumers	0	0	NULL
 setup_instruments	0	0	NULL
 setup_loggers	0	0	NULL
@@ -780,6 +792,7 @@ events_waits_history_long	NULL	NULL	NULL
 events_waits_summary_by_account_by_event_name	NULL	NULL	NULL
 events_waits_summary_by_host_by_event_name	NULL	NULL	NULL
 events_waits_summary_by_instance	NULL	NULL	NULL
+events_waits_summary_by_source	NULL	NULL	NULL
 events_waits_summary_by_thread_by_event_name	NULL	NULL	NULL
 events_waits_summary_by_user_by_event_name	NULL	NULL	NULL
 events_waits_summary_global_by_event_name	NULL	NULL	NULL
@@ -826,6 +839,7 @@ session_connect_attrs	NULL	NULL	NULL
 session_status	NULL	NULL	NULL
 session_variables	NULL	NULL	NULL
 setup_actors	NULL	NULL	NULL
+setup_consumer_options	NULL	NULL	NULL
 setup_consumers	NULL	NULL	NULL
 setup_instruments	NULL	NULL	NULL
 setup_loggers	NULL	NULL	NULL
@@ -901,6 +915,7 @@ events_waits_history_long	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_by_account_by_event_name	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_by_host_by_event_name	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_by_instance	utf8mb4_0900_ai_ci	NULL
+events_waits_summary_by_source	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_by_thread_by_event_name	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_by_user_by_event_name	utf8mb4_0900_ai_ci	NULL
 events_waits_summary_global_by_event_name	utf8mb4_0900_ai_ci	NULL
@@ -947,6 +962,7 @@ session_connect_attrs	utf8mb4_bin	NULL
 session_status	utf8mb4_0900_ai_ci	NULL
 session_variables	utf8mb4_0900_ai_ci	NULL
 setup_actors	utf8mb4_0900_ai_ci	NULL
+setup_consumer_options	utf8mb4_0900_ai_ci	NULL
 setup_consumers	utf8mb4_0900_ai_ci	NULL
 setup_instruments	utf8mb4_0900_ai_ci	NULL
 setup_loggers	utf8mb4_0900_ai_ci	NULL
@@ -1022,6 +1038,7 @@ events_waits_history_long
 events_waits_summary_by_account_by_event_name	
 events_waits_summary_by_host_by_event_name	
 events_waits_summary_by_instance	
+events_waits_summary_by_source	
 events_waits_summary_by_thread_by_event_name	
 events_waits_summary_by_user_by_event_name	
 events_waits_summary_global_by_event_name	
@@ -1068,6 +1085,7 @@ session_connect_attrs
 session_status	
 session_variables	
 setup_actors	
+setup_consumer_options	
 setup_consumers	
 setup_instruments	
 setup_loggers	
@@ -1143,6 +1161,7 @@ events_waits_history_long
 events_waits_summary_by_account_by_event_name	
 events_waits_summary_by_host_by_event_name	
 events_waits_summary_by_instance	
+events_waits_summary_by_source	
 events_waits_summary_by_thread_by_event_name	
 events_waits_summary_by_user_by_event_name	
 events_waits_summary_global_by_event_name	
@@ -1189,6 +1208,7 @@ session_connect_attrs
 session_status	
 session_variables	
 setup_actors	
+setup_consumer_options	
 setup_consumers	
 setup_instruments	
 setup_loggers	

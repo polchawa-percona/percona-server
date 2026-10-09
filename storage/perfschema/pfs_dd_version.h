@@ -287,8 +287,14 @@
 
    - WL#15201 PERFORMANCE_SCHEMA, OTEL INTERFACE: LOG
      - New table performance_schema.setup_logger.
+
+  80410:
+
+   - Percona Server added tables
+     performance_schema.events_waits_summary_by_source and
+     performance_schema.setup_consumer_options.
 */
 
-static const uint PFS_DD_VERSION = 80409;
+static const uint PFS_DD_VERSION = 80410;
 
 #endif /* PFS_DD_VERSION_H */

@@ -93,10 +93,22 @@ BEGIN
     DEALLOCATE PREPARE reset_stmt;
 
     SET @query = 'UPDATE performance_schema.setup_consumers
-                     SET ENABLED = IF(NAME IN (''events_statements_current'', ''events_transactions_current'', ''global_instrumentation'', ''thread_instrumentation'', ''statements_digest''), ''YES'', ''NO'')';
+                     SET ENABLED = IF(NAME IN (''events_statements_current'', ''events_transactions_current'', ''global_instrumentation'', ''thread_instrumentation'', ''statements_digest'', ''latch_source_summary''), ''YES'', ''NO'')';
 
     IF (in_verbose) THEN
         SELECT CONCAT('Resetting: setup_consumers\n', REPLACE(@query, '  ', '')) AS status;
+    END IF;
+
+    PREPARE reset_stmt FROM @query;
+    EXECUTE reset_stmt;
+    DEALLOCATE PREPARE reset_stmt;
+
+    SET @query = 'UPDATE performance_schema.setup_consumer_options
+                     SET VALUE = ''NONE''
+                   WHERE CONSUMER = ''latch_source_summary'' AND NAME = ''granularity''';
+
+    IF (in_verbose) THEN
+        SELECT CONCAT('Resetting: setup_consumer_options\n', REPLACE(@query, '  ', '')) AS status;
     END IF;
 
     PREPARE reset_stmt FROM @query;
