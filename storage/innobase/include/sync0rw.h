@@ -695,6 +695,11 @@ static inline void pfs_rw_lock_free_func(rw_lock_t *lock); /*!< in: rw-lock */
 /** NOTE! The following macros should be used in rw locking and
  unlocking, not the corresponding function. */
 
+/* Percona: the coz-mcp release hooks (UT_COZ_RELEASE_PASS) are in the unlock
+wrappers below, because release builds do not pass the pass value on to the
+unlock functions, and a non-zero pass value marks a hand-off latch (see
+ut0coz.h). */
+
 static inline void rw_lock_s_lock(rw_lock_t *M, ut::Location L) {
   rw_lock_s_lock_func(M, 0, L);
 }
@@ -705,15 +710,17 @@ static inline void rw_lock_s_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 
 static inline bool rw_lock_s_lock_nowait(rw_lock_t *M, ut::Location L) {
   return UT_COZ_ACQUIRED_IF(rw_lock_s_lock_low(M, 0, L), M, L.filename, L.line,
-                            ut_coz_rw_lock_id(M), ut_coz::S);
+                            ut_coz_rw_lock_id(M), ut_coz::S, 0);
 }
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_s_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_s_unlock_func(P, L);
 }
 #else
 static inline void rw_lock_s_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_s_unlock_func(L);
 }
 #endif /* UNIV_DEBUG */
@@ -729,21 +736,25 @@ static inline void rw_lock_sx_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 static inline bool rw_lock_sx_lock_nowait(rw_lock_t *M, ulint P,
                                           ut::Location L) {
   return UT_COZ_ACQUIRED_IF(rw_lock_sx_lock_low(M, P, L), M, L.filename, L.line,
-                            ut_coz_rw_lock_id(M), ut_coz::SX);
+                            ut_coz_rw_lock_id(M), ut_coz::SX, P);
 }
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_sx_unlock(rw_lock_t *L) {
+  UT_COZ_RELEASE_PASS(L, 0);
   rw_lock_sx_unlock_func(0, L);
 }
 static inline void rw_lock_sx_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_sx_unlock_func(P, L);
 }
 #else  /* UNIV_DEBUG */
 static inline void rw_lock_sx_unlock(rw_lock_t *L) {
+  UT_COZ_RELEASE_PASS(L, 0);
   rw_lock_sx_unlock_func(L);
 }
 static inline void rw_lock_sx_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_sx_unlock_func(L);
 }
 #endif /* UNIV_DEBUG */
@@ -762,10 +773,12 @@ static inline bool rw_lock_x_lock_nowait(rw_lock_t *M, ut::Location L) {
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_x_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_x_unlock_func(P, L);
 }
 #else
 static inline void rw_lock_x_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   rw_lock_x_unlock_func(L);
 }
 #endif
@@ -801,15 +814,17 @@ static inline void rw_lock_s_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 
 static inline bool rw_lock_s_lock_nowait(rw_lock_t *M, ut::Location L) {
   return UT_COZ_ACQUIRED_IF(pfs_rw_lock_s_lock_low(M, 0, L), M, L.filename,
-                            L.line, ut_coz_rw_lock_id(M), ut_coz::S);
+                            L.line, ut_coz_rw_lock_id(M), ut_coz::S, 0);
 }
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_s_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_s_unlock_func(P, L);
 }
 #else
 static inline void rw_lock_s_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_s_unlock_func(L);
 }
 #endif
@@ -825,21 +840,25 @@ static inline void rw_lock_sx_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 static inline bool rw_lock_sx_lock_nowait(rw_lock_t *M, ulint P,
                                           ut::Location L) {
   return UT_COZ_ACQUIRED_IF(pfs_rw_lock_sx_lock_low(M, P, L), M, L.filename,
-                            L.line, ut_coz_rw_lock_id(M), ut_coz::SX);
+                            L.line, ut_coz_rw_lock_id(M), ut_coz::SX, P);
 }
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_sx_unlock(rw_lock_t *L) {
+  UT_COZ_RELEASE_PASS(L, 0);
   pfs_rw_lock_sx_unlock_func(0, L);
 }
 static inline void rw_lock_sx_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_sx_unlock_func(P, L);
 }
 #else
 static inline void rw_lock_sx_unlock(rw_lock_t *L) {
+  UT_COZ_RELEASE_PASS(L, 0);
   pfs_rw_lock_sx_unlock_func(L);
 }
 static inline void rw_lock_sx_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_sx_unlock_func(L);
 }
 #endif
@@ -858,10 +877,12 @@ static inline bool rw_lock_x_lock_nowait(rw_lock_t *M, ut::Location L) {
 
 #ifdef UNIV_DEBUG
 static inline void rw_lock_x_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_x_unlock_func(P, L);
 }
 #else
 static inline void rw_lock_x_unlock_gen(rw_lock_t *L, ulint P) {
+  UT_COZ_RELEASE_PASS(L, P);
   pfs_rw_lock_x_unlock_func(L);
 }
 #endif

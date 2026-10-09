@@ -2370,6 +2370,13 @@ void LinuxAIOHandler::collect() {
     timeout.tv_sec = 0;
     timeout.tv_nsec = OS_AIO_REAP_TIMEOUT;
 
+    /* Percona: no coz-mcp pre_block()/post_block() around this wait (see
+    ut0coz.h). It ends when the storage device completes an I/O, not when
+    another thread unblocks this one: the device runs outside Coz virtual
+    time, like the benchmark client, so the delays inserted while this thread
+    waited must still be paid. The latches handed over with the I/O (pass
+    value BUF_IO_READ or BUF_IO_WRITE) are released by the completion
+    routine, which lets this thread catch up before waiters wake up. */
     auto ret = io_getevents(io_ctx, 1, m_n_slots, events, &timeout);
 
     /* Cannot be bigger than the events array provided. */

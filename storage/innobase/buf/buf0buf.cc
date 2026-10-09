@@ -3617,6 +3617,10 @@ got_block:
     completes */
 
     const auto start_time = trx_stats::start_io_read(trx, 0);
+    /* Percona: coz-mcp cannot see this polling wait. The read is completed
+    by another thread (buf_page_io_complete(), which catches up on Coz
+    delays when it takes the block mutex before it resets io_fix). */
+    UT_COZ_PRE_BLOCK();
     for (;;) {
       enum buf_io_fix io_fix;
 
@@ -3630,6 +3634,7 @@ got_block:
         break;
       }
     }
+    UT_COZ_POST_BLOCK(true);
     trx_stats::end_io_read(trx, start_time);
   }
 
