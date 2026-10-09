@@ -1,5 +1,7 @@
 update performance_schema.setup_instruments set enabled='NO';
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 update performance_schema.setup_instruments set enabled='YES'
   where name like "wait/synch/mutex/mysys/THR_LOCK_myisam";
 drop table if exists test.t1;

@@ -17,6 +17,8 @@ let $schema_to_dump= 'test';
 
 # Start recording of events
 update performance_schema.setup_consumers set enabled = 'YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 
 set autocommit = off;
 

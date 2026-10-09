@@ -15,6 +15,8 @@ drop table if exists test.no_index_tab_2;
 
 # Start recording events
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 insert into marker set a = 1;
 eval create table test.no_index_tab_1
 ( a varchar(255) not null, b int not null) engine = $engine_type;

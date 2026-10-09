@@ -11,7 +11,7 @@ count(*)
 5
 select count(*) from performance_schema.setup_consumers;
 count(*)
-16
+17
 select count(*) > 4 from performance_schema.setup_instruments;
 count(*) > 4
 1
@@ -136,6 +136,7 @@ performance_schema_max_file_classes	0
 performance_schema_max_file_handles	0
 performance_schema_max_file_instances	0
 performance_schema_max_index_stat	0
+performance_schema_max_latch_source_summaries	4096
 performance_schema_max_logger_classes	0
 performance_schema_max_memory_classes	0
 performance_schema_max_metadata_locks	0
@@ -212,6 +213,7 @@ memory/performance_schema/events_waits_history	YES	NULL	global_statistics	1	Memo
 memory/performance_schema/events_waits_history_long	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_history_long
 memory/performance_schema/events_waits_summary_by_account_by_event_name	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_summary_by_account_by_event_name
 memory/performance_schema/events_waits_summary_by_host_by_event_name	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_summary_by_host_by_event_name
+memory/performance_schema/events_waits_summary_by_source	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_summary_by_source
 memory/performance_schema/events_waits_summary_by_thread_by_event_name	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_summary_by_thread_by_event_name
 memory/performance_schema/events_waits_summary_by_user_by_event_name	YES	NULL	global_statistics	1	Memory used for table performance_schema.events_waits_summary_by_user_by_event_name
 memory/performance_schema/file_class	YES	NULL	global_statistics	1	Memory used for file instrument classes
@@ -277,6 +279,7 @@ events_waits_history_long	YES
 global_instrumentation	YES
 thread_instrumentation	YES
 statements_digest	YES
+latch_source_summary	NO
 select * from performance_schema.accounts;
 USER	HOST	CURRENT_CONNECTIONS	TOTAL_CONNECTIONS	MAX_SESSION_CONTROLLED_MEMORY	MAX_SESSION_TOTAL_MEMORY
 select * from performance_schema.cond_instances;

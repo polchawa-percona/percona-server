@@ -105,6 +105,8 @@ explain select * from performance_schema.pfs_example_continent
 --echo Verify stats collection in PFS stats tables
 --echo -------------------------------------------------
 update performance_schema.setup_consumers set ENABLED='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 update performance_schema.setup_instruments set ENABLED='YES', TIMED='YES';
 
 insert into performance_schema.setup_objects values

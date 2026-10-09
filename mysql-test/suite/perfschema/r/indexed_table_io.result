@@ -28,6 +28,8 @@ index_tab	CREATE TABLE `index_tab` (
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 # Printing of 100 inserts per table is suppressed
 update performance_schema.setup_consumers set enabled='NO';
 select SUM(NUMBER_OF_BYTES)
@@ -52,6 +54,8 @@ count(*)
 100
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select avg(a) from test.no_index_tab;
 avg(a)
 50.5000
@@ -65,6 +69,8 @@ SUM(NUMBER_OF_BYTES)
 100
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select avg(a) from test.index_tab;
 avg(a)
 50.5000
@@ -78,6 +84,8 @@ SUM(NUMBER_OF_BYTES)
 100
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select 1 as my_column from test.no_index_tab where a = 50;
 my_column
 1
@@ -91,6 +99,8 @@ SUM(NUMBER_OF_BYTES)
 100
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select 1 as my_column from test.index_tab where a = 50;
 my_column
 1
@@ -104,6 +114,8 @@ SUM(NUMBER_OF_BYTES)
 1
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 delete from test.no_index_tab where a = 51;
 update performance_schema.setup_consumers set enabled='NO';
 select SUM(NUMBER_OF_BYTES)
@@ -115,6 +127,8 @@ SUM(NUMBER_OF_BYTES)
 102
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 delete from test.index_tab where a = 51;
 update performance_schema.setup_consumers set enabled='NO';
 select SUM(NUMBER_OF_BYTES)
@@ -135,6 +149,8 @@ Performance_schema_file_handles_lost	0
 Performance_schema_file_instances_lost	0
 Performance_schema_hosts_lost	0
 Performance_schema_index_stat_lost	0
+Performance_schema_latch_source_holds_lost	0
+Performance_schema_latch_source_summaries_lost	0
 Performance_schema_locker_lost	0
 Performance_schema_logger_lost	0
 Performance_schema_memory_classes_lost	0
@@ -167,3 +183,5 @@ drop table test.marker;
 flush status;
 update performance_schema.setup_instruments set enabled='YES';
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+'latch_source_summary';

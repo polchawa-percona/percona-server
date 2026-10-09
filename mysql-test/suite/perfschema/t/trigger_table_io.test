@@ -33,6 +33,8 @@ for each row insert into test.t2 set b = old.a, v = 99;
 
 # Start recording events
 update performance_schema.setup_consumers set enabled = 'YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 
 # Code to test
 

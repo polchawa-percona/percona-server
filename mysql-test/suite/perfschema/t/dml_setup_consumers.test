@@ -21,6 +21,8 @@ update performance_schema.setup_consumers
 
 update performance_schema.setup_consumers
   set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 
 --error ER_TABLEACCESS_DENIED_ERROR
 delete from performance_schema.setup_consumers;

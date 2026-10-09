@@ -32,6 +32,8 @@ show create table test.index_tab;
 
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 --echo # Printing of 100 inserts per table is suppressed
 --disable_query_log
 let $run= 100;
@@ -60,11 +62,15 @@ select count(*) from test.index_tab;
 # --> No difference between numvber of accesses for no_index_tab and index_tab
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select avg(a) from test.no_index_tab;
 update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'no_index_tab';
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select avg(a) from test.index_tab;
 update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'index_tab';
@@ -76,11 +82,15 @@ eval $table_io_select 'index_tab';
 # --> index_tab requires much less accesses than no_index_tab
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select 1 as my_column from test.no_index_tab where a = 50;
 update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'no_index_tab';
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 select 1 as my_column from test.index_tab where a = 50;
 update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'index_tab';
@@ -93,6 +103,8 @@ eval $table_io_select 'index_tab';
 # --> index_tab requires much less accesses than no_index_tab
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 delete from test.no_index_tab where a = 51;
 update performance_schema.setup_consumers set enabled='NO';
 --skip_if_hypergraph  # Returns 101 instead of 102. (The same is seen with
@@ -102,6 +114,8 @@ update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'no_index_tab';
 truncate table performance_schema.events_waits_history_long;
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 delete from test.index_tab where a = 51;
 update performance_schema.setup_consumers set enabled='NO';
 eval $table_io_select 'index_tab';

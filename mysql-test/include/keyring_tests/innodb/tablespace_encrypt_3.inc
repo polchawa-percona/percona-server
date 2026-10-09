@@ -63,6 +63,8 @@ connect(con1, localhost, root,,);
 --connection con1
 
 UPDATE performance_schema.setup_consumers SET ENABLED='YES';
+UPDATE performance_schema.setup_consumers SET enabled = 'NO' WHERE name =
+    'latch_source_summary';
 SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES
 	WHERE NAME='encrypt_ts';
 SELECT * FROM performance_schema.setup_consumers

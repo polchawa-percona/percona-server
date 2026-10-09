@@ -36,6 +36,7 @@ events_stages_history_long
 events_statements_history_long
 events_transactions_history_long
 events_waits_history_long
+latch_source_summary
 CALL sys.ps_setup_show_disabled(TRUE, FALSE);
 performance_schema_enabled
 1
@@ -62,6 +63,7 @@ events_stages_history_long
 events_statements_history_long
 events_transactions_history_long
 events_waits_history_long
+latch_source_summary
 disabled_instruments	timed
 idle	YES
 stage/innodb/alter table (end)	YES
@@ -135,6 +137,7 @@ events_stages_history_long
 events_statements_history_long
 events_transactions_history_long
 events_waits_history_long
+latch_source_summary
 disabled_threads	thread_type
 innodb/srv_error_monitor_thread	BACKGROUND
 innodb/srv_lock_timeout_thread	BACKGROUND
@@ -170,6 +173,7 @@ events_stages_history_long
 events_statements_history_long
 events_transactions_history_long
 events_waits_history_long
+latch_source_summary
 disabled_threads	thread_type
 innodb/srv_error_monitor_thread	BACKGROUND
 innodb/srv_lock_timeout_thread	BACKGROUND
@@ -230,4 +234,6 @@ UPDATE performance_schema.setup_instruments SET enabled = 'YES', timed = 'YES';
 TRUNCATE TABLE performance_schema.setup_actors;
 INSERT INTO performance_schema.setup_actors VALUES ('%', '%', '%', 'YES', 'YES');
 UPDATE performance_schema.setup_consumers SET enabled = 'YES';
+UPDATE performance_schema.setup_consumers SET enabled = 'NO' WHERE name =
+'latch_source_summary';
 UPDATE performance_schema.threads SET instrumented = 'YES';

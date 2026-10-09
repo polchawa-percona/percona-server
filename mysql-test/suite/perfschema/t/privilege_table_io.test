@@ -39,6 +39,8 @@ show global variables;
 
 # Start recording events
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 update performance_schema.setup_objects set enabled='YES'
   where object_type='TABLE' and object_schema= 'mysql';
 

@@ -48,6 +48,8 @@ drop table test.t3;
 update performance_schema.threads set instrumented='YES';
 update performance_schema.setup_instruments set enabled='YES', timed='YES';
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+    'latch_source_summary';
 
 --enable_query_log
 

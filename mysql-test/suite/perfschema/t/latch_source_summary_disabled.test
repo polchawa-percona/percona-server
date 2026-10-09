@@ -1,0 +1,26 @@
+#
+# PS-11508: performance_schema_max_latch_source_summaries = 0 disables
+# events_waits_summary_by_source.
+#
+
+--source include/have_log_bin.inc
+
+SHOW GLOBAL VARIABLES LIKE 'performance_schema_max_latch_source_summaries';
+
+UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES'
+  WHERE NAME = 'wait/synch/mutex/sql/MYSQL_BIN_LOG::LOCK_log';
+UPDATE performance_schema.setup_consumers SET ENABLED = 'YES'
+  WHERE NAME = 'latch_source_summary';
+
+--disable_result_log
+SHOW BINARY LOGS;
+--enable_result_log
+
+SELECT COUNT(*) FROM performance_schema.events_waits_summary_by_source;
+SHOW GLOBAL STATUS LIKE 'Performance_schema_latch_source_%';
+TRUNCATE TABLE performance_schema.events_waits_summary_by_source;
+
+UPDATE performance_schema.setup_consumers SET ENABLED = 'NO'
+  WHERE NAME = 'latch_source_summary';
+UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES'
+  WHERE NAME = 'wait/synch/mutex/sql/MYSQL_BIN_LOG::LOCK_log';

@@ -11,7 +11,7 @@ count(*)
 5
 select count(*) from performance_schema.setup_consumers;
 count(*)
-16
+17
 select count(*) > 4 from performance_schema.setup_instruments;
 count(*) > 4
 1
@@ -124,6 +124,8 @@ Performance_schema_file_handles_lost	0
 Performance_schema_file_instances_lost	0
 Performance_schema_hosts_lost	0
 Performance_schema_index_stat_lost	0
+Performance_schema_latch_source_holds_lost	0
+Performance_schema_latch_source_summaries_lost	0
 Performance_schema_locker_lost	0
 Performance_schema_logger_lost	0
 Performance_schema_memory_classes_lost	0

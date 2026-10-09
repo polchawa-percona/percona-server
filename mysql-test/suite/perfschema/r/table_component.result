@@ -99,6 +99,8 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 Verify stats collection in PFS stats tables
 -------------------------------------------------
 update performance_schema.setup_consumers set ENABLED='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 update performance_schema.setup_instruments set ENABLED='YES', TIMED='YES';
 insert into performance_schema.setup_objects values
 ('TABLE', "performance_schema", "pfs_example_country", 'YES', 'YES');

@@ -69,6 +69,8 @@ update performance_schema.threads set instrumented='NO';
 update performance_schema.setup_instruments set enabled='YES', timed='YES';
 
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+    'latch_source_summary';
 
 # Start from a known clean state, to avoid noise from previous tests
 flush tables;

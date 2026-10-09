@@ -484,6 +484,8 @@ OBJECT_SCHEMA	NULL
 OBJECT_NAME	NULL
 TRUNCATE TABLE performance_schema.events_statements_history_long ;
 UPDATE performance_schema.setup_consumers SET ENABLED = 'YES';
+UPDATE performance_schema.setup_consumers SET enabled = 'NO'
+  WHERE name = 'latch_source_summary';
 PREPARE st FROM 'SELECT SUM(1000 + ?) AS total';
 SELECT STATEMENT_NAME, SQL_TEXT, COUNT_REPREPARE, COUNT_EXECUTE, SUM_ROWS_SENT, SUM_SELECT_SCAN, SUM_NO_INDEX_USED FROM performance_schema.prepared_statements_instances ;
 STATEMENT_NAME	st

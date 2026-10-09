@@ -7,4 +7,5 @@ drop table test.marker;
 flush status;
 update performance_schema.setup_instruments set enabled='YES';
 update performance_schema.setup_consumers set enabled='YES';
-
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+    'latch_source_summary';

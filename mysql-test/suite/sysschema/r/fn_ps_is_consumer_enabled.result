@@ -42,3 +42,5 @@ SELECT sys.ps_is_consumer_enabled('events_statements_history_long');
 sys.ps_is_consumer_enabled('events_statements_history_long')
 NO
 UPDATE performance_schema.setup_consumers SET enabled = 'YES';
+UPDATE performance_schema.setup_consumers SET enabled = 'NO' WHERE name =
+'latch_source_summary';

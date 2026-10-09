@@ -16,6 +16,7 @@ events_waits_history_long	YES
 global_instrumentation	YES
 thread_instrumentation	YES
 statements_digest	YES
+latch_source_summary	NO
 select * from performance_schema.setup_consumers
 where name='events_waits_current';
 NAME	ENABLED
@@ -42,6 +43,7 @@ statements_digest	YES
 select * from performance_schema.setup_consumers
 where enabled='NO';
 NAME	ENABLED
+latch_source_summary	NO
 insert into performance_schema.setup_consumers
 set name='FOO', enabled='YES';
 ERROR 42000: INSERT command denied to user 'root'@'localhost' for table 'setup_consumers'
@@ -50,6 +52,8 @@ set name='FOO';
 ERROR HY000: Invalid performance_schema usage.
 update performance_schema.setup_consumers
 set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 delete from performance_schema.setup_consumers;
 ERROR 42000: DELETE command denied to user 'root'@'localhost' for table 'setup_consumers'
 delete from performance_schema.setup_consumers

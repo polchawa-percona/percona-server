@@ -39,9 +39,10 @@
 #include "storage/perfschema/pfs_events_transactions.h"
 #include "storage/perfschema/pfs_events_waits.h"
 #include "storage/perfschema/pfs_instr.h"
+#include "storage/perfschema/pfs_latch_source.h" /* Percona */
 #include "string_with_len.h"
 
-#define COUNT_SETUP_CONSUMERS 16
+#define COUNT_SETUP_CONSUMERS 17
 
 static row_setup_consumers all_setup_consumers_data[COUNT_SETUP_CONSUMERS] = {
     {{STRING_WITH_LEN("events_stages_current")},
@@ -106,6 +107,11 @@ static row_setup_consumers all_setup_consumers_data[COUNT_SETUP_CONSUMERS] = {
      true},
     {{STRING_WITH_LEN("statements_digest")},
      &flag_statements_digest,
+     false,
+     false},
+    /* Percona */
+    {{STRING_WITH_LEN("latch_source_summary")},
+     &flag_latch_source_summary,
      false,
      false}};
 

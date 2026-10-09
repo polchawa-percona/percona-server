@@ -25,6 +25,8 @@ let $schema_to_dump= 'test','test1';
 
 # Start event recording
 update performance_schema.setup_consumers set enabled = 'YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 
 # INSERT ... SELECT ...
 insert into test1.t2 select * from test.t1;

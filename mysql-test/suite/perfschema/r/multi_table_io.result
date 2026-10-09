@@ -26,6 +26,8 @@ truncate table performance_schema.events_waits_history_long;
 flush status;
 flush tables;
 update performance_schema.setup_consumers set enabled = 'YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 insert into test1.t2 select * from test.t1;
 insert into marker set a = 1;
 select * from test.t1 natural join test1.t2;
@@ -82,6 +84,8 @@ Performance_schema_file_handles_lost	0
 Performance_schema_file_instances_lost	0
 Performance_schema_hosts_lost	0
 Performance_schema_index_stat_lost	0
+Performance_schema_latch_source_holds_lost	0
+Performance_schema_latch_source_summaries_lost	0
 Performance_schema_locker_lost	0
 Performance_schema_logger_lost	0
 Performance_schema_memory_classes_lost	0
@@ -116,3 +120,5 @@ drop table test.marker;
 flush status;
 update performance_schema.setup_instruments set enabled='YES';
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+'latch_source_summary';

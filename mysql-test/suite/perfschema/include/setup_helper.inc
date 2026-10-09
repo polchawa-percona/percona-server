@@ -6,6 +6,8 @@ let $MYSQLD_TMPDIR= `select @@tmpdir`;
 --disable_query_log
 update performance_schema.setup_instruments set enabled='NO';
 update performance_schema.setup_consumers set enabled='YES';
+update performance_schema.setup_consumers set enabled = 'NO' where name =
+    'latch_source_summary';
 --enable_query_log
 
 connect (con1, localhost, root, , );

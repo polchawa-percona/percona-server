@@ -9,6 +9,8 @@ update performance_schema.setup_instruments set enabled='YES'
 
 update performance_schema.setup_consumers
   set enabled='YES';
+update performance_schema.setup_consumers set enabled='NO'
+  where name='latch_source_summary';
 
 truncate table performance_schema.events_waits_history_long;
 
