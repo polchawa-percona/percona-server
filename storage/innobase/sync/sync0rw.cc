@@ -652,6 +652,8 @@ void rw_lock_x_lock_func(rw_lock_t *lock, ulint pass, ut::Location location) {
   sync_array_t *sync_arr;
   uint64_t count_os_wait = 0;
   bool spinning = false;
+  UT_COZ_WAIT_GUARD(lock, location.filename, location.line,
+                    ut_coz_rw_lock_id(lock), ut_coz::X);
 
   ut_ad(rw_lock_validate(lock));
   ut_ad(!rw_lock_own(lock, RW_LOCK_S));
@@ -723,6 +725,8 @@ void rw_lock_sx_lock_func(rw_lock_t *lock, ulint pass, ut::Location location) {
   ulint i = 0;
   sync_array_t *sync_arr;
   uint64_t count_os_wait = 0;
+  UT_COZ_WAIT_GUARD(lock, location.filename, location.line,
+                    ut_coz_rw_lock_id(lock), ut_coz::SX);
 
   ut_ad(rw_lock_validate(lock));
   ut_ad(!rw_lock_own(lock, RW_LOCK_S));

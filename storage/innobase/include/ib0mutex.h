@@ -37,6 +37,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0atomic.h"
 #include "os0event.h"
 #include "sync0policy.h"
+#include "ut0coz.h"
 #include "ut0rnd.h"
 #include "ut0ut.h"
 
@@ -612,6 +613,7 @@ struct PolicyMutex {
 
     policy().release(m_impl);
 
+    UT_COZ_RELEASE(this);
     m_impl.exit();
   }
 
@@ -634,7 +636,9 @@ struct PolicyMutex {
 
     policy().enter(m_impl, name, line);
 
+    UT_COZ_WAIT_BEGIN(this, name, line, policy().get_id(), ut_coz::MUTEX);
     m_impl.enter(n_spins, n_delay, name, line);
+    UT_COZ_ACQUIRED(this);
 
     policy().locked(m_impl, name, line);
 #ifdef UNIV_PFS_MUTEX
@@ -663,6 +667,7 @@ struct PolicyMutex {
     int ret = m_impl.try_lock() ? 0 : 1;
 
     if (ret == 0) {
+      UT_COZ_TRY_ACQUIRED(this, name, line, policy().get_id(), ut_coz::MUTEX);
       policy().enter(m_impl, name, line);
 
       policy().locked(m_impl, name, line);

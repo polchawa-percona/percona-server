@@ -250,6 +250,12 @@ IF(MSVC)
   ADD_DEFINITIONS(-DHAVE_WINDOWS_MM_FENCE)
 ENDIF()
 
+# Percona: InnoDB latch hooks for coz-mcp (see include/ut0coz.h)
+OPTION(WITH_COZ "Report InnoDB latch operations to coz-mcp's libcoz" OFF)
+IF(WITH_COZ)
+  ADD_DEFINITIONS(-DUNIV_COZ_HOOKS)
+ENDIF()
+
 IF(MUTEXTYPE MATCHES "event")
   ADD_DEFINITIONS(-DMUTEX_EVENT)
 ELSEIF(MUTEXTYPE MATCHES "futex" AND DEFINED HAVE_IB_LINUX_FUTEX)

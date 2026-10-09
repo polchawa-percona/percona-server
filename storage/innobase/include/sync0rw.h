@@ -48,6 +48,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef UNIV_HOTBACKUP
 #include "os0event.h"
 #include "ut0counter.h"
+#include "ut0coz.h"
 #endif /* !UNIV_HOTBACKUP */
 #include <atomic>
 #include "ut0mutex.h"
@@ -488,7 +489,33 @@ struct rw_lock_t
     return snapshot < 0 && -X_LOCK_DECR < snapshot &&
            snapshot != -X_LOCK_HALF_DECR;
   }
+
+#if defined(UNIV_COZ_HOOKS) && !defined(UNIV_DEBUG)
+  /** Percona: latch id for coz-mcp latch statistics (debug builds keep it in
+  latch_t). Set by rw_lock_create(). */
+  latch_id_t m_coz_id{LATCH_ID_NONE};
+#endif /* UNIV_COZ_HOOKS && !UNIV_DEBUG */
 };
+
+#ifdef UNIV_COZ_HOOKS
+/** Percona: @return latch id of an rw-lock for coz-mcp latch statistics */
+inline latch_id_t ut_coz_rw_lock_id(const rw_lock_t *lock) {
+#ifdef UNIV_DEBUG
+  return lock->get_id();
+#else
+  return lock->m_coz_id;
+#endif /* UNIV_DEBUG */
+}
+
+/** Percona: remember the latch id of an rw-lock (release builds only; debug
+builds set it in rw_lock_create_func()) */
+inline void ut_coz_rw_lock_set_id(rw_lock_t *lock [[maybe_unused]],
+                                  latch_id_t id [[maybe_unused]]) {
+#ifndef UNIV_DEBUG
+  lock->m_coz_id = id;
+#endif /* !UNIV_DEBUG */
+}
+#endif /* UNIV_COZ_HOOKS */
 
 #ifndef UNIV_LIBRARY
 #ifndef UNIV_HOTBACKUP
@@ -677,7 +704,8 @@ static inline void rw_lock_s_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 }
 
 static inline bool rw_lock_s_lock_nowait(rw_lock_t *M, ut::Location L) {
-  return rw_lock_s_lock_low(M, 0, L);
+  return UT_COZ_ACQUIRED_IF(rw_lock_s_lock_low(M, 0, L), M, L.filename, L.line,
+                            ut_coz_rw_lock_id(M), ut_coz::S);
 }
 
 #ifdef UNIV_DEBUG
@@ -700,7 +728,8 @@ static inline void rw_lock_sx_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 
 static inline bool rw_lock_sx_lock_nowait(rw_lock_t *M, ulint P,
                                           ut::Location L) {
-  return rw_lock_sx_lock_low(M, P, L);
+  return UT_COZ_ACQUIRED_IF(rw_lock_sx_lock_low(M, P, L), M, L.filename, L.line,
+                            ut_coz_rw_lock_id(M), ut_coz::SX);
 }
 
 #ifdef UNIV_DEBUG
@@ -771,7 +800,8 @@ static inline void rw_lock_s_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 }
 
 static inline bool rw_lock_s_lock_nowait(rw_lock_t *M, ut::Location L) {
-  return pfs_rw_lock_s_lock_low(M, 0, L);
+  return UT_COZ_ACQUIRED_IF(pfs_rw_lock_s_lock_low(M, 0, L), M, L.filename,
+                            L.line, ut_coz_rw_lock_id(M), ut_coz::S);
 }
 
 #ifdef UNIV_DEBUG
@@ -794,7 +824,8 @@ static inline void rw_lock_sx_lock_gen(rw_lock_t *M, ulint P, ut::Location L) {
 
 static inline bool rw_lock_sx_lock_nowait(rw_lock_t *M, ulint P,
                                           ut::Location L) {
-  return pfs_rw_lock_sx_lock_low(M, P, L);
+  return UT_COZ_ACQUIRED_IF(pfs_rw_lock_sx_lock_low(M, P, L), M, L.filename,
+                            L.line, ut_coz_rw_lock_id(M), ut_coz::SX);
 }
 
 #ifdef UNIV_DEBUG
@@ -845,6 +876,49 @@ static inline void rw_lock_s_unlock(rw_lock_t *L) {
 static inline void rw_lock_x_unlock(rw_lock_t *L) {
   rw_lock_x_unlock_gen(L, 0);
 }
+
+#ifdef UNIV_COZ_HOOKS
+/* Percona: release builds do not keep the latch id of an rw-lock; record it
+at creation so coz-mcp latch statistics can name the lock. */
+#ifdef UNIV_PFS_RWLOCK
+static inline void ut_coz_rw_lock_create(mysql_pfs_key_t key, rw_lock_t *lock,
+                                         latch_id_t id, ut::Location loc) {
+  pfs_rw_lock_create_func(key, lock, IF_DEBUG(id, ) loc);
+  ut_coz_rw_lock_set_id(lock, id);
+}
+static inline void ut_coz_rw_lock_create_unregistered(mysql_pfs_key_t key,
+                                                      rw_lock_t *lock,
+                                                      latch_id_t id,
+                                                      ut::Location loc) {
+  pfs_rw_lock_create_unregistered_func(key, lock, IF_DEBUG(id, ) loc);
+  ut_coz_rw_lock_set_id(lock, id);
+}
+#undef rw_lock_create
+#undef rw_lock_create_unregistered
+#define rw_lock_create(K, L, ID) \
+  ut_coz_rw_lock_create((K), (L), (ID), UT_LOCATION_HERE)
+#define rw_lock_create_unregistered(K, L, ID) \
+  ut_coz_rw_lock_create_unregistered((K), (L), (ID), UT_LOCATION_HERE)
+#else /* UNIV_PFS_RWLOCK */
+static inline void ut_coz_rw_lock_create(rw_lock_t *lock, latch_id_t id,
+                                         ut::Location loc) {
+  rw_lock_create_func(lock, IF_DEBUG(id, ) loc);
+  ut_coz_rw_lock_set_id(lock, id);
+}
+static inline void ut_coz_rw_lock_create_unregistered(rw_lock_t *lock,
+                                                      latch_id_t id,
+                                                      ut::Location loc) {
+  rw_lock_create_unregistered_func(lock, IF_DEBUG(id, ) loc);
+  ut_coz_rw_lock_set_id(lock, id);
+}
+#undef rw_lock_create
+#undef rw_lock_create_unregistered
+#define rw_lock_create(K, L, ID) \
+  ut_coz_rw_lock_create((L), (ID), UT_LOCATION_HERE)
+#define rw_lock_create_unregistered(K, L, ID) \
+  ut_coz_rw_lock_create_unregistered((L), (ID), UT_LOCATION_HERE)
+#endif /* UNIV_PFS_RWLOCK */
+#endif /* UNIV_COZ_HOOKS */
 
 #include "sync0rw.ic"
 
