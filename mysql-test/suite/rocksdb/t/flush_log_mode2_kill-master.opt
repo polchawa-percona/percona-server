@@ -1,0 +1,1 @@
+--skip-log-bin --rocksdb_flush_log_at_trx_commit=2
