@@ -26,12 +26,16 @@ namespace myrocks {
 enum dd_table_keys {
   /** Columns before first instant ADD COLUMN */
   DD_TABLE_INSTANT_COLS,
+  /** Token of the last inplace ALTER TABLE that changed the index list,
+  see Rdb_dict_manager DDL_PENDING_ALTER */
+  DD_TABLE_ALTER_TOKEN,
   /** Sentinel */
   DD_TABLE__LAST
 };
 
 /** RocksDB private key strings for dd::Table. @see dd_table_keys */
-const char *const dd_table_key_strings[DD_TABLE__LAST] = {"instant_col"};
+const char *const dd_table_key_strings[DD_TABLE__LAST] = {"instant_col",
+                                                          "alter_token"};
 
 /** Look up a column in a table using the system_charset_info collation.
 @param[in]	dd_table	data dictionary table
