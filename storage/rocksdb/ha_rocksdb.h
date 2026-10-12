@@ -862,12 +862,22 @@ class ha_rocksdb : public my_core::handler, public blob_buffer {
       MY_ATTRIBUTE((__warn_unused_result__));
 
   int delete_table_def(Rdb_tbl_def *const tbl);
-  int delete_table(Rdb_tbl_def *const tbl);
+  /*
+    drop_log_dd_id: if not nullptr, the DD table id of the table being
+    dropped; a DROP record is written to the DDL recovery log in the same
+    batch, see rocksdb_recover_interrupted_ddl().
+  */
+  int delete_table(Rdb_tbl_def *const tbl,
+                   const dd::Object_id *drop_log_dd_id = nullptr);
   int delete_table(const char *const from, const dd::Table *table_def) override
       MY_ATTRIBUTE((__warn_unused_result__));
   int create(const char *const name, TABLE *const form,
              HA_CREATE_INFO *const create_info, dd::Table *table_def) override
       MY_ATTRIBUTE((__warn_unused_result__));
+  int get_extra_columns_and_keys(const HA_CREATE_INFO *create_info,
+                                 const List<Create_field> *create_list,
+                                 const KEY *key_info, uint key_count,
+                                 dd::Table *table_obj) override;
   int truncate_table(Rdb_tbl_def *tbl_def,
                      const std::string &actual_user_table_name,
                      TABLE *table_arg, ulonglong auto_increment_value,
