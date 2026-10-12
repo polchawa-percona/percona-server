@@ -6647,7 +6647,12 @@ static int rdb_resolve_pending_alter(
   }
 
   rdb_pending_alters.remove(tbl_name);
-  if (!unused_ids.empty() && !rocksdb_enable_delete_range_for_drop_index) {
+  /*
+    Wake the drop index thread also when no index was dropped, as at the end
+    of every index-changing ALTER TABLE: it also removes dropped column
+    families.
+  */
+  if (!rocksdb_enable_delete_range_for_drop_index) {
     rdb_drop_idx_thread.signal();
   }
   return HA_EXIT_SUCCESS;
@@ -15632,6 +15637,7 @@ bool ha_rocksdb::commit_inplace_alter_table(
     const std::unique_ptr<rocksdb::WriteBatch> wb = local_dict_manager->begin();
     rocksdb::WriteBatch *const batch = wb.get();
     std::vector<std::string> pending_alter_tables;
+    bool queued_drops = false;
 
     /*
       The server data dictionary is committed after this function. Until
@@ -15662,19 +15668,6 @@ bool ha_rocksdb::commit_inplace_alter_table(
         Rdb_inplace_alter_ctx *const ctx =
             static_cast<Rdb_inplace_alter_ctx *>(*pctx);
 
-        /* Mark indexes to be dropped */
-        if (rocksdb_enable_delete_range_for_drop_index) {
-          int err = delete_range(ctx->m_dropped_index_ids);
-          for (auto &index_id : ctx->m_dropped_index_ids) {
-            local_dict_manager->delete_index_info(batch, index_id);
-          }
-          if (err) {
-            DBUG_RETURN(err);
-          }
-        } else {
-          local_dict_manager->add_drop_index(ctx->m_dropped_index_ids, batch);
-        }
-
         for (const auto &index : ctx->m_added_indexes) {
           /* The indexes are complete; the pending record covers them now. */
           local_dict_manager->end_ongoing_index_operation(
@@ -15682,14 +15675,25 @@ bool ha_rocksdb::commit_inplace_alter_table(
               Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
         }
 
-        /* Debug: behave like a server version without pending records */
-        if (ctx->m_dropped_index_ids.empty() &&
-            !DBUG_EVALUATE_IF("rocksdb_skip_pending_alter", true, false)) {
+        if (!DBUG_EVALUATE_IF("rocksdb_skip_pending_alter", true, false)) {
+          /*
+            The dropped indexes keep their data until the record is
+            resolved: the ALTER TABLE can still be rolled back.
+          */
           const std::string &tbl_name = ctx->m_new_tdef->full_tablename();
           local_dict_manager->put_pending_alter(
               batch, tbl_name, alter_token,
               rdb_index_ids(ctx->m_old_key_descr, ctx->m_old_n_keys));
           pending_alter_tables.push_back(tbl_name);
+        } else {
+          /* Debug: behave like a server version without pending records */
+          const int err = rdb_drop_unused_indexes(
+              local_dict_manager, ctx->m_dropped_index_ids, batch);
+          if (err) {
+            DBUG_RETURN(err);
+          }
+          queued_drops |= !ctx->m_dropped_index_ids.empty() &&
+                          !rocksdb_enable_delete_range_for_drop_index;
         }
 
         if (ddl_manager.put_and_write(ctx->m_new_tdef, batch)) {
@@ -15738,7 +15742,11 @@ bool ha_rocksdb::commit_inplace_alter_table(
           "wait_for mark_cf_dropped_done_after_commit_alter_table";
       assert(!debug_sync_set_action(ha_thd(), STRING_WITH_LEN(act)));
     });
-    if (!rocksdb_enable_delete_range_for_drop_index) {
+    /*
+      Dropped indexes are queued when the pending record is resolved (see
+      rdb_resolve_pending_alter()), which signals the drop index thread.
+    */
+    if (queued_drops) {
       rdb_drop_idx_thread.signal();
     }
 
