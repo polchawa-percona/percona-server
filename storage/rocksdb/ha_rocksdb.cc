@@ -6354,43 +6354,12 @@ bool rdb_sync_wal_supported() {
 #endif
 }
 
-/* Clean up tables leftover from truncation */
-static void rocksdb_truncation_table_cleanup(void) {
-  /* Scan for tables that have the truncation prefix */
-  struct Rdb_truncate_tbls : public Rdb_tables_scanner {
-   public:
-    std::vector<Rdb_tbl_def *> m_tbl_list;
-    int add_table(Rdb_tbl_def *tdef) override {
-      assert(tdef != nullptr);
-      if (tdef->base_tablename().find(TRUNCATE_TABLE_PREFIX) !=
-          std::string::npos) {
-        m_tbl_list.push_back(tdef);
-      }
-      return HA_EXIT_SUCCESS;
-    }
-  } collector;
-  ddl_manager.scan_for_tables(&collector);
-
-  /*
-    For now, delete any table found. It's possible to rename them back,
-    but there's a risk the rename can potentially lead to other inconsistencies.
-    Removing the old table (which is being truncated anyway) seems to be the
-    safest solution.
-  */
-  ha_rocksdb table(rocksdb_hton, nullptr);
-  for (Rdb_tbl_def *tbl_def : collector.m_tbl_list) {
-    LogPluginErrMsg(WARNING_LEVEL, 0, "Removing truncated leftover table %s",
-                    tbl_def->full_tablename().c_str());
-    table.delete_table(tbl_def);
-  }
-}
-
 /*
   DDL recovery log.
 
   MyRocks has no atomic DDL: the server data dictionary (DD) and the MyRocks
-  dictionary are committed separately, so a crash inside CREATE, DROP or
-  RENAME TABLE can leave them disagreeing. The DD is atomic and is the
+  dictionary are committed separately, so a crash inside CREATE, DROP, RENAME
+  or TRUNCATE TABLE can leave them disagreeing. The DD is atomic and is the
   source of truth. Table DDL records what it is doing in the MyRocks
   dictionary (Rdb_key_def::DDL_RECOVERY_LOG), and startup uses these records
   to finish or undo an interrupted statement before the tables are validated:
@@ -6408,6 +6377,9 @@ static void rocksdb_truncation_table_cleanup(void) {
   - RENAME, keyed by the new name, with the old name and the DD table id:
     written by the dictionary commit of RENAME TABLE, which precedes the DD
     commit. Startup renames a table back when the DD still has the old name.
+  - TRUNCATE needs no record: the old table is kept as #truncate_tmp#<name>
+    until the new one is committed. Startup renames it back if the new table
+    does not exist, otherwise drops it.
 
   A record only acts when the dictionaries disagree in exactly the way the
   interrupted statement leaves them, so records left over by statements that
@@ -6663,6 +6635,38 @@ static bool rdb_recovery_dd_drop_table(THD *thd, const Rdb_dd_name &name) {
 */
 static void rocksdb_recover_interrupted_ddl() {
   ha_rocksdb handler(rocksdb_hton, nullptr);
+
+  /* TRUNCATE TABLE: the old table is kept as #truncate_tmp#<name> */
+  {
+    Rdb_table_names tables;
+    ddl_manager.scan_for_tables(&tables);
+    for (const std::string &name : tables.m_names) {
+      const size_t pos = name.find(TRUNCATE_TABLE_PREFIX, name.find('.'));
+      if (pos == std::string::npos) continue;
+      const std::string orig =
+          name.substr(0, pos) + name.substr(pos + TRUNCATE_TABLE_PREFIX.size());
+      Rdb_tbl_def *const tbl = ddl_manager.find(name);
+      if (tbl == nullptr) continue;
+      if (ddl_manager.find(orig) != nullptr) {
+        /* The table was truncated: drop the old data */
+        LogPluginErrMsg(WARNING_LEVEL, 0,
+                        "Removing truncated leftover table %s", name.c_str());
+        (void)handler.delete_table(tbl);
+      } else {
+        /* The new table was not created: keep the old one */
+        LogPluginErrMsg(WARNING_LEVEL, 0,
+                        "Restoring table %s from %s: TRUNCATE TABLE was "
+                        "interrupted",
+                        orig.c_str(), name.c_str());
+        if (rdb_recovery_rename(name, orig)) {
+          LogPluginErrMsg(ERROR_LEVEL, 0, "Failed to rename %s to %s",
+                          name.c_str(), orig.c_str());
+        } else {
+          DBUG_EXECUTE_IF("rocksdb_crash_in_ddl_recovery", DBUG_SUICIDE(););
+        }
+      }
+    }
+  }
 
   Rdb_dict_manager *const dict =
       dict_manager.get_dict_manager_selector_non_const(false);
@@ -7572,9 +7576,6 @@ static int rocksdb_init_internal(void *const p) {
   rdb_get_hton_init_state()->set_initialized(true);
 
   compaction_stats.resize_history(rocksdb_max_compaction_history);
-
-  // Remove tables that may have been leftover during truncation
-  rocksdb_truncation_table_cleanup();
 
   LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
                   "MyRocks storage engine plugin has been successfully "
@@ -13208,6 +13209,7 @@ rocksdb::Range ha_rocksdb::get_range(int i, uchar *buf) const {
 }
 
 static int delete_range(const std::unordered_set<GL_INDEX_ID> &indices) {
+  DBUG_EXECUTE_IF("rocksdb_delete_range_failure", return HA_EXIT_FAILURE;);
   int ret = 0;
   rocksdb::WriteBatch batch;
   for (const auto &d : indices) {
