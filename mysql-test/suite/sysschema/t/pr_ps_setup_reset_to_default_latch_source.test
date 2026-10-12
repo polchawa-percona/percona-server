@@ -1,0 +1,19 @@
+#
+# PS-11822: sys.ps_setup_reset_to_default() keeps the latch_source_summary
+# consumer enabled. The granularity variable is not a setup table and is not
+# reset.
+#
+
+UPDATE performance_schema.setup_consumers SET ENABLED = 'NO'
+  WHERE NAME = 'latch_source_summary';
+SET GLOBAL performance_schema_latch_source_granularity = SOURCE;
+
+CALL sys.ps_setup_reset_to_default(FALSE);
+
+SELECT * FROM performance_schema.setup_consumers
+  WHERE NAME = 'latch_source_summary';
+SHOW GLOBAL VARIABLES LIKE 'performance_schema_latch_source_granularity';
+
+SET GLOBAL performance_schema_latch_source_granularity = NONE;
+
+--source ../include/ps_setup_reset_to_default_cleanup.inc

@@ -156,6 +156,7 @@
 #endif /* WITH_LOCK_ORDER */
 
 #ifdef WITH_PERFSCHEMA_STORAGE_ENGINE
+#include "storage/perfschema/pfs_latch_source.h" /* Percona */
 #include "storage/perfschema/pfs_server.h"
 #include "storage/perfschema/terminology_use_previous.h"
 #endif /* WITH_PERFSCHEMA_STORAGE_ENGINE */
@@ -699,6 +700,37 @@ static Sys_var_bool Sys_pfs_consumer_statement_digest(
         GLOBAL_VAR(pfs_param.m_consumer_statement_digest_enabled),
     CMD_LINE(OPT_ARG), DEFAULT(true), PFS_TRAILING_PROPERTIES);
 
+/* Percona */
+static Sys_var_bool Sys_pfs_consumer_latch_source_summary(
+    "performance_schema_consumer_latch_source_summary",
+    "Default startup value for the latch_source_summary consumer.",
+    READ_ONLY NOT_VISIBLE
+        GLOBAL_VAR(pfs_param.m_consumer_latch_source_summary_enabled),
+    CMD_LINE(OPT_ARG), DEFAULT(true), PFS_TRAILING_PROPERTIES);
+
+/* Percona */
+static const char *pfs_latch_source_granularity_names[] = {"NONE", "SOURCE",
+                                                           nullptr};
+
+/* Percona */
+static bool pfs_latch_source_granularity_update(sys_var *, THD *,
+                                                enum_var_type) {
+  update_latch_source_derived_flag();
+  return false;
+}
+
+/* Percona */
+static Sys_var_enum Sys_pfs_latch_source_granularity(
+    "performance_schema_latch_source_granularity",
+    "Granularity of the latch_source_summary consumer: NONE collects nothing,"
+    " SOURCE collects mutex and rwlock wait and hold statistics per acquire"
+    " source line in table EVENTS_WAITS_SUMMARY_BY_SOURCE.",
+    GLOBAL_VAR(latch_source_granularity), CMD_LINE(REQUIRED_ARG),
+    pfs_latch_source_granularity_names, DEFAULT(LATCH_SOURCE_GRANULARITY_NONE),
+    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr),
+    ON_UPDATE(pfs_latch_source_granularity_update), nullptr,
+    sys_var::PARSE_EARLY);
+
 static Sys_var_long Sys_pfs_events_waits_history_long_size(
     "performance_schema_events_waits_history_long_size",
     "Number of rows in EVENTS_WAITS_HISTORY_LONG."
@@ -1005,6 +1037,15 @@ static Sys_var_long Sys_pfs_digest_size(
     READ_ONLY GLOBAL_VAR(pfs_param.m_digest_sizing), CMD_LINE(REQUIRED_ARG),
     VALID_RANGE(-1, 1024 * 1024), DEFAULT(PFS_AUTOSIZE_VALUE), BLOCK_SIZE(1),
     PFS_TRAILING_PROPERTIES);
+
+/* Percona */
+static Sys_var_long Sys_pfs_max_latch_source_summaries(
+    "performance_schema_max_latch_source_summaries",
+    "Maximum number of rows in EVENTS_WAITS_SUMMARY_BY_SOURCE."
+    " Use 0 to disable, -1 for automated sizing.",
+    READ_ONLY GLOBAL_VAR(pfs_param.m_latch_source_sizing),
+    CMD_LINE(REQUIRED_ARG), VALID_RANGE(-1, 1024 * 1024),
+    DEFAULT(PFS_AUTOSIZE_VALUE), BLOCK_SIZE(1), PFS_TRAILING_PROPERTIES);
 
 static Sys_var_long Sys_pfs_events_transactions_history_long_size(
     "performance_schema_events_transactions_history_long_size",

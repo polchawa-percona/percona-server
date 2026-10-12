@@ -40,6 +40,7 @@ events_transactions_history
 events_waits_current
 events_waits_history
 global_instrumentation
+latch_source_summary
 statements_digest
 thread_instrumentation
 CALL sys.ps_setup_show_enabled(TRUE, FALSE);
@@ -65,6 +66,7 @@ events_transactions_history
 events_waits_current
 events_waits_history
 global_instrumentation
+latch_source_summary
 statements_digest
 thread_instrumentation
 enabled_instruments	timed
@@ -112,6 +114,7 @@ memory/performance_schema/events_waits_history	NULL
 memory/performance_schema/events_waits_history_long	NULL
 memory/performance_schema/events_waits_summary_by_account_by_event_name	NULL
 memory/performance_schema/events_waits_summary_by_host_by_event_name	NULL
+memory/performance_schema/events_waits_summary_by_source	NULL
 memory/performance_schema/events_waits_summary_by_thread_by_event_name	NULL
 memory/performance_schema/events_waits_summary_by_user_by_event_name	NULL
 memory/performance_schema/file_class	NULL
@@ -216,6 +219,7 @@ events_transactions_history
 events_waits_current
 events_waits_history
 global_instrumentation
+latch_source_summary
 statements_digest
 thread_instrumentation
 enabled_threads	thread_type
@@ -267,6 +271,7 @@ events_transactions_history
 events_waits_current
 events_waits_history
 global_instrumentation
+latch_source_summary
 statements_digest
 thread_instrumentation
 enabled_threads	thread_type
@@ -340,6 +345,7 @@ memory/performance_schema/events_waits_history	NULL
 memory/performance_schema/events_waits_history_long	NULL
 memory/performance_schema/events_waits_summary_by_account_by_event_name	NULL
 memory/performance_schema/events_waits_summary_by_host_by_event_name	NULL
+memory/performance_schema/events_waits_summary_by_source	NULL
 memory/performance_schema/events_waits_summary_by_thread_by_event_name	NULL
 memory/performance_schema/events_waits_summary_by_user_by_event_name	NULL
 memory/performance_schema/file_class	NULL

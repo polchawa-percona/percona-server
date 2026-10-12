@@ -1,0 +1,71 @@
+# Percona: PS-11822 performance_schema_latch_source_granularity.
+
+#
+# Only global
+#
+select @@global.performance_schema_latch_source_granularity into @save;
+select @@global.performance_schema_latch_source_granularity;
+
+--error ER_INCORRECT_GLOBAL_LOCAL_VAR
+select @@session.performance_schema_latch_source_granularity;
+
+show global variables like 'performance_schema_latch_source_granularity';
+
+show session variables like 'performance_schema_latch_source_granularity';
+
+--disable_warnings
+select * from performance_schema.global_variables
+  where variable_name='performance_schema_latch_source_granularity';
+
+select * from performance_schema.session_variables
+  where variable_name='performance_schema_latch_source_granularity';
+--enable_warnings
+
+--error ER_GLOBAL_VARIABLE
+set session performance_schema_latch_source_granularity = SOURCE;
+
+#
+# Wrong value
+#
+--error ER_WRONG_VALUE_FOR_VAR
+set global performance_schema_latch_source_granularity = 2;
+
+--error ER_WRONG_VALUE_FOR_VAR
+set global performance_schema_latch_source_granularity = 'FOO';
+
+--error ER_WRONG_VALUE_FOR_VAR
+set global performance_schema_latch_source_granularity = '';
+
+--error ER_WRONG_TYPE_FOR_VAR
+set global performance_schema_latch_source_granularity = 1.5;
+
+#
+# Right value
+#
+set global performance_schema_latch_source_granularity = SOURCE;
+select @@global.performance_schema_latch_source_granularity;
+
+set global performance_schema_latch_source_granularity = NONE;
+select @@global.performance_schema_latch_source_granularity;
+
+set global performance_schema_latch_source_granularity = 'source';
+select @@global.performance_schema_latch_source_granularity;
+
+set global performance_schema_latch_source_granularity = 0;
+select @@global.performance_schema_latch_source_granularity;
+
+set global performance_schema_latch_source_granularity = 1;
+select @@global.performance_schema_latch_source_granularity;
+
+set global performance_schema_latch_source_granularity = DEFAULT;
+select @@global.performance_schema_latch_source_granularity;
+
+#
+# SET PERSIST
+#
+set persist performance_schema_latch_source_granularity = SOURCE;
+select * from performance_schema.persisted_variables
+  where variable_name='performance_schema_latch_source_granularity';
+reset persist performance_schema_latch_source_granularity;
+
+set @@global.performance_schema_latch_source_granularity = @save;

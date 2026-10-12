@@ -1,0 +1,15 @@
+select @@global.performance_schema_latch_source_granularity;
+@@global.performance_schema_latch_source_granularity
+SOURCE
+select variable_name, variable_source from performance_schema.variables_info
+where variable_name='performance_schema_latch_source_granularity';
+variable_name	variable_source
+performance_schema_latch_source_granularity	COMMAND_LINE
+set global performance_schema_latch_source_granularity = NONE;
+select @@global.performance_schema_latch_source_granularity;
+@@global.performance_schema_latch_source_granularity
+NONE
+set global performance_schema_latch_source_granularity = SOURCE;
+select @@global.performance_schema_latch_source_granularity;
+@@global.performance_schema_latch_source_granularity
+SOURCE

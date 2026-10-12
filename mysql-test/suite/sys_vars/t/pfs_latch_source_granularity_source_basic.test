@@ -1,0 +1,11 @@
+# Percona: PS-11822 performance_schema_latch_source_granularity set at startup.
+
+select @@global.performance_schema_latch_source_granularity;
+
+select variable_name, variable_source from performance_schema.variables_info
+  where variable_name='performance_schema_latch_source_granularity';
+
+set global performance_schema_latch_source_granularity = NONE;
+select @@global.performance_schema_latch_source_granularity;
+set global performance_schema_latch_source_granularity = SOURCE;
+select @@global.performance_schema_latch_source_granularity;

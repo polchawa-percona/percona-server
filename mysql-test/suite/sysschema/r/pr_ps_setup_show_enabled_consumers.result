@@ -13,6 +13,7 @@ events_transactions_history
 events_waits_current
 events_waits_history
 global_instrumentation
+latch_source_summary
 statements_digest
 thread_instrumentation
 UPDATE performance_schema.setup_instruments SET enabled = 'YES', timed = 'YES';

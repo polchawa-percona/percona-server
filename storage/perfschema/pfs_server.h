@@ -141,6 +141,8 @@ struct PFS_global_param {
   bool m_consumer_global_instrumentation_enabled;
   bool m_consumer_thread_instrumentation_enabled;
   bool m_consumer_statement_digest_enabled;
+  /** Percona: default value for consumer latch_source_summary. */
+  bool m_consumer_latch_source_summary_enabled;
 
   /** True if SHOW PROCESSLIST is enabeld in the performance schema. */
   bool m_processlist_enabled;
@@ -273,6 +275,11 @@ struct PFS_global_param {
   long m_events_statements_history_long_sizing;
   /** Maximum number of digests to be captured */
   long m_digest_sizing;
+  /**
+    Percona: maximum number of rows in EVENTS_WAITS_SUMMARY_BY_SOURCE.
+    @sa latch_source_lost.
+  */
+  long m_latch_source_sizing;
   /** Maximum number of programs to be captured */
   long m_program_sizing;
   /** Maximum number of prepared statements to be captured */
