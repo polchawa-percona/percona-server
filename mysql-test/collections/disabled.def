@@ -135,6 +135,8 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.skip_scan_rec_per_key_race : BUG#11840 PS-11840 skip-scan rec_per_key race asserts on debug
+rocksdb.skip_scan_rec_per_key_race_sync : BUG#11840 PS-11840 skip-scan rec_per_key race (DEBUG_SYNC)
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
