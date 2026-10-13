@@ -1,0 +1,37 @@
+#
+# Finding 46 (port-findings.md): a crash inside CREATE TABLE after the server's
+# data dictionary is committed and before the MyRocks dictionary is, or inside
+# DROP TABLE after the MyRocks dictionary is committed and before the server's
+# data dictionary is, leaves the dictionaries disagreeing. MyRocks then refuses
+# to start with the default rocksdb_validate_tables=1.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and both
+# dictionaries agree; the table is usable or absent.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--let $check_tables = 't1'
+
+--echo # CREATE TABLE: crash before the MyRocks dictionary commit.
+--let $crash_point = rocksdb_crash_before_create_table
+--let $crash_stmt = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+
+--echo # DROP TABLE: crash after the MyRocks dictionary commit.
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--echo # The MyRocks data is gone, so the table must be gone too.
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+SELECT * FROM t1;
+DROP TABLE t1;
