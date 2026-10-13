@@ -1,0 +1,118 @@
+# PS-11842: concurrent CREATE TABLE and INPLACE ADD INDEX produce overlapping
+# key ranges at Lmax during bulk-load ingestion (originally reported as
+# PS-11020).
+#
+# INPLACE ADD INDEX allocates the index id N of the new index in
+# prepare_inplace_alter_table() and ingests the SST files of the new index
+# (keys with prefix N) only at the end of inplace_alter_table(). A table
+# created in between gets index id N+1. Once its rows are flushed and
+# compacted together with older data (index ids below N), one Lmax file
+# spans key prefixes on both sides of N, so the new index files can no
+# longer be ingested at Lmax. With
+# rocksdb_bulk_load_fail_if_not_bottommost_level=ON the ALTER then fails
+# with "Files cannot be ingested to Lmax"; without it they are ingested at
+# a higher level.
+#
+# The test stops the ALTER after the index id is allocated, creates t2,
+# writes rows to t0 (created before the ALTER) and t2 in one memtable,
+# flushes and compacts the column family and then lets the ALTER finish.
+# The ALTER must succeed.
+#
+# A fix may serialize the two operations, so that the CREATE TABLE waits
+# until the ADD INDEX has ingested its files. The test therefore waits at
+# most 10 seconds for the CREATE TABLE to finish while the ALTER is stopped;
+# if it does not finish, the ALTER is resumed first and the rows are
+# written after it. The result is the same either way.
+
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t0 (id INT PRIMARY KEY, y INT) ENGINE=ROCKSDB;
+CREATE TABLE t1 (id INT PRIMARY KEY, x INT) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+  SELECT n, n % 97 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+--connect (con_alter, localhost, root,,)
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL alter_prepared WAIT_FOR alter_resume';
+--send ALTER TABLE t1 ADD INDEX kx (x), ALGORITHM=INPLACE
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR alter_prepared';
+
+--connect (con_create, localhost, root,,)
+--send CREATE TABLE t2 (id INT PRIMARY KEY, z INT) ENGINE=ROCKSDB
+
+--connection default
+--disable_query_log
+--let $created = 0
+--let $i = 100
+while ($i)
+{
+  # ROCKSDB_DDL lists t2 once MyRocks has written its table definition.
+  # information_schema.tables can show t2 earlier, while the CREATE TABLE
+  # is still inside the storage engine.
+  --let $created = `SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't2'`
+  if ($created)
+  {
+    --let $i = 0
+  }
+  if (!$created)
+  {
+    --sleep 0.1
+    --dec $i
+  }
+}
+
+if ($created)
+{
+  # The CREATE TABLE ran while the ALTER was stopped: write t0 and t2,
+  # flush and compact before the ALTER ingests its files.
+  --connection con_create
+  --reap
+  INSERT INTO t0 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+    SELECT n, n FROM s;
+  INSERT INTO t2 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+    SELECT n, n FROM s;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  --connection default
+}
+SET DEBUG_SYNC = 'now SIGNAL alter_resume';
+--enable_query_log
+
+--connection con_alter
+--echo # The ALTER must ingest the new index at Lmax.
+--reap
+
+--disable_query_log
+if (!$created)
+{
+  # The CREATE TABLE waited for the ALTER.
+  --connection con_create
+  --reap
+  INSERT INTO t0 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+    SELECT n, n FROM s;
+  INSERT INTO t2 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+    SELECT n, n FROM s;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+}
+--enable_query_log
+
+--connection default
+SHOW CREATE TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kx) WHERE x = 5;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kx);
+SELECT COUNT(*) FROM t0;
+SELECT COUNT(*) FROM t2;
+CHECK TABLE t1, t2;
+
+--disconnect con_alter
+--disconnect con_create
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t0, t1, t2;
+--source include/wait_until_count_sessions.inc
