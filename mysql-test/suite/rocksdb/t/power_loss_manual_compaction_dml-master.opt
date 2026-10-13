@@ -1,0 +1,2 @@
+--rocksdb_override_cf_options=cf_mc={disable_auto_compactions=true;target_file_size_base=32k}
+--rocksdb_max_subcompactions=1

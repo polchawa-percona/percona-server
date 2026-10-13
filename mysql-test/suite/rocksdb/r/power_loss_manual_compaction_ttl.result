@@ -1,0 +1,12 @@
+# TTL compaction held at start
+# restart
+# Recovered transaction: as expected
+CHECK TABLE tt;
+Table	Op	Msg_type	Msg_text
+test.tt	#	#	OK
+# TTL compaction held at middle
+# restart
+# Recovered transaction: as expected
+CHECK TABLE tt;
+Table	Op	Msg_type	Msg_text
+test.tt	#	#	OK

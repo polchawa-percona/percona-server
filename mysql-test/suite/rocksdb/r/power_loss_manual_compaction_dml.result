@@ -1,0 +1,144 @@
+# OPTIMIZE TABLE t1, held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_lzero_now = 1, held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1, held at start
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# OPTIMIZE TABLE t1, held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_lzero_now = 1, held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1, held at middle
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# OPTIMIZE TABLE t1, held at completed
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at completed
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at completed
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at completed
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
