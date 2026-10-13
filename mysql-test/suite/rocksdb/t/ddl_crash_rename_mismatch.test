@@ -1,0 +1,147 @@
+#
+# Finding 47 (port-findings.md): a crash inside RENAME TABLE after the MyRocks
+# dictionary rename is committed and before the server's data dictionary is.
+# MyRocks refuses to start with the default rocksdb_validate_tables=1. With
+# =2 the server knows the table only by its old name and MyRocks only by its
+# new one: the table cannot be opened and its data cannot be reached or
+# dropped with SQL.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and the
+# table exists under exactly one of the two names, with all its rows.
+#
+# Fixed by the MyRocks DDL recovery log: startup renames the table back to the
+# name the server's data dictionary has. A partitioned table is renamed one
+# partition at a time, so a crash can also leave only some partitions renamed.
+# The crash point follows the MyRocks commit and precedes the server's, so the
+# test checks that the RENAME is rolled back: the table is test.t1 in both
+# dictionaries, with all its rows. Also covered: a partitioned table with all
+# partitions renamed (debug crash point partition_crash_after_rename_all), a
+# RENAME of two tables, and a crash during the startup recovery itself (debug
+# crash point rocksdb_crash_in_ddl_recovery).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Renaming table .* back to .*: RENAME TABLE was interrupted");
+--enable_query_log
+
+CREATE DATABASE db2;
+
+--let $i = 0
+while ($i < 3)
+{
+  if ($i < 2)
+  {
+    CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+  }
+  if ($i == 2)
+  {
+    CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+      PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+                               PARTITION p1 VALUES LESS THAN MAXVALUE);
+  }
+  INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+  --let $crash_point = rocksdb_crash_after_rename
+  if ($i == 0)
+  {
+    --echo # RENAME TABLE within the database.
+    --let $crash_stmt = RENAME TABLE t1 TO t2
+    --let $new_db = test
+  }
+  if ($i == 1)
+  {
+    --echo # RENAME TABLE to another database.
+    --let $crash_stmt = RENAME TABLE t1 TO db2.t2
+    --let $new_db = db2
+  }
+  if ($i == 2)
+  {
+    --echo # Partitioned RENAME TABLE: crash after the first partition.
+    --let $crash_stmt = RENAME TABLE t1 TO t2
+    --let $new_db = test
+  }
+  --source suite/rocksdb/include/ddl_crash.inc
+  SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+    WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+  --echo # The RENAME is rolled back in both dictionaries.
+  --eval SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('$new_db','t2'))
+  --eval SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('$new_db','t2'))
+  SELECT * FROM t1 ORDER BY id;
+  CHECK TABLE t1;
+  --echo # Each index of t1 has one MyRocks entry (two for the partitioned table).
+  SELECT INDEX_TYPE, COUNT(*) AS myrocks_entries FROM information_schema.ROCKSDB_DDL
+    WHERE TABLE_SCHEMA IN ('test', 'db2') AND TABLE_NAME IN ('t1', 't2')
+    GROUP BY INDEX_TYPE ORDER BY INDEX_TYPE;
+  DROP TABLE t1;
+  --inc $i
+}
+
+--echo # Partitioned RENAME TABLE: crash after all partitions are renamed in
+--echo # MyRocks, before the server's data dictionary commit.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+                           PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = partition_crash_after_rename_all
+--let $crash_stmt = RENAME TABLE t1 TO t2
+--source suite/rocksdb/include/ddl_crash.inc
+--let $check_tables = 't1','t2'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2');
+SELECT * FROM t1 ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo # RENAME TABLE of two tables: crash after the first table is renamed in
+--echo # MyRocks. Only that rename is rolled back; the second table was not
+--echo # touched.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+CREATE TABLE t3 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (30);
+--let $crash_point = rocksdb_crash_after_rename
+--let $crash_stmt = RENAME TABLE t1 TO t2, t3 TO t4
+--source suite/rocksdb/include/ddl_crash.inc
+--let $check_tables = 't1','t2','t3','t4'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT TABLE_NAME FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2', 't3', 't4')
+  ORDER BY TABLE_NAME;
+SELECT * FROM t1 ORDER BY id;
+SELECT * FROM t3;
+DROP TABLE t1, t3;
+
+--echo # A crash during the startup recovery itself, after the first partition
+--echo # of a partitioned table is renamed back: the next startup renames the
+--echo # other partition back.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+                           PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $recovery_log = $MYSQLTEST_VARDIR/log/ddl_crash_rename_recovery_crash.err
+--source include/expect_crash.inc
+SET SESSION debug = "+d,partition_crash_after_rename_all";
+--error CR_SERVER_LOST
+RENAME TABLE t1 TO t2;
+--source include/wait_until_disconnected.inc
+--error 137
+--exec $MYSQLD_CMD --debug=+d,rocksdb_crash_in_ddl_recovery --log-error=$recovery_log $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD"
+--source include/start_mysqld.inc
+--let $assert_text = The recovery crashed after renaming one partition back
+--let $assert_file = $recovery_log
+--let $assert_select = Renaming table .* back to .*: RENAME TABLE was interrupted
+--let $assert_count = 1
+--source include/assert_grep.inc
+--remove_file $recovery_log
+--let $check_tables = 't1','t2'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2');
+SELECT * FROM t1 ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+DROP DATABASE db2;

@@ -1,0 +1,25 @@
+# Crash at rocksdb_crash_before_create_table during: CREATE TABLE T1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+CREATE TABLE T1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','T1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','T1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND LOWER(TABLE_NAME) = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND LOWER(TABLE_NAME) = 't1';
+t1_in_myrocks
+0
+CREATE TABLE T1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO T1 VALUES (1,1);
+SELECT * FROM T1;
+id	a
+1	1
+DROP TABLE T1;

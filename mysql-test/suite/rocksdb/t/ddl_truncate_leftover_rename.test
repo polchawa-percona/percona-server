@@ -1,0 +1,44 @@
+#
+# PS-11831: TRUNCATE TABLE renames the table to #truncate_tmp#<name> in
+# MyRocks, creates the new table and drops the old one. If that drop fails
+# without aborting the server (here a failed delete range), the leftover stays.
+# If the table is then renamed away from <name>, the startup recovery of
+# PS-11668 sees no table <name> in MyRocks and renames the leftover back to
+# <name> as if the TRUNCATE had been interrupted, so MyRocks has a table that
+# the server's data dictionary does not know, and it refuses to start.
+#
+# Expected: startup drops the leftover (the TRUNCATE completed), MyRocks
+# starts and both dictionaries agree. Disabled until PS-11831 is fixed.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Failure when trying to drop table .* during truncation");
+CALL mtr.add_suppression("Removing truncated leftover table");
+--enable_query_log
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+SET SESSION debug = "+d,rocksdb_delete_range_failure";
+TRUNCATE TABLE t1;
+SET SESSION debug = "-d,rocksdb_delete_range_failure";
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = DEFAULT;
+--echo # The old table is left behind under its temporary name.
+SELECT COUNT(DISTINCT TABLE_NAME) AS leftovers FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#truncate_tmp#%';
+INSERT INTO t1 VALUES (10,10);
+RENAME TABLE t1 TO t2;
+
+--source include/restart_mysqld.inc
+
+--let $check_tables = 't1','t2'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS leftovers FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#truncate_tmp#%';
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2');
+SELECT * FROM t2;
+DROP TABLE t2;
