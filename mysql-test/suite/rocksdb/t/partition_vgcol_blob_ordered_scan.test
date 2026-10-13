@@ -1,0 +1,31 @@
+# PS-11841: heap-use-after-free in the ordered index scan of a partitioned
+# MyRocks table through an index that contains a VIRTUAL BLOB generated
+# column (originally reported as PS-9844).
+#
+# Partition_base::read_range_first_in_part() copies each partition's row,
+# including the blob pointer of the generated column, into that partition's
+# priority-queue buffer. handler::ha_index_read_map() then re-evaluates the
+# generated column into the one shared Field_blob, which frees the value that
+# the row queued for an earlier partition still points to. The queue merge
+# (key_rec_cmp() -> Field_blob::cmp_max()) then reads freed memory when two
+# queued rows tie on i2. Only ha_rockspart derives from Partition_base, so
+# the InnoDB run below is a reference and is not affected.
+#
+# This test detects the bug only in an ASAN build, which reports
+# heap-use-after-free. A debug build without ASAN passes, because the freed
+# memory still holds the old bytes; the row-count and ordering checks below
+# are what a debug build can see.
+
+--source include/have_rocksdb.inc
+
+--echo # This test detects the bug only in an ASAN build; a debug build passes.
+
+SET SESSION cte_max_recursion_depth = 1000;
+
+--let $engine = ROCKSDB
+--echo # Engine: $engine
+--source suite/rocksdb/include/partition_vgcol_blob_ordered_scan.inc
+
+--let $engine = InnoDB
+--echo # Engine: $engine
+--source suite/rocksdb/include/partition_vgcol_blob_ordered_scan.inc
