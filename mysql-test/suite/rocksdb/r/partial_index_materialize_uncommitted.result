@@ -1,0 +1,79 @@
+CREATE TABLE t (g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+# READ-COMMITTED
+DELETE FROM t;
+INSERT INTO t VALUES (1, 1, 1), (1, 2, 2);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO t VALUES (1, 10, 10), (1, 11, 11);
+# con1 reads its own rows through the partial index.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+1	10	10
+1	11	11
+# Another connection must not see con1's uncommitted rows.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+COMMIT;
+ROLLBACK;
+# After the rollback the group has its 2 committed rows.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+SELECT COUNT(*) FROM t FORCE INDEX (kp) WHERE g = 1 AND v >= 0;
+COUNT(*)
+2
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# REPEATABLE-READ
+DELETE FROM t;
+INSERT INTO t VALUES (1, 1, 1), (1, 2, 2);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+INSERT INTO t VALUES (1, 10, 10), (1, 11, 11);
+# con1 reads its own rows through the partial index.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+1	10	10
+1	11	11
+# Another connection must not see con1's uncommitted rows.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+COMMIT;
+ROLLBACK;
+# After the rollback the group has its 2 committed rows.
+SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+g	id	v
+1	1	1
+1	2	2
+SELECT COUNT(*) FROM t FORCE INDEX (kp) WHERE g = 1 AND v >= 0;
+COUNT(*)
+2
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;

@@ -1,0 +1,615 @@
+CREATE DATABASE mc;
+CREATE TABLE mc.t_pk (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_hpk (
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_multi (
+id INT PRIMARY KEY,
+u INT NOT NULL,
+v VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+c TEXT NOT NULL,
+UNIQUE KEY ku (u), KEY kv (v), KEY kc (c(8)), KEY kcov (u, v)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_cf (
+id INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+UNIQUE KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+CREATE TABLE mc.t_part (
+g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+CREATE TABLE mc.side_def (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE mc.side_cf (
+id INT NOT NULL, a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# READ-COMMITTED, none
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 0
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000001' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+101
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: READ-COMMITTED, none
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	935850641	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, optimize
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 0
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000002' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+102
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	202	14378014	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 0
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000003' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+103
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	203	3998544656	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 0
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000004' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+104
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	204	3927275452	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 0
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000005' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+105
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	3846726043	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE-READ, none
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 1213
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000006' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+106
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: REPEATABLE-READ, none
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	2413640859	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, optimize
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 1213
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000007' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+107
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	469914913	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 1213
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000008' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+108
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	75401836	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 1213
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000009' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+109
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	2357331931	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero
+# 1. insert waits for a deleted primary key, compaction in between
+BEGIN;
+DELETE FROM mc.t_multi WHERE id = @k;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+COUNT(*)
+1
+INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over');
+COMMIT;
+insert after the deleting transaction committed: 1213
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+# 2. compaction between a unique check and the write
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f');
+SET DEBUG_SYNC = 'now WAIT_FOR checked';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC = 'now SIGNAL go';
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+ERROR 23000: Duplicate entry '7000010' for key 't_multi.ku'
+# 3. locking read on the full unique key across a compaction
+BEGIN;
+SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+id
+110
+UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+COMMIT;
+UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+SELECT c FROM mc.t_multi WHERE id = @k + 100;
+c
+con1+con2
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	3046623852	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET DEBUG_SYNC = 'RESET';
+# restart: --rocksdb_validate_tables=1
+# check: after restart
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	3046623852	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+DROP DATABASE mc;
