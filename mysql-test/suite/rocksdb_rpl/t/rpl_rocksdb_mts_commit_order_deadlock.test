@@ -1,0 +1,106 @@
+# PS-11845: a multi-threaded replica fails with a lock wait timeout applying
+# MyRocks row events with replica_parallel_workers > 1 (originally reported
+# as PS-9122).
+#
+# With replica_preserve_commit_order=ON, a worker that applied a later
+# transaction (T2) keeps its row locks while it waits for the earlier
+# transaction (T1) to commit. If T1 then needs one of those row locks, the
+# two workers wait for each other. The server breaks this commit-order
+# deadlock only when the storage engine reports the row lock wait with
+# thd_report_row_lock_wait(): T2 is rolled back and retried, T1 continues.
+# InnoDB reports its waits; MyRocks does not, so T1 waits until
+# rocksdb_lock_wait_timeout expires, the retries fail the same way and the
+# applier stops with ER_LOCK_WAIT_TIMEOUT.
+#
+# The test forces this order deterministically:
+# - the source binlogs T1 and T2 with the same commit parent
+#   (set_commit_parent_100), so the replica applies them in parallel;
+# - a replica session holds a metadata lock (LOCK TABLES t2 WRITE) that T1
+#   needs first, so T2 is applied first and waits for T1's commit while
+#   holding its lock on t1. The metadata lock wait is not limited by the
+#   short rocksdb_lock_wait_timeout set below;
+# - when the session releases its lock, T1 scans t1 (no key, so the rows
+#   are read in insertion order) for the row (2, 0), reads the row (1, 0)
+#   first and must wait for T2's lock on it.
+# The replica must apply both transactions.
+
+--source include/not_group_replication_plugin.inc
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/have_binlog_format_row.inc
+--source include/rpl/init_source_replica.inc
+
+--let $engine = RocksDB
+
+--eval CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT) ENGINE = $engine
+--eval CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE = $engine
+INSERT INTO t1 VALUES (1, 0), (2, 0);
+INSERT INTO t2 VALUES (1, 0);
+--source include/rpl/sync_to_replica.inc
+# The replica table has no key, as in rpl_row_img_diff_indexes ("source with
+# keys, replica without keys"): the applier finds rows by a table scan.
+SET SESSION sql_log_bin = 0;
+ALTER TABLE t1 DROP PRIMARY KEY;
+SET SESSION sql_log_bin = 1;
+
+--source include/rpl/stop_applier.inc
+SET @saved_replica_parallel_workers = @@GLOBAL.replica_parallel_workers;
+SET @saved_replica_preserve_commit_order = @@GLOBAL.replica_preserve_commit_order;
+SET @saved_replica_transaction_retries = @@GLOBAL.replica_transaction_retries;
+SET @saved_rocksdb_lock_wait_timeout = @@GLOBAL.rocksdb_lock_wait_timeout;
+SET @saved_innodb_lock_wait_timeout = @@GLOBAL.innodb_lock_wait_timeout;
+SET GLOBAL replica_parallel_workers = 4;
+SET GLOBAL replica_preserve_commit_order = ON;
+SET GLOBAL replica_transaction_retries = 2;
+# Keeps a failing run short.
+SET GLOBAL rocksdb_lock_wait_timeout = 5;
+SET GLOBAL innodb_lock_wait_timeout = 5;
+
+--source include/rpl/connection_source.inc
+# The first transactions after START REPLICA are not applied in parallel.
+# This one must not touch t2, which the replica session locks below.
+INSERT INTO t1 VALUES (3, 0);
+
+--let $debug_point = d,set_commit_parent_100
+--source include/add_debug_point.inc
+# T1
+BEGIN;
+UPDATE t2 SET v = 1 WHERE id = 1;
+UPDATE t1 SET c2 = 1 WHERE c1 = 2;
+COMMIT;
+# T2
+UPDATE t1 SET c2 = 2 WHERE c1 = 1;
+--source include/remove_debug_point.inc
+
+--source include/rpl/connection_replica.inc
+# Block T1 at its first statement.
+LOCK TABLES t2 WRITE;
+
+--source include/rpl/connection_replica1.inc
+--source include/rpl/start_applier.inc
+
+# T2 has updated its row of t1 and waits for T1 to commit.
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.processlist WHERE state = 'Waiting for preceding transaction to commit'
+--source include/wait_condition_or_abort.inc
+
+--source include/rpl/connection_replica.inc
+# Let T1 continue: it now needs the row lock that T2 holds.
+UNLOCK TABLES;
+
+--source include/rpl/connection_source.inc
+--echo # The replica must apply T1 and T2.
+--source include/rpl/sync_to_replica.inc
+SELECT * FROM t1 ORDER BY c1;
+SELECT * FROM t2 ORDER BY id;
+
+--source include/rpl/stop_applier.inc
+SET GLOBAL replica_parallel_workers = @saved_replica_parallel_workers;
+SET GLOBAL replica_preserve_commit_order = @saved_replica_preserve_commit_order;
+SET GLOBAL replica_transaction_retries = @saved_replica_transaction_retries;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_rocksdb_lock_wait_timeout;
+SET GLOBAL innodb_lock_wait_timeout = @saved_innodb_lock_wait_timeout;
+--source include/rpl/start_applier.inc
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1, t2;
+--source include/rpl/deinit.inc

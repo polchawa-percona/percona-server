@@ -138,6 +138,7 @@ rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
+rocksdb_rpl.rpl_rocksdb_mts_commit_order_deadlock : BUG#11845 PS-11845 MTS commit-order deadlock ends in lock wait timeout
 
 # Group Replication tests.
 
