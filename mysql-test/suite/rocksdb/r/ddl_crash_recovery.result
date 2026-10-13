@@ -1,0 +1,372 @@
+#
+# 1. CREATE TABLE: crash after the MyRocks dictionary commit.
+#    The server DD is committed before the engine creates the table, so
+#    both dictionaries have the table: it exists, empty and usable.
+#
+# Crash at rocksdb_crash_after_create_table during: CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	0
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+SELECT id FROM t1 FORCE INDEX(ka) WHERE a > 1 ORDER BY id;
+id
+2
+3
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+DROP TABLE t1;
+#
+# 2. TRUNCATE TABLE: crash after the new table is committed, before the
+#    old one (renamed to #truncate_tmp#t1) is dropped. Startup removes
+#    the leftover, so t1 is empty and nothing else is left in MyRocks.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at rocksdb_crash_after_create_table during: TRUNCATE TABLE t1
+TRUNCATE TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	0
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+include/assert_grep.inc [Startup removed the truncate leftover]
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1;
+id	a	b
+4	4	4
+DROP TABLE t1;
+#
+# 3. TRUNCATE TABLE: crash after the old table is dropped from the
+#    MyRocks dictionary. t1 is empty and consistent.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at rocksdb_crash_after_delete_table during: TRUNCATE TABLE t1
+TRUNCATE TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	0
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1;
+id	a	b
+4	4	4
+DROP TABLE t1;
+#
+# 4. DROP TABLE: kill the server while the dropped indexes are still
+#    being removed in the background. After the restart the drop resumes
+#    and the data of the table goes away.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 10000)
+SELECT n, n, n FROM s;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT SUM(NUM_ROWS) > 0 AS has_keys FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN (INDEX_NUMBERS);
+has_keys
+1
+SET GLOBAL rocksdb_pause_background_work = 1;
+DROP TABLE t1;
+# Kill the server
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COALESCE(SUM(NUM_ROWS), 0) AS keys_left FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN (INDEX_NUMBERS);
+keys_left
+0
+#
+# 5. INSTANT ADD COLUMN: crash before the server DD commit. The ALTER is
+#    rolled back: old definition, old rows.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT
+ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	3
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	1	1
+2	2	2
+3	3	3
+4	4	4
+#
+# 6. INSTANT ADD COLUMN: crash after the server DD commit. The new column
+#    is there and old rows read its default.
+#
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+# Crash at crash_after_index_create during: ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT
+ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	4
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT '7',
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO t1 VALUES (5,5,5,5);
+SELECT * FROM t1 ORDER BY id;
+id	a	b	c
+1	1	1	7
+2	2	2	7
+3	3	3	7
+4	4	4	7
+5	5	5	5
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+DROP TABLE t1;
+#
+# 7. INPLACE ADD INDEX: crash after the server DD commit. The index is in
+#    both dictionaries and returns all rows.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+# Crash at crash_after_index_create during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	3
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO t1 VALUES (4,4,4);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+#
+# 8. INPLACE DROP INDEX: crash after the server DD commit. The index is
+#    gone from both dictionaries and the table is usable.
+#
+# Crash at crash_after_index_create during: ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	4
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+INSERT INTO t1 VALUES (5,5,5);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+id
+1
+2
+3
+4
+5
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COALESCE(SUM(NUM_ROWS), 0) AS dropped_index_keys_left FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER = INDEX_NUMBERS;
+dropped_index_keys_left
+0
+DROP TABLE t1;
+#
+# 9. CREATE TABLE ... SELECT: kill after the first rows are written,
+#    before the statement commits. MyRocks has no atomic DDL, so (as for
+#    every engine without it) the new table stays, empty, in both
+#    dictionaries; InnoDB would have no table. Only consistency is checked.
+#
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,1),(2,2),(3,3);
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET DEBUG_SYNC = 'create_select_after_write_rows_event SIGNAL written WAIT_FOR never';
+CREATE TABLE t1 ENGINE=ROCKSDB SELECT * FROM t2;
+SET DEBUG_SYNC = 'now WAIT_FOR written';
+# Kill the server
+Got one of the listed errors
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# Server data dictionary:
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2');
+TABLE_NAME	ENGINE
+t1	ROCKSDB
+t2	ROCKSDB
+# MyRocks dictionary:
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+TABLE_NAME
+t1
+t2
+SELECT 't1' AS table_name, COUNT(*) AS row_count FROM test.t1;
+table_name	row_count
+t1	0
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT 't2' AS table_name, COUNT(*) AS row_count FROM test.t2;
+table_name	row_count
+t2	3
+CHECK TABLE test.t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;
+# Nothing is left in the MyRocks dictionary.
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';
+COUNT(*)
+0

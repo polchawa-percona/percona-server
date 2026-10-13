@@ -436,6 +436,15 @@ int Rdb_cf_manager::drop_cf(Rdb_ddl_manager *const ddl_manager,
     return ret;
   }
 
+  if (dict_manager->is_cf_used_by_pending_alter(cf_id)) {
+    RDB_MUTEX_UNLOCK_CHECK(m_mutex);
+    LogPluginErrMsg(INFORMATION_LEVEL, 0,
+                    "Cannot mark Column family %s with id %u to be dropped, "
+                    "because it is used by an unfinished ALTER TABLE",
+                    cf_name.c_str(), cf_id);
+    return HA_EXIT_FAILURE;
+  }
+
   // We don't call DropColumnFamily on RocksDB here and
   // we don't delete handle object. Here we mark the column family
   // as dropped.

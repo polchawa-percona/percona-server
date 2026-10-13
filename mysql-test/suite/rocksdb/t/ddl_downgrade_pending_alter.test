@@ -1,0 +1,107 @@
+#
+# PS-11834: an inplace ALTER TABLE that changes the index list writes a
+# pending ALTER TABLE record (Rdb_key_def::DDL_PENDING_ALTER, PS-11669 /
+# PS-11670) that is resolved only when the table is next opened. A crash inside
+# the ALTER TABLE, a restart that does not open the table and a clean shutdown
+# leave the record in the MyRocks dictionary. A downgrade within 8.4 to a
+# server version without such records then ignores it: the data of an index
+# dropped by a committed ALTER TABLE is never reclaimed, and after an ALTER
+# TABLE that the data dictionary rolled back MyRocks keeps the index list from
+# after the ALTER TABLE (a real older version then crashes on open or on the
+# first INSERT, PS-11669 / PS-11670; the simulation below refuses to open the
+# table).
+#
+# A downgrade is only supported after a clean shutdown, so the test crashes,
+# restarts the current version, shuts it down cleanly and only then starts the
+# "older version". The debug point rocksdb_simulate_no_pending_alter_support
+# makes MyRocks ignore pending ALTER TABLE records, as a version without them
+# does.
+#
+# Expected: the older version sees no pending record (they are resolved before
+# the shutdown or at the end of startup), every table matches the server data
+# dictionary and no index data is left behind. If the fix instead refuses such
+# a downgrade with a clear error, this test needs to change accordingly.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+CALL mtr.add_suppression("Table '.*' definition differs between MyRocks");
+--enable_query_log
+
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $orphan_base = `SELECT INDEX_NUMBER - 1 FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'orphan_probe'`
+DROP TABLE orphan_probe;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+CREATE TABLE t3 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+INSERT INTO t2 VALUES (1,10,30),(2,20,20),(3,30,10);
+INSERT INTO t3 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # t1: DROP INDEX committed in the data dictionary, crash before the
+--echo # table is reopened.
+--let $crash_point = crash_after_index_create
+--let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+
+--echo # t2: DROP INDEX rolled back by the data dictionary.
+--let $crash_point = crash_commit_after_prepare
+--let $crash_stmt = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+
+--echo # t3: ADD INDEX rolled back by the data dictionary.
+--let $crash_point = crash_commit_after_prepare
+--let $crash_stmt = ALTER TABLE t3 ADD INDEX kb(b), ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+
+--echo # None of the tables is opened. Clean shutdown, then start a simulated
+--echo # older server version that ignores pending ALTER TABLE records.
+--let $restart_parameters = restart: --debug=+d,rocksdb_simulate_no_pending_alter_support
+--source include/restart_mysqld.inc
+
+--echo # Pending ALTER TABLE records the older version ignored (expect 0):
+--perl
+  use strict;
+  my $file = $ENV{'MYSQLTEST_VARDIR'} . '/log/mysqld.1.err';
+  open(my $fh, '<', $file) or die "Cannot open $file: $!";
+  my $count = 0;
+  while (my $line = <$fh>) {
+    $count = 0 if $line =~ /starting as process/;
+    $count++ if $line =~ /Simulating a server version without pending ALTER TABLE records: ignoring the record of table test\.t[123]\./;
+  }
+  close($fh);
+  print "ignored_pending_alter_records: $count\n";
+EOF
+
+--echo # The data of the indexes that no table uses is reclaimed
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+
+--echo # Every table matches the data dictionary: t1 without ka, t2 with ka,
+--echo # t3 without kb.
+--let $i = 1
+while ($i <= 3)
+{
+  --let $t = t$i
+  --eval SHOW CREATE TABLE $t
+  --eval SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '$t' ORDER BY INDEX_NAME
+  --eval SELECT * FROM $t ORDER BY id
+  --eval INSERT INTO $t VALUES (4,40,40)
+  --eval UPDATE $t SET a = a + 100, b = b + 100 WHERE id = 1
+  --eval SELECT * FROM $t ORDER BY id
+  --eval CHECK TABLE $t
+  --inc $i
+}
+SELECT id, a FROM t2 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+
+--echo # Restart without the simulation, so that no pending record outlives
+--echo # the test.
+--let $restart_parameters =
+--source include/restart_mysqld.inc
+DROP TABLE t1, t2, t3;
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
