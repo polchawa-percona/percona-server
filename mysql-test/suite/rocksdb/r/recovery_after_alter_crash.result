@@ -15,7 +15,7 @@ SET SESSION debug='+d,crash_commit_after_prepare';
 ALTER TABLE t ADD INDEX k2 (c2), ALGORITHM=INPLACE;
 ERROR HY000: Lost connection to MySQL server during query
 # 6. Wait until the server is fully disconnected due to the crash
-# 7. Restart the MySQL server; MyRocks should automatically rebuild the corrupted table definition
+# 7. Restart the MySQL server; MyRocks restores the index list from before the ALTER TABLE
 # restart
 # 8. Verify that the data in the table is intact after reconstruction
 SELECT * FROM t ORDER BY i;
@@ -33,10 +33,9 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	t	NULL	ref	k1	k1	5	const	1	100.00	NULL
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t`.`i` AS `i`,`test`.`t`.`c1` AS `c1`,`test`.`t`.`c2` AS `c2` from `test`.`t` where (`test`.`t`.`c1` = 200)
-# 11. Assert that RocksDB successfully reconstructed the corrupted table
-include/assert_grep.inc [RocksDB table reconstruction finished]
-# 12. Attempt to add a new index k2 on column c2 using the INPLACE algorithm.
-# This command causes a server crash when `rocksdb_validate_tables=1`, which is the default setting
+# 11. Assert that RocksDB rolled back the interrupted ALTER TABLE (PS-11669)
+include/assert_grep.inc [RocksDB rolled back the interrupted ALTER TABLE]
+# 12. Add the index k2 on column c2 again using the INPLACE algorithm.
 ALTER TABLE t ADD INDEX k2 (c2), ALGORITHM=INPLACE;
 # 13. Clean up the test table
 DROP TABLE t;

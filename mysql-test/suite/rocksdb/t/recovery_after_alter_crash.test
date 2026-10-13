@@ -4,7 +4,7 @@
 
 --echo # 1. Disable query logging temporarily to suppress expected warnings during test
 --disable_query_log
-CALL mtr.add_suppression("Plugin rocksdb reported: 'Table '.*' definition differs between MyRocks .* ADD INDEX'");
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
 --enable_query_log
 
 --echo # 2. Create a test table with MyRocks engine, a primary key, and one secondary index
@@ -29,7 +29,7 @@ ALTER TABLE t ADD INDEX k2 (c2), ALGORITHM=INPLACE;
 --echo # 6. Wait until the server is fully disconnected due to the crash
 --source include/wait_until_disconnected.inc
 
---echo # 7. Restart the MySQL server; MyRocks should automatically rebuild the corrupted table definition
+--echo # 7. Restart the MySQL server; MyRocks restores the index list from before the ALTER TABLE
 --source include/start_mysqld.inc
 
 --echo # 8. Verify that the data in the table is intact after reconstruction
@@ -41,15 +41,14 @@ ANALYZE TABLE t;
 --echo # 10. Check that the original index (k1) exists and can be used in queries
 EXPLAIN SELECT * FROM t WHERE c1 = 200;
 
---echo # 11. Assert that RocksDB successfully reconstructed the corrupted table
---let $assert_text = RocksDB table reconstruction finished
+--echo # 11. Assert that RocksDB rolled back the interrupted ALTER TABLE (PS-11669)
+--let $assert_text = RocksDB rolled back the interrupted ALTER TABLE
 --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
---let $assert_select = Reconstruction of the corrupted table .* has finished.
+--let $assert_select = Table 'test.t': ALTER TABLE was interrupted before the data dictionary commit
 --let $assert_count = 1
 --source include/assert_grep.inc
 
---echo # 12. Attempt to add a new index k2 on column c2 using the INPLACE algorithm.
---echo # This command causes a server crash when `rocksdb_validate_tables=1`, which is the default setting
+--echo # 12. Add the index k2 on column c2 again using the INPLACE algorithm.
 ALTER TABLE t ADD INDEX k2 (c2), ALGORITHM=INPLACE;
 
 --echo # 13. Clean up the test table

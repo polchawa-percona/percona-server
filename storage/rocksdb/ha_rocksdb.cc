@@ -38,6 +38,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -400,6 +401,7 @@ static bool parse_fault_injection_params(bool *retryable,
                                          std::vector<rocksdb::FileType> *types);
 
 static int delete_range(const std::unordered_set<GL_INDEX_ID> &indices);
+static bool rdb_has_pending_alter(const std::string &tbl_name);
 
 static int rocksdb_force_flush_memtable_now(
     THD *const thd, struct SYS_VAR *const var, void *const var_ptr,
@@ -6246,6 +6248,22 @@ static bool rocksdb_get_table_statistics(
     return true;  // (HA_ERR_TOO_LONG_PATH);
   }
 
+  /*
+    The first open of a table with an unresolved interrupted ALTER TABLE may
+    replace (and free) its Rdb_tbl_def, and the metadata lock held here does
+    not conflict with that of the opening session. The record cannot be
+    resolved here: the server does not always pass the table's se_private_data
+    (INFORMATION_SCHEMA.TABLES.TABLE_ROWS does not). Read the statistics under
+    the dictionary lock instead, which rdb_resolve_pending_alter() holds until
+    the definition is replaced.
+  */
+  std::unique_ptr<std::lock_guard<Rdb_dict_manager>> dm_lock;
+  if (rdb_has_pending_alter(norm_name)) {
+    dm_lock = std::make_unique<std::lock_guard<Rdb_dict_manager>>(
+        *dict_manager.get_dict_manager_selector_non_const(
+            is_tmp_table(norm_name)));
+  }
+
   // We are called from within metadata lock MDL_EXPLICIT, so it should be
   // safe to access Rdb_tbl_def here
   auto tbl_def = ddl_manager.find(norm_name);
@@ -6253,6 +6271,9 @@ static bool rocksdb_get_table_statistics(
     // Table is missing due to a possible race condition
     my_error(HA_ERR_NO_SUCH_TABLE, MYF(0), "Table is missing");
     return true;
+  }
+  if (dm_lock) {
+    DEBUG_SYNC(current_thd, "rocksdb_table_statistics_pending_alter");
   }
 
   int ret = ha_rocksdb::update_stats(stats, tbl_def);
@@ -6381,6 +6402,261 @@ static void rocksdb_truncation_table_cleanup(void) {
 /*
   Storage Engine initialization function, invoked when plugin is loaded.
 */
+
+/*
+  Remove the data of indexes that no table uses any more: queue them for the
+  drop index thread, or with rocksdb_enable_delete_range_for_drop_index delete
+  their range now. The dictionary changes are added to the batch.
+*/
+static int rdb_drop_unused_indexes(
+    Rdb_dict_manager *const local_dict_manager,
+    const std::unordered_set<GL_INDEX_ID> &gl_index_ids,
+    rocksdb::WriteBatch *const batch) {
+  if (gl_index_ids.empty()) return HA_EXIT_SUCCESS;
+
+  if (rocksdb_enable_delete_range_for_drop_index) {
+    const int err = delete_range(gl_index_ids);
+    for (const auto &gl_index_id : gl_index_ids) {
+      local_dict_manager->delete_index_info(batch, gl_index_id);
+    }
+    return err;
+  }
+
+  local_dict_manager->add_drop_index(gl_index_ids, batch);
+  return HA_EXIT_SUCCESS;
+}
+
+namespace {
+/*
+  Names of the tables (and partitions) that have a pending inplace ALTER TABLE
+  record (Rdb_key_def::DDL_PENDING_ALTER) in the MyRocks dictionary, with the
+  token of the record. Lets ha_rocksdb::open() skip the dictionary lookup for
+  every other table, and open a table whose ALTER TABLE committed even if the
+  record cannot be read or removed.
+*/
+class Rdb_pending_alters {
+ public:
+  void add(const std::string &tbl_name, const uint64 token) {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    m_tokens[tbl_name] = token;
+  }
+  void remove(const std::string &tbl_name) {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    m_tokens.erase(tbl_name);
+  }
+  /* Whether the table has a record; if so, also returns its token */
+  bool find(const std::string &tbl_name, uint64 *const token) {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    const auto it = m_tokens.find(tbl_name);
+    if (it == m_tokens.end()) return false;
+    *token = it->second;
+    return true;
+  }
+  void clear() {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    m_tokens.clear();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::unordered_map<std::string, uint64> m_tokens;
+};
+
+Rdb_pending_alters rdb_pending_alters;
+
+std::vector<GL_INDEX_ID> rdb_index_ids(
+    const std::shared_ptr<Rdb_key_def> *const key_descr, const uint n_keys) {
+  std::vector<GL_INDEX_ID> ids;
+  ids.reserve(n_keys);
+  for (uint i = 0; i < n_keys; i++) {
+    ids.push_back(key_descr[i]->get_gl_index_id());
+  }
+  return ids;
+}
+
+/* Index ids in 'from' that are not in 'other' */
+std::unordered_set<GL_INDEX_ID> rdb_index_ids_minus(
+    const std::vector<GL_INDEX_ID> &from,
+    const std::vector<GL_INDEX_ID> &other) {
+  std::unordered_set<GL_INDEX_ID> result(from.begin(), from.end());
+  for (const auto &id : other) result.erase(id);
+  return result;
+}
+
+/* Token of the last index-changing inplace ALTER TABLE in the server DD */
+uint64 rdb_dd_alter_token(const dd::Properties &se_private_data) {
+  uint64 token = 0;
+  const char *const key = dd_table_key_strings[DD_TABLE_ALTER_TOKEN];
+  if (se_private_data.exists(key) && se_private_data.get(key, &token)) {
+    token = 0;
+  }
+  return token;
+}
+}  // namespace
+
+static bool rdb_has_pending_alter(const std::string &tbl_name) {
+  uint64 token;
+  return rdb_pending_alters.find(tbl_name, &token);
+}
+
+/*
+  Finish an inplace ALTER TABLE that changed the index list of a table (or
+  partition) and that has a pending record in the MyRocks dictionary:
+  commit_inplace_alter_table() committed the new index list before the server
+  data dictionary commit, which can still have failed or been interrupted by
+  a crash. The server data dictionary decides: if its table definition has the
+  token of the ALTER TABLE, keep the new index list and remove the indexes that
+  only the old one used; otherwise restore the old index list and remove the
+  indexes that only the new one used.
+
+  Called before a table is opened, so the server data dictionary is final
+  (XA recovery of the DDL transaction has completed), and again (strict) before
+  an inplace ALTER TABLE of an open table, whose own record must not replace
+  one whose cleanup is still due.
+
+  @param tbl_name   normalized table name (dbname.tablename[#P#partition])
+  @param se_private_data  se_private_data of the table in the server data
+                         dictionary, or nullptr if not known (then nothing is
+                         done)
+  @param strict     whether a failed cleanup of a committed ALTER TABLE is an
+                    error
+
+  @return HA_EXIT_SUCCESS or an HA_ERR error code
+*/
+static int rdb_resolve_pending_alter(
+    const std::string &tbl_name, const dd::Properties *const se_private_data,
+    const bool strict) {
+  uint64 token = 0;
+  if (se_private_data == nullptr ||
+      !rdb_pending_alters.find(tbl_name, &token)) {
+    return HA_EXIT_SUCCESS;
+  }
+
+  /*
+    If the ALTER TABLE committed, the current index list is the right one and
+    only the cleanup is left. Unless strict, a cleanup failure is only logged
+    (without setting a statement error) and the cleanup is retried later.
+  */
+  const bool committed = rdb_dd_alter_token(*se_private_data) == token;
+  if (strict && !committed) {
+    // Only open() restores an index list.
+    assert(false);
+    my_error(ER_INTERNAL_ERROR, MYF(0),
+             "Table definition differs between MyRocks and the data "
+             "dictionary");
+    return HA_ERR_ROCKSDB_INVALID_TABLE;
+  }
+  const auto cleanup_failed = [&](const rocksdb::Status &status,
+                                  int err) -> int {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Table '%s': failed to finish an interrupted ALTER TABLE "
+                    "(error %d, %s)",
+                    tbl_name.c_str(), err, status.ToString().c_str());
+    if (committed && !strict) return HA_EXIT_SUCCESS;
+    return status.ok() ? err : ha_rocksdb::rdb_error_to_mysql(status);
+  };
+
+  auto local_dict_manager =
+      dict_manager.get_dict_manager_selector_non_const(is_tmp_table(tbl_name));
+#ifndef NDEBUG
+  /* Lets a test see that resolution waits for the dictionary lock */
+  if (local_dict_manager->try_lock()) {
+    local_dict_manager->unlock();
+  } else {
+    DEBUG_SYNC(current_thd, "rocksdb_resolve_pending_alter_lock_busy");
+  }
+#endif
+  std::lock_guard<Rdb_dict_manager> dm_lock(*local_dict_manager);
+
+  uint64 record_token = 0;
+  std::vector<GL_INDEX_ID> old_ids;
+  const rocksdb::Status status =
+      local_dict_manager->get_pending_alter(tbl_name, &record_token, &old_ids);
+  if (status.IsNotFound()) {
+    // Resolved by another thread in the meantime.
+    rdb_pending_alters.remove(tbl_name);
+    return HA_EXIT_SUCCESS;
+  }
+  if (!status.ok()) {
+    return cleanup_failed(status, HA_ERR_ROCKSDB_STATUS_IO_ERROR);
+  }
+  assert(record_token == token);
+
+  Rdb_tbl_def *const cur_tdef = ddl_manager.find(tbl_name);
+  if (cur_tdef == nullptr) {
+    // Table is gone: delete_table() handles the record. Nothing to resolve.
+    return HA_EXIT_SUCCESS;
+  }
+  const std::vector<GL_INDEX_ID> cur_ids =
+      rdb_index_ids(cur_tdef->m_key_descr_arr, cur_tdef->m_key_count);
+
+  const std::unique_ptr<rocksdb::WriteBatch> wb = local_dict_manager->begin();
+  rocksdb::WriteBatch *const batch = wb.get();
+  std::unordered_set<GL_INDEX_ID> unused_ids;
+  /* Old index list to restore, installed in memory only after the commit */
+  std::unique_ptr<Rdb_tbl_def, void (*)(Rdb_tbl_def *)> old_tdef(
+      nullptr, [](Rdb_tbl_def *const tdef) {
+        /*
+          Keep the index numbers registered: they belong to the current
+          definition too.
+        */
+        for (uint i = 0; i < tdef->m_key_count; i++) {
+          tdef->m_key_descr_arr[i] = nullptr;
+        }
+        delete tdef;
+      });
+
+  if (committed) {
+    unused_ids = rdb_index_ids_minus(old_ids, cur_ids);
+  } else {
+    LogPluginErrMsg(WARNING_LEVEL, 0,
+                    "Table '%s': ALTER TABLE was interrupted before the data "
+                    "dictionary commit. Restoring the index list from before "
+                    "the ALTER TABLE.",
+                    tbl_name.c_str());
+    old_tdef.reset(ddl_manager.build_tbl_def(tbl_name, old_ids));
+    if (!old_tdef) {
+      return HA_ERR_ROCKSDB_CORRUPT_DATA;
+    }
+    old_tdef->m_auto_incr_val =
+        cur_tdef->m_auto_incr_val.load(std::memory_order_relaxed);
+    old_tdef->m_hidden_pk_val =
+        cur_tdef->m_hidden_pk_val.load(std::memory_order_relaxed);
+    unused_ids = rdb_index_ids_minus(cur_ids, old_ids);
+    if (ddl_manager.write_tbl_def(old_tdef.get(), batch)) {
+      return HA_ERR_ROCKSDB_INVALID_TABLE;
+    }
+  }
+
+  local_dict_manager->delete_pending_alter(batch, tbl_name);
+  int err = HA_EXIT_SUCCESS;
+  DBUG_EXECUTE_IF("rocksdb_fail_pending_alter_cleanup",
+                  { err = HA_ERR_ROCKSDB_STATUS_IO_ERROR; });
+  if (err == HA_EXIT_SUCCESS) {
+    err = rdb_drop_unused_indexes(local_dict_manager, unused_ids, batch);
+  }
+  if (err == HA_EXIT_SUCCESS) {
+    err = local_dict_manager->commit(batch);
+  }
+  if (err != HA_EXIT_SUCCESS) {
+    return cleanup_failed(rocksdb::Status::OK(), err);
+  }
+  if (old_tdef) {
+    // Replaces (and frees) cur_tdef.
+    ddl_manager.put_committed(old_tdef.release());
+  }
+
+  rdb_pending_alters.remove(tbl_name);
+  /*
+    Wake the drop index thread also when no index was dropped, as at the end
+    of every index-changing ALTER TABLE: it also removes dropped column
+    families.
+  */
+  if (!rocksdb_enable_delete_range_for_drop_index) {
+    rdb_drop_idx_thread.signal();
+  }
+  return HA_EXIT_SUCCESS;
+}
 
 static int rocksdb_init_internal(void *const p) {
   DBUG_ENTER_FUNC();
@@ -6979,6 +7255,39 @@ static int rocksdb_init_internal(void *const p) {
       })) {
     LogPluginErrMsg(ERROR_LEVEL, 0, "Failed to initialize DDL manager.");
     DBUG_RETURN(HA_EXIT_FAILURE);
+  }
+
+  {
+    /*
+      Inplace ALTER TABLE statements interrupted before the server data
+      dictionary commit. Resolved when the table is opened, renamed or
+      dropped, see rdb_resolve_pending_alter().
+    */
+    std::vector<std::string> pending_alter_tables;
+    rdb_pending_alters.clear();
+    const auto *const local_dict_manager =
+        dict_manager.get_dict_manager_selector_const(false /*is_tmp_table*/);
+    if (!local_dict_manager->get_pending_alter_tables(&pending_alter_tables)
+             .ok()) {
+      DBUG_RETURN(HA_EXIT_FAILURE);
+    }
+    for (const auto &tbl_name : pending_alter_tables) {
+      uint64 token;
+      std::vector<GL_INDEX_ID> old_ids;
+      if (!local_dict_manager->get_pending_alter(tbl_name, &token, &old_ids)
+               .ok()) {
+        LogPluginErrMsg(ERROR_LEVEL, 0,
+                        "Failed to read the pending ALTER TABLE record of "
+                        "table %s.",
+                        tbl_name.c_str());
+        DBUG_RETURN(HA_EXIT_FAILURE);
+      }
+      LogPluginErrMsg(INFORMATION_LEVEL, 0,
+                      "Table '%s' has an unfinished ALTER TABLE, it is "
+                      "resolved when the table is opened.",
+                      tbl_name.c_str());
+      rdb_pending_alters.add(tbl_name, token);
+    }
   }
 
   for (const auto &cf_handle : cf_manager.get_all_cf()) {
@@ -8021,6 +8330,39 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked,
     DBUG_RETURN(err);
   }
 
+  /*
+    Debug: fail one open before the pending ALTER TABLE record is resolved,
+    e.g. the reopen of the table after the data dictionary commit of an ALTER
+    TABLE. The _p1 variant fails only the open of partition p1.
+  */
+  DBUG_EXECUTE_IF("rocksdb_open_fail_once", {
+    DBUG_SET("-d,rocksdb_open_fail_once");
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+  });
+  DBUG_EXECUTE_IF("rocksdb_open_fail_once_p1", {
+    if (strstr(name, "#p#p1") != nullptr || strstr(name, "#P#p1") != nullptr) {
+      DBUG_SET("-d,rocksdb_open_fail_once_p1");
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+  });
+
+  {
+    /*
+      Before the table handler and its performance counters are set up:
+      resolution reads the dictionary and can fail.
+    */
+    std::string tbl_name;
+    err = rdb_normalize_tablename(name, &tbl_name);
+    if (err == HA_EXIT_SUCCESS) {
+      err = rdb_resolve_pending_alter(
+          tbl_name, table_def ? &table_def->se_private_data() : nullptr,
+          false /* strict */);
+    }
+    if (err != HA_EXIT_SUCCESS) {
+      DBUG_RETURN(err);
+    }
+  }
+
   m_table_handler = rdb_open_tables.get_table_handler(name);
 
   if (m_table_handler == nullptr) {
@@ -8030,19 +8372,31 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked,
   m_io_perf.init(&m_table_handler->m_table_perf_context,
                  &m_table_handler->m_io_perf_read, &stats);
 
-  Rdb_perf_context_guard guard(&m_io_perf,
-                               rocksdb_perf_context_level(ha_thd()));
+  /* Ended before the table handler is released on an error below */
+  std::optional<Rdb_perf_context_guard> guard;
+  guard.emplace(&m_io_perf, rocksdb_perf_context_level(ha_thd()));
+  /*
+    On an error: end the guard first, because it records into the counters of
+    the table handler, and clear the handler, so close() does not release it
+    again.
+  */
+  const auto release_table_handler = [&]() {
+    guard.reset();
+    rdb_open_tables.release_table_handler(m_table_handler);
+    m_table_handler = nullptr;
+  };
 
   std::string fullname;
   err = rdb_normalize_tablename(name, &fullname);
   if (err != HA_EXIT_SUCCESS) {
-    rdb_open_tables.release_table_handler(m_table_handler);
+    release_table_handler();
     DBUG_RETURN(err);
   }
 
   m_tbl_def = ddl_manager.find(fullname);
+  DBUG_EXECUTE_IF("rocksdb_open_fail_find_tbl_def", m_tbl_def = nullptr;);
   if (m_tbl_def == nullptr) {
-    rdb_open_tables.release_table_handler(m_table_handler);
+    release_table_handler();
     my_error(ER_INTERNAL_ERROR, MYF(0),
              "Attempt to open a table that is not present in RocksDB-SE data "
              "dictionary");
@@ -8100,6 +8454,15 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked,
                       m_tbl_def->m_key_count, rdb_name);
     }
 
+    /*
+      A crash during an inplace ALTER TABLE leaves a pending record that
+      rdb_resolve_pending_alter() resolved above. A mismatch here comes from
+      an older server version without such records. The key definitions
+      cannot be matched to the keys of the table, and using them would crash
+      the server: only the index list of an interrupted ADD INDEX can be
+      rebuilt, and only on request.
+    */
+    bool rebuilt = false;
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
     if (m_tbl_def->m_key_count > n_keys && rocksdb_validate_tables > 0) {
       if (rocksdb_validate_tables == 1) {
@@ -8113,28 +8476,43 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked,
                         "Starting reconstruction of the corrupted table %s.",
                         m_tbl_def->full_tablename().c_str());
 
-        if (rebuild_table_def_from_table(table) != HA_EXIT_SUCCESS) {
+        if (DBUG_EVALUATE_IF("rocksdb_open_fail_rebuild", true, false) ||
+            rebuild_table_def_from_table(table) != HA_EXIT_SUCCESS) {
           LogPluginErrMsg(ERROR_LEVEL, 0,
                           "Failed to rebuild table definition for table '%s'",
                           tbl_name.c_str());
+          release_table_handler();
+          m_tbl_def = nullptr;
           my_error(ER_KEY_CREATE_DURING_ALTER, MYF(0));
-          return HA_EXIT_FAILURE;
+          DBUG_RETURN(HA_EXIT_FAILURE);
         }
 
         LogPluginErrMsg(
             INFORMATION_LEVEL, 0,
             "Reconstruction of the corrupted table %s has finished.",
             m_tbl_def->full_tablename().c_str());
+        rebuilt = true;
       }
     }
 #endif
+    if (!rebuilt) {
+      release_table_handler();
+      m_tbl_def = nullptr;
+      m_key_descr_arr = nullptr;
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "Table definition differs between MyRocks and the data "
+               "dictionary");
+      DBUG_RETURN(HA_ERR_ROCKSDB_INVALID_TABLE);
+    }
   }
 
   // close() above has already called free_key_buffers(). No need to do it here.
-  err = alloc_key_buffers(*table, *m_tbl_def);
+  err =
+      DBUG_EVALUATE_IF("rocksdb_open_fail_alloc_key_buffers", HA_ERR_OUT_OF_MEM,
+                       alloc_key_buffers(*table, *m_tbl_def));
 
   if (err) {
-    rdb_open_tables.release_table_handler(m_table_handler);
+    release_table_handler();
     DBUG_RETURN(err);
   }
 
@@ -8177,11 +8555,20 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked,
   }
 
   /* Load hidden pk only once on first use. */
-  if (has_hidden_pk(*table) && m_tbl_def->m_hidden_pk_val == 0 &&
-      (err = load_hidden_pk_value()) != HA_EXIT_SUCCESS) {
-    rdb_open_tables.release_table_handler(m_table_handler);
-    free_key_buffers();
-    DBUG_RETURN(err);
+  if (has_hidden_pk(*table) && m_tbl_def->m_hidden_pk_val == 0) {
+    err = load_hidden_pk_value();
+    /* Debug: fail after the read, which the perf counters record */
+    DBUG_EXECUTE_IF("rocksdb_open_fail_load_hidden_pk", {
+      if (err == HA_EXIT_SUCCESS) {
+        m_tbl_def->m_hidden_pk_val = 0;
+        err = HA_ERR_INTERNAL_ERROR;
+      }
+    });
+    if (err != HA_EXIT_SUCCESS) {
+      release_table_handler();
+      free_key_buffers();
+      DBUG_RETURN(err);
+    }
   }
 
   /* Index block size in MyRocks: used by MySQL in query optimization */
@@ -9200,11 +9587,13 @@ int ha_rocksdb::create_table(const std::string &table_name,
       goto error;
     }
 
+    DBUG_EXECUTE_IF("rocksdb_crash_before_create_table", DBUG_SUICIDE(););
     err = local_dict_manager->commit(batch);
     if (err != HA_EXIT_SUCCESS) {
       goto error;
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_create_table", DBUG_SUICIDE(););
 
   DBUG_RETURN(HA_EXIT_SUCCESS);
 
@@ -12753,11 +13142,14 @@ static int delete_range(const std::unordered_set<GL_INDEX_ID> &indices) {
   rocksdb::Status status =
       rdb->Write(rocksdb::WriteOptions(), optimize, &batch);
 
-  if (status.ok()) {
-    if (!rdb_sync_wal_supported()) {
-      // If we don't support SyncWAL, do a flush at least
-      rdb->FlushWAL(false);
-    }
+  if (!status.ok()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0, "Failed to write the range deletion: %s",
+                    status.ToString().c_str());
+    return HA_EXIT_FAILURE;
+  }
+  if (!rdb_sync_wal_supported()) {
+    // If we don't support SyncWAL, do a flush at least
+    rdb->FlushWAL(false);
   }
   return HA_EXIT_SUCCESS;
 }
@@ -13002,6 +13394,35 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
 
   {
     std::lock_guard<Rdb_dict_manager> dm_lock(*local_dict_manager);
+    /*
+      A pending inplace ALTER TABLE (see rdb_resolve_pending_alter()) still
+      owns the indexes of the index list from before the ALTER TABLE: drop
+      them with the table.
+    */
+    // A copy: ddl_manager.remove() below frees tbl.
+    const std::string tbl_name = tbl->full_tablename();
+    bool had_pending_alter = false;
+    uint64 token;
+    if (rdb_pending_alters.find(tbl_name, &token)) {
+      std::vector<GL_INDEX_ID> old_ids;
+      const rocksdb::Status status =
+          local_dict_manager->get_pending_alter(tbl_name, &token, &old_ids);
+      if (!status.ok() && !status.IsNotFound()) {
+        DBUG_RETURN(ha_rocksdb::rdb_error_to_mysql(status));
+      }
+      if (status.ok()) {
+        had_pending_alter = true;
+        local_dict_manager->delete_pending_alter(batch, tbl_name);
+        int err = rdb_drop_unused_indexes(
+            local_dict_manager,
+            rdb_index_ids_minus(
+                old_ids, rdb_index_ids(tbl->m_key_descr_arr, tbl->m_key_count)),
+            batch);
+        if (err) {
+          DBUG_RETURN(err);
+        }
+      }
+    }
     if (rocksdb_enable_delete_range_for_drop_index) {
       std::unordered_set<GL_INDEX_ID> dropped_index_ids;
       for (uint32 i = 0; i < tbl->m_key_count; i++) {
@@ -13027,7 +13448,9 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
     if (err) {
       DBUG_RETURN(err);
     }
+    if (had_pending_alter) rdb_pending_alters.remove(tbl_name);
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_delete_table", DBUG_SUICIDE(););
 
   DBUG_EXECUTE_IF("rocksdb_after_delete_table", {
     static constexpr char act[] =
@@ -13173,11 +13596,38 @@ int ha_rocksdb::rename_table(
   // rename table is under dict_manager lock, and the cfs used
   // by indices of this table cannot be dropped during the process.
   std::lock_guard<Rdb_dict_manager> dm_lock(*local_dict_manager);
+  /* A pending inplace ALTER TABLE record moves with the table. */
+  bool moved_pending_alter = false;
+  uint64 token;
+  if (rdb_pending_alters.find(from_str, &token)) {
+    std::vector<GL_INDEX_ID> old_ids;
+    const rocksdb::Status status =
+        local_dict_manager->get_pending_alter(from_str, &token, &old_ids);
+    if (!status.ok() && !status.IsNotFound()) {
+      DBUG_RETURN(ha_rocksdb::rdb_error_to_mysql(status));
+    }
+    if (status.ok()) {
+      local_dict_manager->delete_pending_alter(batch, from_str);
+      local_dict_manager->put_pending_alter(batch, to_str, token, old_ids);
+      moved_pending_alter = true;
+    }
+  }
   if (ddl_manager.rename(from_str, to_str, batch)) {
     rc = HA_ERR_ROCKSDB_INVALID_TABLE;
   } else {
     rc = local_dict_manager->commit(batch);
   }
+  if (rc == HA_EXIT_SUCCESS && moved_pending_alter) {
+    rdb_pending_alters.remove(from_str);
+    rdb_pending_alters.add(to_str, token);
+  }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename", {
+    if (rc == HA_EXIT_SUCCESS) DBUG_SUICIDE();
+  });
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename_from_tmp", {
+    if (rc == HA_EXIT_SUCCESS && strstr(from, tmp_file_prefix) != nullptr)
+      DBUG_SUICIDE();
+  });
   DBUG_RETURN(rc);
 }
 
@@ -14475,12 +14925,27 @@ my_core::enum_alter_inplace_result ha_rocksdb::check_if_supported_inplace_alter(
 */
 bool ha_rocksdb::prepare_inplace_alter_table(
     TABLE *altered_table, my_core::Alter_inplace_info *ha_alter_info,
-    const dd::Table *old_table_def MY_ATTRIBUTE((__unused__)),
+    const dd::Table *old_table_def,
     dd::Table *new_table_def MY_ATTRIBUTE((__unused__))) {
   DBUG_ENTER_FUNC();
 
   assert(altered_table != nullptr);
   assert(ha_alter_info != nullptr);
+
+  /*
+    Finish the cleanup of an earlier interrupted ALTER TABLE first: this
+    statement's pending record and its index list replace that state.
+  */
+  if (rdb_resolve_pending_alter(
+          m_tbl_def->full_tablename(),
+          old_table_def ? &old_table_def->se_private_data() : nullptr,
+          true /* strict */) != HA_EXIT_SUCCESS) {
+    if (!ha_thd()->is_error()) {
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "Failed to finish an interrupted ALTER TABLE");
+    }
+    DBUG_RETURN(HA_EXIT_FAILURE);
+  }
 
   Rdb_tbl_def *new_tdef = nullptr;
   std::shared_ptr<Rdb_key_def> *old_key_descr = nullptr;
@@ -15171,7 +15636,20 @@ bool ha_rocksdb::commit_inplace_alter_table(
         dict_manager.get_dict_manager_selector_non_const(table_default_cf_id);
     const std::unique_ptr<rocksdb::WriteBatch> wb = local_dict_manager->begin();
     rocksdb::WriteBatch *const batch = wb.get();
-    std::unordered_set<GL_INDEX_ID> create_index_ids;
+    std::vector<std::string> pending_alter_tables;
+    bool queued_drops = false;
+
+    /*
+      The server data dictionary is committed after this function. Until
+      then a crash must be able to restore the index list from before the
+      ALTER TABLE: write a pending record with the old index list and a token
+      that is also stored in the new server data dictionary definition. See
+      rdb_resolve_pending_alter().
+    */
+    const uint64 alter_token =
+        rdb_dd_alter_token(old_dd_tab->se_private_data()) + 1;
+    new_dd_tab->se_private_data().set(
+        dd_table_key_strings[DD_TABLE_ALTER_TOKEN], alter_token);
 
     m_tbl_def = ctx0->m_new_tdef;
     m_key_descr_arr = m_tbl_def->m_key_descr_arr;
@@ -15190,21 +15668,32 @@ bool ha_rocksdb::commit_inplace_alter_table(
         Rdb_inplace_alter_ctx *const ctx =
             static_cast<Rdb_inplace_alter_ctx *>(*pctx);
 
-        /* Mark indexes to be dropped */
-        if (rocksdb_enable_delete_range_for_drop_index) {
-          int err = delete_range(ctx->m_dropped_index_ids);
-          for (auto &index_id : ctx->m_dropped_index_ids) {
-            local_dict_manager->delete_index_info(batch, index_id);
-          }
+        for (const auto &index : ctx->m_added_indexes) {
+          /* The indexes are complete; the pending record covers them now. */
+          local_dict_manager->end_ongoing_index_operation(
+              batch, index->get_gl_index_id(),
+              Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
+        }
+
+        if (!DBUG_EVALUATE_IF("rocksdb_skip_pending_alter", true, false)) {
+          /*
+            The dropped indexes keep their data until the record is
+            resolved: the ALTER TABLE can still be rolled back.
+          */
+          const std::string &tbl_name = ctx->m_new_tdef->full_tablename();
+          local_dict_manager->put_pending_alter(
+              batch, tbl_name, alter_token,
+              rdb_index_ids(ctx->m_old_key_descr, ctx->m_old_n_keys));
+          pending_alter_tables.push_back(tbl_name);
+        } else {
+          /* Debug: behave like a server version without pending records */
+          const int err = rdb_drop_unused_indexes(
+              local_dict_manager, ctx->m_dropped_index_ids, batch);
           if (err) {
             DBUG_RETURN(err);
           }
-        } else {
-          local_dict_manager->add_drop_index(ctx->m_dropped_index_ids, batch);
-        }
-
-        for (const auto &index : ctx->m_added_indexes) {
-          create_index_ids.insert(index->get_gl_index_id());
+          queued_drops |= !ctx->m_dropped_index_ids.empty() &&
+                          !rocksdb_enable_delete_range_for_drop_index;
         }
 
         if (ddl_manager.put_and_write(ctx->m_new_tdef, batch)) {
@@ -15230,9 +15719,21 @@ bool ha_rocksdb::commit_inplace_alter_table(
         assert(0);
       }
 
-      /* Mark ongoing create indexes as finished/remove from data dictionary */
-      local_dict_manager->finish_indexes_operation(
-          create_index_ids, Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
+      for (const auto &tbl_name : pending_alter_tables) {
+        rdb_pending_alters.add(tbl_name, alter_token);
+      }
+
+      /*
+        Debug: fail the reopen of the table after the data dictionary commit
+        (all partitions, or only p1), which leaves the record pending.
+      */
+      DBUG_EXECUTE_IF("rocksdb_fail_reopen_after_alter",
+                      DBUG_SET("+d,rocksdb_open_fail_once"););
+      DBUG_EXECUTE_IF("rocksdb_fail_reopen_after_alter_p1",
+                      DBUG_SET("+d,rocksdb_open_fail_once_p1"););
+
+      DBUG_EXECUTE_IF("rocksdb_crash_before_finish_create_index",
+                      DBUG_SUICIDE(););
     }
 
     DBUG_EXECUTE_IF("rocksdb_delete_index", {
@@ -15241,7 +15742,11 @@ bool ha_rocksdb::commit_inplace_alter_table(
           "wait_for mark_cf_dropped_done_after_commit_alter_table";
       assert(!debug_sync_set_action(ha_thd(), STRING_WITH_LEN(act)));
     });
-    if (!rocksdb_enable_delete_range_for_drop_index) {
+    /*
+      Dropped indexes are queued when the pending record is resolved (see
+      rdb_resolve_pending_alter()), which signals the drop index thread.
+    */
+    if (queued_drops) {
       rdb_drop_idx_thread.signal();
     }
 
