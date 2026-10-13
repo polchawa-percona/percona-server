@@ -1,0 +1,51 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11843 (originally reported as PS-10907): the slow query log Lock_time
+# of a statement that waited for a MyRocks row lock must include the row
+# lock wait time, as it does for InnoDB, which reports the wait through
+# thd_storage_lock_wait().
+#
+
+SET @old_log_output = @@global.log_output;
+SET @old_slow_query_log = @@global.slow_query_log;
+SET @old_long_query_time = @@global.long_query_time;
+SET GLOBAL log_output = 'TABLE';
+SET GLOBAL long_query_time = 0;
+SET GLOBAL slow_query_log = 1;
+TRUNCATE TABLE mysql.slow_log;
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+BEGIN;
+INSERT INTO t1 VALUES (1);
+
+--connect (con1,localhost,root,,test)
+SET SESSION long_query_time = 0;
+SET SESSION rocksdb_lock_wait_timeout = 2;
+--echo # Waits for the row lock held by the default connection and times out
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (1);
+--disconnect con1
+
+--connection default
+ROLLBACK;
+
+--let $wait_condition = SELECT COUNT(*) = 1 FROM mysql.slow_log WHERE sql_text = 'INSERT INTO t1 VALUES (1)' AND TIME_TO_SEC(query_time) >= 1
+--source include/wait_condition.inc
+
+--echo # The statement waited about 2 seconds for the row lock, so its
+--echo # lock_time must be at least 1 second
+SELECT TIME_TO_SEC(lock_time) >= 1 AS lock_time_includes_row_lock_wait
+  FROM mysql.slow_log
+  WHERE sql_text = 'INSERT INTO t1 VALUES (1)' AND TIME_TO_SEC(query_time) >= 1;
+
+DROP TABLE t1;
+SET GLOBAL slow_query_log = @old_slow_query_log;
+SET GLOBAL long_query_time = @old_long_query_time;
+SET GLOBAL log_output = @old_log_output;
+TRUNCATE TABLE mysql.slow_log;
+# MTR enables the general log, so it was written to the table as well
+TRUNCATE TABLE mysql.general_log;
+--source include/wait_until_count_sessions.inc
