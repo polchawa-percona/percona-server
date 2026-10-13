@@ -9394,6 +9394,8 @@ int ha_rocksdb::truncate_table(Rdb_tbl_def *tbl_def_arg,
                      table_def);
   if (err != HA_EXIT_SUCCESS) DBUG_RETURN(err);
 
+  DEBUG_SYNC(ha_thd(), "rocksdb.truncate_after_rename");
+
   /*
     Attempt to create the table. If this succeeds, then drop the old table.
     Otherwise, try to restore it.
@@ -9427,6 +9429,8 @@ int ha_rocksdb::truncate_table(Rdb_tbl_def *tbl_def_arg,
     error should be returned at this point from trying to delete the old
     table. If the delete_table fails, log it instead.
   */
+  DEBUG_SYNC(ha_thd(), "rocksdb.truncate_before_drop_old");
+
   Rdb_tbl_def *old_tbl_def = ddl_manager.find(tmp_tablename);
   if (should_remove_old_table && old_tbl_def) {
     m_tbl_def = old_tbl_def;
