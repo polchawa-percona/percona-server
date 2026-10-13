@@ -1,0 +1,42 @@
+call mtr.add_suppression("Failed to allocate memory for merge buffer");
+# Partitioned table
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB
+PARTITION BY HASH(pk) PARTITIONS 4;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+SET SESSION rocksdb_merge_buf_size = 18446744073709551615;
+ALTER TABLE t1 ADD INDEX k1 (a), LOCK=EXCLUSIVE, ALGORITHM=INPLACE;
+ERROR HY000: MyRocks failed populating secondary key during alter.
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+ALTER TABLE t1 ADD INDEX k2 (a), LOCK=EXCLUSIVE, ALGORITHM=INPLACE;
+SELECT index_name FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name;
+INDEX_NAME
+k2
+PRIMARY
+SELECT COUNT(*) FROM t1 FORCE INDEX (k2) WHERE a > 0;
+COUNT(*)
+5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Non-partitioned table
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+SET SESSION rocksdb_merge_buf_size = 18446744073709551615;
+ALTER TABLE t2 ADD INDEX k1 (a), ALGORITHM=INPLACE;
+ERROR HY000: MyRocks failed populating secondary key during alter.
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+ALTER TABLE t2 ADD INDEX k2 (a), ALGORITHM=INPLACE;
+SELECT index_name FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't2' ORDER BY index_name;
+INDEX_NAME
+k2
+PRIMARY
+SELECT COUNT(*) FROM t2 FORCE INDEX (k2) WHERE a > 0;
+COUNT(*)
+5
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t2;

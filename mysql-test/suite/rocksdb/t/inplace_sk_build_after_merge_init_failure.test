@@ -1,0 +1,57 @@
+#
+# PS-11658, second trigger: an INPLACE ADD INDEX that fails because the
+# merge buffer for the index build cannot be allocated
+# (Rdb_index_merge::init() fails for rocksdb_merge_buf_size = ULLONG_MAX)
+# leaves the transaction's pending merge state behind, the same as a killed
+# build (rocksdb.inplace_sk_build_after_kill). The next INPLACE ADD INDEX on
+# the same connection then fails with ER_SK_POPULATE_DURING_ALTER although
+# the merge buffer size is valid again.
+#
+# Expected: the failed ALTER reports ER_SK_POPULATE_DURING_ALTER and leaves
+# the table unchanged; the next ADD INDEX on the same connection succeeds,
+# for a partitioned and for a non-partitioned table. Each case runs on its
+# own connection, so that the cases do not share the session state.
+#
+--source include/have_rocksdb.inc
+--source include/not_asan.inc
+
+call mtr.add_suppression("Failed to allocate memory for merge buffer");
+
+--echo # Partitioned table
+--connect(con1,localhost,root,,test)
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB
+  PARTITION BY HASH(pk) PARTITIONS 4;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+
+SET SESSION rocksdb_merge_buf_size = 18446744073709551615;
+--error ER_SK_POPULATE_DURING_ALTER
+ALTER TABLE t1 ADD INDEX k1 (a), LOCK=EXCLUSIVE, ALGORITHM=INPLACE;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+
+ALTER TABLE t1 ADD INDEX k2 (a), LOCK=EXCLUSIVE, ALGORITHM=INPLACE;
+SELECT index_name FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k2) WHERE a > 0;
+CHECK TABLE t1;
+DROP TABLE t1;
+--disconnect con1
+--connection default
+
+--echo # Non-partitioned table
+--connect(con2,localhost,root,,test)
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+
+SET SESSION rocksdb_merge_buf_size = 18446744073709551615;
+--error ER_SK_POPULATE_DURING_ALTER
+ALTER TABLE t2 ADD INDEX k1 (a), ALGORITHM=INPLACE;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+
+ALTER TABLE t2 ADD INDEX k2 (a), ALGORITHM=INPLACE;
+SELECT index_name FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't2' ORDER BY index_name;
+SELECT COUNT(*) FROM t2 FORCE INDEX (k2) WHERE a > 0;
+CHECK TABLE t2;
+DROP TABLE t2;
+--disconnect con2
+--connection default
