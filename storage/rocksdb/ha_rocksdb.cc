@@ -62,6 +62,13 @@
 #include "sql/table.h"
 #include "sql/strfunc.h"
 
+/* MySQL includes used by the DDL recovery (rocksdb_recover_interrupted_ddl) */
+#include "sql/dd/collection.h"
+#include "sql/dd/dd_table.h"  // dd::drop_table
+#include "sql/dd/types/column.h"
+#include "sql/dd/types/column_statistics.h"
+#include "sql/transaction.h"
+
 /* RocksDB includes */
 #include "monitoring/histogram.h"
 #include "rocksdb/compaction_filter.h"
@@ -6379,6 +6386,481 @@ static void rocksdb_truncation_table_cleanup(void) {
 }
 
 /*
+  DDL recovery log.
+
+  MyRocks has no atomic DDL: the server data dictionary (DD) and the MyRocks
+  dictionary are committed separately, so a crash inside CREATE, DROP or
+  RENAME TABLE can leave them disagreeing. The DD is atomic and is the
+  source of truth. Table DDL records what it is doing in the MyRocks
+  dictionary (Rdb_key_def::DDL_RECOVERY_LOG), and startup uses these records
+  to finish or undo an interrupted statement before the tables are validated:
+
+  - CREATE, keyed by the table name: written before the DD commit of
+    CREATE TABLE (from get_extra_columns_and_keys()), removed by the
+    dictionary commit of the table (of its last partition). Startup removes
+    a table that the DD has but MyRocks has not fully created: the statement
+    is rolled back.
+  - DROP, keyed by the table name, with the DD table id: written by the
+    dictionary commit of DROP TABLE, which precedes the DD commit. Startup
+    removes a table that MyRocks has dropped (fully or some partitions) from
+    the DD too: the statement is rolled forward, because its data is already
+    queued for deletion.
+  - RENAME, keyed by the new name, with the old name and the DD table id:
+    written by the dictionary commit of RENAME TABLE, which precedes the DD
+    commit. Startup renames a table back when the DD still has the old name.
+
+  A record only acts when the dictionaries disagree in exactly the way the
+  interrupted statement leaves them, so records left over by statements that
+  completed are harmless. Startup removes the records it has resolved.
+*/
+using ddl_log_op = Rdb_dict_manager::ddl_log_op;
+
+/* Names that are not covered: temporary tables, ALTER and TRUNCATE helpers */
+static bool rdb_ddl_log_skip(const std::string &name) {
+  return name.compare(0, TMP_SCHEMA_NAME.size(), TMP_SCHEMA_NAME) == 0 ||
+         name.find(tmp_file_prefix) != std::string::npos ||
+         name.find(TRUNCATE_TABLE_PREFIX) != std::string::npos;
+}
+
+/* "db.table#P#partition" -> "db.table" */
+static std::string rdb_base_tablename(const std::string &name) {
+  const size_t pos = name.find("#P#", name.find('.'));
+  return pos == std::string::npos ? name : name.substr(0, pos);
+}
+
+static std::string rdb_ddl_log_id_payload(const dd::Object_id id) {
+  uchar buf[sizeof(uint64)];
+  rdb_netbuf_store_uint64(buf, id);
+  return std::string(reinterpret_cast<char *>(buf), sizeof(buf));
+}
+
+static dd::Object_id rdb_ddl_log_payload_id(const std::string &payload) {
+  if (payload.size() < sizeof(uint64)) return dd::INVALID_OBJECT_ID;
+  return rdb_netbuf_to_uint64(reinterpret_cast<const uchar *>(payload.data()));
+}
+
+/*
+  Writes the CREATE record of a CREATE TABLE before the server commits its DD
+  entry. Called from get_extra_columns_and_keys(), which dd::create_table()
+  calls before the DD object is stored.
+*/
+int rdb_ddl_log_create_table(const HA_CREATE_INFO *create_info,
+                             const dd::Table *table_obj) {
+  /*
+    With lower_case_table_names=2 (case-insensitive file systems only) the
+    engine derives the table name from the original spelling, which cannot be
+    reproduced here reliably, so CREATE TABLE is not logged there.
+  */
+  THD *const thd = my_core::thd_get_current_thd();
+  if (thd == nullptr || table_obj == nullptr || lower_case_table_names == 2 ||
+      thd->lex->sql_command != SQLCOM_CREATE_TABLE ||
+      thd->lex->query_tables == nullptr ||
+      (create_info->options & HA_LEX_CREATE_TMP_TABLE) ||
+      thd->is_plugin_fake_ddl()) {
+    return HA_EXIT_SUCCESS;
+  }
+  const Table_ref *const target = thd->lex->query_tables;
+  if ((lower_case_table_names == 1
+           ? my_strcasecmp(system_charset_info, target->table_name,
+                           table_obj->name().c_str())
+           : strcmp(target->table_name, table_obj->name().c_str())) != 0 ||
+      dd::get_dictionary()->is_dd_table_name(target->db, target->table_name)) {
+    return HA_EXIT_SUCCESS;
+  }
+
+  char db_buf[FN_REFLEN];
+  char tbl_buf[FN_REFLEN];
+  tablename_to_filename(target->db, db_buf, sizeof(db_buf));
+  tablename_to_filename(target->table_name, tbl_buf, sizeof(tbl_buf));
+  const std::string name = std::string(db_buf) + "." + tbl_buf;
+  if (rdb_ddl_log_skip(name)) return HA_EXIT_SUCCESS;
+
+  Rdb_dict_manager *const dict =
+      dict_manager.get_dict_manager_selector_non_const(false);
+  const std::unique_ptr<rocksdb::WriteBatch> wb = dict->begin();
+  dict->put_ddl_log(wb.get(), ddl_log_op::CREATE, name, "");
+  return dict->commit(wb.get()) ? HA_ERR_ROCKSDB_COMMIT_FAILED
+                                : HA_EXIT_SUCCESS;
+}
+
+/* Removes the CREATE record of a table whose creation has finished. */
+void rdb_ddl_log_create_done(const char *const name) {
+  std::string str;
+  if (rdb_normalize_tablename(name, &str) != HA_EXIT_SUCCESS ||
+      rdb_ddl_log_skip(str)) {
+    return;
+  }
+  Rdb_dict_manager *const dict =
+      dict_manager.get_dict_manager_selector_non_const(false);
+  const std::unique_ptr<rocksdb::WriteBatch> wb = dict->begin();
+  dict->delete_ddl_log(wb.get(), ddl_log_op::CREATE, rdb_base_tablename(str));
+  (void)dict->commit(wb.get());
+}
+
+namespace {
+struct Rdb_table_names : public Rdb_tables_scanner {
+  std::vector<std::string> m_names;
+  int add_table(Rdb_tbl_def *tdef) override {
+    m_names.push_back(tdef->full_tablename());
+    return HA_EXIT_SUCCESS;
+  }
+};
+
+/* Server names of the table in a MyRocks name "db.table[#P#...]" */
+struct Rdb_dd_name {
+  std::string db;
+  std::string table;
+  explicit Rdb_dd_name(const std::string &rdb_name) {
+    std::string db_enc, tbl_enc;
+    if (rdb_split_normalized_tablename(rdb_name, &db_enc, &tbl_enc, nullptr) !=
+        HA_EXIT_SUCCESS) {
+      return;
+    }
+    char buf[FN_REFLEN];
+    filename_to_tablename(db_enc.c_str(), buf, sizeof(buf));
+    db = buf;
+    filename_to_tablename(tbl_enc.c_str(), buf, sizeof(buf));
+    table = buf;
+  }
+};
+
+/* Explicit-duration metadata lock held by the startup recovery. */
+class Rdb_recovery_mdl {
+ public:
+  Rdb_recovery_mdl(THD *thd, const MDL_key::enum_mdl_namespace ns,
+                   const char *db, const char *name, const enum_mdl_type type)
+      : m_thd(thd) {
+    MDL_REQUEST_INIT(&m_request, ns, db, name, type, MDL_EXPLICIT);
+    m_locked = !thd->mdl_context.acquire_lock(&m_request, 10);
+  }
+  ~Rdb_recovery_mdl() {
+    if (m_locked) m_thd->mdl_context.release_lock(m_request.ticket);
+  }
+  Rdb_recovery_mdl(const Rdb_recovery_mdl &) = delete;
+  Rdb_recovery_mdl &operator=(const Rdb_recovery_mdl &) = delete;
+  bool locked() const { return m_locked; }
+
+ private:
+  THD *const m_thd;
+  MDL_request m_request;
+  bool m_locked;
+};
+}  // anonymous namespace
+
+/*
+  Looks up the DD table of a table name. The caller holds a metadata lock on
+  the name and an Auto_releaser that ends before the lock is released.
+  @return true on error (*table is then undefined)
+*/
+static bool rdb_recovery_dd_table(THD *thd, const Rdb_dd_name &name,
+                                  const dd::Table **table) {
+  *table = nullptr;
+  if (name.db.empty()) return true;
+  if (thd->dd_client()->acquire(name.db.c_str(), name.table.c_str(), table)) {
+    thd->clear_error();
+    return true;
+  }
+  return false;
+}
+
+static bool rdb_is_rocksdb_dd_table(const dd::Table *table) {
+  return table != nullptr &&
+         my_strcasecmp(system_charset_info, table->engine().c_str(),
+                       rocksdb_hton_name) == 0;
+}
+
+/* Is every index of the table empty? */
+enum class rdb_emptiness { EMPTY, NOT_EMPTY, ERROR };
+static rdb_emptiness rdb_table_emptiness(const Rdb_tbl_def &tbl) {
+  rocksdb::TransactionDB *const rdb = rdb_get_rocksdb_db();
+  rocksdb::ReadOptions opts;
+  opts.total_order_seek = true;
+  for (uint i = 0; i < tbl.m_key_count; i++) {
+    const Rdb_key_def &kd = *tbl.m_key_descr_arr[i];
+    uchar key_buf[Rdb_key_def::INDEX_NUMBER_SIZE];
+    rdb_netbuf_store_index(key_buf, kd.get_index_number());
+    const rocksdb::Slice prefix(reinterpret_cast<char *>(key_buf),
+                                sizeof(key_buf));
+    std::unique_ptr<rocksdb::Iterator> it(rdb->NewIterator(opts, kd.get_cf()));
+    rocksdb_smart_seek(kd.m_is_reverse_cf, it.get(), prefix);
+    if (!it->status().ok()) return rdb_emptiness::ERROR;
+    if (it->Valid() && it->key().starts_with(prefix)) {
+      return rdb_emptiness::NOT_EMPTY;
+    }
+  }
+  return rdb_emptiness::EMPTY;
+}
+
+static bool rdb_recovery_rename(const std::string &from,
+                                const std::string &to) {
+  Rdb_dict_manager *const dict =
+      dict_manager.get_dict_manager_selector_non_const(is_tmp_table(from));
+  const std::unique_ptr<rocksdb::WriteBatch> wb = dict->begin();
+  std::lock_guard<Rdb_dict_manager> dm_lock(*dict);
+  if (ddl_manager.rename(from, to, wb.get())) return true;
+  return dict->commit(wb.get());
+}
+
+/*
+  Removes a table from the server DD (with its histograms) and commits. Runs
+  in the session that initializes the plugins at server startup.
+*/
+static bool rdb_recovery_dd_drop_table(THD *thd, const Rdb_dd_name &name) {
+  Rdb_recovery_mdl schema_lock(thd, MDL_key::SCHEMA, name.db.c_str(), "",
+                               MDL_INTENTION_EXCLUSIVE);
+  if (!schema_lock.locked()) return true;
+  Rdb_recovery_mdl table_lock(thd, MDL_key::TABLE, name.db.c_str(),
+                              name.table.c_str(), MDL_EXCLUSIVE);
+  if (!table_lock.locked()) return true;
+
+  dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  dd::Table *table = nullptr;
+  if (thd->dd_client()->acquire_for_modification(name.db.c_str(),
+                                                 name.table.c_str(), &table)) {
+    return true;
+  }
+  if (table == nullptr) return false;
+
+  bool error = false;
+  for (const dd::Column *const col : *table->columns()) {
+    /* Released with the other transactional locks of the session */
+    MDL_key key;
+    dd::Column_statistics::create_mdl_key(name.db.c_str(), name.table.c_str(),
+                                          col->name(), &key);
+    MDL_request stat_request;
+    MDL_REQUEST_INIT_BY_KEY(&stat_request, &key, MDL_EXCLUSIVE,
+                            MDL_TRANSACTION);
+    if (thd->mdl_context.acquire_lock(&stat_request, 10)) {
+      error = true;
+      break;
+    }
+    const dd::Column_statistics *stats = nullptr;
+    if (thd->dd_client()->acquire(
+            dd::Column_statistics::create_name(name.db.c_str(),
+                                               name.table.c_str(), col->name()),
+            &stats) ||
+        (stats != nullptr && thd->dd_client()->drop(stats))) {
+      error = true;
+      break;
+    }
+  }
+
+  error = error ||
+          dd::drop_table(thd, name.db.c_str(), name.table.c_str(), *table) ||
+          trans_commit_stmt(thd) || trans_commit(thd);
+  if (error) {
+    trans_rollback_stmt(thd);
+    trans_rollback(thd);
+  }
+  return error;
+}
+
+/*
+  Finishes or undoes table DDL interrupted by a crash, see the DDL recovery
+  log above. Runs at startup after the MyRocks dictionary is loaded and
+  before the tables are validated against the server DD, for every value of
+  rocksdb_validate_tables.
+*/
+static void rocksdb_recover_interrupted_ddl() {
+  ha_rocksdb handler(rocksdb_hton, nullptr);
+
+  Rdb_dict_manager *const dict =
+      dict_manager.get_dict_manager_selector_non_const(false);
+  std::vector<Rdb_dict_manager::ddl_log_entry> log;
+  if (dict->get_all_ddl_log(&log)) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Failed to read the DDL recovery log, interrupted DDL is "
+                    "not recovered");
+    return;
+  }
+  if (log.empty()) return;
+
+  THD *const thd = my_core::thd_get_current_thd();
+  if (thd == nullptr) return;
+  /*
+    The server DD is changed only while the server starts (the plugins are
+    initialized in a session of their own), never by INSTALL PLUGIN.
+  */
+  const bool can_change_dd = !opt_initialize && !mysqld_server_started;
+  /*
+    Records whose statement could not be resolved (an error, or the DD may
+    not be changed now) are kept for the next startup; the others are
+    removed at the end.
+  */
+  std::set<std::pair<ddl_log_op, std::string>> keep;
+
+  /* RENAME TABLE: rename the table back if the DD has the old name */
+  for (const auto &entry : log) {
+    if (entry.op != ddl_log_op::RENAME) continue;
+    const std::string &to = entry.name;
+    if (entry.payload.size() <= sizeof(uint64)) continue;
+    const std::string from = entry.payload.substr(sizeof(uint64));
+    const dd::Object_id id = rdb_ddl_log_payload_id(entry.payload);
+    if (ddl_manager.find(to) == nullptr || ddl_manager.find(from) != nullptr) {
+      continue;
+    }
+    const Rdb_dd_name to_name(to);
+    const Rdb_dd_name from_name(from);
+    Rdb_recovery_mdl to_lock(thd, MDL_key::TABLE, to_name.db.c_str(),
+                             to_name.table.c_str(), MDL_SHARED);
+    Rdb_recovery_mdl from_lock(thd, MDL_key::TABLE, from_name.db.c_str(),
+                               from_name.table.c_str(), MDL_SHARED);
+    dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+    const dd::Table *to_table = nullptr;
+    const dd::Table *from_table = nullptr;
+    if (!to_lock.locked() || !from_lock.locked() ||
+        rdb_recovery_dd_table(thd, to_name, &to_table) ||
+        rdb_recovery_dd_table(thd, from_name, &from_table)) {
+      keep.emplace(entry.op, entry.name);
+      continue;
+    }
+    if (to_table != nullptr || !rdb_is_rocksdb_dd_table(from_table) ||
+        from_table->id() != id) {
+      continue;
+    }
+    LogPluginErrMsg(WARNING_LEVEL, 0,
+                    "Renaming table %s back to %s: RENAME TABLE was "
+                    "interrupted",
+                    to.c_str(), from.c_str());
+    if (rdb_recovery_rename(to, from)) {
+      LogPluginErrMsg(ERROR_LEVEL, 0, "Failed to rename %s to %s", to.c_str(),
+                      from.c_str());
+      keep.emplace(entry.op, entry.name);
+      continue;
+    }
+    DBUG_EXECUTE_IF("rocksdb_crash_in_ddl_recovery", DBUG_SUICIDE(););
+  }
+
+  /* CREATE TABLE and DROP TABLE */
+  std::map<std::string, std::pair<bool, dd::Object_id>> pending;
+  for (const auto &entry : log) {
+    if (entry.op == ddl_log_op::CREATE) {
+      pending[entry.name].first = true;
+    } else if (entry.op == ddl_log_op::DROP) {
+      pending[entry.name].second = rdb_ddl_log_payload_id(entry.payload);
+    }
+  }
+  /* MyRocks entries (the table, or its partitions) by table name */
+  std::map<std::string, std::vector<std::string>> entries_of;
+  if (!pending.empty()) {
+    Rdb_table_names tables;
+    ddl_manager.scan_for_tables(&tables);
+    for (const std::string &name : tables.m_names) {
+      const std::string base = rdb_base_tablename(name);
+      if (pending.count(base)) entries_of[base].push_back(name);
+    }
+  }
+  for (const auto &p : pending) {
+    const std::string &base = p.first;
+    const bool created = p.second.first;
+    const dd::Object_id dropped_id = p.second.second;
+    const auto keep_records = [&]() {
+      if (created) keep.emplace(ddl_log_op::CREATE, base);
+      if (dropped_id != dd::INVALID_OBJECT_ID) {
+        keep.emplace(ddl_log_op::DROP, base);
+      }
+    };
+    std::vector<Rdb_tbl_def *> entries;
+    for (const std::string &name : entries_of[base]) {
+      Rdb_tbl_def *const tbl = ddl_manager.find(name);
+      if (tbl != nullptr) entries.push_back(tbl);
+    }
+
+    const Rdb_dd_name dd_name(base);
+    std::size_t expected = 0;
+    bool in_dd = false;
+    dd::Object_id dd_id = dd::INVALID_OBJECT_ID;
+    {
+      Rdb_recovery_mdl lock(thd, MDL_key::TABLE, dd_name.db.c_str(),
+                            dd_name.table.c_str(), MDL_SHARED);
+      dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+      const dd::Table *table = nullptr;
+      if (!lock.locked() || rdb_recovery_dd_table(thd, dd_name, &table)) {
+        keep_records();
+        continue;
+      }
+      if (table != nullptr) {
+        if (!rdb_is_rocksdb_dd_table(table)) continue;
+        in_dd = true;
+        dd_id = table->id();
+        expected = std::max<std::size_t>(1, table->leaf_partitions().size());
+      }
+    }
+
+    /*
+      A DROP record of the table the DD has (same id) means that the DROP was
+      interrupted; with rocksdb_enable_delete_range_for_drop_index the record
+      precedes the removal of the rows and of the dictionary entry, so
+      MyRocks can still list the table. Without such a record a table that is
+      complete in both dictionaries needs nothing.
+    */
+    const bool roll_forward_drop =
+        dropped_id != dd::INVALID_OBJECT_ID && (!in_dd || dropped_id == dd_id);
+    if (in_dd && entries.size() >= expected && !roll_forward_drop) continue;
+
+    bool roll_back_create = false;
+    if (!roll_forward_drop) {
+      if (!created) continue;
+      rdb_emptiness emptiness = rdb_emptiness::EMPTY;
+      for (const Rdb_tbl_def *const tbl : entries) {
+        emptiness = rdb_table_emptiness(*tbl);
+        if (emptiness != rdb_emptiness::EMPTY) break;
+      }
+      if (emptiness == rdb_emptiness::ERROR) {
+        keep_records();
+        continue;
+      }
+      if (emptiness == rdb_emptiness::NOT_EMPTY) {
+        LogPluginErrMsg(WARNING_LEVEL, 0,
+                        "Table %s was not completely created, but it is not "
+                        "empty. It is left as it is",
+                        base.c_str());
+        continue;
+      }
+      roll_back_create = true;
+    }
+
+    if (in_dd) {
+      if (!can_change_dd) {
+        keep_records();
+        continue;
+      }
+      LogPluginErrMsg(WARNING_LEVEL, 0,
+                      roll_back_create
+                          ? "Removing table %s.%s: CREATE TABLE was "
+                            "interrupted before the table was created in "
+                            "RocksDB"
+                          : "Removing table %s.%s: DROP TABLE was interrupted "
+                            "after the table was dropped in RocksDB",
+                      dd_name.db.c_str(), dd_name.table.c_str());
+      if (rdb_recovery_dd_drop_table(thd, dd_name)) {
+        LogPluginErrMsg(ERROR_LEVEL, 0,
+                        "Failed to remove table %s.%s from the data "
+                        "dictionary",
+                        dd_name.db.c_str(), dd_name.table.c_str());
+        thd->clear_error();
+        keep_records();
+        continue;
+      }
+      DBUG_EXECUTE_IF("rocksdb_crash_in_ddl_recovery", DBUG_SUICIDE(););
+    }
+
+    /* Drop what MyRocks still has of the table */
+    for (Rdb_tbl_def *const tbl : entries) {
+      if (handler.delete_table(tbl) != HA_EXIT_SUCCESS) keep_records();
+    }
+  }
+
+  const std::unique_ptr<rocksdb::WriteBatch> wb = dict->begin();
+  for (const auto &entry : log) {
+    if (keep.count({entry.op, entry.name}) == 0) {
+      dict->delete_ddl_log(wb.get(), entry.op, entry.name);
+    }
+  }
+  (void)dict->commit(wb.get());
+}
+
+/*
   Storage Engine initialization function, invoked when plugin is loaded.
 */
 
@@ -6971,7 +7453,8 @@ static int rocksdb_init_internal(void *const p) {
   if (st_rdb_exec_time.exec("Rdb_ddl_manager::init", [&]() {
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
         return ddl_manager.init(&dict_manager, &cf_manager,
-                                rocksdb_validate_tables);
+                                rocksdb_validate_tables,
+                                rocksdb_recover_interrupted_ddl);
 #else
         return ddl_manager.init(&dict_manager, &cf_manager);
 #endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
@@ -9200,11 +9683,26 @@ int ha_rocksdb::create_table(const std::string &table_name,
       goto error;
     }
 
+    if (!rdb_ddl_log_skip(table_name)) {
+      /*
+        A DROP of the table, if any, has finished in the server DD. A CREATE
+        of a non-partitioned table finishes here; the partitioned one in
+        ha_rockspart::create().
+      */
+      const std::string base = rdb_base_tablename(table_name);
+      local_dict_manager->delete_ddl_log(batch, ddl_log_op::DROP, base);
+      if (base == table_name) {
+        local_dict_manager->delete_ddl_log(batch, ddl_log_op::CREATE, base);
+      }
+    }
+
+    DBUG_EXECUTE_IF("rocksdb_crash_before_create_table", DBUG_SUICIDE(););
     err = local_dict_manager->commit(batch);
     if (err != HA_EXIT_SUCCESS) {
       goto error;
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_create_table", DBUG_SUICIDE(););
 
   DBUG_RETURN(HA_EXIT_SUCCESS);
 
@@ -9337,6 +9835,13 @@ int ha_rocksdb::create(const char *const name, TABLE *const table_arg,
   }
   DBUG_RETURN(create_table(str, create_info->actual_user_table_name, *table_arg,
                            create_info->auto_increment_value, table_def));
+}
+
+int ha_rocksdb::get_extra_columns_and_keys(const HA_CREATE_INFO *create_info,
+                                           const List<Create_field> *,
+                                           const KEY *, uint,
+                                           dd::Table *table_obj) {
+  return rdb_ddl_log_create_table(create_info, table_obj);
 }
 
 /*
@@ -12982,7 +13487,8 @@ Rdb_tbl_def *ha_rocksdb::get_table_if_exists(const char *const tablename) {
     HA_EXIT_SUCCESS  OK
     other            HA_ERR error code (can be SE-specific)
 */
-int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
+int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl,
+                             const dd::Object_id *drop_log_dd_id) {
   DBUG_ENTER_FUNC();
 
   assert(tbl != nullptr);
@@ -13002,7 +13508,24 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
 
   {
     std::lock_guard<Rdb_dict_manager> dm_lock(*local_dict_manager);
+    const std::string &name = tbl->full_tablename();
+    const bool log_drop = drop_log_dd_id != nullptr && !rdb_ddl_log_skip(name);
     if (rocksdb_enable_delete_range_for_drop_index) {
+      if (log_drop) {
+        /*
+          delete_range() removes the rows before the dictionary commit
+          below: log the drop first, so that recovery finishes it.
+        */
+        const std::unique_ptr<rocksdb::WriteBatch> log_wb =
+            local_dict_manager->begin();
+        local_dict_manager->put_ddl_log(
+            log_wb.get(), ddl_log_op::DROP, rdb_base_tablename(name),
+            rdb_ddl_log_id_payload(*drop_log_dd_id));
+        const int err = local_dict_manager->commit(log_wb.get());
+        if (err) {
+          DBUG_RETURN(err);
+        }
+      }
       std::unordered_set<GL_INDEX_ID> dropped_index_ids;
       for (uint32 i = 0; i < tbl->m_key_count; i++) {
         dropped_index_ids.insert(tbl->m_key_descr_arr[i]->get_gl_index_id());
@@ -13011,12 +13534,26 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
       }
       int err = delete_range(dropped_index_ids);
       if (err) {
+        /*
+          The DROP record stays: some rows may be gone already, so the next
+          startup finishes the drop if the server DD still has the table.
+        */
         DBUG_RETURN(err);
       }
+      DBUG_EXECUTE_IF("rocksdb_crash_after_delete_range", DBUG_SUICIDE(););
     } else {
       local_dict_manager->add_drop_table(tbl->m_key_descr_arr, tbl->m_key_count,
                                          batch);
     }
+    if (!rdb_ddl_log_skip(name)) {
+      local_dict_manager->delete_ddl_log(batch, ddl_log_op::RENAME, name);
+    }
+    if (log_drop) {
+      local_dict_manager->put_ddl_log(batch, ddl_log_op::DROP,
+                                      rdb_base_tablename(name),
+                                      rdb_ddl_log_id_payload(*drop_log_dd_id));
+    }
+
     /*
       Remove the table entry in data dictionary (this will also remove it from
       the persistent data dictionary).
@@ -13028,6 +13565,7 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
       DBUG_RETURN(err);
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_delete_table", DBUG_SUICIDE(););
 
   DBUG_EXECUTE_IF("rocksdb_after_delete_table", {
     static constexpr char act[] =
@@ -13093,8 +13631,7 @@ int ha_rocksdb::delete_table_def(Rdb_tbl_def *const tbl) {
 */
 
 int ha_rocksdb::delete_table(const char *const tablename,
-                             const dd::Table *table_def
-                                 MY_ATTRIBUTE((__unused__))) {
+                             const dd::Table *table_def) {
   DBUG_ENTER_FUNC();
 
   assert(tablename != nullptr);
@@ -13105,6 +13642,18 @@ int ha_rocksdb::delete_table(const char *const tablename,
     DBUG_RETURN(HA_ERR_NO_SUCH_TABLE);
   }
 
+  /*
+    DROP TABLE (also DROP DATABASE, and the cleanup of a failed CREATE TABLE)
+    commits the server DD after this: log the drop for crash recovery.
+  */
+  THD *const thd = my_core::thd_get_current_thd();
+  if (table_def != nullptr && thd != nullptr &&
+      (thd->lex->sql_command == SQLCOM_DROP_TABLE ||
+       thd->lex->sql_command == SQLCOM_DROP_DB ||
+       thd->lex->sql_command == SQLCOM_CREATE_TABLE)) {
+    const dd::Object_id id = table_def->id();
+    DBUG_RETURN(delete_table(tbl, &id));
+  }
   DBUG_RETURN(delete_table(tbl));
 }
 
@@ -13113,10 +13662,10 @@ int ha_rocksdb::delete_table(const char *const tablename,
     HA_EXIT_SUCCESS  OK
     other            HA_ERR error code (cannot be SE-specific)
 */
-int ha_rocksdb::rename_table(
-    const char *const from, const char *const to,
-    const dd::Table *from_table_def MY_ATTRIBUTE((__unused__)),
-    dd::Table *to_table_def MY_ATTRIBUTE((__unused__))) {
+int ha_rocksdb::rename_table(const char *const from, const char *const to,
+                             const dd::Table *from_table_def,
+                             dd::Table *to_table_def
+                                 MY_ATTRIBUTE((__unused__))) {
   DBUG_ENTER_FUNC();
 
   std::string from_str;
@@ -13176,8 +13725,34 @@ int ha_rocksdb::rename_table(
   if (ddl_manager.rename(from_str, to_str, batch)) {
     rc = HA_ERR_ROCKSDB_INVALID_TABLE;
   } else {
+    /*
+      The server DD is committed after this: log the rename for crash
+      recovery. Records of earlier statements on these names are obsolete.
+    */
+    const bool log_from = !rdb_ddl_log_skip(from_str);
+    const bool log_to = !rdb_ddl_log_skip(to_str);
+    if (log_from) {
+      local_dict_manager->delete_ddl_log(batch, ddl_log_op::RENAME, from_str);
+    }
+    if (log_to) {
+      const std::string to_base = rdb_base_tablename(to_str);
+      local_dict_manager->delete_ddl_log(batch, ddl_log_op::CREATE, to_base);
+      local_dict_manager->delete_ddl_log(batch, ddl_log_op::DROP, to_base);
+    }
+    if (log_from && log_to && from_table_def != nullptr) {
+      local_dict_manager->put_ddl_log(
+          batch, ddl_log_op::RENAME, to_str,
+          rdb_ddl_log_id_payload(from_table_def->id()) + from_str);
+    }
     rc = local_dict_manager->commit(batch);
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename", {
+    if (rc == HA_EXIT_SUCCESS) DBUG_SUICIDE();
+  });
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename_from_tmp", {
+    if (rc == HA_EXIT_SUCCESS && strstr(from, tmp_file_prefix) != nullptr)
+      DBUG_SUICIDE();
+  });
   DBUG_RETURN(rc);
 }
 
@@ -15229,6 +15804,9 @@ bool ha_rocksdb::commit_inplace_alter_table(
         */
         assert(0);
       }
+
+      DBUG_EXECUTE_IF("rocksdb_crash_before_finish_create_index",
+                      DBUG_SUICIDE(););
 
       /* Mark ongoing create indexes as finished/remove from data dictionary */
       local_dict_manager->finish_indexes_operation(

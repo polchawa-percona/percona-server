@@ -1,0 +1,192 @@
+#
+# Finding 46 (port-findings.md): a crash inside CREATE TABLE after the server's
+# data dictionary is committed and before the MyRocks dictionary is, or inside
+# DROP TABLE after the MyRocks dictionary is committed and before the server's
+# data dictionary is, leaves the dictionaries disagreeing. MyRocks then refuses
+# to start with the default rocksdb_validate_tables=1.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and both
+# dictionaries agree; the table is usable or absent.
+#
+# Fixed by the MyRocks DDL recovery log: an interrupted CREATE TABLE is rolled
+# back (the table is removed from the server's data dictionary), an
+# interrupted DROP TABLE is rolled forward (its data is already queued for
+# deletion in MyRocks). Partitioned tables are created and dropped one
+# partition at a time, so a crash can also leave only some partitions.
+# A crash during the recovery itself (debug crash point
+# rocksdb_crash_in_ddl_recovery) is finished by the next startup.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Removing table .*: CREATE TABLE was interrupted");
+CALL mtr.add_suppression("Removing table .*: DROP TABLE was interrupted");
+--enable_query_log
+
+--let $check_tables = 't1'
+--let $error_log = $MYSQLTEST_VARDIR/log/mysqld.1.err
+
+--echo # CREATE TABLE: crash before the MyRocks dictionary commit.
+--let $crash_point = rocksdb_crash_before_create_table
+--let $crash_stmt = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--let $assert_text = Startup rolled back the CREATE TABLE
+--let $assert_file = $error_log
+--let $assert_select = Removing table test.t1: CREATE TABLE was interrupted
+--let $assert_count = 1
+--source include/assert_grep.inc
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+
+--echo # DROP TABLE: crash after the MyRocks dictionary commit.
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--echo # The MyRocks data is gone, so the table must be gone too.
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo # Partitioned CREATE TABLE: crash before the first partition is created.
+--let $crash_point = rocksdb_crash_before_create_table
+--let $crash_stmt = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE)
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--echo # Partitioned CREATE TABLE: crash after the first partition is created.
+--let $crash_point = rocksdb_crash_after_create_table
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--echo # Partitioned DROP TABLE: crash after the first partition is dropped.
+--eval $crash_stmt
+INSERT INTO t1 VALUES (1,1),(2,2),(20,20);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+  WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--echo # The histogram of the dropped table is removed too.
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+  WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+
+--echo # DROP TABLE with rocksdb_enable_delete_range_for_drop_index=ON: crash
+--echo # after the rows are deleted, before the MyRocks dictionary commit.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+--let $crash_point = rocksdb_crash_after_delete_range
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--echo # A crash during the startup recovery itself, after the table is removed
+--echo # from the server's data dictionary and before MyRocks drops what it has
+--echo # of the table: the next startup finishes the recovery.
+CREATE TABLE t0 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1),(2),(3);
+--let $recovery_log = $MYSQLTEST_VARDIR/log/ddl_crash_recovery_crash.err
+
+--echo # Partitioned CREATE TABLE: crash after the first partition is created,
+--echo # then crash in the recovery.
+--source include/expect_crash.inc
+SET SESSION debug = "+d,rocksdb_crash_after_create_table";
+--error CR_SERVER_LOST
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+--source include/wait_until_disconnected.inc
+--error 137
+--exec $MYSQLD_CMD --debug=+d,rocksdb_crash_in_ddl_recovery --log-error=$recovery_log $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD"
+--source include/start_mysqld.inc
+--let $assert_text = The recovery crashed after removing the table from the DD
+--let $assert_file = $recovery_log
+--let $assert_select = Removing table test.t1: CREATE TABLE was interrupted
+--let $assert_count = 1
+--source include/assert_grep.inc
+--remove_file $recovery_log
+--let $check_tables = 't0','t1'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT * FROM t0;
+
+--echo # Partitioned DROP TABLE: crash after the first partition is dropped,
+--echo # then crash in the recovery.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(20,20);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a;
+SET SESSION transaction_isolation = DEFAULT;
+--source include/expect_crash.inc
+SET SESSION debug = "+d,rocksdb_crash_after_delete_table";
+--error CR_SERVER_LOST
+DROP TABLE t1;
+--source include/wait_until_disconnected.inc
+--error 137
+--exec $MYSQLD_CMD --debug=+d,rocksdb_crash_in_ddl_recovery --log-error=$recovery_log $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD"
+--source include/start_mysqld.inc
+--let $assert_text = The recovery crashed after removing the table from the DD
+--let $assert_file = $recovery_log
+--let $assert_select = Removing table test.t1: DROP TABLE was interrupted
+--let $assert_count = 1
+--source include/assert_grep.inc
+--remove_file $recovery_log
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+  WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+SELECT * FROM t0;
+DROP TABLE t0;
+--let $check_tables = 't1'
+
+--echo # A completed DROP TABLE leaves a recovery record that must not affect a
+--echo # table created later with the same name, also after a restart.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE t2;
+--echo # A failed partitioned CREATE TABLE keeps its recovery record (the
+--echo # server removes the table from its DD after the engine failed); the
+--echo # record must not affect the next startup.
+SET SESSION debug = "+d,rocksdb_truncate_failure";
+--error ER_INTERNAL_ERROR
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB
+  PARTITION BY HASH (id) PARTITIONS 2;
+SET SESSION debug = "-d,rocksdb_truncate_failure";
+--source include/restart_mysqld.inc
+--let $check_tables = 't1','t2'
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT * FROM t1;
+DROP TABLE t1;
