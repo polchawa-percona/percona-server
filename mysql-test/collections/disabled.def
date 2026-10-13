@@ -138,6 +138,7 @@ rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.ddl_crash_create_drop_mismatch : BUG#0 PS-11666 CREATE/DROP crash
 rocksdb.ddl_crash_rename_mismatch : BUG#0 PS-11667 RENAME crash
 rocksdb.ddl_crash_truncate : BUG#0 PS-11668 TRUNCATE crash
+rocksdb.ddl_downgrade_pending_alter : BUG#11834 PS-11834 downgrade with an unresolved pending ALTER TABLE record
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

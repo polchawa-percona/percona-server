@@ -5983,6 +5983,10 @@ rocksdb::Status Rdb_dict_manager::get_pending_alter(
   Rdb_pending_alter_key key_writer;
   rdb_pending_alter_key(&key_writer, tbl_name);
 
+  /* Debug: a server version without pending records does not read them */
+  DBUG_EXECUTE_IF("rocksdb_simulate_no_pending_alter_support",
+                  { return rocksdb::Status::NotFound(); });
+
   std::string value;
   const rocksdb::Status status = get_value(key_writer.to_slice(), &value);
   if (!status.ok()) {
@@ -6061,8 +6065,18 @@ rocksdb::Status Rdb_dict_manager::get_pending_alter_tables(
         memcmp(key.data(), prefix_buf, Rdb_key_def::INDEX_NUMBER_SIZE)) {
       break;
     }
-    names->emplace_back(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE,
-                        key.size() - Rdb_key_def::INDEX_NUMBER_SIZE);
+    const std::string name(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE,
+                           key.size() - Rdb_key_def::INDEX_NUMBER_SIZE);
+    /* Debug: a server version without pending records does not see them */
+    if (DBUG_EVALUATE_IF("rocksdb_simulate_no_pending_alter_support", true,
+                         false)) {
+      LogPluginErrMsg(INFORMATION_LEVEL, 0,
+                      "Simulating a server version without pending ALTER "
+                      "TABLE records: ignoring the record of table %s.",
+                      name.c_str());
+      continue;
+    }
+    names->push_back(name);
   }
   if (!it->status().ok()) {
     LogPluginErrMsg(ERROR_LEVEL, 0,
