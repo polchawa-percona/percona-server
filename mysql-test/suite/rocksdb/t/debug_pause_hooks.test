@@ -1,0 +1,155 @@
+#
+# Self-test of the shared debug-only pause hooks for manual compactions and
+# the drop-index thread (storage/rocksdb/rdb_utils.h), and of the includes
+# debug_pause_mark.inc / debug_pause_wait.inc that tests use with them.
+#
+# Each hook must hold its thread while its global debug keyword is set and
+# release it when the keyword is removed. Keywords match exactly: a keyword
+# that only shares a prefix with a hook does not pause anything.
+#
+# The -master.opt file gives the test a freshly started server (MTR
+# restarts with a clean datadir when the options change), so no drop left
+# by an earlier test makes the drop-index thread run manual compactions that
+# the global hooks would also hold, and several compaction workers. In
+# addition, the compaction checks count only pauses in this test's column
+# family, and the drop-index checks look only at this test's indexes.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (id INT NOT NULL, a INT NOT NULL,
+  PRIMARY KEY (id) COMMENT 'cfname=cf_hooks',
+  KEY ka (a) COMMENT 'cfname=cf_hooks') ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+  SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--let $cf_id = `SELECT DISTINCT column_family FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't1'`
+--let $debug_pause_details = cf id $cf_id
+
+connect (con1,localhost,root,,);
+connection default;
+
+--echo #
+--echo # Manual compaction hooks
+--echo #
+--let $points = start index middle completed
+while ($points) {
+  --let $point = `SELECT SUBSTRING_INDEX('$points', ' ', 1)`
+  --let $points = `SELECT TRIM(SUBSTR('$points', LENGTH('$point') + 1))`
+  --let $debug_pause_hook = rocksdb_pause_manual_compaction_$point
+  --echo # $debug_pause_hook
+
+  # An L0 file with all 4000 keys that overlaps the older file, so the
+  # compaction rewrites both and is not a trivial move.
+  UPDATE t1 SET a = a + 1;
+  SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+  --source suite/rocksdb/include/debug_pause_mark.inc
+  eval SET GLOBAL debug = '+d,$debug_pause_hook';
+  connection con1;
+  send SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+
+  connection default;
+  --source suite/rocksdb/include/debug_pause_wait.inc
+  # Held: the statement has not returned, the compaction is still running.
+  SELECT COUNT(*) AS compact_cf_running FROM performance_schema.processlist
+    WHERE info LIKE 'SET GLOBAL rocksdb_compact_cf%';
+  SELECT COUNT(*) > 0 AS compaction_active
+    FROM information_schema.rocksdb_active_compaction_stats
+    WHERE cf_name = 'cf_hooks';
+
+  # Resumed: the statement returns.
+  eval SET GLOBAL debug = '-d,$debug_pause_hook';
+  connection con1;
+  reap;
+  connection default;
+  --let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_active_compaction_stats WHERE cf_name = 'cf_hooks'
+  --source include/wait_condition.inc
+}
+
+--let $assert_text = Each compaction hook paused once in cf_hooks
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = MyRocks: test: paused at rocksdb_pause_manual_compaction_(start|index|middle|completed), cf id $cf_id\b
+--let $assert_only_after = CURRENT_TEST: rocksdb.debug_pause_hooks
+--let $assert_count = 4
+--source include/assert_grep.inc
+
+--echo #
+--echo # A keyword that is only a prefix of a hook does not pause it
+--echo #
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_star';
+# Returns only if the compaction is not held.
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_star';
+--let $assert_text = The prefix keyword did not pause the compaction
+--let $assert_select = MyRocks: test: paused at rocksdb_pause_manual_compaction_start, cf id $cf_id\b
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--echo #
+--echo # rocksdb_pause_drop_index_thread
+--echo #
+--let $debug_pause_details =
+--let $debug_pause_hook = rocksdb_pause_drop_index_thread
+CREATE TABLE t2 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+  ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+  SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+--let $t2_index = `SELECT CONCAT('cf_id:', column_family, ',index_id:', index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't2'`
+
+--source suite/rocksdb/include/debug_pause_mark.inc
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+DROP TABLE t2;
+--source suite/rocksdb/include/debug_pause_wait.inc
+# Held: the dropped index is not reclaimed while the keyword is set.
+--replace_result $t2_index T2_INDEX
+eval SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t2_index';
+
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# The drop-index thread goes on to reclaim the dropped index.
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t2_index'
+--let $wait_timeout = 120
+--source include/wait_condition.inc
+
+--echo #
+--echo # Shutdown ends a pause of the drop-index thread
+--echo #
+CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2')
+  ENGINE=ROCKSDB;
+INSERT INTO t3 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+  SELECT i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+--let $t3_index = `SELECT CONCAT('cf_id:', column_family, ',index_id:', index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't3'`
+--source suite/rocksdb/include/debug_pause_mark.inc
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+DROP TABLE t3;
+--source suite/rocksdb/include/debug_pause_wait.inc
+--replace_result $t3_index T3_INDEX
+eval SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t3_index';
+disconnect con1;
+--source include/restart_mysqld.inc
+# After the restart the drop is finished.
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t3_index'
+--let $wait_timeout = 120
+--source include/wait_condition.inc
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+--let $t1_indexes = `SELECT GROUP_CONCAT(CONCAT('''cf_id:', column_family, ',index_id:', index_number, '''')) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't1'`
+DROP TABLE t1;
+# Let the drop-index thread reclaim t1 before the next test (or --repeat)
+# sets any hook: its compactions are manual compactions too.
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name IN ($t1_indexes)
+--source include/wait_condition.inc
+--source include/wait_until_count_sessions.inc
