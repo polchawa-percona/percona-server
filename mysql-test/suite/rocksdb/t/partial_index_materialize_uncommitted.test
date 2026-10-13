@@ -1,0 +1,58 @@
+#
+# A read through a partial index materializes a group that has grown past
+# the threshold: Rdb_iterator_partial::materialize_prefix() reads the group's
+# primary-key rows and writes their secondary-key entries in a separate write
+# batch that is committed at once. It reads the group through the reading
+# transaction, so the transaction's own uncommitted rows are materialized too.
+# Their secondary-key entries are then visible to every other connection, and
+# stay after the transaction rolls back.
+#
+# Correct behaviour, asserted here: other connections never see the
+# uncommitted rows, and after the rollback the partial index has exactly the
+# group's committed rows and CHECK TABLE reports no corruption.
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t (g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+  PRIMARY KEY (g, id),
+  KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+  ENGINE=ROCKSDB;
+
+connect (con1,localhost,root,,);
+connect (con_r,localhost,root,,);
+--let $levels = READ-COMMITTED REPEATABLE-READ
+while ($levels) {
+  --let $level = `SELECT SUBSTRING_INDEX('$levels', ' ', 1)`
+  --let $levels = `SELECT TRIM(SUBSTR('$levels', LENGTH('$level') + 1))`
+  --echo # $level
+  connection default;
+  DELETE FROM t;
+  # Group 1 has 2 rows, below the threshold: not materialized.
+  INSERT INTO t VALUES (1, 1, 1), (1, 2, 2);
+  connection con_r;
+  eval SET SESSION transaction_isolation = '$level';
+  BEGIN;
+  SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+  connection con1;
+  eval SET SESSION transaction_isolation = '$level';
+  BEGIN;
+  # Group 1 grows to 4 rows in con1's view, past the threshold.
+  INSERT INTO t VALUES (1, 10, 10), (1, 11, 11);
+  --echo # con1 reads its own rows through the partial index.
+  SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+  connection con_r;
+  --echo # Another connection must not see con1's uncommitted rows.
+  SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+  COMMIT;
+  connection con1;
+  ROLLBACK;
+  connection default;
+  --echo # After the rollback the group has its 2 committed rows.
+  SELECT * FROM t FORCE INDEX (kp) WHERE g = 1;
+  SELECT COUNT(*) FROM t FORCE INDEX (kp) WHERE g = 1 AND v >= 0;
+  CHECK TABLE t;
+}
+disconnect con1;
+disconnect con_r;
+connection default;
+DROP TABLE t;

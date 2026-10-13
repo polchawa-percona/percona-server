@@ -1,0 +1,712 @@
+CREATE DATABASE mc;
+CREATE TABLE mc.t_pk (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_hpk (
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_multi (
+id INT PRIMARY KEY,
+u INT NOT NULL,
+v VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+c TEXT NOT NULL,
+UNIQUE KEY ku (u), KEY kv (v), KEY kc (c(8)), KEY kcov (u, v)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_cf (
+id INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+UNIQUE KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+CREATE TABLE mc.t_part (
+g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+CREATE TABLE mc.side_def (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE mc.side_cf (
+id INT NOT NULL, a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+CREATE TABLE mc.multi_orig ENGINE=InnoDB AS SELECT * FROM mc.t_multi;
+CREATE TABLE mc.cf_orig ENGINE=InnoDB AS SELECT * FROM mc.t_cf;
+SET SESSION transaction_isolation = DEFAULT;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# READ-COMMITTED, optimize, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	391252222	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, optimize, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	4077298535	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, optimize, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2939501072	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3772707348	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3169676131	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	1488568570	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	76175757	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3345895666	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2606614917	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	3169528929	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	4030047566	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2886089785	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 0
+next statement sees the new rows: 1
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	1213372320	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE-READ, optimize, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	341905111	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, optimize, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	1535821523	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, optimize, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	129589156	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3824022589	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3219025226	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2084201525	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	537525570	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2030230021	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	623985522	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero, forward scan of t_multi.kv
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= '' INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3244681451	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero, backward scan of t_cf.kb (reverse column family)
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	2639688092	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero, primary key scan of t_multi
+BEGIN;
+SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648 INTO @mc_scan_result;
+SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+SET DEBUG_SYNC = 'now SIGNAL go';
+paused scan returned the rows of its snapshot: 1
+next statement sees the old rows: 1
+next statement sees the new rows: 0
+COMMIT;
+SET DEBUG_SYNC = 'RESET';
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	3535649176	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	100	973716194	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET DEBUG_SYNC = 'RESET';
+DROP DATABASE mc;

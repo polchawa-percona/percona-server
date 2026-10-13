@@ -1,0 +1,596 @@
+CREATE DATABASE mc;
+CREATE TABLE mc.t_pk (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_hpk (
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_multi (
+id INT PRIMARY KEY,
+u INT NOT NULL,
+v VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+c TEXT NOT NULL,
+UNIQUE KEY ku (u), KEY kv (v), KEY kc (c(8)), KEY kcov (u, v)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_cf (
+id INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+UNIQUE KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+CREATE TABLE mc.t_part (
+g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+CREATE TABLE mc.side_def (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE mc.side_cf (
+id INT NOT NULL, a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+CREATE TABLE mc.snaps (n INT PRIMARY KEY, d TEXT) ENGINE=InnoDB;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# READ-COMMITTED, optimize
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version1' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version2' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version3' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version4' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+con_s1 sees its version: 0, sees the latest: 1
+con_s2 sees its version: 0, sees the latest: 1
+con_s3 sees its version: 0, sees the latest: 1
+con_s4 sees its version: 0, sees the latest: 1
+con_s5 sees its version: 0, sees the latest: 1
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1747545677	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version6' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version7' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version8' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version9' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+con_s1 sees its version: 0, sees the latest: 1
+con_s2 sees its version: 0, sees the latest: 1
+con_s3 sees its version: 0, sees the latest: 1
+con_s4 sees its version: 0, sees the latest: 1
+con_s5 sees its version: 0, sees the latest: 1
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	2262017173	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version11' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version12' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version13' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version14' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+con_s1 sees its version: 0, sees the latest: 1
+con_s2 sees its version: 0, sees the latest: 1
+con_s3 sees its version: 0, sees the latest: 1
+con_s4 sees its version: 0, sees the latest: 1
+con_s5 sees its version: 0, sees the latest: 1
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	4139339802	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version16' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version17' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version18' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version19' WHERE id = 200;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+con_s1 sees its version: 0, sees the latest: 1
+con_s2 sees its version: 0, sees the latest: 1
+con_s3 sees its version: 0, sees the latest: 1
+con_s4 sees its version: 0, sees the latest: 1
+con_s5 sees its version: 0, sees the latest: 1
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	2919167830	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, optimize
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version21' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version22' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version23' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version24' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+con_s1 sees its version: 1, sees the latest: 0
+con_s2 sees its version: 1, sees the latest: 0
+con_s3 sees its version: 1, sees the latest: 0
+con_s4 sees its version: 1, sees the latest: 0
+con_s5 sees its version: 1, sees the latest: 0
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	3717465049	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version26' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version27' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version28' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version29' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+con_s1 sees its version: 1, sees the latest: 0
+con_s2 sees its version: 1, sees the latest: 0
+con_s3 sees its version: 1, sees the latest: 0
+con_s4 sees its version: 1, sees the latest: 0
+con_s5 sees its version: 1, sees the latest: 0
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	3034957335	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version31' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version32' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version33' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version34' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+con_s1 sees its version: 1, sees the latest: 0
+con_s2 sees its version: 1, sees the latest: 0
+con_s3 sees its version: 1, sees the latest: 0
+con_s4 sees its version: 1, sees the latest: 0
+con_s5 sees its version: 1, sees the latest: 0
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	3297718936	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+UPDATE mc.t_cf SET b = 'version36' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+UPDATE mc.t_cf SET b = 'version37' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+DROP TEMPORARY TABLE tmp_m, tmp_c;
+UPDATE mc.t_cf SET b = 'version38' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+INSERT INTO mc.t_pk
+WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+SELECT n FROM s;
+REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+DELETE FROM mc.t_pk WHERE id = 108;
+INSERT INTO mc.t_pk VALUES (108);
+UPDATE mc.t_cf SET b = 'version39' WHERE id = 200;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+con_s1 sees its version: 1, sees the latest: 0
+con_s2 sees its version: 1, sees the latest: 0
+con_s3 sees its version: 1, sees the latest: 0
+con_s4 sees its version: 1, sees the latest: 0
+con_s5 sees its version: 1, sees the latest: 0
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+COMMIT;
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	4221849808	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# restart: --rocksdb_validate_tables=1
+# check: after restart
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2194207400	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	4221849808	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+DROP DATABASE mc;
