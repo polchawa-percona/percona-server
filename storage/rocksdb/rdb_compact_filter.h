@@ -32,6 +32,7 @@
 /* MyRocks includes */
 #include "./ha_rocksdb_proto.h"
 #include "./rdb_datadic.h"
+#include "./rdb_utils.h"
 
 namespace myrocks {
 
@@ -40,7 +41,9 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
   Rdb_compact_filter(const Rdb_compact_filter &) = delete;
   Rdb_compact_filter &operator=(const Rdb_compact_filter &) = delete;
 
-  explicit Rdb_compact_filter(uint32_t _cf_id) : m_cf_id(_cf_id) {}
+  explicit Rdb_compact_filter(uint32_t _cf_id,
+                              bool _is_manual_compaction = false)
+      : m_cf_id(_cf_id), m_is_manual_compaction(_is_manual_compaction) {}
   ~Rdb_compact_filter() {
     // Increment stats by num expired at the end of compaction
     rdb_update_global_stats(ROWS_EXPIRED, m_num_expired);
@@ -55,6 +58,13 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
                       std::string *new_value,
                       bool *value_changed) const override {
     assert(key.size() >= sizeof(uint32));
+
+#ifndef NDEBUG
+    if (m_is_manual_compaction && ++m_dbug_num_keys == 1000) {
+      rdb_dbug_pause_while_set("rocksdb_pause_manual_compaction_middle",
+                               "cf id " + std::to_string(m_cf_id));
+    }
+#endif
 
     GL_INDEX_ID gl_index_id;
     gl_index_id.cf_id = m_cf_id;
@@ -93,6 +103,19 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
       }
 
       m_prev_index = gl_index_id;
+
+#ifndef NDEBUG
+      if (m_is_manual_compaction && !m_dbug_index_paused &&
+          rdb_dbug_global_keyword_set(
+              "rocksdb_pause_manual_compaction_index")) {
+        m_dbug_index_paused = true;
+        rdb_dbug_pause_while_set("rocksdb_pause_manual_compaction_index",
+                                 "cf id " + std::to_string(gl_index_id.cf_id) +
+                                     ", index id " +
+                                     std::to_string(gl_index_id.index_id) +
+                                     ", drop " + (m_should_delete ? "1" : "0"));
+      }
+#endif
     }
 
     if (m_should_delete) {
@@ -184,6 +207,14 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
  private:
   // Column family for this compaction filter
   const uint32_t m_cf_id;
+  // Whether this filter runs in a manual compaction (used by test hooks)
+  [[maybe_unused]] const bool m_is_manual_compaction;
+#ifndef NDEBUG
+  // Number of keys seen, for rocksdb_pause_manual_compaction_middle
+  mutable uint64 m_dbug_num_keys = 0;
+  // Whether rocksdb_pause_manual_compaction_index has paused this filter
+  mutable bool m_dbug_index_paused = false;
+#endif
   // Index id of the previous record
   mutable GL_INDEX_ID m_prev_index = {0, 0};
   // Number of rows deleted for the same index id
@@ -213,8 +244,15 @@ class Rdb_compact_filter_factory : public rocksdb::CompactionFilterFactory {
 
   std::unique_ptr<rocksdb::CompactionFilter> CreateCompactionFilter(
       const rocksdb::CompactionFilter::Context &context) override {
-    return std::unique_ptr<rocksdb::CompactionFilter>(
-        new Rdb_compact_filter(context.column_family_id));
+#ifndef NDEBUG
+    if (context.is_manual_compaction) {
+      rdb_dbug_pause_while_set(
+          "rocksdb_pause_manual_compaction_start",
+          "cf id " + std::to_string(context.column_family_id));
+    }
+#endif
+    return std::unique_ptr<rocksdb::CompactionFilter>(new Rdb_compact_filter(
+        context.column_family_id, context.is_manual_compaction));
   }
 };
 
