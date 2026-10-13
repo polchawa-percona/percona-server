@@ -1,0 +1,49 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# rocksdb_deadlock_detect_depth accepts values up to ULONG_MAX
+# (ha_rocksdb.cc, MYSQL_THDVAR_ULONG(deadlock_detect_depth, ..., ULONG_MAX)).
+# The value is passed unchanged to RocksDB as
+# TransactionOptions::deadlock_detect_depth, and
+# PointLockManager::IncrementWaiters() allocates a std::vector<int> of that
+# many elements when a transaction starts waiting for a lock with deadlock
+# detection on. For a large value the vector constructor throws
+# (std::length_error for ULONG_MAX, std::bad_alloc for other huge values),
+# nothing catches it and the server aborts. Found by pstress with the random
+# startup option --rocksdb_deadlock_detect_depth=1125899906842624.
+#
+# The test asserts that a lock wait with the maximum value ends with a lock
+# wait timeout and the server keeps running.
+#
+
+CREATE TABLE t1 (id INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+
+connect (con1, localhost, root,,);
+BEGIN;
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+
+connection default;
+SET SESSION rocksdb_deadlock_detect = ON;
+--disable_warnings
+SET SESSION rocksdb_deadlock_detect_depth = 18446744073709551615;
+--enable_warnings
+SET SESSION rocksdb_lock_wait_timeout = 1;
+BEGIN;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 WHERE id = 1 FOR UPDATE;
+ROLLBACK;
+
+connection con1;
+ROLLBACK;
+disconnect con1;
+
+connection default;
+SET SESSION rocksdb_deadlock_detect_depth = DEFAULT;
+SET SESSION rocksdb_deadlock_detect = DEFAULT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc
