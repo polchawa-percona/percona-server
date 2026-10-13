@@ -1,0 +1,68 @@
+SELECT @@global.rocksdb_flush_log_at_trx_commit;
+@@global.rocksdb_flush_log_at_trx_commit
+2
+SELECT @@global.log_bin;
+@@global.log_bin
+0
+CREATE TABLE t1 (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0, 'before');
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+#
+# Binary log off, autocommit INSERT
+#
+INSERT INTO t1 VALUES (1, 'autocommit');
+# Kill and restart
+SELECT * FROM t1 ORDER BY id;
+id	val
+0	before
+1	autocommit
+#
+# Binary log off, multi-statement transaction
+#
+BEGIN;
+INSERT INTO t1 VALUES (2, 'trx');
+INSERT INTO t1 VALUES (3, 'trx');
+UPDATE t1 SET val = 'trx updated' WHERE id = 0;
+COMMIT;
+# Kill and restart
+SELECT * FROM t1 ORDER BY id;
+id	val
+0	trx updated
+1	autocommit
+2	trx
+3	trx
+#
+# Control: binary log on, autocommit INSERT and multi-statement
+# transaction
+#
+# restart: --log-bin
+SELECT @@global.rocksdb_flush_log_at_trx_commit;
+@@global.rocksdb_flush_log_at_trx_commit
+2
+SELECT @@global.log_bin;
+@@global.log_bin
+1
+DELETE FROM t1;
+INSERT INTO t1 VALUES (0, 'before'), (1, 'autocommit'), (2, 'trx'),
+(3, 'trx');
+UPDATE t1 SET val = 'trx updated' WHERE id = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (4, 'binlog autocommit');
+BEGIN;
+INSERT INTO t1 VALUES (5, 'binlog trx');
+UPDATE t1 SET val = 'binlog trx updated' WHERE id = 1;
+COMMIT;
+# Kill and restart: --log-bin
+SELECT @@global.log_bin;
+@@global.log_bin
+1
+SELECT * FROM t1 ORDER BY id;
+id	val
+0	trx updated
+1	binlog trx updated
+2	trx
+3	trx
+4	binlog autocommit
+5	binlog trx
+# restart
+DROP TABLE t1;
