@@ -1,0 +1,29 @@
+SET @old_log_output = @@global.log_output;
+SET @old_slow_query_log = @@global.slow_query_log;
+SET @old_long_query_time = @@global.long_query_time;
+SET GLOBAL log_output = 'TABLE';
+SET GLOBAL long_query_time = 0;
+SET GLOBAL slow_query_log = 1;
+TRUNCATE TABLE mysql.slow_log;
+CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE=ROCKSDB;
+BEGIN;
+INSERT INTO t1 VALUES (1);
+SET SESSION long_query_time = 0;
+SET SESSION rocksdb_lock_wait_timeout = 2;
+# Waits for the row lock held by the default connection and times out
+INSERT INTO t1 VALUES (1);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+# The statement waited about 2 seconds for the row lock, so its
+# lock_time must be at least 1 second
+SELECT TIME_TO_SEC(lock_time) >= 1 AS lock_time_includes_row_lock_wait
+FROM mysql.slow_log
+WHERE sql_text = 'INSERT INTO t1 VALUES (1)' AND TIME_TO_SEC(query_time) >= 1;
+lock_time_includes_row_lock_wait
+1
+DROP TABLE t1;
+SET GLOBAL slow_query_log = @old_slow_query_log;
+SET GLOBAL long_query_time = @old_long_query_time;
+SET GLOBAL log_output = @old_log_output;
+TRUNCATE TABLE mysql.slow_log;
+TRUNCATE TABLE mysql.general_log;
