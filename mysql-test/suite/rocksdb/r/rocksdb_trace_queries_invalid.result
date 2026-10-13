@@ -1,0 +1,29 @@
+# Control: a valid value starts tracing
+SET GLOBAL rocksdb_trace_queries = '1:1024:ps11846_trace_ok';
+SELECT @@global.rocksdb_trace_queries;
+@@global.rocksdb_trace_queries
+1:1024:ps11846_trace_ok
+SET GLOBAL rocksdb_trace_queries = '';
+# Negative sampling_frequency
+SET GLOBAL rocksdb_trace_queries = '-1:1024:ps11846_trace_1';
+ERROR 42000: Variable 'rocksdb_trace_queries' can't be set to the value of '-1:1024:ps11846_trace_1'
+# Negative max_trace_file_size
+SET GLOBAL rocksdb_trace_queries = '1:-1024:ps11846_trace_2';
+ERROR 42000: Variable 'rocksdb_trace_queries' can't be set to the value of '1:-1024:ps11846_trace_2'
+# Non-integer sampling_frequency
+SET GLOBAL rocksdb_trace_queries = '1.1:1024:ps11846_trace_3';
+ERROR 42000: Variable 'rocksdb_trace_queries' can't be set to the value of '1.1:1024:ps11846_trace_3'
+# Non-integer max_trace_file_size
+SET GLOBAL rocksdb_trace_queries = '1:10.24:ps11846_trace_4';
+ERROR 42000: Variable 'rocksdb_trace_queries' can't be set to the value of '1:10.24:ps11846_trace_4'
+# Trailing garbage after the number
+SET GLOBAL rocksdb_trace_queries = '1abc:1024:ps11846_trace_5';
+ERROR 42000: Variable 'rocksdb_trace_queries' can't be set to the value of '1abc:1024:ps11846_trace_5'
+# rocksdb_trace_block_cache_access uses the same parser
+SET GLOBAL rocksdb_trace_block_cache_access = '-1:1024:ps11846_bc_1';
+ERROR 42000: Variable 'rocksdb_trace_block_cache_access' can't be set to the value of '-1:1024:ps11846_bc_1'
+SET GLOBAL rocksdb_trace_block_cache_access = '1:1.5:ps11846_bc_2';
+ERROR 42000: Variable 'rocksdb_trace_block_cache_access' can't be set to the value of '1:1.5:ps11846_bc_2'
+SELECT @@global.rocksdb_trace_queries, @@global.rocksdb_trace_block_cache_access;
+@@global.rocksdb_trace_queries	@@global.rocksdb_trace_block_cache_access
+	
