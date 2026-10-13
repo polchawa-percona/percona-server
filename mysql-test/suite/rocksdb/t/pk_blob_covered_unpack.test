@@ -1,0 +1,61 @@
+--source include/have_rocksdb.inc
+
+#
+# Reading a MyRocks table whose primary key contains a BLOB/TEXT key part
+# that covers the whole column (e.g. TINYBLOB with a 255-byte prefix).
+#
+# Such a key part is KEY_COVERED, so Rdb_key_def::unpack_record() decodes it
+# from the primary key into the handler's blob buffer. The buffer size
+# (m_max_blob_length) is only computed for secondary keys, so for the primary
+# key the buffer is never (re)allocated before it is written to:
+#   - on a handler that has not read a secondary key with a blob part yet,
+#     the blob is copied to a NULL pointer: the server crashes on every build
+#     (debug builds assert in blob_buffer::get_blob_buffer());
+#   - after a secondary key read, the buffer is freed at the end of the
+#     statement but its write pointer is kept, so the next primary key read
+#     writes user data into freed heap memory. This part is only detected
+#     under ASAN; on other builds it silently corrupts the heap.
+#
+# The test asserts the correct results.
+#
+
+--echo # Part 1 crashes every build; part 2 (after a secondary key read) is detected only under ASAN.
+
+--echo #
+--echo # Part 1: PK on a fully covered TINYBLOB, fresh handler
+--echo #
+CREATE TABLE t1 (b TINYBLOB NOT NULL, c INT, PRIMARY KEY (b(255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (REPEAT('a', 200), 1), (REPEAT('b', 255), 2), ('c', 3);
+SELECT LENGTH(b), LEFT(b, 3), c FROM t1;
+SELECT LENGTH(b), c FROM t1 WHERE b > 'b';
+UPDATE t1 SET c = c + 10 WHERE b = 'c';
+DELETE FROM t1 WHERE b = REPEAT('a', 200);
+SELECT LENGTH(b), c FROM t1 ORDER BY b DESC;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Part 1b: PK on a fully covered TINYTEXT (single-byte charset)
+--echo #
+CREATE TABLE t2 (t TINYTEXT CHARACTER SET latin1 NOT NULL, c INT,
+                 PRIMARY KEY (t(255))) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (REPEAT('x', 255), 1), ('y', 2), ('Z', 3);
+SELECT LENGTH(t), LEFT(t, 3), c FROM t2;
+CHECK TABLE t2;
+DROP TABLE t2;
+
+--echo #
+--echo # Part 2: secondary key read with a blob part, then a PK read in the
+--echo # next statement of the same handler
+--echo #
+CREATE TABLE t3 (b TINYBLOB NOT NULL, d TINYBLOB, e INT,
+                 PRIMARY KEY (b(255)), KEY kd (d(255))) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (REPEAT('a', 255), REPEAT('d', 255), 1),
+                      (REPEAT('z', 255), 'e', 2), ('m', NULL, 3);
+SELECT LENGTH(d) FROM t3 FORCE INDEX (kd) WHERE d > '';
+SELECT LENGTH(b), LENGTH(d), e FROM t3;
+SELECT LENGTH(d) FROM t3 FORCE INDEX (kd) WHERE d > '';
+UPDATE t3 SET e = e + 1;
+SELECT LENGTH(b), LEFT(b, 2), LENGTH(d), e FROM t3;
+CHECK TABLE t3;
+DROP TABLE t3;
