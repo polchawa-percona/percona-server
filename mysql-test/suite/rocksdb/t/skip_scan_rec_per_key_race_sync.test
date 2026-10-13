@@ -1,0 +1,92 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # PS-11840: race on the rec_per_key arrays while a skip scan is costed,
+--echo # made deterministic with DEBUG_SYNC (rocksdb.skip_scan_rec_per_key_race
+--echo # is the stress-loop version).
+--echo #
+--echo # ha_rocksdb::info() rewrites every rec_per_key element of table->key_info.
+--echo # Those arrays belong to the TABLE_SHARE and are shared by all sessions. For
+--echo # a partitioned table, info() runs for each partition the statement uses,
+--echo # and a partition without rows writes REC_PER_KEY_UNKNOWN. cost_skip_scan()
+--echo # reads the same element twice: once in has_records_per_key() and once in
+--echo # guess_rec_per_key() or records_per_key(). When another session rewrites it
+--echo # in between, a debug server aborts:
+--echo # 1. unknown, then known: "!key->has_records_per_key(used_keyparts - 1)" in
+--echo #    guess_rec_per_key() (the assertion reported in PS-10150);
+--echo # 2. known, then unknown: "keys_per_group >= 0" in cost_skip_scan().
+--echo # Expected: both queries of con1 complete without a crash.
+--echo #
+--echo # con1 arms both sync points, cost_skip_scan_no_records_per_key and
+--echo # cost_skip_scan_has_records_per_key, so it stops after
+--echo # has_records_per_key() whatever that returned, and the test never waits
+--echo # for a sync point that is not reached.
+--echo #
+
+CREATE TABLE t (ip_col INT, ipkey INT, PRIMARY KEY (ipkey, ip_col), INDEX i0 (ipkey))
+  ENGINE=ROCKSDB
+  PARTITION BY RANGE (ip_col) (
+    PARTITION p0 VALUES LESS THAN (100),
+    PARTITION p1 VALUES LESS THAN (1000));
+INSERT INTO t VALUES (150,1),(160,2),(170,3),(150,4),(160,5),(170,6);
+--echo # Flush the memtable, so that the row count of p1 comes from SST properties
+--echo # and not from an approximate memtable estimate, which can be 0. With 0
+--echo # rows, info() writes REC_PER_KEY_UNKNOWN for p1 too.
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+ANALYZE TABLE t;
+--echo # Precondition: p0 is empty and info() of p1 writes known statistics.
+SELECT PARTITION_NAME, TABLE_ROWS > 0 FROM INFORMATION_SCHEMA.PARTITIONS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY PARTITION_NAME;
+SELECT CARDINALITY IS NOT NULL AS ipkey_cardinality_known
+  FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' AND INDEX_NAME = 'PRIMARY'
+  AND SEQ_IN_INDEX = 1;
+
+--echo #
+--echo # Case 1: con1 costs a skip scan on the empty partition p0 and stops after
+--echo # has_records_per_key() returned false. con2 reads the non-empty
+--echo # partition p1: info() writes known values.
+--echo #
+--echo # Clear signals that earlier tests may have left on this server.
+SET DEBUG_SYNC = 'RESET';
+--connect (con1, localhost, root,,)
+SET DEBUG_SYNC = 'cost_skip_scan_no_records_per_key SIGNAL con1_costing WAIT_FOR con1_go';
+SET DEBUG_SYNC = 'cost_skip_scan_has_records_per_key SIGNAL con1_costing WAIT_FOR con1_go';
+--send SELECT /*+ SKIP_SCAN(t PRIMARY) */ COUNT(*) FROM t WHERE ip_col = 50
+
+--connect (con2, localhost, root,,)
+SET DEBUG_SYNC = 'now WAIT_FOR con1_costing TIMEOUT 60';
+SELECT COUNT(*) FROM t WHERE ip_col = 150;
+SET DEBUG_SYNC = 'now SIGNAL con1_go';
+
+--connection con1
+--reap
+SET DEBUG_SYNC = 'RESET';
+
+--echo #
+--echo # Case 2: con1 costs a skip scan on p1 and stops after
+--echo # has_records_per_key() returned true. con2 reads the empty partition p0:
+--echo # info() writes REC_PER_KEY_UNKNOWN. The result of con1 is not printed:
+--echo # skip scan on a partitioned MyRocks table returns wrong rows (PS-11793,
+--echo # rocksdb.skip_scan_partition_wrong_result).
+--echo #
+SET DEBUG_SYNC = 'cost_skip_scan_no_records_per_key SIGNAL con1_costing WAIT_FOR con1_go';
+SET DEBUG_SYNC = 'cost_skip_scan_has_records_per_key SIGNAL con1_costing WAIT_FOR con1_go';
+--send SELECT /*+ SKIP_SCAN(t PRIMARY) */ COUNT(*) INTO @c FROM t WHERE ip_col = 150
+
+--connection con2
+SET DEBUG_SYNC = 'now WAIT_FOR con1_costing TIMEOUT 60';
+SELECT COUNT(*) FROM t WHERE ip_col = 50;
+SET DEBUG_SYNC = 'now SIGNAL con1_go';
+--disconnect con2
+
+--connection con1
+--reap
+SET DEBUG_SYNC = 'RESET';
+--disconnect con1
+
+--connection default
+DROP TABLE t;
+--source include/wait_until_count_sessions.inc
