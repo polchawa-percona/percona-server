@@ -3547,6 +3547,7 @@ class Rdb_transaction {
                         s.code(), s.ToString().c_str());
         return s;
       }
+      DEBUG_SYNC(m_thd, "rocksdb.bulk_load_after_retry_compaction");
       // try again after compaction
       s = rdb->IngestExternalFiles(args);
     }
