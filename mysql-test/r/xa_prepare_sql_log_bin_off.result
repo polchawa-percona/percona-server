@@ -1,0 +1,75 @@
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=InnoDB;
+# 1. sql_log_bin = 0 in a session that never wrote to the binary log
+#    (the session has no binlog cache manager).
+SET SESSION sql_log_bin = 0;
+XA START 'xa_nolog';
+INSERT INTO t1 VALUES (1);
+XA END 'xa_nolog';
+XA PREPARE 'xa_nolog';
+# 2. sql_log_bin = 0 in a session that already wrote to the binary log
+#    (the binlog cache manager exists, its caches are empty).
+INSERT INTO t1 VALUES (10);
+SET SESSION sql_log_bin = 0;
+XA START 'xa_nolog_cached';
+INSERT INTO t1 VALUES (3);
+XA END 'xa_nolog_cached';
+XA PREPARE 'xa_nolog_cached';
+# 3. sql_log_bin = 0, resolved with XA ROLLBACK after the restarts.
+SET SESSION sql_log_bin = 0;
+XA START 'xa_nolog_rb';
+INSERT INTO t1 VALUES (4);
+XA END 'xa_nolog_rb';
+XA PREPARE 'xa_nolog_rb';
+# 4. Control: sql_log_bin = 1.
+XA START 'xa_log';
+INSERT INTO t1 VALUES (2);
+XA END 'xa_log';
+XA PREPARE 'xa_log';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	xa_nolog_rb
+1	15	0	xa_nolog_cached
+1	6	0	xa_log
+1	8	0	xa_nolog
+# All must still be prepared after a clean restart.
+# restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	xa_nolog_rb
+1	15	0	xa_nolog_cached
+1	6	0	xa_log
+1	8	0	xa_nolog
+# 5. sql_log_bin = 0, prepared after the clean restart and followed by
+#    a kill only (no clean shutdown in between).
+SET SESSION sql_log_bin = 0;
+XA START 'xa_nolog_kill';
+INSERT INTO t1 VALUES (5);
+XA END 'xa_nolog_kill';
+XA PREPARE 'xa_nolog_kill';
+# All must still be prepared after a kill.
+# Kill and restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	xa_nolog_rb
+1	13	0	xa_nolog_kill
+1	15	0	xa_nolog_cached
+1	6	0	xa_log
+1	8	0	xa_nolog
+SET SESSION sql_log_bin = 0;
+XA COMMIT 'xa_nolog';
+XA COMMIT 'xa_nolog_cached';
+XA COMMIT 'xa_nolog_kill';
+XA ROLLBACK 'xa_nolog_rb';
+SET SESSION sql_log_bin = 1;
+XA COMMIT 'xa_log';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+SELECT * FROM t1 ORDER BY a;
+a
+1
+2
+3
+5
+10
+DROP TABLE t1;

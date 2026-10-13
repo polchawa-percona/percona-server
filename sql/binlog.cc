@@ -2657,6 +2657,32 @@ inline bool is_loggable_xa_prepare(THD *thd) {
       thd->get_transaction()->xid_state()->has_state(XID_STATE::XA_IDLE));
 }
 
+/**
+  Marks an XA PREPARE that writes nothing to the binary log (for example,
+  because sql_log_bin is 0 for the session) as prepared in the transaction
+  coordinator.
+
+  Recovery keeps a prepared XA transaction only if the binary log holds its
+  XA_prepare_log_event or an engine reports it as prepared in TC; a
+  transaction that is only prepared in the engines is rolled back. With no
+  event in the binary log, the engines' own mark is the only record, so it
+  has to be set here and made durable. The prepare phase set
+  HA_IGNORE_DURABILITY because the binlog group commit flush stage normally
+  flushes the engine logs, which does not happen when nothing is logged, so
+  regular durability is restored first.
+
+  @param thd The session executing XA PREPARE.
+  @param all Whether the whole transaction is being prepared.
+
+  @return 0 on success, non-zero if an engine failed to set the mark.
+*/
+static int set_prepared_in_tc_without_binlog(THD *thd, bool all) {
+  if (!all || !trx_coordinator::should_statement_set_prepared_in_tc(thd))
+    return 0;
+  thd->durability_property = HA_REGULAR_DURABILITY;
+  return trx_coordinator::set_prepared_in_tc_in_engines(thd, all);
+}
+
 static int binlog_prepare(handlerton *, THD *thd, bool all) {
   DBUG_TRACE;
   if (!all) {
@@ -8482,7 +8508,9 @@ TC_LOG::enum_result MYSQL_BIN_LOG::commit(THD *thd, bool all) {
     the transaction.
    */
   if (cache_mngr == nullptr) {
-    if (!skip_commit && trx_coordinator::commit_in_engines(thd, all))
+    if (skip_commit) {
+      if (set_prepared_in_tc_without_binlog(thd, all)) return RESULT_ABORTED;
+    } else if (trx_coordinator::commit_in_engines(thd, all))
       return RESULT_ABORTED;
     return RESULT_SUCCESS;
   }
@@ -8717,7 +8745,14 @@ TC_LOG::enum_result MYSQL_BIN_LOG::commit(THD *thd, bool all) {
       */
       (void)RUN_HOOK(transaction, after_commit, (thd, all));
     }
-  } else if (!skip_commit) {
+  } else if (skip_commit) {
+    /*
+      XA PREPARE with nothing logged: the caches are empty (for example,
+      sql_log_bin is 0), so ordered_commit() does not run and does not mark
+      the transaction as prepared in TC.
+    */
+    if (set_prepared_in_tc_without_binlog(thd, all)) return RESULT_ABORTED;
+  } else {
     /*
       We only set engine binlog position in ordered_commit path flush phase
       and not all transactions go through them (such as table copy in DDL).
