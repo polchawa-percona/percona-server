@@ -1,0 +1,57 @@
+#
+# A transaction's snapshot against partition DDL followed by a manual
+# compaction of the affected partition's column family.
+#
+# con_snap starts a transaction without touching the tables, so it holds no
+# metadata lock: at REPEATABLE READ with a consistent snapshot, at READ
+# COMMITTED as the baseline. Another connection then truncates, drops or
+# reorganizes a RANGE partition (or coalesces HASH partitions), changes a row
+# in an untouched partition, and runs a manual compaction with each trigger.
+# con_snap then reads the affected partition (explicitly and through pruning,
+# by the primary key and by a secondary index) and the untouched partitions.
+#
+# At READ COMMITTED every read returns the latest rows ("current"). At
+# REPEATABLE READ:
+# - TRUNCATE PARTITION recreates only that partition: it reads as empty and
+#   the untouched partitions return the snapshot's rows ("snapshot").
+# - DROP, REORGANIZE and COALESCE PARTITION run as a COPY ALTER on MyRocks
+#   and rebuild the whole table, so the snapshot sees every partition, the
+#   untouched ones included, as empty ("empty") instead of failing with
+#   ER_TABLE_DEF_CHANGED. That is PS-11627. With its fix, reads of the
+#   recreated partitions (every partition after DROP, REORGANIZE and
+#   COALESCE, p1 after TRUNCATE) are expected to fail with error 1412
+#   instead, and this result needs re-recording.
+# No manual compaction trigger changes what any read returns.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE = InnoDB;
+INSERT INTO seq WITH RECURSIVE s (n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 299) SELECT n FROM s;
+connect (con_snap, localhost, root,,);
+connection default;
+
+let $levels = REPEATABLE-READ READ-COMMITTED;
+while ($levels)
+{
+  let $sc_level = `SELECT SUBSTRING_INDEX('$levels', ' ', 1)`;
+  let $levels = `SELECT TRIM(SUBSTRING('$levels', LENGTH('$sc_level') + 1))`;
+  --echo # $sc_level
+  let $ops = TRUNCATE DROP REORGANIZE COALESCE;
+  while ($ops)
+  {
+    let $sc_op = `SELECT SUBSTRING_INDEX('$ops', ' ', 1)`;
+    let $ops = `SELECT TRIM(SUBSTRING('$ops', LENGTH('$sc_op') + 1))`;
+    let $triggers = optimize_table optimize_partition compact_cf lzero flush_lzero;
+    while ($triggers)
+    {
+      let $sc_trigger = `SELECT SUBSTRING_INDEX('$triggers', ' ', 1)`;
+      let $triggers = `SELECT TRIM(SUBSTRING('$triggers', LENGTH('$sc_trigger') + 1))`;
+      --source suite/rocksdb/include/compaction_partition_snap_case.inc
+    }
+  }
+}
+
+disconnect con_snap;
+DROP TABLE seq;
+--source include/wait_until_count_sessions.inc
