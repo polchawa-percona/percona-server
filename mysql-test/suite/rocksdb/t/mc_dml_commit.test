@@ -1,0 +1,91 @@
+#
+# Manual compaction while a transaction has uncommitted DML, at READ
+# COMMITTED and REPEATABLE READ. Under write_prepared nothing reaches the
+# memtable before prepare; under write_unprepared with a flush threshold of 1
+# every row is written to the memtable at once, so flushes and compactions
+# see uncommitted data. A reader at the same level, started before the DML,
+# must not see the uncommitted rows, and after COMMIT it must see the new
+# rows at READ COMMITTED and keep its snapshot at REPEATABLE READ. The writer
+# must see its own uncommitted rows unchanged by the compaction. After
+# COMMIT or ROLLBACK every index must agree with the primary key.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+--let $mc_check_label = initial
+--source suite/rocksdb/include/mc_check.inc
+
+connect (con1,localhost,root,,);
+connect (con_r,localhost,root,,);
+--let $mc_round = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  connection con1;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_start = `SELECT IF('$mc_level' = 'REPEATABLE-READ', 'START TRANSACTION WITH CONSISTENT SNAPSHOT', 'BEGIN')`
+  connection con_r;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_triggers = optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --let $mc_end = COMMIT
+    while ($mc_end) {
+      --inc $mc_round
+      --echo # $mc_level: $mc_trigger during an open transaction, then $mc_end
+      connection con_r;
+      eval $mc_start;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_r_before = $mc_digest
+      connection con1;
+      BEGIN;
+      --source suite/rocksdb/include/mc_dml.inc
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_own_before = $mc_digest
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      connection con1;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_own_before'`
+      --echo writer sees its own rows after compaction: $mc_ok
+      connection con_r;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_r_before'`
+      --echo reader does not see uncommitted rows: $mc_ok
+      connection con1;
+      eval $mc_end;
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_now = $mc_digest
+      connection con_r;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_r_before'`
+      --echo reader still sees the state from before the transaction: $mc_ok
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_now'`
+      --echo reader sees the current state: $mc_ok
+      COMMIT;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_now'`
+      --echo reader sees the current state after its commit: $mc_ok
+      connection default;
+      --let $mc_check_label = $mc_level, $mc_trigger, $mc_end
+      --source suite/rocksdb/include/mc_check.inc
+      --let $mc_end = `SELECT IF('$mc_end' = 'COMMIT', 'ROLLBACK', '')`
+    }
+  }
+}
+disconnect con1;
+disconnect con_r;
+connection default;
+
+--echo # Restart with table validation.
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc_check_label = after restart
+--source suite/rocksdb/include/mc_check.inc
+
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

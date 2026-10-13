@@ -1,0 +1,89 @@
+#
+# Manual compaction between XA PREPARE and XA COMMIT or XA ROLLBACK (from
+# the same connection, one XA transaction per connection), at READ COMMITTED
+# and REPEATABLE READ. The binlog two-phase commit variant is mc_dml_2pc.test.
+# Disabled until PS-11631 is fixed: the statement after XA ROLLBACK crashes
+# the server.
+# A reader at the same level, started before the transaction, must not see
+# the prepared rows; after the commit it must see them at READ COMMITTED and
+# keep its snapshot at REPEATABLE READ. Every index must agree with the
+# primary key afterwards.
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+
+connect (con_r,localhost,root,,);
+--let $mc_round = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  connection con_r;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_start = `SELECT IF('$mc_level' = 'REPEATABLE-READ', 'START TRANSACTION WITH CONSISTENT SNAPSHOT', 'BEGIN')`
+  --let $mc_triggers = optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --let $mc_mode = xa_commit
+    while ($mc_mode) {
+      --inc $mc_round
+      --echo # $mc_level, $mc_trigger, $mc_mode
+      connection con_r;
+      eval $mc_start;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_r_before = $mc_digest
+
+      connect (con1,localhost,root,,);
+      eval SET SESSION transaction_isolation = '$mc_level';
+      if (1) {
+        eval XA START 'mc$mc_round';
+        --source suite/rocksdb/include/mc_dml.inc
+        eval XA END 'mc$mc_round';
+        eval XA PREPARE 'mc$mc_round';
+        connection default;
+      }
+      --source suite/rocksdb/include/mc_compact.inc
+      connection con_r;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_r_before'`
+      --echo reader does not see prepared rows: $mc_ok
+      connection default;
+      if ($mc_mode == xa_commit) {
+        connection con1;
+        eval XA COMMIT 'mc$mc_round';
+      }
+      if ($mc_mode == xa_rollback) {
+        connection con1;
+        eval XA ROLLBACK 'mc$mc_round';
+      }
+      disconnect con1;
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_now = $mc_digest
+      connection con_r;
+      --source suite/rocksdb/include/mc_digest.inc
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_r_before'`
+      --echo reader still sees the state from before: $mc_ok
+      --let $mc_ok = `SELECT '$mc_digest' = '$mc_now'`
+      --echo reader sees the current state: $mc_ok
+      COMMIT;
+      connection default;
+      --let $mc_check_label = $mc_level, $mc_trigger, $mc_mode
+      --source suite/rocksdb/include/mc_check.inc
+      --let $mc_mode = `SELECT IF('$mc_mode' = 'xa_commit', 'xa_rollback', '')`
+    }
+  }
+}
+disconnect con_r;
+connection default;
+SET DEBUG_SYNC = 'RESET';
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc_check_label = after restart
+--source suite/rocksdb/include/mc_check.inc
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

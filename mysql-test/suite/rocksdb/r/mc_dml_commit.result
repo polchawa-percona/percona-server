@@ -1,0 +1,504 @@
+CREATE DATABASE mc;
+CREATE TABLE mc.t_pk (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_hpk (
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_multi (
+id INT PRIMARY KEY,
+u INT NOT NULL,
+v VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+c TEXT NOT NULL,
+UNIQUE KEY ku (u), KEY kv (v), KEY kc (c(8)), KEY kcov (u, v)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_cf (
+id INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+UNIQUE KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+CREATE TABLE mc.t_part (
+g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+CREATE TABLE mc.side_def (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE mc.side_cf (
+id INT NOT NULL, a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# check: initial
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	200	2928660620	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	200	1432494514	1	1
+tbl	n	sum	kp_ok
+t_part	200	2994356320	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# READ-COMMITTED: optimize during an open transaction, then COMMIT
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 0
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, optimize, COMMIT
+tbl	n	sum
+t_pk	300	1552279018
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	1562157278	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	1012518098	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	199	438113277	1	1
+tbl	n	sum	kp_ok
+t_part	201	4248017736	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: optimize during an open transaction, then ROLLBACK
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, optimize, ROLLBACK
+tbl	n	sum
+t_pk	300	1552279018
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	1562157278	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	201	1012518098	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	199	438113277	1	1
+tbl	n	sum	kp_ok
+t_part	201	4248017736	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: compact_cf during an open transaction, then COMMIT
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 0
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, compact_cf, COMMIT
+tbl	n	sum
+t_pk	300	135288843
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	202	1766198936	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	198	3338886209	1	1
+tbl	n	sum	kp_ok
+t_part	202	3543546317	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: compact_cf during an open transaction, then ROLLBACK
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, compact_cf, ROLLBACK
+tbl	n	sum
+t_pk	300	135288843
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	202	1766198936	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	198	3338886209	1	1
+tbl	n	sum	kp_ok
+t_part	202	3543546317	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: lzero during an open transaction, then COMMIT
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 0
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, lzero, COMMIT
+tbl	n	sum
+t_pk	300	3820808025
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	1562157278	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	203	2757358194	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	197	2431624940	1	1
+tbl	n	sum	kp_ok
+t_part	203	2850672359	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: lzero during an open transaction, then ROLLBACK
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, lzero, ROLLBACK
+tbl	n	sum
+t_pk	300	3820808025
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	1562157278	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	203	2757358194	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	197	2431624940	1	1
+tbl	n	sum	kp_ok
+t_part	203	2850672359	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: flush_lzero during an open transaction, then COMMIT
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 0
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, flush_lzero, COMMIT
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	204	2195724613	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	196	1557425561	1	1
+tbl	n	sum	kp_ok
+t_part	204	2156625789	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED: flush_lzero during an open transaction, then ROLLBACK
+BEGIN;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: READ-COMMITTED, flush_lzero, ROLLBACK
+tbl	n	sum
+t_pk	300	3559414693
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	200	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	204	2195724613	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	196	1557425561	1	1
+tbl	n	sum	kp_ok
+t_part	204	2156625789	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE-READ: optimize during an open transaction, then COMMIT
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 0
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, optimize, COMMIT
+tbl	n	sum
+t_pk	300	2592597968
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	202	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	3223978924	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	195	2094768559	1	1
+tbl	n	sum	kp_ok
+t_part	205	410709456	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: optimize during an open transaction, then ROLLBACK
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, optimize, ROLLBACK
+tbl	n	sum
+t_pk	300	2592597968
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	202	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	205	3223978924	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	195	2094768559	1	1
+tbl	n	sum	kp_ok
+t_part	205	410709456	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: compact_cf during an open transaction, then COMMIT
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 0
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, compact_cf, COMMIT
+tbl	n	sum
+t_pk	300	2415930516
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	204	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	206	717081627	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	194	3295698308	1	1
+tbl	n	sum	kp_ok
+t_part	206	898623957	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: compact_cf during an open transaction, then ROLLBACK
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, compact_cf, ROLLBACK
+tbl	n	sum
+t_pk	300	2415930516
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	204	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	206	717081627	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	194	3295698308	1	1
+tbl	n	sum	kp_ok
+t_part	206	898623957	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: lzero during an open transaction, then COMMIT
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 0
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, lzero, COMMIT
+tbl	n	sum
+t_pk	300	1186980990
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	206	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	207	3254323953	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	193	2758332102	1	1
+tbl	n	sum	kp_ok
+t_part	207	2308734462	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: lzero during an open transaction, then ROLLBACK
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, lzero, ROLLBACK
+tbl	n	sum
+t_pk	300	1186980990
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	206	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	207	3254323953	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	193	2758332102	1	1
+tbl	n	sum	kp_ok
+t_part	207	2308734462	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: flush_lzero during an open transaction, then COMMIT
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+COMMIT;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 0
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, flush_lzero, COMMIT
+tbl	n	sum
+t_pk	300	792276519
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	208	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	208	4027000371	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	192	2734245723	1	1
+tbl	n	sum	kp_ok
+t_part	208	426715120	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ: flush_lzero during an open transaction, then ROLLBACK
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+BEGIN;
+writer sees its own rows after compaction: 1
+reader does not see uncommitted rows: 1
+ROLLBACK;
+reader still sees the state from before the transaction: 1
+reader sees the current state: 1
+COMMIT;
+reader sees the current state after its commit: 1
+# check: REPEATABLE-READ, flush_lzero, ROLLBACK
+tbl	n	sum
+t_pk	300	792276519
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	208	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	208	4027000371	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	192	2734245723	1	1
+tbl	n	sum	kp_ok
+t_part	208	426715120	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# Restart with table validation.
+# restart: --rocksdb_validate_tables=1
+# check: after restart
+tbl	n	sum
+t_pk	300	792276519
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	208	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	208	4027000371	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	192	2734245723	1	1
+tbl	n	sum	kp_ok
+t_part	208	426715120	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+DROP DATABASE mc;
