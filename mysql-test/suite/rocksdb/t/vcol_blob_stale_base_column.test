@@ -1,0 +1,70 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11849: heap corruption under pstress on non-partitioned MyRocks tables.
+#
+# When MyRocks reads a row through a secondary key and has to fetch it by
+# primary key, get_row_by_rowid() calls fill_virtual_columns(), which
+# re-evaluates every VIRTUAL generated column of the table into
+# table->record[0], including columns that are not in the read set.
+#
+# The base columns of such a generated column are not in the read set either,
+# so the row decoder does not decode them. For a BLOB/TEXT column it still
+# copies the new length into the record but leaves the old data pointer
+# (Rdb_convert_to_record_value_decoder::decode_blob()). The generated column
+# expression then reads a stale pointer with a new length. Here the scan of
+# kb first unpacks the short value '0' of row 1 (fully covered by the 13-byte
+# prefix) into the handler's 13-byte blob buffer. The next entry is row 3,
+# whose 20-byte value is not covered, so the key unpack skips the column and
+# the row decoder replaces only the length: the generated column reads 20
+# bytes from the 13-byte buffer.
+#
+# The query results in this test match InnoDB on the builds tried, because the
+# evaluated column is never returned. ASAN reports the invalid read
+# (heap-buffer-overflow in fill_virtual_columns()); other builds read
+# whatever memory the stale pointer points to, which can also be freed memory.
+#
+
+--echo # The invalid read in this test is only detected under ASAN.
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  b BLOB,
+  u INT,
+  vb BLOB GENERATED ALWAYS AS (IFNULL(b, '')) VIRTUAL,
+  KEY kb (b(13), u)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 (id, b, u) VALUES
+  (1, '0', 21), (2, 'b', 25), (3, REPEAT('0', 20), 32), (4, 'Z', 11);
+
+SELECT MAX(u) FROM t1 FORCE INDEX (kb) WHERE id > 0;
+SELECT id, u FROM t1 FORCE INDEX (kb) WHERE id > 0 ORDER BY id;
+SELECT id, LENGTH(vb) FROM t1 FORCE INDEX (kb) WHERE id > 0 ORDER BY id;
+CHECK TABLE t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Same with a composite primary key and a generated column that reads
+--echo # two base columns (the shape found by the targeted stress).
+--echo #
+CREATE TABLE t2 (
+  id INT,
+  a VARCHAR(64) NOT NULL,
+  b BLOB,
+  u INT,
+  vb BLOB GENERATED ALWAYS AS (CONCAT(a, IFNULL(b, ''))) VIRTUAL,
+  PRIMARY KEY (a, id),
+  KEY kb (b(13), u)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t2 (id, a, b, u) VALUES
+  (36, '823', '0', 21), (50, REPEAT('0', 63), 'b', 25),
+  (50, 'bbbbbbbb', REPEAT('0', 20), 32), (17, '        ', 'Z', 11);
+
+SELECT MAX(u), MIN(a) FROM t2 WHERE id = 45;
+SELECT MAX(u), COUNT(*) FROM t2 FORCE INDEX (kb) WHERE id > 0;
+CHECK TABLE t2;
+
+DROP TABLE t2;

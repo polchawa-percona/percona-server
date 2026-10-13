@@ -1,0 +1,29 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, t TEXT, u INT,
+KEY kt (t(10)), KEY ku (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('a', 20), 1), (2, REPEAT('b', 5000), 2);
+BEGIN;
+UPDATE t1 SET u = u + 10 WHERE id = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+# Leave stale TEXT data of earlier rows in the row buffer.
+SELECT id, LENGTH(t) FROM t1 WHERE id = 1;
+id	LENGTH(t)
+1	20
+SELECT u FROM t1 WHERE id = 2;
+u
+2
+BEGIN;
+# Row 1 matches and is locked by con1.
+SELECT id, u FROM t1 FORCE INDEX (kt) WHERE t LIKE 'a%' FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+UPDATE t1 FORCE INDEX (kt) SET u = u + 1 WHERE t LIKE 'a%';
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+SET SESSION transaction_isolation = DEFAULT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SELECT id, LENGTH(t), u FROM t1 ORDER BY id;
+id	LENGTH(t)	u
+1	20	1
+2	5000	2
+DROP TABLE t1;
