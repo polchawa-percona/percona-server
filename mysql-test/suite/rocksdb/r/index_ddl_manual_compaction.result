@@ -1,0 +1,513 @@
+SET SESSION cte_max_recursion_depth = 100000;
+## round 1
+Warnings:
+Note	1051	Unknown table 'test.ta'
+Note	1051	Unknown table 'test.tn'
+Note	1051	Unknown table 'test.th'
+Note	1051	Unknown table 'test.tr'
+Note	1051	Unknown table 'test.tp'
+Note	1051	Unknown table 'test.tz'
+Note	1051	Unknown table 'test.tzr'
+# S1: ADD INDEX + ADD UNIQUE INDEX paused in the PK scan (after its snapshot)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM tp;
+UPDATE ta SET a = a + 1000 WHERE pk <= 100;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k1 (a, b), ADD UNIQUE INDEX u1 (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+COMMIT;
+# snapshot older than the ALTER: PK and old SK return the expected rows
+SET DEBUG_SYNC = 'RESET';
+# S2: hidden-PK table, ADD INDEX paused before the merge
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE th ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S3: reverse CF, ADD INDEX paused before the ingest
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tr ADD INDEX kab (a, b) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S4: two indexes in one ALTER, paused after the first one is ingested
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k2 (c(8), a), ADD INDEX k3 (b(4)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S5: partial index and a plain index, paused after the dictionary commit
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tp ADD INDEX ik (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tn ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S6: UNIQUE build with duplicates next to a good index, paused after the first build
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k4 (a, c(4)), ADD UNIQUE INDEX u4 (a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u4'
+ALTER TABLE ta ADD UNIQUE INDEX u5 (a), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u5'
+SET DEBUG_SYNC = 'RESET';
+# S7: DROP INDEX while the drop-index thread is held, next to live indexes
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE ta DROP INDEX k1, ALGORITHM=INPLACE;
+ALTER TABLE tn ADD INDEX kadj (a, b), ALGORITHM=INPLACE;
+ALTER TABLE tr DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta DROP INDEX kc0, ADD INDEX kc0 (c(10)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# checks
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+# ta.u1 matches the table
+# ta.k3 matches the table
+# ta.k2 matches the table
+# th.kb matches the table
+# tr.kab matches the table
+# tn.kb matches the table
+# tn.kadj matches the table
+# tp.ik matches the table
+SELECT INDEX_NAME, NON_UNIQUE FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'ta' AND SEQ_IN_INDEX = 1 ORDER BY INDEX_NAME;
+INDEX_NAME	NON_UNIQUE
+k2	1
+k3	1
+ka0	1
+kba0	1
+kc0	1
+PRIMARY	0
+u1	0
+CHECK TABLE ta, tn, th, tr, tp, tz, tzr;
+Table	Op	Msg_type	Msg_text
+test.ta	check	status	OK
+test.tn	check	status	OK
+test.th	check	status	OK
+test.tr	check	status	OK
+test.tp	check	status	OK
+test.tz	check	status	OK
+test.tzr	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+## round 2
+# S1: ADD INDEX + ADD UNIQUE INDEX paused in the PK scan (after its snapshot)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM tp;
+UPDATE ta SET a = a + 1000 WHERE pk <= 100;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k1 (a, b), ADD UNIQUE INDEX u1 (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+COMMIT;
+# snapshot older than the ALTER: PK and old SK return the expected rows
+SET DEBUG_SYNC = 'RESET';
+# S2: hidden-PK table, ADD INDEX paused before the merge
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE th ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S3: reverse CF, ADD INDEX paused before the ingest
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tr ADD INDEX kab (a, b) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S4: two indexes in one ALTER, paused after the first one is ingested
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k2 (c(8), a), ADD INDEX k3 (b(4)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S5: partial index and a plain index, paused after the dictionary commit
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tp ADD INDEX ik (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tn ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S6: UNIQUE build with duplicates next to a good index, paused after the first build
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k4 (a, c(4)), ADD UNIQUE INDEX u4 (a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u4'
+ALTER TABLE ta ADD UNIQUE INDEX u5 (a), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u5'
+SET DEBUG_SYNC = 'RESET';
+# S7: DROP INDEX while the drop-index thread is held, next to live indexes
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE ta DROP INDEX k1, ALGORITHM=INPLACE;
+ALTER TABLE tn ADD INDEX kadj (a, b), ALGORITHM=INPLACE;
+ALTER TABLE tr DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta DROP INDEX kc0, ADD INDEX kc0 (c(10)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# checks
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+# ta.u1 matches the table
+# ta.k3 matches the table
+# ta.k2 matches the table
+# th.kb matches the table
+# tr.kab matches the table
+# tn.kb matches the table
+# tn.kadj matches the table
+# tp.ik matches the table
+SELECT INDEX_NAME, NON_UNIQUE FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'ta' AND SEQ_IN_INDEX = 1 ORDER BY INDEX_NAME;
+INDEX_NAME	NON_UNIQUE
+k2	1
+k3	1
+ka0	1
+kba0	1
+kc0	1
+PRIMARY	0
+u1	0
+CHECK TABLE ta, tn, th, tr, tp, tz, tzr;
+Table	Op	Msg_type	Msg_text
+test.ta	check	status	OK
+test.tn	check	status	OK
+test.th	check	status	OK
+test.tr	check	status	OK
+test.tp	check	status	OK
+test.tz	check	status	OK
+test.tzr	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+## round 3
+# S1: ADD INDEX + ADD UNIQUE INDEX paused in the PK scan (after its snapshot)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM tp;
+UPDATE ta SET a = a + 1000 WHERE pk <= 100;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k1 (a, b), ADD UNIQUE INDEX u1 (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+COMMIT;
+# snapshot older than the ALTER: PK and old SK return the expected rows
+SET DEBUG_SYNC = 'RESET';
+# S2: hidden-PK table, ADD INDEX paused before the merge
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE th ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S3: reverse CF, ADD INDEX paused before the ingest
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tr ADD INDEX kab (a, b) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S4: two indexes in one ALTER, paused after the first one is ingested
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k2 (c(8), a), ADD INDEX k3 (b(4)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S5: partial index and a plain index, paused after the dictionary commit
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tp ADD INDEX ik (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tn ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S6: UNIQUE build with duplicates next to a good index, paused after the first build
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k4 (a, c(4)), ADD UNIQUE INDEX u4 (a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u4'
+ALTER TABLE ta ADD UNIQUE INDEX u5 (a), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u5'
+SET DEBUG_SYNC = 'RESET';
+# S7: DROP INDEX while the drop-index thread is held, next to live indexes
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE ta DROP INDEX k1, ALGORITHM=INPLACE;
+ALTER TABLE tn ADD INDEX kadj (a, b), ALGORITHM=INPLACE;
+ALTER TABLE tr DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta DROP INDEX kc0, ADD INDEX kc0 (c(10)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# checks
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+# ta.u1 matches the table
+# ta.k3 matches the table
+# ta.k2 matches the table
+# th.kb matches the table
+# tr.kab matches the table
+# tn.kb matches the table
+# tn.kadj matches the table
+# tp.ik matches the table
+SELECT INDEX_NAME, NON_UNIQUE FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'ta' AND SEQ_IN_INDEX = 1 ORDER BY INDEX_NAME;
+INDEX_NAME	NON_UNIQUE
+k2	1
+k3	1
+ka0	1
+kba0	1
+kc0	1
+PRIMARY	0
+u1	0
+CHECK TABLE ta, tn, th, tr, tp, tz, tzr;
+Table	Op	Msg_type	Msg_text
+test.ta	check	status	OK
+test.tn	check	status	OK
+test.th	check	status	OK
+test.tr	check	status	OK
+test.tp	check	status	OK
+test.tz	check	status	OK
+test.tzr	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+## round 4
+# S1: ADD INDEX + ADD UNIQUE INDEX paused in the PK scan (after its snapshot)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM tp;
+UPDATE ta SET a = a + 1000 WHERE pk <= 100;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k1 (a, b), ADD UNIQUE INDEX u1 (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+COMMIT;
+# snapshot older than the ALTER: PK and old SK return the expected rows
+SET DEBUG_SYNC = 'RESET';
+# S2: hidden-PK table, ADD INDEX paused before the merge
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE th ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S3: reverse CF, ADD INDEX paused before the ingest
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tr ADD INDEX kab (a, b) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S4: two indexes in one ALTER, paused after the first one is ingested
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k2 (c(8), a), ADD INDEX k3 (b(4)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S5: partial index and a plain index, paused after the dictionary commit
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tp ADD INDEX ik (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5', ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'rocksdb.commit_in_place_alter_table_dict_committed SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE tn ADD INDEX kb (b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# S6: UNIQUE build with duplicates next to a good index, paused after the first build
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta ADD INDEX k4 (a, c(4)), ADD UNIQUE INDEX u4 (a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u4'
+ALTER TABLE ta ADD UNIQUE INDEX u5 (a), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u5'
+SET DEBUG_SYNC = 'RESET';
+# S7: DROP INDEX while the drop-index thread is held, next to live indexes
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+ALTER TABLE ta DROP INDEX k1, ALGORITHM=INPLACE;
+ALTER TABLE tn ADD INDEX kadj (a, b), ALGORITHM=INPLACE;
+ALTER TABLE tr DROP INDEX ka, ADD INDEX ka (a) COMMENT 'cfname=rev:mc2r', ALGORITHM=INPLACE;
+BEGIN;
+COMMIT;
+# reader sees the expected rows
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE ta DROP INDEX kc0, ADD INDEX kc0 (c(10)), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET DEBUG_SYNC = 'RESET';
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+# checks
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+# ta.u1 matches the table
+# ta.k3 matches the table
+# ta.k2 matches the table
+# th.kb matches the table
+# tr.kab matches the table
+# tn.kb matches the table
+# tn.kadj matches the table
+# tp.ik matches the table
+SELECT INDEX_NAME, NON_UNIQUE FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'ta' AND SEQ_IN_INDEX = 1 ORDER BY INDEX_NAME;
+INDEX_NAME	NON_UNIQUE
+k2	1
+k3	1
+ka0	1
+kba0	1
+kc0	1
+PRIMARY	0
+u1	0
+CHECK TABLE ta, tn, th, tr, tp, tz, tzr;
+Table	Op	Msg_type	Msg_text
+test.ta	check	status	OK
+test.tn	check	status	OK
+test.th	check	status	OK
+test.tr	check	status	OK
+test.tp	check	status	OK
+test.tz	check	status	OK
+test.tzr	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+# restart:--rocksdb_validate_tables=1
+# ta.ka0 matches the table
+# ta.kc0 matches the table
+# ta.kba0 matches the table
+# tn.ka matches the table
+# th.ka matches the table
+# tr.ka matches the table
+CHECK TABLE ta, tn, th, tr, tp;
+Table	Op	Msg_type	Msg_text
+test.ta	check	status	OK
+test.tn	check	status	OK
+test.th	check	status	OK
+test.tr	check	status	OK
+test.tp	check	status	OK
+DROP PROCEDURE mc_dml;
+DROP TABLE ta, tn, th, tr, tp, tz, tzr, mc_seq;

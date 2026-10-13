@@ -15020,6 +15020,9 @@ int ha_rocksdb::inplace_populate_sk(
       LogPluginErrMsg(ERROR_LEVEL, 0, "Error finishing bulk load.");
       DBUG_RETURN(res);
     }
+
+    /* The SST files of this index are ingested (or its build failed). */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_after_ingest");
   }
 
   /*
@@ -15252,6 +15255,9 @@ bool ha_rocksdb::commit_inplace_alter_table(
       local_dict_manager->finish_indexes_operation(
           create_index_ids, Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
     }
+
+    /* The MyRocks dictionary changes of the ALTER are committed. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.commit_in_place_alter_table_dict_committed");
 
     DBUG_EXECUTE_IF("rocksdb_delete_index", {
       static constexpr char act[] =
