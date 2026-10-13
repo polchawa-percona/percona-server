@@ -1,0 +1,236 @@
+# CREATE TABLE: crash before the MyRocks dictionary commit.
+# Crash at rocksdb_crash_before_create_table during: CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+include/assert_grep.inc [Startup rolled back the CREATE TABLE]
+DROP TABLE IF EXISTS t1;
+Warnings:
+Note	1051	Unknown table 'test.t1'
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# DROP TABLE: crash after the MyRocks dictionary commit.
+# Crash at rocksdb_crash_after_delete_table during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+# The MyRocks data is gone, so the table must be gone too.
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+SELECT * FROM t1;
+id	a
+1	1
+DROP TABLE t1;
+# Partitioned CREATE TABLE: crash before the first partition is created.
+# Crash at rocksdb_crash_before_create_table during: CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE)
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+# Partitioned CREATE TABLE: crash after the first partition is created.
+# Crash at rocksdb_crash_after_create_table during: CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE)
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+# Partitioned DROP TABLE: crash after the first partition is dropped.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(20,20);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	status	Histogram statistics created for column 'a'.
+SET SESSION transaction_isolation = DEFAULT;
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+t1_histograms
+1
+# Crash at rocksdb_crash_after_delete_table during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+# The histogram of the dropped table is removed too.
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+t1_histograms
+0
+# DROP TABLE with rocksdb_enable_delete_range_for_drop_index=ON: crash
+# after the rows are deleted, before the MyRocks dictionary commit.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+# Crash at rocksdb_crash_after_delete_range during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+# A crash during the startup recovery itself, after the table is removed
+# from the server's data dictionary and before MyRocks drops what it has
+# of the table: the next startup finishes the recovery.
+CREATE TABLE t0 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1),(2),(3);
+# Partitioned CREATE TABLE: crash after the first partition is created,
+# then crash in the recovery.
+SET SESSION debug = "+d,rocksdb_crash_after_create_table";
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/assert_grep.inc [The recovery crashed after removing the table from the DD]
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t0','t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t0','t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+SELECT * FROM t0;
+id
+1
+2
+3
+# Partitioned DROP TABLE: crash after the first partition is dropped,
+# then crash in the recovery.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(20,20);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON a;
+Table	Op	Msg_type	Msg_text
+test.t1	histogram	status	Histogram statistics created for column 'a'.
+SET SESSION transaction_isolation = DEFAULT;
+SET SESSION debug = "+d,rocksdb_crash_after_delete_table";
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/assert_grep.inc [The recovery crashed after removing the table from the DD]
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t0','t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t0','t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+SELECT COUNT(*) AS t1_histograms FROM information_schema.COLUMN_STATISTICS
+WHERE SCHEMA_NAME = 'test' AND TABLE_NAME = 't1';
+t1_histograms
+0
+SELECT * FROM t0;
+id
+1
+2
+3
+DROP TABLE t0;
+# A completed DROP TABLE leaves a recovery record that must not affect a
+# table created later with the same name, also after a restart.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE t2;
+# A failed partitioned CREATE TABLE keeps its recovery record (the
+# server removes the table from its DD after the engine failed); the
+# record must not affect the next startup.
+SET SESSION debug = "+d,rocksdb_truncate_failure";
+CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=ROCKSDB
+PARTITION BY HASH (id) PARTITIONS 2;
+ERROR HY000: Internal error: Simulated truncation failure.
+SET SESSION debug = "-d,rocksdb_truncate_failure";
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT * FROM t1;
+id	a
+1	1
+DROP TABLE t1;
