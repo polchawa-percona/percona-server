@@ -1,0 +1,49 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11849: heap corruption under pstress on non-partitioned MyRocks tables.
+#
+# REPLACE reads each conflicting row into table->record[1] with
+# handler::ha_index_read_idx_map(). At READ COMMITTED,
+# ha_rocksdb::secondary_index_read() locks the row, reads it by primary key
+# with get_row_by_rowid(record[1]) and then re-packs the secondary key from
+# record[1] to check that the row still matches.
+#
+# get_row_by_rowid() evaluates the VIRTUAL generated columns into
+# table->record[0] (fill_virtual_columns()), not into the record[1] buffer it
+# was given, so the re-check packs record[1]'s generated column with whatever
+# it held before. When the REPLACE conflicts on two keys, that is a BLOB
+# pointer from the first conflict, whose memory the server has already freed
+# while recomputing the generated columns of the new row:
+#   - ASAN: heap-use-after-free READ in Rdb_key_def::pack_record();
+#   - release builds: the re-packed key usually does not match, the read
+#     returns HA_ERR_KEY_NOT_FOUND and the REPLACE fails with
+#     ER_KEY_NOT_FOUND ("Can't find record"); the exact outcome depends on
+#     the content of the freed memory.
+# REPEATABLE READ does not run the re-check and is not affected.
+#
+# The test asserts the correct results.
+#
+
+--echo # ASAN: heap-use-after-free. Other builds: REPLACE usually fails, error 1032.
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  b BLOB,
+  vb BLOB GENERATED ALWAYS AS (b) VIRTUAL,
+  UNIQUE KEY uvb (vb(12))
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 (id, b) VALUES
+  (1, REPEAT('a', 40)), (2, REPEAT('b', 44));
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # Conflicts with row 1 on the primary key and with row 2 on uvb.
+REPLACE INTO t1 (id, b) VALUES (1, REPEAT('b', 44));
+SELECT id, LENGTH(b), LEFT(b, 3), LEFT(vb, 3) FROM t1 ORDER BY id;
+
+CHECK TABLE t1;
+SET SESSION transaction_isolation = DEFAULT;
+
+DROP TABLE t1;
