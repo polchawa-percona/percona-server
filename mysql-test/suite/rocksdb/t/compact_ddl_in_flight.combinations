@@ -1,0 +1,5 @@
+[drop_thread]
+rocksdb_enable_delete_range_for_drop_index=OFF
+
+[delete_range]
+rocksdb_enable_delete_range_for_drop_index=ON
