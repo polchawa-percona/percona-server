@@ -1,0 +1,38 @@
+CREATE TABLE t0 (id INT PRIMARY KEY, y INT) ENGINE=ROCKSDB;
+CREATE TABLE t1 (id INT PRIMARY KEY, x INT) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 1000)
+SELECT n, n % 97 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL alter_prepared WAIT_FOR alter_resume';
+ALTER TABLE t1 ADD INDEX kx (x), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR alter_prepared';
+CREATE TABLE t2 (id INT PRIMARY KEY, z INT) ENGINE=ROCKSDB;
+# The ALTER must ingest the new index at Lmax.
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `x` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kx` (`x`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*) FROM t1 FORCE INDEX (kx) WHERE x = 5;
+COUNT(*)
+11
+SELECT COUNT(*) FROM t1 FORCE INDEX (kx);
+COUNT(*)
+1000
+SELECT COUNT(*) FROM t0;
+COUNT(*)
+1000
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1000
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t0, t1, t2;
