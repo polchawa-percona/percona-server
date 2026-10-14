@@ -1,0 +1,46 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11884: rocksdb_two_write_queues is ON by default, and RocksDB rejects
+# every write with Status::NotSupported("pipelined_writes is not compatible
+# with concurrent prepares") when enable_pipelined_write is also ON
+# (DBImpl::WriteImpl). MyRocks accepts --rocksdb_enable_pipelined_write=ON
+# without checking the combination; the first dictionary write at startup
+# fails, rdb_handle_io_error() treats the status as a WAL I/O error and the
+# server aborts ("aborting on WAL write error").
+#
+# The test restarts the server with the option and asserts that it comes
+# up, whether a fixed MyRocks then runs (with a compatible configuration)
+# or refuses to load with a configuration error.
+#
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported");
+CALL mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+CALL mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
+--enable_query_log
+
+--let $restart_parameters = restart: --rocksdb_enable_pipelined_write=ON
+--source include/restart_mysqld.inc
+
+SELECT 1 AS server_alive;
+
+# If MyRocks is loaded, it must work.
+--let $rocksdb_loaded = `SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT')`
+if ($rocksdb_loaded) {
+  --disable_query_log
+  CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1), (2);
+  BEGIN;
+  INSERT INTO t1 VALUES (3);
+  COMMIT;
+  --let $rows = `SELECT COUNT(*) FROM t1`
+  DROP TABLE t1;
+  if ($rows != 3) {
+    --die PS-11884: MyRocks loaded but did not keep the rows
+  }
+  --enable_query_log
+}
+
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc

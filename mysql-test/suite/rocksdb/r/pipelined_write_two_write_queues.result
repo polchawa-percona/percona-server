@@ -1,0 +1,5 @@
+# restart: --rocksdb_enable_pipelined_write=ON
+SELECT 1 AS server_alive;
+server_alive
+1
+# restart:
