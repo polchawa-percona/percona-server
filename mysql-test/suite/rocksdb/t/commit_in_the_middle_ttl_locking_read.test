@@ -1,0 +1,28 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11895: with rocksdb_commit_in_the_middle=ON, a locking read of a TTL table
+# under REPEATABLE READ scans a fresh database snapshot while the transaction
+# snapshot is still delayed, so TTL read filtering runs without a snapshot
+# timestamp: a debug server aborts on the assertion in
+# rdb_should_hide_ttl_rec(), and a release server skips TTL filtering and warns
+# "TTL read filtering called with no snapshot". Found by pstress.
+#
+# The expected results are those of the same statements with
+# rocksdb_commit_in_the_middle=OFF.
+#
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a))
+  ENGINE=ROCKSDB COMMENT='ttl_duration=3600;';
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION rocksdb_commit_in_the_middle = ON;
+--echo # Secondary-key and full scans with row locks.
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+SELECT * FROM t1 WHERE b BETWEEN 1 AND 3 ORDER BY pk FOR UPDATE;
+SELECT * FROM t1 WHERE b = 3 FOR SHARE;
+
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;
