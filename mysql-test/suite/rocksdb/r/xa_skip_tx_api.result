@@ -1,0 +1,131 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+
+### xa_detach_on_prepare = 1
+SET GLOBAL xa_detach_on_prepare = 1;
+# The first MyRocks statement of the session is inside XA:
+# XA COMMIT in the same session keeps the rows.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+XA START 'xs1';
+INSERT INTO t1 VALUES (1, 1);
+XA END 'xs1';
+XA PREPARE 'xs1';
+XA COMMIT 'xs1';
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+# The session keeps working after the XA transaction.
+INSERT INTO t1 VALUES (2, 2);
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+# ... and the prepared rows survive a disconnect and are committed
+# from another session.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+XA START 'xs2';
+INSERT INTO t1 VALUES (3, 3);
+XA END 'xs2';
+XA PREPARE 'xs2';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	3	0	xs2
+XA COMMIT 'xs2';
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+# A session that already owns a write batch cannot prepare an XA
+# transaction that modified MyRocks tables.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+INSERT INTO t1 VALUES (4, 4);
+XA START 'xs3';
+INSERT INTO t1 VALUES (5, 5);
+XA END 'xs3';
+XA PREPARE 'xs3';
+ERROR 42000: This version of MySQL doesn't yet support 'XA PREPARE with rocksdb_master_skip_tx_api or rocksdb_rpl_skip_tx_api'
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+XA COMMIT 'xs3';
+ERROR XAE04: XAER_NOTA: Unknown XID
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+4	4
+# A read-only XA transaction still works.
+XA START 'xs4';
+SELECT * FROM t1 WHERE a = 1;
+a	b
+1	1
+XA END 'xs4';
+XA PREPARE 'xs4';
+XA COMMIT 'xs4';
+DELETE FROM t1;
+
+### xa_detach_on_prepare = 0
+SET GLOBAL xa_detach_on_prepare = 0;
+# The first MyRocks statement of the session is inside XA:
+# XA COMMIT in the same session keeps the rows.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+XA START 'xs1';
+INSERT INTO t1 VALUES (1, 1);
+XA END 'xs1';
+XA PREPARE 'xs1';
+XA COMMIT 'xs1';
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+# The session keeps working after the XA transaction.
+INSERT INTO t1 VALUES (2, 2);
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+# ... and the prepared rows survive a disconnect and are committed
+# from another session.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+XA START 'xs2';
+INSERT INTO t1 VALUES (3, 3);
+XA END 'xs2';
+XA PREPARE 'xs2';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	3	0	xs2
+XA COMMIT 'xs2';
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+# A session that already owns a write batch cannot prepare an XA
+# transaction that modified MyRocks tables.
+SET SESSION rocksdb_master_skip_tx_api = ON;
+INSERT INTO t1 VALUES (4, 4);
+XA START 'xs3';
+INSERT INTO t1 VALUES (5, 5);
+XA END 'xs3';
+XA PREPARE 'xs3';
+ERROR 42000: This version of MySQL doesn't yet support 'XA PREPARE with rocksdb_master_skip_tx_api or rocksdb_rpl_skip_tx_api'
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+XA COMMIT 'xs3';
+ERROR XAE04: XAER_NOTA: Unknown XID
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+4	4
+# A read-only XA transaction still works.
+XA START 'xs4';
+SELECT * FROM t1 WHERE a = 1;
+a	b
+1	1
+XA END 'xs4';
+XA PREPARE 'xs4';
+XA COMMIT 'xs4';
+DELETE FROM t1;
+SET GLOBAL xa_detach_on_prepare = SAVED;
+DROP TABLE t1;
