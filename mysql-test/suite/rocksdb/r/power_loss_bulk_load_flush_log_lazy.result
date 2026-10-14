@@ -1,0 +1,21 @@
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t_sorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_unsorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sorted SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_unsorted SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET GLOBAL rocksdb_debug_simulate_power_loss = ON;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Each table must have as many secondary key entries as rows.
+SELECT (SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)) =
+(SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0) AS sorted_consistent,
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)) =
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0) AS unsorted_consistent;
+sorted_consistent	unsorted_consistent
+1	1
+DROP TABLE t_sorted, t_unsorted;

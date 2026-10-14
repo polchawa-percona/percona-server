@@ -19,8 +19,11 @@
 
 /* C++ standard header files */
 #include <array>
+#include <chrono>
+#include <cstring>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 /* C standard header files */
@@ -28,6 +31,7 @@
 
 /* MySQL header files */
 #include "my_dir.h"
+#include "mysqld_error.h"
 #include "sql/mysqld.h"
 
 /* MyRocks header files */
@@ -452,5 +456,45 @@ void rdb_persist_corruption_marker() {
                     io_s.ToString().c_str(), fileName.c_str());
   }
 }
+
+#ifndef NDEBUG
+bool rdb_dbug_global_keyword_set(const char *const keyword) {
+  /*
+    The initial (global) settings are explained as
+    "d,kw1,kw2[:-d,kw3][:<other flags>]"; only the included keyword list
+    counts. An overlong explanation is truncated, which can only hide
+    keywords at its end.
+  */
+  char buf[4096];
+  DBUG_EXPLAIN_INITIAL(buf, sizeof(buf));
+  if (buf[0] != 'd' || buf[1] != ',') return false;
+  const char *p = buf + 2;
+  const size_t len = strlen(keyword);
+  while (*p != '\0' && *p != ':') {
+    const char *const end = p + strcspn(p, ",:");
+    if (static_cast<size_t>(end - p) == len && strncmp(p, keyword, len) == 0)
+      return true;
+    p = (*end == ',') ? end + 1 : end;
+  }
+  return false;
+}
+
+void rdb_dbug_pause_while_set(const char *const keyword,
+                              const std::string &details,
+                              const std::function<bool()> &should_stop) {
+  if (!rdb_dbug_global_keyword_set(keyword)) return;
+  // NO_LINT_DEBUG
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: test: paused at %s%s%s", keyword,
+                  details.empty() ? "" : ", ", details.c_str());
+  while (rdb_dbug_global_keyword_set(keyword) &&
+         !(should_stop && should_stop())) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  // NO_LINT_DEBUG
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: test: resumed at %s", keyword);
+}
+#endif  // !NDEBUG
 
 }  // namespace myrocks

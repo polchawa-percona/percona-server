@@ -1,0 +1,6 @@
+[sync_power]
+rocksdb_flush_log_at_trx_commit=1
+rocksdb_fault_injection_options={"power_loss":true}
+
+[sync_kill]
+rocksdb_flush_log_at_trx_commit=1
