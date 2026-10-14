@@ -9214,6 +9214,11 @@ bool rdb_inject_error(Rdb_inject_class cls, const char *site,
   const auto chosen =
       static_cast<Rdb_inject_class>(THDVAR(thd, debug_inject_error_class));
   if (chosen != Rdb_inject_class::ANY && chosen != cls) return false;
+  // Crashing before a dictionary read adds no new crash window.
+  if (static_cast<Rdb_inject_status>(THDVAR(thd, debug_inject_error_status)) >=
+          Rdb_inject_status::CRASH_BEFORE &&
+      strcmp(site, "dict_get") == 0)
+    return false;
   if (THDVAR(thd, debug_inject_trace)) {
     // NO_LINT_DEBUG
     LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
