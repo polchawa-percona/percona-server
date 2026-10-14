@@ -1,0 +1,51 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11877: the startup value of rocksdb_max_latest_deadlocks is never
+# applied. Only the dynamic update function rocksdb_set_max_latest_deadlocks()
+# calls TransactionDB::SetDeadlockInfoBufferSize(); rocksdb_init_internal()
+# does not set TransactionDBOptions::max_num_deadlocks, so the deadlock
+# buffer keeps RocksDB's default size of 5 until the variable is changed at
+# runtime.
+#
+# The server is started with rocksdb_max_latest_deadlocks=1. After two
+# deadlocks, information_schema.ROCKSDB_DEADLOCK must report only the
+# latest one.
+#
+
+SELECT @@global.rocksdb_max_latest_deadlocks;
+
+SET @prior_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @prior_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 10000;
+
+# Needed by simple_deadlock.inc
+let $engine = rocksdb;
+
+--source include/count_sessions.inc
+connect (con1,localhost,root,,);
+let $con1 = `SELECT CONNECTION_ID()`;
+connect (con2,localhost,root,,);
+let $con2 = `SELECT CONNECTION_ID()`;
+
+connection default;
+CREATE TABLE t (i INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1), (2);
+
+--echo # Deadlock 1
+--source ../include/simple_deadlock.inc
+--echo # Deadlock 2
+--source ../include/simple_deadlock.inc
+
+connection default;
+--echo # Only the latest deadlock is kept
+SELECT COUNT(DISTINCT DEADLOCK_ID) AS deadlocks
+  FROM information_schema.ROCKSDB_DEADLOCK;
+
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc
+SET GLOBAL rocksdb_lock_wait_timeout = @prior_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @prior_deadlock_detect;
+DROP TABLE t;
