@@ -1,0 +1,10 @@
+CREATE TABLE t1 (pk INT, PRIMARY KEY (pk) COMMENT 'cfname=cf_imm') ENGINE=ROCKSDB;
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+WHERE CF_NAME = 'cf_imm' AND OPTION_TYPE = 'NUM_LEVELS';
+VALUE
+7
+# The statement must fail, warn, or take effect
+client_told_the_truth
+1
+SET GLOBAL rocksdb_update_cf_options = DEFAULT;
+DROP TABLE t1;
