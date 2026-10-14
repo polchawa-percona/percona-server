@@ -1,0 +1,9 @@
+SET @prior_tables = @@global.rocksdb_read_free_rpl_tables;
+SET @pattern = CONCAT(REPEAT('(', 10000), 't', REPEAT(')', 10000));
+SELECT 1 AS server_alive;
+server_alive
+1
+SET GLOBAL rocksdb_read_free_rpl_tables = @prior_tables;
+SELECT @@global.rocksdb_read_free_rpl_tables;
+@@global.rocksdb_read_free_rpl_tables
+.*

@@ -1,0 +1,44 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11881: every MyRocks table definition is matched against
+# rocksdb_read_free_rpl_tables with std::regex_match()
+# (Rdb_tbl_def::check_and_set_read_free_rpl_table()), also when the table is
+# created, while ha_rocksdb::create_table() holds the Rdb_dict_manager mutex.
+# libstdc++ matches by backtracking, so a pattern such as '(a*)*b' takes
+# exponential time on a table name made of 'a' characters: CREATE TABLE
+# never finishes, and every other MyRocks DDL waits for the dictionary
+# mutex. Percona Server ignores the variable since PS-6869
+# (ha_rocksdb::is_read_free_rpl_table() always returns true), but the match
+# still runs.
+#
+# The test asserts that CREATE TABLE finishes with such a pattern and that
+# DDL on another table is not blocked.
+#
+
+SET @prior_tables = @@global.rocksdb_read_free_rpl_tables;
+SET GLOBAL rocksdb_read_free_rpl_tables = '(a*)*b';
+
+connect (con1, localhost, root,,);
+--send CREATE TABLE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (pk INT PRIMARY KEY) ENGINE=ROCKSDB
+
+connection default;
+--let $wait_timeout = 60
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.processlist WHERE info LIKE 'CREATE TABLE aaaa%'
+--source include/wait_condition.inc
+if (!$success) {
+  --die PS-11881: CREATE TABLE still running after 60 seconds
+}
+
+connection con1;
+--reap
+
+connection default;
+CREATE TABLE t2 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE t2;
+
+disconnect con1;
+--source include/wait_until_count_sessions.inc
+SET GLOBAL rocksdb_read_free_rpl_tables = @prior_tables;
+DROP TABLE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;

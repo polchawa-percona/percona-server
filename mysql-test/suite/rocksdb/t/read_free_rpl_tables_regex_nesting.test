@@ -1,0 +1,31 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11881: rocksdb_read_free_rpl_tables is compiled with std::regex
+# (Regex_list_handler::set_patterns() from
+# rocksdb_validate_read_free_rpl_tables()), with no limit on the pattern.
+# libstdc++ compiles nested groups recursively, so a pattern with a few
+# thousand nested groups overflows the connection thread's stack and the
+# server dies while it validates the SET statement. Percona Server ignores
+# the variable since PS-6869 (ha_rocksdb::is_read_free_rpl_table() always
+# returns true), but the pattern is still compiled.
+#
+# The test asserts that setting such a pattern keeps the server running.
+#
+
+SET @prior_tables = @@global.rocksdb_read_free_rpl_tables;
+SET @pattern = CONCAT(REPEAT('(', 10000), 't', REPEAT(')', 10000));
+
+# A fixed server may accept or reject the pattern; only survival matters.
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--error 0, ER_WRONG_VALUE_FOR_VAR, ER_WRONG_ARGUMENTS
+SET GLOBAL rocksdb_read_free_rpl_tables = @pattern;
+--enable_warnings
+--enable_result_log
+--enable_query_log
+SELECT 1 AS server_alive;
+
+SET GLOBAL rocksdb_read_free_rpl_tables = @prior_tables;
+SELECT @@global.rocksdb_read_free_rpl_tables;

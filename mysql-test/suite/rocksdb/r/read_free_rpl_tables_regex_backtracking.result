@@ -1,0 +1,7 @@
+SET @prior_tables = @@global.rocksdb_read_free_rpl_tables;
+SET GLOBAL rocksdb_read_free_rpl_tables = '(a*)*b';
+CREATE TABLE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE t2;
+SET GLOBAL rocksdb_read_free_rpl_tables = @prior_tables;
+DROP TABLE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
