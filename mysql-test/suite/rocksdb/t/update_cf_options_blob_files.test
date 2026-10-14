@@ -1,0 +1,48 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11885: rocksdb_update_cf_options accepts enable_blob_files for a live
+# column family. The next flush of that column family writes blob index
+# entries (kEntryBlobIndex), and MyRocks' table properties collector
+# (Rdb_tbl_prop_coll::CollectStatsForRow(), properties_collector.cc) logs
+# "Unexpected entry type found: 5" and calls abort().
+#
+# The test enables blob files for the column family of a table, writes and
+# flushes rows, and asserts that the server keeps running and the rows are
+# intact. A fixed server may reject the option instead.
+#
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Failed to apply the options");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Unexpected entry type found");
+--enable_query_log
+
+CREATE TABLE t1 (pk INT, a VARCHAR(100),
+  PRIMARY KEY (pk) COMMENT 'cfname=cf_blob') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('a', 50));
+
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--error 0, ER_WRONG_VALUE_FOR_VAR, ER_WRONG_ARGUMENTS
+SET GLOBAL rocksdb_update_cf_options = 'cf_blob={enable_blob_files=true;min_blob_size=1}';
+--enable_warnings
+--enable_result_log
+--enable_query_log
+
+INSERT INTO t1 VALUES (2, REPEAT('b', 50)), (3, REPEAT('c', 50));
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+SELECT pk, LENGTH(a) FROM t1 ORDER BY pk;
+CHECK TABLE t1;
+
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--error 0, ER_WRONG_VALUE_FOR_VAR, ER_WRONG_ARGUMENTS
+SET GLOBAL rocksdb_update_cf_options = 'cf_blob={enable_blob_files=false}';
+--enable_warnings
+--enable_result_log
+--enable_query_log
+SET GLOBAL rocksdb_update_cf_options = DEFAULT;
+DROP TABLE t1;
