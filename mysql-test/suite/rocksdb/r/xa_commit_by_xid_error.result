@@ -1,0 +1,28 @@
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("Failed to write to WAL");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+XA START 'x';
+INSERT INTO t1 VALUES (2, 2);
+XA END 'x';
+XA PREPARE 'x';
+# The first COMMIT-class call is the WAL flush of the binary log flush
+# stage, the second the commit of the prepared transaction.
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'ABORTED';
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+XA COMMIT 'x';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+Pattern "injected error at xa_commit_by_xid" found
+Pattern "aborting on WAL write error" found
+# The transaction is committed, or still prepared and committed now.
+SELECT * FROM t1;
+pk	a
+1	1
+2	2
+DROP TABLE t1;

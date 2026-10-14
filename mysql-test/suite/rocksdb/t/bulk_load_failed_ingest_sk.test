@@ -1,0 +1,53 @@
+#
+# A bulk load whose ingest fails must not leave secondary-index entries for
+# the rows it did not load.
+#
+# With rocksdb_bulk_load_allow_sk=OFF (the default) the primary key rows of a
+# bulk load go to SST files that are ingested when the bulk load ends, while
+# the secondary-index entries are written through the transaction and
+# committed by each statement. When the ingest fails, the primary key rows are
+# dropped but the secondary-index entries stay, and CHECK TABLE reports the
+# table as corrupt.
+#
+# Here the ingest fails because the loaded keys overlap rows that are still in
+# the memtable ("External file requires flush"); after a flush the same load
+# fails with ER_OVERLAPPING_KEYS instead. Both must leave the table as it was.
+#
+--source include/have_rocksdb.inc
+
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(32) NOT NULL,
+  KEY kb (b)
+) ENGINE=ROCKSDB;
+
+--echo # Overlap with rows in the memtable.
+INSERT INTO t1 VALUES (10, 10, 'x'), (20, 20, 'y'), (30, 30, 'z');
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (15, 15, 'b15');
+INSERT INTO t1 VALUES (25, 25, 'b25');
+--replace_regex /\[.*\] bulk load error/[file] bulk load error/
+--error ER_UNKNOWN_ERROR
+SET SESSION rocksdb_bulk_load = 0;
+SELECT pk, b FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk;
+SELECT b, pk FROM t1 FORCE INDEX (kb) ORDER BY b;
+CHECK TABLE t1;
+
+--echo # Overlap with rows in an SST file.
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 VALUES (10, 10, 'x'), (20, 20, 'y'), (30, 30, 'z');
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 VALUES (15, 15, 'b15');
+INSERT INTO t2 VALUES (25, 25, 'b25');
+--error ER_OVERLAPPING_KEYS
+SET SESSION rocksdb_bulk_load = 0;
+SELECT pk, b FROM t2 FORCE INDEX (PRIMARY) ORDER BY pk;
+SELECT b, pk FROM t2 FORCE INDEX (kb) ORDER BY b;
+CHECK TABLE t2;
+
+DROP TABLE t1, t2;
