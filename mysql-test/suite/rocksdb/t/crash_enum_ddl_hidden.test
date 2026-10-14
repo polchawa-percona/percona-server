@@ -1,0 +1,8 @@
+# Scratch (crash campaign): crash-at-call enumeration over DDL, shape hidden.
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+call mtr.add_suppression(".*");
+--let $ce_shape = hidden
+--source suite/rocksdb/include/crash_enum_ddl.inc

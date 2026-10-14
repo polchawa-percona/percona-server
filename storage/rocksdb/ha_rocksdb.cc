@@ -1631,13 +1631,18 @@ enum class Rdb_inject_status : ulong {
   ABORTED,
   MEMORYLIMIT,
   EXPIRED,
-  INVALIDARGUMENT
+  INVALIDARGUMENT,
+  CRASH_BEFORE,
+  CRASH_AFTER,
+  POWER_LOSS_BEFORE,
+  POWER_LOSS_AFTER
 };
 
 static const char *inject_error_status_names[] = {
     "IOERROR",     "NOSPACE",  "CORRUPTION",      "BUSY",
     "TIMEDOUT",    "TRYAGAIN", "INCOMPLETE",      "ABORTED",
-    "MEMORYLIMIT", "EXPIRED",  "INVALIDARGUMENT", NullS};
+    "MEMORYLIMIT", "EXPIRED",  "INVALIDARGUMENT", "CRASH_BEFORE",
+    "CRASH_AFTER", "POWER_LOSS_BEFORE", "POWER_LOSS_AFTER", NullS};
 
 static TYPELIB inject_error_status_typelib = {
     array_elements(inject_error_status_names) - 1,
@@ -1656,6 +1661,12 @@ static MYSQL_THDVAR_ENUM(
     "that rocksdb_debug_inject_error_nth selects",
     nullptr, nullptr, static_cast<ulong>(Rdb_inject_status::IOERROR),
     &inject_error_status_typelib);
+
+static MYSQL_THDVAR_BOOL(
+    debug_inject_trace, PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: log every RocksDB call that "
+    "rocksdb_debug_inject_error_nth counts",
+    nullptr, nullptr, false);
 
 static MYSQL_THDVAR_ULONGLONG(
     debug_inject_error_nth, PLUGIN_VAR_RQCMDARG,
@@ -3034,6 +3045,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(debug_inject_error_class),
     MYSQL_SYSVAR(debug_inject_error_status),
     MYSQL_SYSVAR(debug_inject_error_nth),
+    MYSQL_SYSVAR(debug_inject_trace),
     MYSQL_SYSVAR(rollback_on_timeout),
 
     MYSQL_SYSVAR(enable_insert_with_update_caching),
@@ -9160,6 +9172,33 @@ static int rocksdb_init_func(void *const p) {
 }
 
 #ifndef NDEBUG
+static thread_local const char *rdb_crash_after_site = nullptr;
+static thread_local bool rdb_crash_after_power_loss = false;
+
+/*
+  Test infrastructure: kill the server at an injection site, as a plain
+  process crash or as a power cut (requires rocksdb_fault_injection_options
+  with "power_loss":true).
+*/
+[[noreturn]] static void rdb_test_crash(bool power_loss, const char *site,
+                                        const char *when) {
+  fprintf(stderr, "MyRocks: test: %s %s %s\n",
+          power_loss ? "power loss" : "crash", when, site);
+  fflush(stderr);
+  if (power_loss && rdb_power_loss_fs) {
+    rdb_power_loss_fs->DeleteFilesCreatedAfterLastDirSync(rocksdb::IOOptions(),
+                                                          nullptr);
+    rdb_power_loss_fs->SetFilesystemActive(false);
+  }
+  kill(getpid(), SIGKILL);
+  for (;;) pause();
+}
+
+void rdb_inject_crash_after_call() {
+  if (rdb_crash_after_site == nullptr) return;
+  rdb_test_crash(rdb_crash_after_power_loss, rdb_crash_after_site, "after");
+}
+
 /*
   Test infrastructure: decide whether the RocksDB call of class cls at site
   fails with an injected status instead of being executed. Only calls made by
@@ -9175,10 +9214,30 @@ bool rdb_inject_error(Rdb_inject_class cls, const char *site,
   const auto chosen =
       static_cast<Rdb_inject_class>(THDVAR(thd, debug_inject_error_class));
   if (chosen != Rdb_inject_class::ANY && chosen != cls) return false;
+  if (THDVAR(thd, debug_inject_trace)) {
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: call %s", site);
+  }
   if (--nth != 0) return false;
 
   const auto st =
       static_cast<Rdb_inject_status>(THDVAR(thd, debug_inject_error_status));
+  switch (st) {
+    case Rdb_inject_status::CRASH_BEFORE:
+      rdb_test_crash(false, site, "before");
+      break;
+    case Rdb_inject_status::POWER_LOSS_BEFORE:
+      rdb_test_crash(true, site, "before");
+      break;
+    case Rdb_inject_status::CRASH_AFTER:
+    case Rdb_inject_status::POWER_LOSS_AFTER:
+      rdb_crash_after_site = site;
+      rdb_crash_after_power_loss = st == Rdb_inject_status::POWER_LOSS_AFTER;
+      return false;
+    default:
+      break;
+  }
   const rocksdb::Slice msg("injected error");
   switch (st) {
     case Rdb_inject_status::IOERROR:
@@ -9213,6 +9272,12 @@ bool rdb_inject_error(Rdb_inject_class cls, const char *site,
       break;
     case Rdb_inject_status::INVALIDARGUMENT:
       *status = rocksdb::Status::InvalidArgument(msg);
+      break;
+    case Rdb_inject_status::CRASH_BEFORE:
+    case Rdb_inject_status::CRASH_AFTER:
+    case Rdb_inject_status::POWER_LOSS_BEFORE:
+    case Rdb_inject_status::POWER_LOSS_AFTER:
+      assert(false);
       break;
   }
   // NO_LINT_DEBUG

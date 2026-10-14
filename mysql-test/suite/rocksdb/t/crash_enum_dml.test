@@ -1,0 +1,25 @@
+# Scratch (crash campaign): crash / power loss after or before the N-th
+# COMMIT-class RocksDB call of DML statements and transactions, with the
+# binary log on, per write policy (combinations).
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+call mtr.add_suppression(".*");
+--source suite/rocksdb/include/errinj_dml_setup.inc
+--let $errinj_crash = 1
+--let $ce_invariants = 1
+--let $errinj_class = COMMIT
+--let $errinj_status = CRASH_AFTER
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+--let $errinj_status = POWER_LOSS_AFTER
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+--let $errinj_status = POWER_LOSS_BEFORE
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+--let $errinj_crash = 0
+--let $ce_invariants = 0
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

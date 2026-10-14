@@ -112,6 +112,29 @@ while (!$errinj_done) {
       --echo   recovered: $errinj_state_now
       --inc $errinj_violations
     }
+    if ($ce_invariants) {
+      # Scratch (crash campaign): invariants 1, 3, 4 after every recovery.
+      --let $inv_schema = test
+      --let $inv_drop_timeout = 120
+      --source suite/rocksdb/include/myrocks_invariants.inc
+      --disable_query_log
+      --disable_result_log
+      if ($_inv_violations) {
+        --echo VIOLATION $errinj_label n=$errinj_n: $_inv_violations invariant violation(s) after recovery
+        --inc $errinj_violations
+      }
+    }
+    if ($ce_dml_check) {
+      # Scratch: the table must accept writes after recovery.
+      --disable_abort_on_error
+      eval $ce_dml_check;
+      --let $ce_err = $mysql_errno
+      --enable_abort_on_error
+      if ($ce_err) {
+        --echo VIOLATION $errinj_label n=$errinj_n: write after recovery failed with error $ce_err
+        --inc $errinj_violations
+      }
+    }
   }
 
   if (!$errinj_crashed) {

@@ -74,8 +74,11 @@ enum class Rdb_inject_class : ulong {
 #ifndef NDEBUG
 bool rdb_inject_error(Rdb_inject_class cls, const char *site,
                       rocksdb::Status *status);
-#define RDB_INJECTED_ERROR(cls, site, status_ptr) \
-  myrocks::rdb_inject_error(cls, site, status_ptr)
+/* Crash now if the last rdb_inject_error() chose a crash after the call. */
+void rdb_inject_crash_after_call();
+#define RDB_INJECTED_ERROR(cls, site, status_ptr)                   \
+  (myrocks::rdb_inject_error(cls, site, status_ptr) ||              \
+   (myrocks::rdb_inject_crash_after_call(), false))
 /* Evaluate a RocksDB call that returns rocksdb::Status, unless an error is
    injected for it, in which case the call is skipped. */
 #define RDB_INJECT_ERROR(cls, site, call)                           \
@@ -83,7 +86,9 @@ bool rdb_inject_error(Rdb_inject_class cls, const char *site,
     rocksdb::Status rdb_injected_status;                            \
     if (myrocks::rdb_inject_error(cls, site, &rdb_injected_status)) \
       return rdb_injected_status;                                   \
-    return (call);                                                  \
+    rocksdb::Status rdb_call_status = (call);                       \
+    myrocks::rdb_inject_crash_after_call();                         \
+    return rdb_call_status;                                         \
   }()
 #else
 #define RDB_INJECTED_ERROR(cls, site, status_ptr) false
