@@ -1,0 +1,10 @@
+# Scratch (crash campaign): sync-point kill enumeration over DDL, shape partial.
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+call mtr.add_suppression(".*");
+--let $ce_instant_ok = 1
+--let $ce_shape = partial
+--source suite/rocksdb/include/crash_sync_ddl.inc

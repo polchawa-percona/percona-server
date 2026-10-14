@@ -1,0 +1,1 @@
+--rocksdb_enable_instant_ddl_for_append_column=ON
