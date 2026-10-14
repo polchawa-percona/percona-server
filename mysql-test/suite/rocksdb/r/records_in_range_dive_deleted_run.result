@@ -1,0 +1,21 @@
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_dive',
+KEY kk (k) COMMENT 'cfname=cf_dive') ENGINE=ROCKSDB;
+INSERT INTO t
+WITH RECURSIVE q (x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM q WHERE x < 20000)
+SELECT x, x % 1000 FROM q;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_dive';
+# Delete every row with id % 4 = 0: all 20 rows of k = 12, 16 and 20.
+DELETE FROM t WHERE id % 4 = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT COUNT(*) FROM t WHERE k BETWEEN 10 AND 20;
+COUNT(*)
+160
+# The estimate is at least the dive threshold (or the exact count).
+estimate_ok
+1
+DROP TABLE t;
