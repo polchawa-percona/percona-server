@@ -1,0 +1,182 @@
+#
+# Self-test of the MyRocks invariant checks (PS-11628 bug hunt program):
+# suite/rocksdb/include/myrocks_invariants.inc and the myrocks_inv_*.inc
+# helpers. Each check must stay silent on healthy tables of every shape, and
+# must report a violation when the state is broken on purpose. Invariants 3
+# and 4 have no way to break the state on purpose without engine changes, so
+# only their silent pass is tested here (a dropped table is part of it).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("CHECKTABLE t_cf");
+
+CREATE DATABASE inv;
+USE inv;
+
+--echo #
+--echo # Healthy tables of several shapes: no output.
+--echo #
+CREATE TABLE t_pk (pk INT PRIMARY KEY, a INT, b VARCHAR(20), c BLOB,
+                   KEY ka (a), UNIQUE KEY kb (b), KEY kab (a, b), KEY kc (c(10)))
+                   ENGINE=ROCKSDB;
+CREATE TABLE t_hidden (a INT, b VARCHAR(20), KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_cf (pk INT, a INT, b VARCHAR(20) COLLATE utf8mb4_general_ci,
+                   PRIMARY KEY (pk) COMMENT 'cfname=inv_cf',
+                   KEY ka (a) COMMENT 'rev:inv_rev_cf',
+                   KEY kb (b) COMMENT 'cfname=inv_cf') ENGINE=ROCKSDB;
+CREATE TABLE t_part (pk INT, a INT, PRIMARY KEY (pk), KEY ka (a))
+                   ENGINE=ROCKSDB PARTITION BY HASH (pk) PARTITIONS 3;
+CREATE TABLE t_subpart (pk INT, a INT, PRIMARY KEY (pk, a), KEY ka (a))
+                   ENGINE=ROCKSDB
+                   PARTITION BY RANGE (pk) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+                   (PARTITION p0 VALUES LESS THAN (100),
+                    PARTITION p1 VALUES LESS THAN MAXVALUE);
+CREATE TABLE t_ttl (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB
+                   COMMENT 'ttl_duration=3600;';
+CREATE TABLE t_inv (pk INT PRIMARY KEY, a INT, KEY ka (a) INVISIBLE) ENGINE=ROCKSDB;
+CREATE TABLE t_innodb (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=InnoDB;
+CREATE TABLE `t,"odd``` (`p,k` INT PRIMARY KEY, `a"b` INT, `c``d` VARCHAR(10),
+                         KEY `k,"1``` (`a"b`, `c``d`)) ENGINE=ROCKSDB;
+
+INSERT INTO t_pk VALUES (1, 10, 'x', 'blob1'), (2, NULL, 'y', NULL),
+                        (3, 10, NULL, REPEAT('z', 100)), (4, 40, 'w', '');
+INSERT INTO t_hidden VALUES (1, 'a'), (1, 'a'), (NULL, NULL);
+INSERT INTO t_cf VALUES (1, 1, 'A'), (2, 2, 'a'), (3, 3, 'b');
+INSERT INTO t_part VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, NULL);
+INSERT INTO t_subpart VALUES (1, 1), (2, 2), (150, 3), (151, 4);
+INSERT INTO t_ttl VALUES (1, 1), (2, 2);
+INSERT INTO t_inv VALUES (1, 1);
+INSERT INTO `t,"odd``` VALUES (1, 1, 'x'), (2, NULL, 'y');
+INSERT INTO t_innodb VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, NULL);
+ALTER TABLE t_pk DROP INDEX kab;
+ALTER TABLE t_cf ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+CREATE TABLE t_dropped (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t_dropped VALUES (1, 1), (2, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_dropped;
+--echo # A dropped table with rocksdb_enable_delete_range_for_drop_index=ON.
+SET @saved_delete_range = @@GLOBAL.rocksdb_enable_delete_range_for_drop_index;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+CREATE TABLE t_dropped_dr (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t_dropped_dr VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_dropped_dr;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @saved_delete_range;
+
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations, CHECK TABLE skipped: $inv_check_skipped, dictionary check skipped: $inv_dict_skipped
+
+--echo # The secondary-index side really scans the index.
+--replace_column 10 # 11 #
+EXPLAIN SELECT a, pk FROM t_pk FORCE INDEX (ka) ORDER BY a LIMIT 18446744073709551615;
+
+--echo #
+--echo # Invariant 1: a lost secondary index write is reported.
+--echo #
+SET SESSION debug = '+d,myrocks_inv_skip_sk_write';
+INSERT INTO t_pk VALUES (5, 50, 'v', 'blob5');
+UPDATE t_cf SET a = 30 WHERE pk = 3;
+SET SESSION debug = '-d,myrocks_inv_skip_sk_write';
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+DELETE FROM t_pk WHERE pk = 5;
+DROP TABLE t_cf;
+
+--echo #
+--echo # Invariant 2: InnoDB mirror compare.
+--echo #
+CREATE TABLE m_rdb (pk INT PRIMARY KEY, a INT, b TEXT) ENGINE=ROCKSDB;
+CREATE TABLE m_inn (pk INT PRIMARY KEY, a INT, b TEXT) ENGINE=InnoDB;
+INSERT INTO m_rdb VALUES (1, 1, 'a'), (2, NULL, NULL);
+INSERT INTO m_inn VALUES (1, 1, 'a'), (2, NULL, NULL);
+--let $inv_violations = 0
+--let $inv_table = m_rdb
+--let $inv_mirror = m_inn
+--source suite/rocksdb/include/myrocks_inv_mirror_compare.inc
+--echo violations: $inv_violations
+UPDATE m_rdb SET b = 'b' WHERE pk = 2;
+--source suite/rocksdb/include/myrocks_inv_mirror_compare.inc
+--echo violations: $inv_violations
+
+--echo #
+--echo # Invariant 5: a snapshot is stable across a compaction.
+--echo #
+--connect (con1, localhost, root,, inv)
+--let $inv_violations = 0
+--let $inv_table = m_rdb
+--source suite/rocksdb/include/myrocks_inv_snapshot_begin.inc
+--connection default
+DELETE FROM m_rdb WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--connection con1
+--source suite/rocksdb/include/myrocks_inv_snapshot_end.inc
+--echo violations: $inv_violations
+--echo # Without a snapshot the change is seen, and reported.
+--connection con1
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+--source suite/rocksdb/include/myrocks_inv_table_checksum.inc
+--let $_invs_before = $inv_checksum
+--connection default
+INSERT INTO m_rdb VALUES (7, 7, 'g');
+--connection con1
+--source suite/rocksdb/include/myrocks_inv_snapshot_end.inc
+--echo violations: $inv_violations
+--disconnect con1
+--connection default
+
+--echo #
+--echo # Invariant 6: commit log is a prefix.
+--echo #
+CREATE TABLE commit_log (seq INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO commit_log VALUES (1), (2), (3);
+--let $inv_violations = 0
+--let $inv_log_table = commit_log
+--let $inv_acked = 3
+--let $inv_durable = 1
+--source suite/rocksdb/include/myrocks_inv_crash_suffix.inc
+--echo violations: $inv_violations survived: $inv_survived
+--let $inv_acked = 4
+--source suite/rocksdb/include/myrocks_inv_crash_suffix.inc
+--echo violations: $inv_violations survived: $inv_survived
+DELETE FROM commit_log WHERE seq = 2;
+--let $inv_acked = 3
+--let $inv_durable = 0
+--source suite/rocksdb/include/myrocks_inv_crash_suffix.inc
+--echo violations: $inv_violations survived: $inv_survived
+
+--echo #
+--echo # Invariant 7: errors are truthful.
+--echo #
+--let $inv_violations = 0
+--let $inv_table = m_rdb
+--let $inv_stmt = INSERT INTO m_rdb VALUES (10, 10, 'x'), (2, 2, 'dup')
+--let $inv_errors = ER_DUP_ENTRY
+--source suite/rocksdb/include/myrocks_inv_stmt.inc
+--echo violations: $inv_violations errno: $inv_errno
+--echo # A non-transactional table keeps the rows before the error: reported.
+CREATE TABLE m_myisam (pk INT PRIMARY KEY) ENGINE=MyISAM;
+INSERT INTO m_myisam VALUES (2);
+--let $inv_table = m_myisam
+--let $inv_stmt = INSERT INTO m_myisam VALUES (1), (2)
+--source suite/rocksdb/include/myrocks_inv_stmt.inc
+--echo violations: $inv_violations errno: $inv_errno
+--let $inv_errors =
+
+--echo #
+--echo # After a restart, tables not opened yet show empty index names in
+--echo # ROCKSDB_DDL (PS-11882); the include opens them first: no output.
+--echo #
+--source include/restart_mysqld.inc
+USE inv;
+--let $inv_skip_check_table = 1
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+--let $inv_skip_check_table =
+
+--echo # Cleanup
+USE test;
+DROP DATABASE inv;
+--source suite/rocksdb/include/drop_table_sync.inc

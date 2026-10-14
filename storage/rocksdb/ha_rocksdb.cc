@@ -11456,6 +11456,11 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
     return HA_EXIT_SUCCESS;
   }
 
+  /* Test hook: lose the secondary index write, so that a test can check
+     that myrocks_invariants.inc detects a secondary index that differs from
+     the primary key. */
+  DBUG_EXECUTE_IF("myrocks_inv_skip_sk_write", return HA_EXIT_SUCCESS;);
+
   bool store_row_debug_checksums = should_store_row_debug_checksums();
   new_packed_size =
       kd.pack_record(table_arg, m_pack_buffer, row_info.new_data,
