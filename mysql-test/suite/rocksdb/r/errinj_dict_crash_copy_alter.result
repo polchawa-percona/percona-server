@@ -1,0 +1,29 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("RocksDB: ");
+call mtr.add_suppression("MyRocks: ");
+call mtr.add_suppression("Plugin .ROCKSDB.");
+call mtr.add_suppression("Couldn.t stop the");
+call mtr.add_suppression("Failed to initialize DDL manager");
+call mtr.add_suppression("Incorrect information in file");
+call mtr.add_suppression("Failed to get column family info from index id");
+call mtr.add_suppression("Could not get index information for Index Number");
+call mtr.add_suppression("Failed to get column family flags");
+call mtr.add_suppression("Removing truncated leftover table");
+# DICT/IOERROR COPY ALTER: every injected failure was handled correctly
+# DICT/IOERROR ADD PARTITION: every injected failure was handled correctly
+# DICT_READ/BUSY COPY ALTER: every injected failure was handled correctly
+# DICT_READ/BUSY ADD PARTITION: every injected failure was handled correctly
+DROP TABLE IF EXISTS t2, t3, tp, tc;
+Warnings:
+Note	1051	Unknown table 'test.t3'
+Note	1051	Unknown table 'test.tc'
+DROP PROCEDURE errinj_dict_reset;
+DROP PROCEDURE errinj_dict_state;

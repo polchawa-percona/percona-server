@@ -1,0 +1,10 @@
+call mtr.add_suppression("Failed to read/write in RocksDB");
+SET GLOBAL rocksdb_debug_inject_bg_error =
+'DROP_INDEX COMPACT BUSY 2, DROP_INDEX ITERATOR INCOMPLETE 1';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+# After a restart the rows are still not reclaimed.
+# restart
+# drop queue drained, indexes with orphaned rows: 0

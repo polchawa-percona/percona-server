@@ -1,0 +1,49 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+# READ/BUSY multi-row INSERT: every injected failure was handled correctly
+# READ/BUSY UPDATE of a secondary key column: every injected failure was handled correctly
+# READ/BUSY UPDATE of the primary key: every injected failure was handled correctly
+# READ/BUSY DELETE: every injected failure was handled correctly
+# READ/BUSY INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# READ/BUSY REPLACE: every injected failure was handled correctly
+# READ/BUSY INSERT ... SELECT: every injected failure was handled correctly
+# READ/BUSY read through a secondary key: every injected failure was handled correctly
+# READ/BUSY point reads in a join: every injected failure was handled correctly
+# READ/BUSY transaction at REPEATABLE READ: every injected failure was handled correctly
+# READ/BUSY transaction at READ COMMITTED: every injected failure was handled correctly
+# READ/TIMEDOUT multi-row INSERT: every injected failure was handled correctly
+# READ/TIMEDOUT UPDATE of a secondary key column: every injected failure was handled correctly
+# READ/TIMEDOUT UPDATE of the primary key: every injected failure was handled correctly
+# READ/TIMEDOUT DELETE: every injected failure was handled correctly
+# READ/TIMEDOUT INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# READ/TIMEDOUT REPLACE: every injected failure was handled correctly
+# READ/TIMEDOUT INSERT ... SELECT: every injected failure was handled correctly
+# READ/TIMEDOUT read through a secondary key: every injected failure was handled correctly
+# READ/TIMEDOUT point reads in a join: every injected failure was handled correctly
+# READ/TIMEDOUT transaction at REPEATABLE READ: every injected failure was handled correctly
+# READ/TIMEDOUT transaction at READ COMMITTED: every injected failure was handled correctly
+# READ/TRYAGAIN multi-row INSERT: every injected failure was handled correctly
+# READ/TRYAGAIN UPDATE of a secondary key column: every injected failure was handled correctly
+# READ/TRYAGAIN UPDATE of the primary key: every injected failure was handled correctly
+# READ/TRYAGAIN DELETE: every injected failure was handled correctly
+# READ/TRYAGAIN INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# READ/TRYAGAIN REPLACE: every injected failure was handled correctly
+# READ/TRYAGAIN INSERT ... SELECT: every injected failure was handled correctly
+# READ/TRYAGAIN read through a secondary key: every injected failure was handled correctly
+# READ/TRYAGAIN point reads in a join: every injected failure was handled correctly
+# READ/TRYAGAIN transaction at REPEATABLE READ: every injected failure was handled correctly
+# READ/TRYAGAIN transaction at READ COMMITTED: every injected failure was handled correctly
+# READ/INCOMPLETE multi-row INSERT: every injected failure was handled correctly
+# READ/INCOMPLETE UPDATE of a secondary key column: every injected failure was handled correctly
+# READ/INCOMPLETE UPDATE of the primary key: every injected failure was handled correctly
+# READ/INCOMPLETE DELETE: every injected failure was handled correctly
+# READ/INCOMPLETE INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# READ/INCOMPLETE REPLACE: every injected failure was handled correctly
+# READ/INCOMPLETE INSERT ... SELECT: every injected failure was handled correctly
+# READ/INCOMPLETE read through a secondary key: every injected failure was handled correctly
+# READ/INCOMPLETE point reads in a join: every injected failure was handled correctly
+# READ/INCOMPLETE transaction at REPEATABLE READ: every injected failure was handled correctly
+# READ/INCOMPLETE transaction at READ COMMITTED: every injected failure was handled correctly
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

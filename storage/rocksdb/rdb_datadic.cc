@@ -5560,7 +5560,8 @@ rocksdb::Status Rdb_dict_manager::get_value(const rocksdb::Slice &key,
                                             std::string *const value) const {
   rocksdb::ReadOptions options;
   options.total_order_seek = true;
-  return m_db->Get(options, m_system_cfh, key, value);
+  return RDB_INJECT_ERROR(Rdb_inject_class::DICT_READ, "dict_get",
+                          m_db->Get(options, m_system_cfh, key, value));
 }
 
 void Rdb_dict_manager::delete_key(rocksdb::WriteBatchBase *batch,
@@ -5583,7 +5584,8 @@ int Rdb_dict_manager::commit(rocksdb::WriteBatch *const batch,
   options.sync = (sync && rdb_sync_wal_supported());
   rocksdb::TransactionDBWriteOptimizations optimize;
   optimize.skip_concurrency_control = true;
-  rocksdb::Status s = m_db->Write(options, optimize, batch);
+  rocksdb::Status s = RDB_INJECT_ERROR(Rdb_inject_class::DICT, "dict_commit",
+                                       m_db->Write(options, optimize, batch));
   res = !s.ok();  // we return true when something failed
   if (res) {
     rdb_handle_io_error(s, RDB_IO_ERROR_DICT_COMMIT);

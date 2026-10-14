@@ -1,0 +1,41 @@
+#
+# PS-11704: the index statistics thread scans each index through
+# is_valid_iterator(), which treats an iterator error other than an I/O error
+# or corruption as the end of the index. A failed scan therefore stores
+# statistics computed from part of the index and is counted as a success.
+#
+# Correct behaviour: the calculation is counted as a failure (and the stored
+# statistics are left unchanged).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--let $errinj_bg_table = t2
+--let $errinj_bg_keys = , KEY ka (a)
+--source suite/rocksdb/include/errinj_bg_setup.inc
+
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 10;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 0;
+--let $ok_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_success', Value, 1)
+--let $failed_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_failure', Value, 1)
+
+SET GLOBAL rocksdb_debug_inject_bg_error = 'INDEX_STATS ITERATOR INCOMPLETE 1';
+# The updates queue the table for the statistics thread.
+UPDATE t2 SET b = 'x' WHERE pk <= 50;
+--let $errinj_bg_site = iterator
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--let $wait_condition = SELECT VARIABLE_VALUE > 0 + $ok_before + $failed_before FROM (SELECT SUM(VARIABLE_VALUE) AS VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rocksdb_table_index_stats_success', 'rocksdb_table_index_stats_failure')) s
+--source include/wait_condition.inc
+
+--let $ok_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_success', Value, 1)
+--let $failed_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_table_index_stats_failure', Value, 1)
+--expr $ok = $ok_after - $ok_before
+--expr $failed = $failed_after - $failed_before
+--echo # calculations counted as successful: $ok, as failed: $failed
+
+SET GLOBAL rocksdb_table_stats_use_table_scan = DEFAULT;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = DEFAULT;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = DEFAULT;
+DROP TABLE t2;
