@@ -1314,18 +1314,19 @@ int Partition_base::del_ren_table(const char *from, const char *to,
       error = file->ha_delete_table(from_name.c_str(), table_def_from);
       if (error) save_error = error;
     } else {
-      // Currently neither TokuDB nor RocksDB process dd::Table* arguments,
-      // so it's ok to pass nullptr as the last two arguments of the function.
-      // But if some of the SE's implements DD-specific functionality,
-      // it's necessary to modify the following code to pass
-      // reasonable arguments. See also ha_innopart::rename_table()
-      // to understand how to modify *table_def_to.
+      // RocksDB reads table_def_from (the DD table id for its DDL recovery
+      // log) and does not modify *table_def_to. See also
+      // ha_innopart::rename_table() to understand how to modify
+      // *table_def_to.
       error = file->ha_rename_table(from_name.c_str(), (to_name++)->c_str(),
-                                    nullptr, nullptr);
+                                    table_def_from, table_def_to);
 
       if (error) goto rename_error;
     }
   }
+  DBUG_EXECUTE_IF("partition_crash_after_rename_all", {
+    if (to != nullptr) DBUG_SUICIDE();
+  });
 
   return save_error;
 

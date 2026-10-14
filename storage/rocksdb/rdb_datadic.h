@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -488,6 +489,13 @@ class Rdb_key_def {
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
     DDL_PENDING_ALTER = 12,
+    /*
+      Recovery log of table DDL (CREATE, DROP, RENAME TABLE). MyRocks has no
+      atomic DDL, so these records let startup bring the MyRocks dictionary
+      in line with the server data dictionary after a crash, see
+      rocksdb_recover_interrupted_ddl().
+    */
+    DDL_RECOVERY_LOG = 13,
     XA_PREPARED = 14,
     END_DICT_INDEX_ID = 255
   };
@@ -505,6 +513,7 @@ class Rdb_key_def {
     AUTO_INCREMENT_VERSION = 1,
     DROPPED_CF_VERSION = 1,
     DDL_PENDING_ALTER_VERSION = 1,
+    DDL_RECOVERY_LOG_VERSION = 1,
     XA_PREPARED_VERSION = 1,
     // Version for index stats is stored in IndexStats struct
   };
@@ -1517,8 +1526,13 @@ class Rdb_ddl_manager : public Ensure_initialized {
 
   /* Load the data dictionary from on-disk storage */
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
+  /*
+    before_validation runs after the dictionary is loaded and before the
+    tables are validated against the server data dictionary.
+  */
   bool init(Rdb_dict_manager_selector *const dict_arg,
-            Rdb_cf_manager *const cf_manager, const uint32_t validate_tables);
+            Rdb_cf_manager *const cf_manager, const uint32_t validate_tables,
+            const std::function<void()> &before_validation = {});
 #else
   bool init(Rdb_dict_manager *const dict_arg, Rdb_cf_manager *const cf_manager);
 #endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
@@ -1799,6 +1813,23 @@ class Rdb_dict_manager : public Ensure_initialized {
                                   std::string *const locks) const;
   rocksdb::Status get_all_xa_prepared(
       std::vector<std::pair<std::string, uint>> *trx_names) const;
+
+  /*
+    DDL recovery log (Rdb_key_def::DDL_RECOVERY_LOG): one record per
+    (operation, table name), with an operation specific payload.
+  */
+  enum class ddl_log_op : uchar { CREATE = 'C', DROP = 'D', RENAME = 'R' };
+  struct ddl_log_entry {
+    ddl_log_op op;
+    std::string name;
+    std::string payload;
+  };
+  void put_ddl_log(rocksdb::WriteBatch *const batch, const ddl_log_op op,
+                   const std::string &name, const std::string &payload) const;
+  void delete_ddl_log(rocksdb::WriteBatch *const batch, const ddl_log_op op,
+                      const std::string &name) const;
+  /* @return true on error */
+  [[nodiscard]] bool get_all_ddl_log(std::vector<ddl_log_entry> *entries) const;
 
   void delete_dropped_cf_and_flags(rocksdb::WriteBatch *const batch,
                                    const uint cf_id) const;

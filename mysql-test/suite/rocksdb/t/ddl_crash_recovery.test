@@ -6,9 +6,10 @@
 # dictionaries must agree, the rows must be intact, no MyRocks index may be
 # left behind and the table must accept DML and DDL.
 #
-# Windows where recovery is wrong today are in the disabled tests
-# ddl_crash_create_drop_mismatch, ddl_crash_rename_mismatch, ddl_crash_truncate,
-# ddl_crash_add_index and ddl_crash_drop_index. COPY ALTER windows are in
+# Windows that need the MyRocks DDL recovery log at startup are in
+# ddl_crash_create_drop_mismatch, ddl_crash_rename_mismatch and
+# ddl_crash_truncate; windows where recovery is wrong today are in the
+# disabled tests ddl_crash_add_index and ddl_crash_drop_index. COPY ALTER windows are in
 # alter_copy_crash_leftover_warning and alter_copy_crash_rename.
 #
 --source include/have_rocksdb.inc

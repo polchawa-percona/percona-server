@@ -4902,7 +4902,8 @@ bool Rdb_ddl_manager::validate_auto_incr() const {
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
 bool Rdb_ddl_manager::init(Rdb_dict_manager_selector *const dict_arg,
                            Rdb_cf_manager *const cf_manager,
-                           const uint32_t validate_tables) {
+                           const uint32_t validate_tables,
+                           const std::function<void()> &before_validation) {
 #else
 bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
                            Rdb_cf_manager *const cf_manager) {
@@ -5084,6 +5085,8 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
   initialized = true;
 
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
+  if (before_validation) before_validation();
+
   /*
     If validate_tables is greater than 0 run the validation.  Only fail the
     initialzation if the setting is 1.  If the setting is 2 we continue.
@@ -6194,6 +6197,70 @@ rocksdb::Status Rdb_dict_manager::get_pending_alter_tables(
                     it->status().ToString().c_str());
   }
   return it->status();
+}
+
+static std::string rdb_ddl_log_key(const Rdb_dict_manager::ddl_log_op op,
+                                   const std::string &name) {
+  std::string key(Rdb_key_def::INDEX_NUMBER_SIZE + 1, '\0');
+  rdb_netbuf_store_uint32(reinterpret_cast<uchar *>(&key[0]),
+                          Rdb_key_def::DDL_RECOVERY_LOG);
+  key[Rdb_key_def::INDEX_NUMBER_SIZE] = static_cast<char>(op);
+  key.append(name);
+  return key;
+}
+
+void Rdb_dict_manager::put_ddl_log(rocksdb::WriteBatch *const batch,
+                                   const ddl_log_op op, const std::string &name,
+                                   const std::string &payload) const {
+  assert(batch != nullptr);
+  const std::string key = rdb_ddl_log_key(op, name);
+  std::string value(Rdb_key_def::VERSION_SIZE, '\0');
+  rdb_netbuf_store_uint16(reinterpret_cast<uchar *>(&value[0]),
+                          Rdb_key_def::DDL_RECOVERY_LOG_VERSION);
+  value.append(payload);
+  batch->Put(m_system_cfh, key, value);
+}
+
+void Rdb_dict_manager::delete_ddl_log(rocksdb::WriteBatch *const batch,
+                                      const ddl_log_op op,
+                                      const std::string &name) const {
+  assert(batch != nullptr);
+  delete_key(batch, rdb_ddl_log_key(op, name));
+}
+
+bool Rdb_dict_manager::get_all_ddl_log(
+    std::vector<ddl_log_entry> *entries) const {
+  uchar prefix_buf[Rdb_key_def::INDEX_NUMBER_SIZE];
+  rdb_netbuf_store_uint32(prefix_buf, Rdb_key_def::DDL_RECOVERY_LOG);
+  const rocksdb::Slice prefix(reinterpret_cast<char *>(prefix_buf),
+                              sizeof(prefix_buf));
+
+  std::unique_ptr<rocksdb::Iterator> it(new_iterator());
+  for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix);
+       it->Next()) {
+    const rocksdb::Slice key = it->key();
+    const rocksdb::Slice value = it->value();
+    if (key.size() <= Rdb_key_def::INDEX_NUMBER_SIZE ||
+        value.size() < Rdb_key_def::VERSION_SIZE) {
+      continue;
+    }
+    const uint16 version =
+        rdb_netbuf_to_uint16(reinterpret_cast<const uchar *>(value.data()));
+    if (version != Rdb_key_def::DDL_RECOVERY_LOG_VERSION) {
+      LogPluginErrMsg(WARNING_LEVEL, 0,
+                      "Ignoring a DDL recovery log record of version %u",
+                      version);
+      continue;
+    }
+    ddl_log_entry entry;
+    entry.op = static_cast<ddl_log_op>(key[Rdb_key_def::INDEX_NUMBER_SIZE]);
+    entry.name.assign(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE + 1,
+                      key.size() - Rdb_key_def::INDEX_NUMBER_SIZE - 1);
+    entry.payload.assign(value.data() + Rdb_key_def::VERSION_SIZE,
+                         value.size() - Rdb_key_def::VERSION_SIZE);
+    entries->push_back(std::move(entry));
+  }
+  return !it->status().ok();
 }
 
 /*
