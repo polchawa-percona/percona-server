@@ -1,0 +1,161 @@
+SET @orig_rec_ts = @@global.rocksdb_debug_ttl_rec_ts;
+CREATE TABLE t_col (
+a INT NOT NULL, b INT NOT NULL, c VARCHAR(32), d BLOB,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cft',
+UNIQUE KEY ub (b) COMMENT 'cfname=rev:cft2',
+KEY kc (c(4)) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=8;ttl_col=ts;';
+CREATE TABLE t_hid (
+a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cft',
+KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=8;';
+CREATE TABLE t_part (
+a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'p0_cfname=cfp0;p1_cfname=cfp1;',
+KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB
+COMMENT='p0_ttl_duration=8;p1_ttl_duration=100000;'
+  PARTITION BY RANGE (a) (
+PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN (100));
+CREATE TABLE t_plain (
+a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (a) COMMENT 'cfname=cft',
+KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB;
+# Rows 1-4 expire 8 seconds from now, rows 5-8 live long.
+INSERT INTO t_col
+SELECT n, n, REPEAT(CHAR(96 + n), 8), REPEAT('x', 1000),
+IF(n <= 4, UNIX_TIMESTAMP(), UNIX_TIMESTAMP() + 100000)
+FROM (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION
+SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8) s;
+INSERT INTO t_hid VALUES (1,1),(2,2),(3,3),(4,4);
+INSERT INTO t_part VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+Warnings:
+Warning	1292	Truncated incorrect rocksdb_debug_ttl_rec_ts value: '100000'
+INSERT INTO t_hid VALUES (5,5),(6,6),(7,7),(8,8);
+INSERT INTO t_part VALUES (11,11),(12,12),(13,13);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+INSERT INTO t_plain VALUES (1,1),(2,2),(3,3),(4,4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Open the transaction without touching the tables, so it holds no
+# metadata lock and OPTIMIZE TABLE can run.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+# Move rows between the expired and the live state.
+UPDATE t_col SET ts = 0 WHERE a = 5;
+UPDATE t_col SET ts = UNIX_TIMESTAMP() + 100000 WHERE a = 1;
+DELETE FROM t_col WHERE a = 6;
+INSERT INTO t_col VALUES (6, 6, 'ffffffff', REPEAT('y', 1000),
+UNIX_TIMESTAMP() + 100000);
+DELETE FROM t_col WHERE a = 7;
+UPDATE t_hid SET b = b + 100 WHERE a = 2;
+DELETE FROM t_hid WHERE a = 1;
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+Warnings:
+Warning	1292	Truncated incorrect rocksdb_debug_ttl_rec_ts value: '100000'
+INSERT INTO t_hid VALUES (1, 101);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Wait until rows 1-4 (as inserted) have expired.
+# Triggers that take a metadata lock, before the transaction reads.
+OPTIMIZE TABLE t_col, t_hid, t_plain;
+ALTER TABLE t_part OPTIMIZE PARTITION p0;
+ALTER TABLE t_part OPTIMIZE PARTITION p1;
+after OPTIMIZE, open transaction: t_col.PRIMARY: ok
+after OPTIMIZE, open transaction: t_col.ub: ok
+after OPTIMIZE, open transaction: t_col.kc: ok
+after OPTIMIZE, open transaction: t_hid.PRIMARY: ok
+after OPTIMIZE, open transaction: t_hid.kb: ok
+after OPTIMIZE, open transaction: t_part.PRIMARY: ok
+after OPTIMIZE, open transaction: t_part.kb: ok
+after OPTIMIZE, open transaction: t_plain.PRIMARY: ok
+after OPTIMIZE, open transaction: t_plain.kb: ok
+after OPTIMIZE, new statement: t_col.PRIMARY: ok
+after OPTIMIZE, new statement: t_col.ub: ok
+after OPTIMIZE, new statement: t_col.kc: ok
+after OPTIMIZE, new statement: t_hid.PRIMARY: ok
+after OPTIMIZE, new statement: t_hid.kb: ok
+after OPTIMIZE, new statement: t_part.PRIMARY: ok
+after OPTIMIZE, new statement: t_part.kb: ok
+after OPTIMIZE, new statement: t_plain.PRIMARY: ok
+after OPTIMIZE, new statement: t_plain.kb: ok
+SET GLOBAL rocksdb_compact_cf = 'cft';
+SET GLOBAL rocksdb_compact_cf = 'rev:cft2';
+SET GLOBAL rocksdb_compact_cf = 'cfp0';
+SET GLOBAL rocksdb_compact_cf = 'cfp1';
+after rocksdb_compact_cf, open transaction: t_col.PRIMARY: ok
+after rocksdb_compact_cf, open transaction: t_col.ub: ok
+after rocksdb_compact_cf, open transaction: t_col.kc: ok
+after rocksdb_compact_cf, open transaction: t_hid.PRIMARY: ok
+after rocksdb_compact_cf, open transaction: t_hid.kb: ok
+after rocksdb_compact_cf, open transaction: t_part.PRIMARY: ok
+after rocksdb_compact_cf, open transaction: t_part.kb: ok
+after rocksdb_compact_cf, open transaction: t_plain.PRIMARY: ok
+after rocksdb_compact_cf, open transaction: t_plain.kb: ok
+SET GLOBAL rocksdb_compact_lzero_now = 1;
+after rocksdb_compact_lzero_now, open transaction: t_col.PRIMARY: ok
+after rocksdb_compact_lzero_now, open transaction: t_col.ub: ok
+after rocksdb_compact_lzero_now, open transaction: t_col.kc: ok
+after rocksdb_compact_lzero_now, open transaction: t_hid.PRIMARY: ok
+after rocksdb_compact_lzero_now, open transaction: t_hid.kb: ok
+after rocksdb_compact_lzero_now, open transaction: t_part.PRIMARY: ok
+after rocksdb_compact_lzero_now, open transaction: t_part.kb: ok
+after rocksdb_compact_lzero_now, open transaction: t_plain.PRIMARY: ok
+after rocksdb_compact_lzero_now, open transaction: t_plain.kb: ok
+SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1;
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_col.PRIMARY: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_col.ub: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_col.kc: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_hid.PRIMARY: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_hid.kb: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_part.PRIMARY: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_part.kb: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_plain.PRIMARY: ok
+after rocksdb_force_flush_memtable_and_lzero_now, open transaction: t_plain.kb: ok
+COMMIT;
+# With no transaction open, a forced bottommost compaction removes the
+# expired rows from the primary key and every secondary index.
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+SET GLOBAL rocksdb_compact_cf = 'cft';
+SET GLOBAL rocksdb_compact_cf = 'rev:cft2';
+SET GLOBAL rocksdb_compact_cf = 'cfp0';
+SET GLOBAL rocksdb_compact_cf = 'cfp1';
+SET SESSION rocksdb_manual_compaction_bottommost_level = DEFAULT;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+read filtering off: t_col.PRIMARY: ok
+read filtering off: t_col.ub: ok
+read filtering off: t_col.kc: ok
+read filtering off: t_hid.PRIMARY: ok
+read filtering off: t_hid.kb: ok
+read filtering off: t_part.PRIMARY: ok
+read filtering off: t_part.kb: ok
+read filtering off: t_plain.PRIMARY: ok
+read filtering off: t_plain.kb: ok
+SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+CHECK TABLE t_col, t_hid, t_part, t_plain;
+SELECT a, b, c, LENGTH(d) FROM t_col ORDER BY a;
+a	b	c	LENGTH(d)
+1	1	aaaaaaaa	1000
+6	6	ffffffff	1000
+8	8	hhhhhhhh	1000
+# restart: --rocksdb_validate_tables=1
+after restart: t_col.PRIMARY: ok
+after restart: t_col.ub: ok
+after restart: t_col.kc: ok
+after restart: t_hid.PRIMARY: ok
+after restart: t_hid.kb: ok
+after restart: t_part.PRIMARY: ok
+after restart: t_part.kb: ok
+after restart: t_plain.PRIMARY: ok
+after restart: t_plain.kb: ok
+CHECK TABLE t_col, t_hid, t_part, t_plain;
+Table	Op	Msg_type	Msg_text
+test.t_col	check	status	OK
+test.t_hid	check	status	OK
+test.t_part	check	status	OK
+test.t_plain	check	status	OK
+# restart
+DROP TABLE t_col, t_hid, t_part, t_plain;

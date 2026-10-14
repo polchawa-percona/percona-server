@@ -12827,6 +12827,16 @@ void Rdb_drop_index_thread::run() {
     // make sure, no program error is returned
     assert(ret == 0 || ret == ETIMEDOUT);
     RDB_MUTEX_UNLOCK_CHECK(m_signal_mutex);
+#ifndef NDEBUG
+    rdb_dbug_pause_while_set("rocksdb_pause_drop_index_thread", "",
+                             [this]() { return m_killed != THD::NOT_KILLED; });
+    if (m_killed) {
+      // Shutdown ended the pause: stop without another drop pass, as the
+      // check after the wait above does. The mutex is held on loop exit.
+      RDB_MUTEX_LOCK_CHECK(m_signal_mutex);
+      break;
+    }
+#endif
     for (Rdb_dict_manager *local_dict_manager : dict_manager_list) {
       std::unordered_set<GL_INDEX_ID> indices;
       local_dict_manager->get_ongoing_drop_indexes(&indices);

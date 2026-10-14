@@ -1,0 +1,210 @@
+#
+# Manual compaction of TTL tables while a transaction is open, at
+# READ COMMITTED and REPEATABLE READ (see the .combinations file).
+#
+# Rows expire in real time while the transaction is open, and other sessions
+# move rows between the expired and the live state (UPDATE of the TTL column,
+# UPDATE of a hidden-TTL row, DELETE and re-INSERT). Every manual compaction
+# trigger then runs: OPTIMIZE TABLE, ALTER TABLE ... OPTIMIZE PARTITION,
+# rocksdb_compact_cf, rocksdb_compact_lzero_now and
+# rocksdb_force_flush_memtable_and_lzero_now.
+#
+# The compaction filter keeps rows that had not expired when the oldest
+# snapshot was taken, and read filtering hides rows that had expired when the
+# reading transaction's snapshot was taken. So:
+#   REPEATABLE READ: the open transaction must keep reading every row it saw
+#     at its start, through the primary key and every secondary index, before
+#     and after each compaction;
+#   READ COMMITTED: every statement reads only the rows that are live now.
+# After the transaction ends, a forced bottommost compaction must remove the
+# expired rows from the primary key and every secondary index alike, which is
+# checked with read filtering off, and the result must survive a restart with
+# rocksdb_validate_tables=1.
+#
+# The tables cover an explicit TTL column, hidden TTL, per-partition TTL with
+# per-partition column families, a unique index in a reverse column family,
+# a prefix index, a BLOB column, and a table without TTL sharing a column
+# family with the TTL tables.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/count_sessions.inc
+
+--let $rr = `SELECT @@global.transaction_isolation = 'REPEATABLE-READ'`
+
+SET @orig_rec_ts = @@global.rocksdb_debug_ttl_rec_ts;
+
+CREATE TABLE t_col (
+  a INT NOT NULL, b INT NOT NULL, c VARCHAR(32), d BLOB,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  UNIQUE KEY ub (b) COMMENT 'cfname=rev:cft2',
+  KEY kc (c(4)) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=8;ttl_col=ts;';
+
+CREATE TABLE t_hid (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=8;';
+
+CREATE TABLE t_part (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'p0_cfname=cfp0;p1_cfname=cfp1;',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB
+  COMMENT='p0_ttl_duration=8;p1_ttl_duration=100000;'
+  PARTITION BY RANGE (a) (
+    PARTITION p0 VALUES LESS THAN (10),
+    PARTITION p1 VALUES LESS THAN (100));
+
+CREATE TABLE t_plain (
+  a INT NOT NULL, b INT NOT NULL,
+  PRIMARY KEY (a) COMMENT 'cfname=cft',
+  KEY kb (b) COMMENT 'cfname=cft'
+) ENGINE=ROCKSDB;
+
+--echo # Rows 1-4 expire 8 seconds from now, rows 5-8 live long.
+INSERT INTO t_col
+  SELECT n, n, REPEAT(CHAR(96 + n), 8), REPEAT('x', 1000),
+         IF(n <= 4, UNIX_TIMESTAMP(), UNIX_TIMESTAMP() + 100000)
+  FROM (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION
+        SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8) s;
+INSERT INTO t_hid VALUES (1,1),(2,2),(3,3),(4,4);
+INSERT INTO t_part VALUES (1,1),(2,2),(3,3);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+INSERT INTO t_hid VALUES (5,5),(6,6),(7,7),(8,8);
+INSERT INTO t_part VALUES (11,11),(12,12),(13,13);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+INSERT INTO t_plain VALUES (1,1),(2,2),(3,3),(4,4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Open the transaction without touching the tables, so it holds no
+--echo # metadata lock and OPTIMIZE TABLE can run.
+connect (con_snap,localhost,root,,);
+--disable_warnings
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--enable_warnings
+
+connection default;
+--echo # Move rows between the expired and the live state.
+UPDATE t_col SET ts = 0 WHERE a = 5;
+UPDATE t_col SET ts = UNIX_TIMESTAMP() + 100000 WHERE a = 1;
+DELETE FROM t_col WHERE a = 6;
+INSERT INTO t_col VALUES (6, 6, 'ffffffff', REPEAT('y', 1000),
+                          UNIX_TIMESTAMP() + 100000);
+DELETE FROM t_col WHERE a = 7;
+# An UPDATE keeps the hidden TTL timestamp of the old row, so row 2 still
+# expires; re-inserting row 1 gives it a new, long-lived timestamp.
+UPDATE t_hid SET b = b + 100 WHERE a = 2;
+DELETE FROM t_hid WHERE a = 1;
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 100000;
+INSERT INTO t_hid VALUES (1, 101);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = @orig_rec_ts;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Wait until rows 1-4 (as inserted) have expired.
+--sleep 10
+
+# Rows live now: t_col 1, 6, 8; t_hid 1, 5-8; t_part 11-13; t_plain 1-4.
+--let $live_col = 3
+--let $live_hid = 5
+--let $live_part = 3
+--let $live_plain = 4
+if ($rr)
+{
+  --let $exp_col = 8
+  --let $exp_hid = 8
+  --let $exp_part = 6
+}
+if (!$rr)
+{
+  --let $exp_col = $live_col
+  --let $exp_hid = $live_hid
+  --let $exp_part = $live_part
+}
+--let $exp_plain = 4
+
+--echo # Triggers that take a metadata lock, before the transaction reads.
+--disable_result_log
+OPTIMIZE TABLE t_col, t_hid, t_plain;
+ALTER TABLE t_part OPTIMIZE PARTITION p0;
+ALTER TABLE t_part OPTIMIZE PARTITION p1;
+--enable_result_log
+
+connection con_snap;
+--let $ct_label = after OPTIMIZE, open transaction:
+--source suite/rocksdb/include/compaction_ttl_check_all.inc
+
+connection default;
+--let $exp_col_save = $exp_col
+--let $exp_hid_save = $exp_hid
+--let $exp_part_save = $exp_part
+--let $exp_col = $live_col
+--let $exp_hid = $live_hid
+--let $exp_part = $live_part
+--let $ct_label = after OPTIMIZE, new statement:
+--source suite/rocksdb/include/compaction_ttl_check_all.inc
+--let $exp_col = $exp_col_save
+--let $exp_hid = $exp_hid_save
+--let $exp_part = $exp_part_save
+
+--let $i = 1
+while ($i <= 3)
+{
+  connection default;
+  if ($i == 1)
+  {
+    --let $trigger = rocksdb_compact_cf
+    --source suite/rocksdb/include/compaction_ttl_compact_all.inc
+  }
+  if ($i == 2)
+  {
+    --let $trigger = rocksdb_compact_lzero_now
+    # Fails if an automatic compaction takes the L0 files first (PS-11747).
+    --error 0,ER_WRONG_VALUE_FOR_VAR
+    SET GLOBAL rocksdb_compact_lzero_now = 1;
+  }
+  if ($i == 3)
+  {
+    --let $trigger = rocksdb_force_flush_memtable_and_lzero_now
+    SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1;
+  }
+  connection con_snap;
+  --let $ct_label = after $trigger, open transaction:
+  --source suite/rocksdb/include/compaction_ttl_check_all.inc
+  --inc $i
+}
+
+connection con_snap;
+COMMIT;
+disconnect con_snap;
+
+connection default;
+--echo # With no transaction open, a forced bottommost compaction removes the
+--echo # expired rows from the primary key and every secondary index.
+SET SESSION rocksdb_manual_compaction_bottommost_level = 'kForce';
+--source suite/rocksdb/include/compaction_ttl_compact_all.inc
+SET SESSION rocksdb_manual_compaction_bottommost_level = DEFAULT;
+--let $exp_col = $live_col
+--let $exp_hid = $live_hid
+--let $exp_part = $live_part
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+--let $ct_label = read filtering off:
+--source suite/rocksdb/include/compaction_ttl_check_all.inc
+SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+--disable_result_log
+CHECK TABLE t_col, t_hid, t_part, t_plain;
+--enable_result_log
+SELECT a, b, c, LENGTH(d) FROM t_col ORDER BY a;
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $ct_label = after restart:
+--source suite/rocksdb/include/compaction_ttl_check_all.inc
+CHECK TABLE t_col, t_hid, t_part, t_plain;
+
+--let $restart_parameters =
+--source include/restart_mysqld.inc
+DROP TABLE t_col, t_hid, t_part, t_plain;
+--source include/wait_until_count_sessions.inc
