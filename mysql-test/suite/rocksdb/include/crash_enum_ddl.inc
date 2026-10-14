@@ -9,7 +9,8 @@ CREATE PROCEDURE ce_dml_check()
 BEGIN
   IF (SELECT COUNT(*) FROM information_schema.tables
       WHERE table_schema = 'test' AND table_name = 't2') > 0 THEN
-    REPLACE INTO t2 SELECT * FROM t2 ORDER BY pk LIMIT 1;
+    UPDATE t2 SET b = CONCAT(b, 'x') WHERE pk = 3;
+    UPDATE t2 SET b = LEFT(b, CHAR_LENGTH(b) - 1) WHERE pk = 3;
     UPDATE t2 SET d = d + 1 WHERE pk = 5;
     UPDATE t2 SET d = d - 1 WHERE pk = 5;
   END IF;
