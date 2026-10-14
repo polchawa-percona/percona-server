@@ -487,7 +487,8 @@ class Rdb_key_def {
     AUTO_INC = 9,
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
-    XA_PREPARED = 12,
+    DDL_PENDING_ALTER = 12,
+    XA_PREPARED = 14,
     END_DICT_INDEX_ID = 255
   };
 
@@ -503,6 +504,7 @@ class Rdb_key_def {
     DDL_CREATE_INDEX_ONGOING_VERSION = 1,
     AUTO_INCREMENT_VERSION = 1,
     DROPPED_CF_VERSION = 1,
+    DDL_PENDING_ALTER_VERSION = 1,
     XA_PREPARED_VERSION = 1,
     // Version for index stats is stored in IndexStats struct
   };
@@ -1540,6 +1542,21 @@ class Rdb_ddl_manager : public Ensure_initialized {
 
   void set_table_stats(const std::string &tbl_name);
 
+  /*
+    Build a table definition from a list of existing indexes (used to restore
+    the index list of a table after an interrupted inplace ALTER TABLE).
+    Returns nullptr on error.
+  */
+  [[nodiscard]] Rdb_tbl_def *build_tbl_def(
+      const std::string &tbl_name,
+      const std::vector<GL_INDEX_ID> &index_ids) const;
+
+  /* Write the table definition to the batch, without changing the mapping */
+  [[nodiscard]] int write_tbl_def(Rdb_tbl_def *const tbl,
+                                  rocksdb::WriteBatch *const batch) const;
+  /* Change the mapping only, after write_tbl_def() was committed */
+  void put_committed(Rdb_tbl_def *const tbl) { put(tbl); }
+
   /* Modify the mapping and write it to on-disk storage */
   int put_and_write(Rdb_tbl_def *const key_descr,
                     rocksdb::WriteBatch *const batch);
@@ -1641,8 +1658,18 @@ class Rdb_ddl_manager : public Ensure_initialized {
   value: version, index_id
   index_id is 4 bytes
 
-  12. prepared XA transactions
-  key: Rdb_key_def::XA_PREPARED(0xc) + XID (RocksDB transaction name)
+  12. pending inplace ALTER TABLE (index list changed, server data dictionary
+  commit not confirmed yet)
+  key: Rdb_key_def::DDL_PENDING_ALTER(0xc) + dbname.tablename
+  value: version, token, {cf_id, index_id}*n_indexes_of_the_table_before_alter
+  version is 2 bytes, token is 8 bytes. cf_id and index_id are 4 bytes.
+  The token is also stored in the server data dictionary entry of the table
+  that the ALTER TABLE commits (se_private_data). If the server data
+  dictionary has the token, the ALTER TABLE committed, otherwise the index
+  list before the ALTER TABLE is restored.
+
+  14. prepared XA transactions
+  key: Rdb_key_def::XA_PREPARED(0xe) + XID (RocksDB transaction name)
   value: version, flags, {cf_id, exclusive, key_length, key}*
   flags and exclusive are 1 byte, cf_id and key_length are 4 bytes.
   flags: XA_PREPARED_IN_TC (XA PREPARE completed in the transaction
@@ -1716,6 +1743,9 @@ class Rdb_dict_manager : public Ensure_initialized {
   inline void lock() { RDB_MUTEX_LOCK_CHECK(m_mutex); }
 
   inline void unlock() { RDB_MUTEX_UNLOCK_CHECK(m_mutex); }
+
+  /* Whether the lock was free and is now held */
+  inline bool try_lock() { return mysql_mutex_trylock(&m_mutex) == 0; }
 
   inline void assert_lock_held() { mysql_mutex_assert_owner(&m_mutex); }
 
@@ -1832,6 +1862,20 @@ class Rdb_dict_manager : public Ensure_initialized {
     return is_index_operation_ongoing(gl_index_id,
                                       Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
   }
+
+  /* Pending inplace ALTER TABLE records, see 12. above */
+  void put_pending_alter(rocksdb::WriteBatch *const batch,
+                         const std::string &tbl_name, const uint64 token,
+                         const std::vector<GL_INDEX_ID> &old_index_ids) const;
+  /* OK: found; NotFound: no record; other: read error or invalid record */
+  [[nodiscard]] rocksdb::Status get_pending_alter(
+      const std::string &tbl_name, uint64 *const token,
+      std::vector<GL_INDEX_ID> *const old_index_ids) const;
+  void delete_pending_alter(rocksdb::WriteBatch *const batch,
+                            const std::string &tbl_name) const;
+  [[nodiscard]] rocksdb::Status get_pending_alter_tables(
+      std::vector<std::string> *const names) const;
+  [[nodiscard]] bool is_cf_used_by_pending_alter(const uint32_t cf_id) const;
 
   bool get_max_index_id(uint32_t *const index_id, bool is_dd_tbl = false) const;
   bool update_max_index_id(rocksdb::WriteBatch *const batch,

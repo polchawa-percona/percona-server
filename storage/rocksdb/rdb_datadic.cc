@@ -5359,8 +5359,64 @@ uint Rdb_ddl_manager::get_and_update_next_number(uint cf_id, bool is_dd_tbl) {
   on-disk data dictionary.
 */
 
-int Rdb_ddl_manager::put_and_write(Rdb_tbl_def *const tbl,
-                                   rocksdb::WriteBatch *const batch) {
+Rdb_tbl_def *Rdb_ddl_manager::build_tbl_def(
+    const std::string &tbl_name,
+    const std::vector<GL_INDEX_ID> &index_ids) const {
+  if (index_ids.empty() || index_ids.size() > MAX_INDEXES + 1) return nullptr;
+
+  auto tdef = std::make_unique<Rdb_tbl_def>(tbl_name);
+  tdef->m_key_count = index_ids.size();
+  tdef->m_pk_index = MAX_INDEXES;
+  tdef->m_key_descr_arr = new std::shared_ptr<Rdb_key_def>[tdef->m_key_count];
+
+  for (uint keyno = 0; keyno < tdef->m_key_count; keyno++) {
+    const GL_INDEX_ID &gl_index_id = index_ids[keyno];
+    const auto *const dict =
+        m_dict->get_dict_manager_selector_const(gl_index_id.cf_id);
+    struct Rdb_index_info index_info;
+    uint flags = 0;
+    std::shared_ptr<rocksdb::ColumnFamilyHandle> cfh =
+        m_cf_manager->get_cf(gl_index_id.cf_id);
+    if (!cfh || !dict->get_index_info(gl_index_id, &index_info) ||
+        !dict->get_cf_flags(gl_index_id.cf_id, &flags)) {
+      LogPluginErrMsg(ERROR_LEVEL, 0,
+                      "Could not get index information for Index Number "
+                      "(%u,%u), table %s",
+                      gl_index_id.cf_id, gl_index_id.index_id,
+                      tbl_name.c_str());
+      /*
+        The destructor of Rdb_tbl_def unregisters the index numbers of its
+        keys, which may belong to the current definition of the table.
+      */
+      for (uint i = 0; i < keyno; i++) tdef->m_key_descr_arr[i] = nullptr;
+      return nullptr;
+    }
+
+    const uint32 ttl_rec_offset =
+        Rdb_key_def::has_index_flag(index_info.m_index_flags,
+                                    Rdb_key_def::TTL_FLAG)
+            ? Rdb_key_def::calculate_index_flag_offset(index_info.m_index_flags,
+                                                       Rdb_key_def::TTL_FLAG)
+            : UINT_MAX;
+
+    tdef->m_key_descr_arr[keyno] = std::make_shared<Rdb_key_def>(
+        gl_index_id.index_id, keyno, cfh, index_info.m_index_dict_version,
+        index_info.m_index_type, index_info.m_kv_version,
+        flags & Rdb_key_def::REVERSE_CF_FLAG,
+        flags & Rdb_key_def::PER_PARTITION_CF_FLAG, "",
+        dict->get_stats(gl_index_id), index_info.m_index_flags, ttl_rec_offset,
+        index_info.m_ttl_duration);
+    if (index_info.m_index_type == Rdb_key_def::INDEX_TYPE_PRIMARY) {
+      tdef->m_pk_index = keyno;
+    }
+  }
+
+  tdef->m_tbl_stats.set(tdef->m_key_descr_arr[0]->m_stats.m_rows, 0, 0);
+  return tdef.release();
+}
+
+int Rdb_ddl_manager::write_tbl_def(Rdb_tbl_def *const tbl,
+                                   rocksdb::WriteBatch *const batch) const {
   Rdb_buf_writer<FN_LEN * 2 + Rdb_key_def::INDEX_NUMBER_SIZE> buf_writer;
 
   buf_writer.write_index(Rdb_key_def::DDL_ENTRY_INDEX_START_NUMBER);
@@ -5368,11 +5424,16 @@ int Rdb_ddl_manager::put_and_write(Rdb_tbl_def *const tbl,
   const std::string &dbname_tablename = tbl->full_tablename();
   buf_writer.write(dbname_tablename.c_str(), dbname_tablename.size());
 
-  int res;
   auto m_dict_for_current_table = m_dict->get_dict_manager_selector_non_const(
       tbl->m_key_descr_arr[0]->get_gl_index_id().cf_id);
-  if ((res = tbl->put_dict(m_dict_for_current_table, m_cf_manager, batch,
-                           buf_writer.to_slice()))) {
+  return tbl->put_dict(m_dict_for_current_table, m_cf_manager, batch,
+                       buf_writer.to_slice());
+}
+
+int Rdb_ddl_manager::put_and_write(Rdb_tbl_def *const tbl,
+                                   rocksdb::WriteBatch *const batch) {
+  int res;
+  if ((res = write_tbl_def(tbl, batch))) {
     return res;
   }
   if ((res = put(tbl))) {
@@ -6005,6 +6066,132 @@ rocksdb::Status Rdb_dict_manager::get_all_xa_prepared(
     trx_names->emplace_back(
         std::string(key.data() + prefix.size(), key.size() - prefix.size()),
         flags);
+  }
+  return it->status();
+}
+
+namespace {
+using Rdb_pending_alter_key =
+    Rdb_buf_writer<FN_LEN * 2 + Rdb_key_def::INDEX_NUMBER_SIZE>;
+
+void rdb_pending_alter_key(Rdb_pending_alter_key *const key_writer,
+                           const std::string &tbl_name) {
+  key_writer->write_index(Rdb_key_def::DDL_PENDING_ALTER);
+  key_writer->write(tbl_name.c_str(), tbl_name.size());
+}
+}  // namespace
+
+void Rdb_dict_manager::put_pending_alter(
+    rocksdb::WriteBatch *const batch, const std::string &tbl_name,
+    const uint64 token, const std::vector<GL_INDEX_ID> &old_index_ids) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+
+  StringBuffer<8 * Rdb_key_def::PACKED_SIZE> value;
+  value.alloc(Rdb_key_def::VERSION_SIZE + sizeof(uint64) +
+              old_index_ids.size() * Rdb_key_def::PACKED_SIZE * 2);
+  rdb_netstr_append_uint16(&value, Rdb_key_def::DDL_PENDING_ALTER_VERSION);
+  rdb_netstr_append_uint64(&value, token);
+  for (const auto &gl_index_id : old_index_ids) {
+    rdb_netstr_append_uint32(&value, gl_index_id.cf_id);
+    rdb_netstr_append_uint32(&value, gl_index_id.index_id);
+  }
+
+  put_key(batch, key_writer.to_slice(),
+          rocksdb::Slice(value.ptr(), value.length()));
+}
+
+rocksdb::Status Rdb_dict_manager::get_pending_alter(
+    const std::string &tbl_name, uint64 *const token,
+    std::vector<GL_INDEX_ID> *const old_index_ids) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+
+  std::string value;
+  const rocksdb::Status status = get_value(key_writer.to_slice(), &value);
+  if (!status.ok()) {
+    if (!status.IsNotFound()) {
+      LogPluginErrMsg(ERROR_LEVEL, 0,
+                      "Failed to read the pending ALTER TABLE record of table "
+                      "%s: %s",
+                      tbl_name.c_str(), status.ToString().c_str());
+    }
+    return status;
+  }
+
+  constexpr size_t header_size = Rdb_key_def::VERSION_SIZE + sizeof(uint64);
+  constexpr size_t id_size = Rdb_key_def::PACKED_SIZE * 2;
+  const uchar *ptr = reinterpret_cast<const uchar *>(value.data());
+  if (value.size() < header_size ||
+      (value.size() - header_size) % id_size != 0 ||
+      rdb_netbuf_read_uint16(&ptr) != Rdb_key_def::DDL_PENDING_ALTER_VERSION) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Invalid pending ALTER TABLE record for table %s",
+                    tbl_name.c_str());
+    return rocksdb::Status::Corruption();
+  }
+
+  *token = rdb_netbuf_read_uint64(&ptr);
+  old_index_ids->clear();
+  for (size_t i = 0; i < (value.size() - header_size) / id_size; i++) {
+    GL_INDEX_ID gl_index_id;
+    rdb_netbuf_read_gl_index(&ptr, &gl_index_id);
+    old_index_ids->push_back(gl_index_id);
+  }
+  return rocksdb::Status::OK();
+}
+
+void Rdb_dict_manager::delete_pending_alter(rocksdb::WriteBatch *const batch,
+                                            const std::string &tbl_name) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+  delete_key(batch, key_writer.to_slice());
+}
+
+/*
+  Whether an index of the column family is in the index list from before an
+  unfinished inplace ALTER TABLE: that index list can still be restored.
+*/
+bool Rdb_dict_manager::is_cf_used_by_pending_alter(const uint32_t cf_id) const {
+  std::vector<std::string> names;
+  // On a read error, keep the column family.
+  if (!get_pending_alter_tables(&names).ok()) return true;
+  for (const auto &name : names) {
+    uint64 token;
+    std::vector<GL_INDEX_ID> old_index_ids;
+    const rocksdb::Status status =
+        get_pending_alter(name, &token, &old_index_ids);
+    if (status.IsNotFound()) continue;
+    // On a read error, keep the column family.
+    if (!status.ok()) return true;
+    for (const auto &gl_index_id : old_index_ids) {
+      if (gl_index_id.cf_id == cf_id) return true;
+    }
+  }
+  return false;
+}
+
+rocksdb::Status Rdb_dict_manager::get_pending_alter_tables(
+    std::vector<std::string> *const names) const {
+  uchar prefix_buf[Rdb_key_def::INDEX_NUMBER_SIZE];
+  rdb_netbuf_store_index(prefix_buf, Rdb_key_def::DDL_PENDING_ALTER);
+  const rocksdb::Slice prefix(reinterpret_cast<char *>(prefix_buf),
+                              Rdb_key_def::INDEX_NUMBER_SIZE);
+
+  std::unique_ptr<rocksdb::Iterator> it(new_iterator());
+  for (it->Seek(prefix); it->Valid(); it->Next()) {
+    const rocksdb::Slice key = it->key();
+    if (key.size() <= Rdb_key_def::INDEX_NUMBER_SIZE ||
+        memcmp(key.data(), prefix_buf, Rdb_key_def::INDEX_NUMBER_SIZE)) {
+      break;
+    }
+    names->emplace_back(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE,
+                        key.size() - Rdb_key_def::INDEX_NUMBER_SIZE);
+  }
+  if (!it->status().ok()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Failed to read the pending ALTER TABLE records: %s",
+                    it->status().ToString().c_str());
   }
   return it->status();
 }
