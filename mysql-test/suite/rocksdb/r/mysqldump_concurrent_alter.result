@@ -1,0 +1,18 @@
+CREATE DATABASE dumpdb;
+CREATE TABLE dumpdb.t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO dumpdb.t1 VALUES (1),(2),(3);
+CREATE TABLE dumpdb.t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO dumpdb.t2 VALUES (1,10),(2,20),(3,30);
+LOCK TABLES dumpdb.t1 WRITE;
+# Wait until mysqldump is blocked on t1, after taking its snapshot.
+ALTER TABLE dumpdb.t2 FORCE, ALGORITHM=COPY;
+UNLOCK TABLES;
+# Wait for mysqldump to exit.
+include/wait_for_pattern_in_file.inc [mysqldump_exited]
+# The dump must report the changed table definition ...
+Pattern "Table definition has changed" found
+# ... and must not contain an empty dump of t2.
+Pattern "INSERT INTO `t2`" not found
+# A dump taken after the ALTER contains all rows of the rebuilt table.
+Pattern "INSERT INTO `t2` VALUES" found
+DROP DATABASE dumpdb;

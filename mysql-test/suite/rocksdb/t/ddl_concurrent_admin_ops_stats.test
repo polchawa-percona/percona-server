@@ -1,0 +1,82 @@
+#
+# ANALYZE TABLE and the background index-stats thread running while other
+# sessions drop, recreate and rename the same table, and while a column
+# family is created by one session and dropped with rocksdb_delete_cf by
+# another (table-scan statistics, recalculation on every change).
+#
+# After the churn stops, an explicit ANALYZE TABLE must give the table
+# non-zero statistics. Today the statistics sometimes stay at 0 rows and NULL
+# cardinality after ANALYZE TABLE (about 2 runs in 7), so the optimizer sees
+# an empty table. The test is disabled until that is fixed.
+#
+--source include/have_rocksdb.inc
+call mtr.add_suppression("Column family '[a-z_0-9]+' not found");
+call mtr.add_suppression("Cannot mark Column family");
+SET SESSION cte_max_recursion_depth = 100000;
+SET @save_ts = @@global.rocksdb_table_stats_use_table_scan;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET @save_rt = @@global.rocksdb_table_stats_recalc_threshold_pct;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 0;
+--let $load = SELECT n, n % 101 FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000) SELECT n FROM seq) s
+CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+eval INSERT INTO t $load;
+connect (ca, localhost, root,,);
+connect (cb, localhost, root,,);
+connect (cc, localhost, root,,);
+connect (cd, localhost, root,,);
+--disable_query_log
+--disable_result_log
+--let $i = 1
+--let $errs_cf = 0
+while ($i <= 60)
+{
+  connection ca;
+  --send ANALYZE TABLE t
+  connection cc;
+  --send_eval CREATE TABLE tc$i (a INT, PRIMARY KEY (a) COMMENT 'cfname=cf_race') ENGINE=ROCKSDB
+  connection cd;
+  --send SET GLOBAL rocksdb_delete_cf = 'cf_race'
+  connection cb;
+  --error 0,ER_LOCK_DEADLOCK,ER_LOCK_WAIT_TIMEOUT
+  DROP TABLE t;
+  CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+  SET SESSION cte_max_recursion_depth = 100000;
+  eval INSERT INTO t $load;
+  RENAME TABLE t TO tr, tr TO t;
+  connection ca;
+  --error 0,ER_NO_SUCH_TABLE,ER_LOCK_DEADLOCK
+  --reap
+  connection cc;
+  --error 0,ER_CF_DROPPED,ER_WRONG_ARGUMENTS
+  --reap
+  connection cd;
+  --error 0,ER_CANT_DROP_CF,ER_GET_ERRMSG,ER_INTERNAL_ERROR,1105
+  --reap
+  connection default;
+  --let $has = `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='test' AND TABLE_NAME='tc$i'`
+  if ($has)
+  {
+    eval INSERT INTO tc$i VALUES (1),(2),(3);
+    eval DROP TABLE tc$i;
+  }
+  inc $i;
+}
+--enable_result_log
+--enable_query_log
+connection default;
+disconnect ca;
+disconnect cb;
+disconnect cc;
+disconnect cd;
+SELECT COUNT(*), SUM(a) FROM t;
+SELECT COUNT(*) FROM t FORCE INDEX (kb) WHERE b >= 0;
+ANALYZE TABLE t;
+SELECT TABLE_ROWS > 0 AS table_rows_nonzero FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't';
+SELECT INDEX_NAME, CARDINALITY > 0 AS cardinality_nonzero
+  FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't' ORDER BY INDEX_NAME;
+SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' ORDER BY 1;
+DROP TABLE t;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_ts;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = @save_rt;

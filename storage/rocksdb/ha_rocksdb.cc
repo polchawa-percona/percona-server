@@ -134,7 +134,7 @@ const std::string DEFAULT_TMP_SYSTEM_CF_NAME("__tmp_system__");
 const std::string PER_INDEX_CF_NAME("$per_index_cf");
 static const std::string DEFAULT_SK_CF_NAME("default_sk");
 const std::string TRUNCATE_TABLE_PREFIX("#truncate_tmp#");
-static const std::string TMP_SCHEMA_NAME("#sqltmp");
+const std::string TMP_SCHEMA_NAME("#sqltmp");
 
 static std::vector<std::string> rdb_tables_to_recalc;
 
@@ -3478,6 +3478,16 @@ class Rdb_transaction {
   virtual void release_snapshot() = 0;
 
   bool has_snapshot() const { return m_read_opts.snapshot != nullptr; }
+
+  /*
+    Returns true if the transaction's snapshot is older than the moment the
+    index was published by a DDL statement, so reading the index through the
+    snapshot would miss its contents. See Rdb_key_def::m_create_seqno.
+  */
+  [[nodiscard]] bool snapshot_predates(const Rdb_key_def &kd) const {
+    return m_read_opts.snapshot != nullptr &&
+           m_read_opts.snapshot->GetSequenceNumber() < kd.m_create_seqno;
+  }
 
  private:
   // The Rdb_sst_info structures we are currently loading.  In a partitioned
@@ -8694,6 +8704,8 @@ bool ha_rocksdb::create_inplace_key_defs(
           dict_manager.get_dict_manager_selector_const(gl_index_id.cf_id)
               ->get_stats(gl_index_id),
           index_info.m_index_flags, ttl_rec_offset, ttl_duration);
+      // The index itself is unchanged, so it stays as visible as before.
+      new_key_descr[i]->m_create_seqno = okd.m_create_seqno.load();
     } else if (create_key_def(table_arg, i, tbl_def_arg, new_key_descr[i],
                               cfs[i], ttl_duration, ttl_column)) {
       return true;
@@ -9115,6 +9127,33 @@ static void rdb_gen_normalized_tablename(const std::string *db,
 }
 
 /*
+  Record that the indexes of a table became visible to other transactions now.
+  Must be called after the DDL has committed all of its data, so that every
+  write that belongs to the indexes has a sequence number not newer than the
+  recorded one. See Rdb_key_def::m_create_seqno.
+*/
+static uint64_t rdb_current_snapshot_seqno() {
+  /*
+    Use the sequence number a new snapshot would get rather than
+    GetLatestSequenceNumber(): with write_prepared/write_unprepared and
+    two_write_queues the latter can lag behind the published sequence that
+    snapshots are based on.
+  */
+  const rocksdb::Snapshot *const snapshot = rdb->GetSnapshot();
+  assert(snapshot != nullptr);
+  const uint64_t seqno = snapshot->GetSequenceNumber();
+  rdb->ReleaseSnapshot(snapshot);
+  return seqno;
+}
+
+static void rdb_mark_indexes_published(const Rdb_tbl_def &tbl_def) {
+  const uint64_t seqno = rdb_current_snapshot_seqno();
+  for (uint i = 0; i < tbl_def.m_key_count; i++) {
+    tbl_def.m_key_descr_arr[i]->m_create_seqno = seqno;
+  }
+}
+
+/*
  Create a table's Rdb_tbl_def and its Rdb_key_defs and store table information
  into MyRocks Data Dictionary
  The method is called during create table/partition, truncate table/partition
@@ -9200,11 +9239,15 @@ int ha_rocksdb::create_table(const std::string &table_name,
       goto error;
     }
 
+    DBUG_EXECUTE_IF("rocksdb_crash_before_create_table", DBUG_SUICIDE(););
     err = local_dict_manager->commit(batch);
     if (err != HA_EXIT_SUCCESS) {
       goto error;
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_create_table", DBUG_SUICIDE(););
+
+  rdb_mark_indexes_published(*m_tbl_def);
 
   DBUG_RETURN(HA_EXIT_SUCCESS);
 
@@ -11900,6 +11943,18 @@ int ha_rocksdb::index_init(uint idx, bool sorted) {
   m_need_build_decoder = true;
 
   active_index = idx;
+
+  /*
+    A transaction whose snapshot was taken before a DDL statement rebuilt the
+    table (COPY ALTER, TRUNCATE) or added this index would read it as empty or
+    incomplete. Report that the table definition changed, as InnoDB does.
+  */
+  if (tx->snapshot_predates(*m_key_descr_arr[active_index_pos()]) ||
+      tx->snapshot_predates(*m_pk_descr)) {
+    active_index = MAX_KEY;
+    DBUG_RETURN(HA_ERR_TABLE_DEF_CHANGED);
+  }
+
   if (idx != table->s->primary_key &&
       m_key_descr_arr[idx]->is_partial_index()) {
     const dd::Table *dd_table = nullptr;
@@ -13028,6 +13083,7 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl) {
       DBUG_RETURN(err);
     }
   }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_delete_table", DBUG_SUICIDE(););
 
   DBUG_EXECUTE_IF("rocksdb_after_delete_table", {
     static constexpr char act[] =
@@ -13177,6 +13233,33 @@ int ha_rocksdb::rename_table(
     rc = HA_ERR_ROCKSDB_INVALID_TABLE;
   } else {
     rc = local_dict_manager->commit(batch);
+  }
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename", {
+    if (rc == HA_EXIT_SUCCESS) DBUG_SUICIDE();
+  });
+  DBUG_EXECUTE_IF("rocksdb_crash_after_rename_from_tmp", {
+    if (rc == HA_EXIT_SUCCESS && strstr(from, tmp_file_prefix) != nullptr)
+      DBUG_SUICIDE();
+  });
+
+  /*
+    Renaming a temporary #sql table to a user-visible name is the last step of
+    a COPY ALTER: the rebuilt table, with its new indexes and the copied rows,
+    becomes visible now. A plain RENAME TABLE keeps the indexes and their
+    data, so it does not change their visibility.
+  */
+  std::string from_table;
+  if (rc == HA_EXIT_SUCCESS &&
+      rdb_split_normalized_tablename(from_str, nullptr, &from_table) ==
+          HA_EXIT_SUCCESS &&
+      from_table.compare(0, tmp_file_prefix_length, tmp_file_prefix) == 0) {
+    std::string to_table;
+    if (rdb_split_normalized_tablename(to_str, nullptr, &to_table) ==
+            HA_EXIT_SUCCESS &&
+        to_table.compare(0, tmp_file_prefix_length, tmp_file_prefix) != 0) {
+      const Rdb_tbl_def *const tbl_def = ddl_manager.find(to_str);
+      if (tbl_def != nullptr) rdb_mark_indexes_published(*tbl_def);
+    }
   }
   DBUG_RETURN(rc);
 }
@@ -15230,9 +15313,24 @@ bool ha_rocksdb::commit_inplace_alter_table(
         assert(0);
       }
 
+      DBUG_EXECUTE_IF("rocksdb_crash_before_finish_create_index",
+                      DBUG_SUICIDE(););
+
       /* Mark ongoing create indexes as finished/remove from data dictionary */
       local_dict_manager->finish_indexes_operation(
           create_index_ids, Rdb_key_def::DDL_CREATE_INDEX_ONGOING);
+
+      /*
+        The new secondary indexes were populated from the current data, which
+        older snapshots do not see. See Rdb_key_def::m_create_seqno.
+      */
+      const uint64_t seqno = rdb_current_snapshot_seqno();
+      for (inplace_alter_handler_ctx **pctx = ctx_array; *pctx; pctx++) {
+        for (const auto &index :
+             static_cast<Rdb_inplace_alter_ctx *>(*pctx)->m_added_indexes) {
+          index->m_create_seqno = seqno;
+        }
+      }
     }
 
     DBUG_EXECUTE_IF("rocksdb_delete_index", {

@@ -1,0 +1,196 @@
+--source include/have_rocksdb.inc
+
+#
+# After each kind of DDL statement, and again after a restart, the MyRocks
+# metadata must agree with the server's data dictionary:
+# - every index the server knows has an entry in ROCKSDB_DDL, and vice
+#   versa;
+# - ROCKSDB_INDEX_FILE_MAP holds no SST data of dropped indexes once the
+#   drop-index thread and a compaction have run, and every index of a
+#   non-empty table has SST data;
+# - SHOW CREATE TABLE, ROCKSDB_DDL (including index numbers) and the rows
+#   are unchanged by a restart with the default rocksdb_validate_tables=1.
+#
+# Each table is opened before ROCKSDB_DDL is read after the restart: until
+# a table is opened, ROCKSDB_DDL shows empty index names for it (finding
+# #27, test rocksdb.i_s_ddl_index_name_after_restart).
+#
+
+--let $save_append = `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
+
+# Index numbers are allocated globally; remember where this test starts so
+# that leftovers of earlier tests are not reported as orphans.
+CREATE TABLE md_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $md_base = `SELECT INDEX_NUMBER - 1 FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'md_probe'`
+DROP TABLE md_probe;
+
+--echo # CREATE TABLE, including a secondary index in its own column family
+CREATE TABLE t_create (a INT PRIMARY KEY, b INT,
+                       KEY kb(b) COMMENT 'cfname=cf_md') ENGINE=ROCKSDB;
+
+--echo # INPLACE ADD INDEX
+CREATE TABLE t_addidx (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+INSERT INTO t_addidx VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+ALTER TABLE t_addidx ADD INDEX kc(c), ALGORITHM=INPLACE;
+
+--echo # INPLACE DROP INDEX
+CREATE TABLE t_dropidx (a INT PRIMARY KEY, b INT, c INT,
+                        KEY kb(b), KEY kc(c)) ENGINE=ROCKSDB;
+INSERT INTO t_dropidx VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ALTER TABLE t_dropidx DROP INDEX kc, ALGORITHM=INPLACE;
+
+--echo # RENAME TABLE, in the same and into another database
+CREATE TABLE t_ren0 (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+RENAME TABLE t_ren0 TO t_rename;
+CREATE DATABASE md2;
+CREATE TABLE t_xdb (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+RENAME TABLE t_xdb TO md2.t_xdb;
+
+--echo # TRUNCATE TABLE
+CREATE TABLE t_trunc (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_trunc VALUES (100, 100);
+TRUNCATE TABLE t_trunc;
+
+--echo # COPY ALTER
+CREATE TABLE t_copy (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_copy VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_copy MODIFY b BIGINT, ALGORITHM=COPY;
+
+--echo # INSTANT ADD COLUMN
+CREATE TABLE t_instant (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_instant VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+ALTER TABLE t_instant ADD COLUMN e INT DEFAULT 5, ALGORITHM=INSTANT;
+--disable_query_log
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $save_append;
+--enable_query_log
+
+--echo # RENAME INDEX (a COPY ALTER on MyRocks)
+CREATE TABLE t_renidx (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_renidx VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_renidx RENAME INDEX kb TO kb2;
+
+--echo # Primary key change
+CREATE TABLE t_pk (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_pk VALUES (1, 1), (2, 2), (3, 3);
+ALTER TABLE t_pk DROP PRIMARY KEY, ADD PRIMARY KEY (a, b);
+
+--echo # Hidden primary key, then an explicit one
+CREATE TABLE t_hidden (a INT NOT NULL, b INT, KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t_hidden VALUES (1, 1), (2, 2), (3, 3);
+SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+ WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't_hidden' ORDER BY 1;
+ALTER TABLE t_hidden ADD PRIMARY KEY (a);
+
+--echo # Partition DDL
+CREATE TABLE t_part (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10),
+                          PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t_part VALUES (1, 1), (11, 11);
+ALTER TABLE t_part ADD PARTITION (PARTITION p2 VALUES LESS THAN (30));
+INSERT INTO t_part VALUES (21, 21);
+ALTER TABLE t_part REORGANIZE PARTITION p0 INTO
+  (PARTITION p0a VALUES LESS THAN (5), PARTITION p0b VALUES LESS THAN (10));
+INSERT INTO t_part VALUES (7, 7);
+
+--echo # TTL table
+CREATE TABLE t_ttl (a INT PRIMARY KEY, b INT, KEY kb(b)) ENGINE=ROCKSDB
+  COMMENT 'ttl_duration=360000;';
+
+--echo # Data for every table
+INSERT INTO t_create VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_rename VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO md2.t_xdb VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_trunc VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t_instant (a, b) VALUES (4, 4);
+INSERT INTO t_ttl VALUES (1, 1), (2, 2), (3, 3);
+
+--echo # Let the drop-index thread finish and compact the dropped data away.
+let $wait_condition = SELECT COUNT(*) = 0
+  FROM INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO
+ WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'cf_md';
+# With rocksdb_use_default_sk_cf=ON (ddl_metadata_after_restart_default_sk_cf)
+# secondary indexes live in "default_sk"; compact it too.
+if (`SELECT COUNT(*) FROM information_schema.ROCKSDB_CFSTATS WHERE CF_NAME = 'default_sk'`)
+{
+  --disable_query_log
+  SET GLOBAL rocksdb_compact_cf = 'default_sk';
+  --enable_query_log
+}
+
+--source suite/rocksdb/include/ddl_metadata_check.inc
+
+CREATE TABLE md_snapshot ENGINE=InnoDB AS
+  SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME, COLUMN_FAMILY,
+         INDEX_NUMBER, INDEX_TYPE, KV_FORMAT_VERSION, TTL_DURATION,
+         INDEX_FLAGS, CF
+    FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+   WHERE TABLE_SCHEMA IN ('test', 'md2');
+
+--let $md_tables = t_create t_addidx t_dropidx t_rename md2.t_xdb t_trunc t_copy t_instant t_renidx t_pk t_hidden t_part t_ttl
+--let $md_show_create = 1
+--let $_md_i = 1
+--let $_md_t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$md_tables', ' ', $_md_i), ' ', -1)`
+while ($_md_i <= 13)
+{
+  --let $_md_t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$md_tables', ' ', $_md_i), ' ', -1)`
+  eval SHOW CREATE TABLE $_md_t;
+  --inc $_md_i
+}
+
+--echo # Restart with the default rocksdb_validate_tables=1.
+--source include/restart_mysqld.inc
+
+--echo # Open every table first (see finding #27 above).
+--disable_result_log
+--let $_md_i = 1
+while ($_md_i <= 13)
+{
+  --let $_md_t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$md_tables', ' ', $_md_i), ' ', -1)`
+  eval SELECT * FROM $_md_t LIMIT 1;
+  --inc $_md_i
+}
+--enable_result_log
+
+--source suite/rocksdb/include/ddl_metadata_check.inc
+
+--echo # ROCKSDB_DDL rows that changed across the restart (expect none)
+(SELECT 'before' AS side, s.* FROM md_snapshot s
+  WHERE (s.TABLE_SCHEMA, s.TABLE_NAME, IFNULL(s.PARTITION_NAME, ''),
+         s.INDEX_NAME, s.COLUMN_FAMILY, s.INDEX_NUMBER, s.INDEX_TYPE,
+         s.KV_FORMAT_VERSION, s.TTL_DURATION, s.INDEX_FLAGS, s.CF) NOT IN
+        (SELECT TABLE_SCHEMA, TABLE_NAME, IFNULL(PARTITION_NAME, ''),
+                INDEX_NAME, COLUMN_FAMILY, INDEX_NUMBER, INDEX_TYPE,
+                KV_FORMAT_VERSION, TTL_DURATION, INDEX_FLAGS, CF
+           FROM INFORMATION_SCHEMA.ROCKSDB_DDL))
+UNION ALL
+(SELECT 'after', d.TABLE_SCHEMA, d.TABLE_NAME, d.PARTITION_NAME, d.INDEX_NAME,
+        d.COLUMN_FAMILY, d.INDEX_NUMBER, d.INDEX_TYPE, d.KV_FORMAT_VERSION,
+        d.TTL_DURATION, d.INDEX_FLAGS, d.CF
+   FROM INFORMATION_SCHEMA.ROCKSDB_DDL d
+  WHERE d.TABLE_SCHEMA IN ('test', 'md2')
+    AND (d.TABLE_SCHEMA, d.TABLE_NAME, IFNULL(d.PARTITION_NAME, ''),
+         d.INDEX_NAME, d.COLUMN_FAMILY, d.INDEX_NUMBER, d.INDEX_TYPE,
+         d.KV_FORMAT_VERSION, d.TTL_DURATION, d.INDEX_FLAGS, d.CF) NOT IN
+        (SELECT TABLE_SCHEMA, TABLE_NAME, IFNULL(PARTITION_NAME, ''),
+                INDEX_NAME, COLUMN_FAMILY, INDEX_NUMBER, INDEX_TYPE,
+                KV_FORMAT_VERSION, TTL_DURATION, INDEX_FLAGS, CF
+           FROM md_snapshot));
+
+--let $_md_i = 1
+while ($_md_i <= 13)
+{
+  --let $_md_t = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$md_tables', ' ', $_md_i), ' ', -1)`
+  eval SHOW CREATE TABLE $_md_t;
+  --inc $_md_i
+}
+
+DROP TABLE md_snapshot;
+DROP TABLE t_create, t_addidx, t_dropidx, t_rename, t_trunc, t_copy,
+           t_instant, t_renidx, t_pk, t_hidden, t_part, t_ttl;
+DROP DATABASE md2;

@@ -1,0 +1,146 @@
+#
+# A transaction whose snapshot predates a DDL statement that rewrote a table's
+# data must get ER_TABLE_DEF_CHANGED when it reads that table, as with InnoDB.
+# Before the fix MyRocks returned the rebuilt table as empty.
+#
+# The COUNT(*) cases follow innodb.select_count_perf, which checks the same
+# error on the COUNT(*) fast path after a rebuild.
+#
+--source include/have_rocksdb.inc
+
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+CREATE TABLE t_base (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_base VALUES (1);
+
+--let $i = 1
+while ($i <= 6)
+{
+  eval CREATE TABLE t$i (id INT PRIMARY KEY, v INT, KEY kv (v)) ENGINE=ROCKSDB;
+  eval INSERT INTO t$i VALUES (1,10),(2,20),(3,30);
+  --inc $i
+}
+
+connect (reader,localhost,root,,);
+connect (ddl,localhost,root,,);
+
+--echo #
+--echo # 1. START TRANSACTION WITH CONSISTENT SNAPSHOT, then COPY ALTER.
+--echo #
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+ALTER TABLE t1 ADD COLUMN name VARCHAR(10) FIRST, ALGORITHM=COPY;
+connection reader;
+--error ER_TABLE_DEF_CHANGED
+SELECT COUNT(*) FROM t1;
+--error ER_TABLE_DEF_CHANGED
+SELECT SUM(v) FROM t1;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t1 FORCE INDEX (kv) WHERE v = 20;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t1 WHERE id = 2;
+COMMIT;
+SELECT COUNT(*), SUM(v) FROM t1;
+
+--echo #
+--echo # 2. Plain BEGIN with a first read before the COPY ALTER.
+--echo #
+connection reader;
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+ALTER TABLE t2 FORCE, ALGORITHM=COPY;
+connection reader;
+--error ER_TABLE_DEF_CHANGED
+SELECT COUNT(*) FROM t2;
+ROLLBACK;
+SELECT COUNT(*) FROM t2;
+
+--echo #
+--echo # 3. TRUNCATE creates new indexes as well.
+--echo #
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+TRUNCATE TABLE t3;
+INSERT INTO t3 VALUES (4,40);
+connection reader;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t3;
+COMMIT;
+SELECT * FROM t3;
+
+--echo #
+--echo # 4. INPLACE ADD INDEX: the primary key stays readable, only the new
+--echo #    index is too new for the transaction.
+--echo #
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+ALTER TABLE t4 ADD INDEX kv2 (v, id), ALGORITHM=INPLACE;
+INSERT INTO t4 VALUES (4,40);
+connection reader;
+SELECT * FROM t4 FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT * FROM t4 FORCE INDEX (kv) ORDER BY v;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t4 FORCE INDEX (kv2) ORDER BY v;
+COMMIT;
+SELECT * FROM t4 FORCE INDEX (kv2) ORDER BY v;
+
+--echo #
+--echo # 5. Plain RENAME and instant ADD COLUMN keep the data, so the
+--echo #    transaction can still read the table through its snapshot.
+--echo #
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+RENAME TABLE t5 TO t5_renamed;
+ALTER TABLE t6 ADD COLUMN extra INT, ALGORITHM=INSTANT;
+INSERT INTO t6 VALUES (4,40,400);
+connection reader;
+SELECT * FROM t5_renamed ORDER BY id;
+SELECT * FROM t6 ORDER BY id;
+COMMIT;
+SELECT * FROM t6 ORDER BY id;
+
+--echo #
+--echo # 6. A table created after the snapshot is too new as well.
+--echo #
+connection reader;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+CREATE TABLE t_new (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t_new VALUES (1),(2);
+connection reader;
+--error ER_TABLE_DEF_CHANGED
+SELECT * FROM t_new;
+COMMIT;
+SELECT * FROM t_new ORDER BY id;
+
+--echo #
+--echo # 7. READ COMMITTED takes a new snapshot per statement and sees the
+--echo #    rebuilt table.
+--echo #
+connection reader;
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT COUNT(*) FROM t_base;
+connection ddl;
+ALTER TABLE t1 DROP COLUMN name, ALGORITHM=COPY;
+connection reader;
+SELECT COUNT(*), SUM(v) FROM t1;
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+connection default;
+disconnect reader;
+disconnect ddl;
+DROP TABLE t_base, t1, t2, t3, t4, t5_renamed, t6, t_new;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;

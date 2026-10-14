@@ -1,0 +1,27 @@
+CREATE TABLE t (a INT PRIMARY KEY, b INT DEFAULT 1) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1);
+SET GLOBAL rocksdb_enable_instant_ddl_for_table_comment_changes = ON;
+SET GLOBAL rocksdb_enable_instant_ddl_for_column_default_changes = ON;
+# With the master switch ON, both changes are instant.
+SET GLOBAL rocksdb_enable_instant_ddl = ON;
+ALTER TABLE t COMMENT='c1', ALGORITHM=INSTANT;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT 2, ALGORITHM=INSTANT;
+# With the master switch OFF, neither may be instant.
+SET GLOBAL rocksdb_enable_instant_ddl = OFF;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT 3, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t COMMENT='c2', ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+# Other algorithms still work.
+ALTER TABLE t COMMENT='c3', ALGORITHM=COPY;
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT '2',
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='c3'
+SELECT * FROM t;
+a	b
+1	1
+DROP TABLE t;

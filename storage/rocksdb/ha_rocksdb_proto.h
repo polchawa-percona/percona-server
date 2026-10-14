@@ -66,6 +66,7 @@ void rdb_get_global_perf_counters(Rdb_perf_counters *counters);
 void rdb_queue_save_stats_request();
 
 extern const std::string TRUNCATE_TABLE_PREFIX;
+extern const std::string TMP_SCHEMA_NAME;
 
 /*
   Access to singleton objects.

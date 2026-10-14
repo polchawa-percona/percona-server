@@ -4877,6 +4877,122 @@ bool Rdb_ddl_manager::validate_auto_incr() const {
 #endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
         // ROCKSDB_INCLUDE_VALIDATE_TABLES
 
+namespace  // anonymous namespace = not visible outside this source file
+{
+/*
+  Collects the intermediate "#sql..." tables of ALTER TABLE ... ALGORITHM=COPY
+  that are registered in RocksDB. At startup they are leftovers of an
+  interrupted ALTER and can hold a full copy of a table. A partitioned table
+  has one entry per partition.
+*/
+struct Rdb_tmp_tbls : public Rdb_tables_scanner {
+  std::map<std::string, std::map<std::string, std::vector<Rdb_tbl_def *>>>
+      m_list;
+
+  int add_table(Rdb_tbl_def *tdef) override {
+    assert(tdef != nullptr);
+    if (tdef->base_tablename().find(tmp_file_prefix) != std::string::npos &&
+        tdef->base_tablename().find(TRUNCATE_TABLE_PREFIX) ==
+            std::string::npos &&
+        tdef->base_dbname().find(TMP_SCHEMA_NAME) != 0)
+      m_list[tdef->base_dbname()][tdef->base_tablename()].push_back(tdef);
+    return HA_EXIT_SUCCESS;
+  }
+};
+}  // anonymous namespace
+
+/*
+  Report leftover intermediate tables of an interrupted ALTER TABLE
+  ... ALGORITHM=COPY. This runs at every startup, whatever the value of
+  rocksdb_validate_tables, and only logs warnings: the tables are not dropped
+  automatically and never fail the startup. Table validation skips them.
+*/
+void Rdb_ddl_manager::report_tmp_tables() const {
+  Rdb_tmp_tbls tmp_tables;
+  if (scan_for_tables(&tmp_tables) != 0 || tmp_tables.m_list.empty()) return;
+
+  /*
+    Find the tables that have a DD table, so that DROP TABLE can remove them.
+    An intermediate table of ALTER TABLE has a hidden DD table, which
+    fetch_schema_table_names_by_engine() does not return. If the DD cannot be
+    read, the tables are reported without the DROP TABLE hint.
+  */
+  std::set<std::pair<std::string, std::string>> in_dd;
+  THD *const thd = my_core::thd_get_current_thd();
+  if (thd != nullptr) {
+    dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+    std::vector<const dd::Schema *> schemas;
+    if (!thd->dd_client()->fetch_global_components(&schemas)) {
+      for (const dd::Schema *schema : schemas) {
+        char dbbuff[FN_REFLEN];
+        tablename_to_filename(schema->name().c_str(), dbbuff, sizeof(dbbuff));
+        const auto db = tmp_tables.m_list.find(dbbuff);
+        if (db == tmp_tables.m_list.end()) continue;
+
+        std::vector<dd::String_type> tables;
+        if (thd->dd_client()->fetch_schema_table_names_not_hidden_by_se(
+                schema, &tables))
+          continue;
+        /* "#sql" names are not encoded, see filename_to_tablename(). */
+        for (const dd::String_type &table_name : tables) {
+          const std::string name(table_name.c_str());
+          if (db->second.count(name)) in_dd.emplace(dbbuff, name);
+        }
+      }
+    }
+  }
+
+  rocksdb::DB *const rdb = rdb_get_rocksdb_db();
+  for (const auto &db : tmp_tables.m_list) {
+    char dbname[FN_REFLEN];
+    filename_to_tablename(db.first.c_str(), dbname, sizeof(dbname));
+    for (const auto &table : db.second) {
+      uint keys = 0;
+      uint64_t size = 0;
+      for (const Rdb_tbl_def *const tdef : table.second) {
+        keys += tdef->m_key_count;
+        for (uint i = 0; rdb != nullptr && i < tdef->m_key_count; i++) {
+          const Rdb_key_def &kd = *tdef->m_key_descr_arr[i];
+          uchar buf[Rdb_key_def::INDEX_NUMBER_SIZE * 2];
+          const rocksdb::Range range = ha_rocksdb::get_range(kd, buf);
+          uint64_t sz = 0;
+          rdb->GetApproximateSizes(
+              kd.get_cf(), &range, 1, &sz,
+              rocksdb::DB::SizeApproximationFlags::INCLUDE_FILES |
+                  rocksdb::DB::SizeApproximationFlags::INCLUDE_MEMTABLES);
+          size += sz;
+        }
+      }
+      /*
+        "#sql2-..." is the original table renamed away by the ALTER. If the
+        ALTER was interrupted before the altered table got its name, it can
+        hold the only copy of the data, so it must not be dropped blindly.
+      */
+      const bool is_backup =
+          table.first.compare(0, strlen(tmp_file_prefix "2-"),
+                              tmp_file_prefix "2-") == 0;
+      std::string hint =
+          is_backup ? "It is the table before the ALTER and can hold the only "
+                      "copy of its data"
+                    : "It is not used";
+      if (in_dd.count({db.first, table.first})) {
+        hint += is_backup ? ". Check the altered table before dropping it with"
+                          : ". Drop it with";
+        hint +=
+            ": DROP TABLE `" + std::string(dbname) + "`.`" + table.first + "`";
+      } else {
+        hint += ". It has no DD table, so DROP TABLE cannot remove it";
+      }
+      LogPluginErrMsg(WARNING_LEVEL, 0,
+                      "Table %s.%s is registered in RocksDB but is not a "
+                      "visible table. It is a leftover of an interrupted ALTER "
+                      "TABLE (%u indexes, approximately %" PRIu64 " bytes). %s",
+                      db.first.c_str(), table.first.c_str(), keys, size,
+                      hint.c_str());
+    }
+  }
+}
+
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
 bool Rdb_ddl_manager::init(Rdb_dict_manager_selector *const dict_arg,
                            Rdb_cf_manager *const cf_manager,
@@ -5060,6 +5176,8 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
                   "Table_store: loaded DDL data for %d tables", i);
 
   initialized = true;
+
+  report_tmp_tables();
 
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
   /*

@@ -1,0 +1,10 @@
+#
+# rocksdb.consistent_snapshot_ddl with rocksdb_two_write_queues=OFF.
+#
+# The snapshot-age check of PS-11627 takes the sequence number published by a
+# DDL statement from a fresh snapshot, because with two_write_queues=ON (the
+# default) the last allocated sequence can run ahead of the published one.
+# This runs the same scenarios with a single write queue, under each write
+# policy, and expects the same results.
+#
+--source suite/rocksdb/t/consistent_snapshot_ddl.test
