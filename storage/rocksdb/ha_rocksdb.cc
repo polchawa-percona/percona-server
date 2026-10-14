@@ -9394,6 +9394,8 @@ int ha_rocksdb::truncate_table(Rdb_tbl_def *tbl_def_arg,
                      table_def);
   if (err != HA_EXIT_SUCCESS) DBUG_RETURN(err);
 
+  DEBUG_SYNC(ha_thd(), "rocksdb.truncate_after_rename");
+
   /*
     Attempt to create the table. If this succeeds, then drop the old table.
     Otherwise, try to restore it.
@@ -9427,6 +9429,8 @@ int ha_rocksdb::truncate_table(Rdb_tbl_def *tbl_def_arg,
     error should be returned at this point from trying to delete the old
     table. If the delete_table fails, log it instead.
   */
+  DEBUG_SYNC(ha_thd(), "rocksdb.truncate_before_drop_old");
+
   Rdb_tbl_def *old_tbl_def = ddl_manager.find(tmp_tablename);
   if (should_remove_old_table && old_tbl_def) {
     m_tbl_def = old_tbl_def;
@@ -12827,6 +12831,16 @@ void Rdb_drop_index_thread::run() {
     // make sure, no program error is returned
     assert(ret == 0 || ret == ETIMEDOUT);
     RDB_MUTEX_UNLOCK_CHECK(m_signal_mutex);
+#ifndef NDEBUG
+    rdb_dbug_pause_while_set("rocksdb_pause_drop_index_thread", "",
+                             [this]() { return m_killed != THD::NOT_KILLED; });
+    if (m_killed) {
+      // Shutdown ended the pause: stop without another drop pass, as the
+      // check after the wait above does. The mutex is held on loop exit.
+      RDB_MUTEX_LOCK_CHECK(m_signal_mutex);
+      break;
+    }
+#endif
     for (Rdb_dict_manager *local_dict_manager : dict_manager_list) {
       std::unordered_set<GL_INDEX_ID> indices;
       local_dict_manager->get_ongoing_drop_indexes(&indices);

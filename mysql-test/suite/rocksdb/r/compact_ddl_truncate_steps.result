@@ -1,0 +1,108 @@
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# TRUNCATE held at rocksdb.truncate_after_rename
+CALL mc3.mark_dropped('mc3', 't_trunc');
+CALL mc3.mark_dropped('mc3', 't_trunc_pidx');
+SET DEBUG_SYNC = 'rocksdb.truncate_after_rename SIGNAL trunc_held WAIT_FOR trunc_go';
+TRUNCATE TABLE mc3.t_trunc;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+OPTIMIZE TABLE mc3.t_live;
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+SET DEBUG_SYNC = 'rocksdb.truncate_after_rename SIGNAL trunc_held WAIT_FOR trunc_go';
+TRUNCATE TABLE mc3.t_trunc_pidx;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+# Truncated tables are empty and usable.
+SELECT COUNT(*) FROM mc3.t_trunc;
+COUNT(*)
+0
+SELECT COUNT(*) FROM mc3.t_trunc_pidx;
+COUNT(*)
+0
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	340
+mc3.t_trunc	1	50
+mc3.t_trunc_pidx	1	50
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# TRUNCATE held at rocksdb.truncate_before_drop_old
+CALL mc3.mark_dropped('mc3', 't_trunc');
+CALL mc3.mark_dropped('mc3', 't_trunc_pidx');
+SET DEBUG_SYNC = 'rocksdb.truncate_before_drop_old SIGNAL trunc_held WAIT_FOR trunc_go';
+TRUNCATE TABLE mc3.t_trunc;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+OPTIMIZE TABLE mc3.t_live;
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+SET DEBUG_SYNC = 'rocksdb.truncate_before_drop_old SIGNAL trunc_held WAIT_FOR trunc_go';
+TRUNCATE TABLE mc3.t_trunc_pidx;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+# Truncated tables are empty and usable.
+SELECT COUNT(*) FROM mc3.t_trunc;
+COUNT(*)
+0
+SELECT COUNT(*) FROM mc3.t_trunc_pidx;
+COUNT(*)
+0
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	380
+mc3.t_trunc	1	50
+mc3.t_trunc_pidx	1	50
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+# TRUNCATE whose re-creation fails, held after the rename.
+SET SESSION debug = '+d,rocksdb_truncate_failure';
+SET DEBUG_SYNC = 'rocksdb.truncate_after_rename SIGNAL trunc_held WAIT_FOR trunc_go';
+TRUNCATE TABLE mc3.t_trunc;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+ERROR HY000: Internal error: Simulated truncation failure.
+SET SESSION debug = '-d,rocksdb_truncate_failure';
+# Compare before with after
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	380
+mc3.t_trunc	1	50
+CHECK TABLE mc3.t_live, mc3.t_trunc, mc3.t_trunc_pidx;
+Table	Op	Msg_type	Msg_text
+mc3.t_live	check	status	OK
+mc3.t_trunc	check	status	OK
+mc3.t_trunc_pidx	check	status	OK
+# Keys of dropped indexes left in SST files (expect 0):
+SELECT COUNT(*) AS dropped_index_entries
+FROM information_schema.rocksdb_index_file_map m
+JOIN mc3.dropped d ON m.column_family = d.cf AND m.index_number = d.idx;
+dropped_index_entries
+0
+# Tables with temporary names in the MyRocks dictionary (expect none):
+SELECT table_schema, table_name FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE '#%' OR table_name LIKE '%#%';
+table_schema	table_name
+SET DEBUG_SYNC = 'RESET';
+# restart: --rocksdb_validate_tables=1
+# Compare after with restarted
+tbl	idx	cnt_from	cnt_to	same_crc
+tbl	all_indexes_agree	cnt
+mc3.t_live	1	380
+mc3.t_trunc	1	50
+DROP DATABASE mc3;
+DROP DATABASE mc3b;

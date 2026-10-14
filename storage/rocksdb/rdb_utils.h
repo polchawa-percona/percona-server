@@ -462,4 +462,50 @@ class Ensure_initialized {
   bool initialized = false;
 };
 
+#ifndef NDEBUG
+/*
+  Debug-only pause hooks for MyRocks and RocksDB background threads (manual
+  compactions, the drop-index thread). These threads have no DBUG thread
+  state, so DBUG_EXECUTE_IF and DEBUG_SYNC cannot reach them; the hooks are
+  driven by the global debug keywords instead, for example
+    SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+  A hook whose keyword is set logs
+    "MyRocks: test: paused at <keyword>[, <details>]"
+  to the error log, waits while the keyword stays set, and then logs
+    "MyRocks: test: resumed at <keyword>".
+  Tests wait for the first line (see suite/rocksdb/include/debug_pause_*.inc)
+  and remove the keyword to resume.
+
+  Hooks (the keyword names the point where the thread is held):
+  - rocksdb_pause_manual_compaction_start: a manual compaction creates its
+    compaction filter (once per filter; a compaction with subcompactions
+    has several), registered as running and before any key is processed.
+  - rocksdb_pause_manual_compaction_index: a manual compaction filter has
+    decided whether the keys of an index are dropped, at the first index
+    boundary it sees while the keyword is set (once per filter).
+  - rocksdb_pause_manual_compaction_middle: a manual compaction filter has
+    seen 1000 keys, so the compaction is part way through its input.
+  - rocksdb_pause_manual_compaction_completed: a manual compaction's result
+    is installed (OnCompactionCompleted), before its statistics are updated.
+  - rocksdb_pause_drop_index_thread: the drop-index thread woke up and has
+    not looked at the ongoing drops yet. Shutdown ends the pause.
+*/
+
+/** Whether the global debug settings include the keyword (exact match). */
+bool rdb_dbug_global_keyword_set(const char *keyword);
+
+/**
+  If the global debug keyword is set, log that the calling thread is paused,
+  wait until the keyword is removed (or should_stop returns true), and log
+  that it resumed.
+
+  @param keyword      the global debug keyword (one of the hooks above)
+  @param details      extra text for the "paused" line, may be empty
+  @param should_stop  checked while paused; if it returns true, the pause
+                      ends although the keyword is still set
+*/
+void rdb_dbug_pause_while_set(const char *keyword, const std::string &details,
+                              const std::function<bool()> &should_stop = {});
+#endif  // !NDEBUG
+
 }  // namespace myrocks

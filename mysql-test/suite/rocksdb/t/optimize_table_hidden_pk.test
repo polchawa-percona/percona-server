@@ -1,0 +1,43 @@
+#
+# OPTIMIZE TABLE must compact the rows of a table without a primary key.
+#
+# ha_rocksdb::optimize() compacts the key range of each index in
+# table->s->keys. A table without a primary key keeps its rows in a hidden
+# primary key, which is not counted in table->s->keys, so OPTIMIZE TABLE
+# never compacts the rows themselves; for a table without any index it
+# compacts nothing. Deleted rows of such a table stay in the SST files after
+# OPTIMIZE TABLE, while those of a table with a primary key are removed.
+#
+--source include/have_rocksdb.inc
+
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0) {
+    --echo # Table with a primary key.
+    CREATE TABLE t1 (id INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+  }
+  if ($i == 1) {
+    --echo # Table without a primary key.
+    CREATE TABLE t1 (id INT, c INT) ENGINE=ROCKSDB;
+  }
+  INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1
+    FROM s WHERE n < 500) SELECT n, n FROM s;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  DELETE FROM t1;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+  OPTIMIZE TABLE t1;
+
+  --echo # SST entries (rows or delete markers) left; expect none.
+  SELECT d.index_name, d.index_type,
+         COALESCE(SUM(m.num_rows + m.entry_deletes + m.entry_singledeletes), 0)
+           AS sst_entries
+    FROM information_schema.rocksdb_ddl d
+    LEFT JOIN information_schema.rocksdb_index_file_map m
+      ON m.column_family = d.column_family AND m.index_number = d.index_number
+    WHERE d.table_schema = 'test' AND d.table_name = 't1'
+    GROUP BY d.index_name, d.index_type;
+  DROP TABLE t1;
+  --inc $i
+}

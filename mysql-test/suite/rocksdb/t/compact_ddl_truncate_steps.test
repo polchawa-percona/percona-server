@@ -1,0 +1,187 @@
+#
+# Manual compaction at each step of TRUNCATE TABLE.
+#
+# MyRocks truncates a table by renaming it to a temporary name, creating
+# the table again with new index ids and then dropping the renamed table.
+# A manual compaction (which takes no metadata lock) runs at each of these
+# points, together with DML on another table in the same column families:
+# - after the rename, when the old keys belong to a table with a temporary
+#   name and the new table does not exist yet;
+# - after the new table is created, before the old one is dropped;
+# - after a failed creation, before the old table is renamed back.
+# The truncated table must end up empty (or unchanged after the failure),
+# the neighbour table must keep its rows, the old keys must be reclaimed
+# and no table with a temporary name may be left.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+
+--let $mc3_rows = 300
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc
+--let $mc3_off = 10000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_trunc_pidx
+--let $mc3_shape = pidx
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_off = 0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (con_trunc, localhost, root,,);
+connection default;
+
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0) {
+    --let $mc3_point = rocksdb.truncate_after_rename
+    --let $mc3_held_off = 100000
+  }
+  if ($i == 1) {
+    --let $mc3_point = rocksdb.truncate_before_drop_old
+    --let $mc3_held_off = 110000
+  }
+  --echo # TRUNCATE held at $mc3_point
+  --disable_query_log
+  DELETE FROM mc3.chk;
+  --enable_query_log
+  --let $mc3_label = before
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  CALL mc3.mark_dropped('mc3', 't_trunc');
+  CALL mc3.mark_dropped('mc3', 't_trunc_pidx');
+
+  connection con_trunc;
+  eval SET DEBUG_SYNC = '$mc3_point SIGNAL trunc_held WAIT_FOR trunc_go';
+  send TRUNCATE TABLE mc3.t_trunc;
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+  --let $mc3_rows = 40
+  --let $mc3_off = $mc3_held_off
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_fill.inc
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --disable_result_log
+  OPTIMIZE TABLE mc3.t_live;
+  --enable_result_log
+  SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+
+  connection con_trunc;
+  reap;
+  eval SET DEBUG_SYNC = '$mc3_point SIGNAL trunc_held WAIT_FOR trunc_go';
+  send TRUNCATE TABLE mc3.t_trunc_pidx;
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+  connection con_trunc;
+  reap;
+  connection default;
+
+  --echo # Truncated tables are empty and usable.
+  SELECT COUNT(*) FROM mc3.t_trunc;
+  SELECT COUNT(*) FROM mc3.t_trunc_pidx;
+  --let $mc3_rows = 50
+  --let $mc3_off = 200000
+  --let $mc3_t = mc3.t_trunc
+  --source suite/rocksdb/include/mc3_fill.inc
+  --let $mc3_t = mc3.t_trunc_pidx
+  --let $mc3_shape = pidx
+  --source suite/rocksdb/include/mc3_fill.inc
+  --let $mc3_off = 0
+
+  # The neighbour's expected state includes the rows added while held.
+  --disable_query_log
+  DELETE FROM mc3.chk WHERE label = 'before';
+  --enable_query_log
+  --let $mc3_label = before
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_trunc
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_trunc_pidx
+  --let $mc3_shape = pidx
+  --source suite/rocksdb/include/mc3_snap.inc
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --let $mc3_label = after
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_trunc
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_t = mc3.t_trunc_pidx
+  --let $mc3_shape = pidx
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_from = before
+  --let $mc3_to = after
+  --source suite/rocksdb/include/mc3_compare.inc
+  --source suite/rocksdb/include/mc3_reclaimed.inc
+  --inc $i
+}
+
+--echo # TRUNCATE whose re-creation fails, held after the rename.
+--disable_query_log
+DELETE FROM mc3.chk;
+DELETE FROM mc3.dropped;
+--enable_query_log
+--let $mc3_label = before
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+connection con_trunc;
+SET SESSION debug = '+d,rocksdb_truncate_failure';
+SET DEBUG_SYNC = 'rocksdb.truncate_after_rename SIGNAL trunc_held WAIT_FOR trunc_go';
+send TRUNCATE TABLE mc3.t_trunc;
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR trunc_held';
+--source suite/rocksdb/include/mc3_compact_all.inc
+SET DEBUG_SYNC = 'now SIGNAL trunc_go';
+connection con_trunc;
+--error ER_INTERNAL_ERROR
+reap;
+SET SESSION debug = '-d,rocksdb_truncate_failure';
+connection default;
+--source suite/rocksdb/include/mc3_compact_all.inc
+--let $mc3_label = after
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = before
+--let $mc3_to = after
+--source suite/rocksdb/include/mc3_compare.inc
+CHECK TABLE mc3.t_live, mc3.t_trunc, mc3.t_trunc_pidx;
+--source suite/rocksdb/include/mc3_reclaimed.inc
+
+disconnect con_trunc;
+SET DEBUG_SYNC = 'RESET';
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc3_label = restarted
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_t = mc3.t_trunc
+--source suite/rocksdb/include/mc3_snap.inc
+--let $mc3_from = after
+--let $mc3_to = restarted
+--source suite/rocksdb/include/mc3_compare.inc
+
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc

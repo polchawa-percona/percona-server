@@ -1,0 +1,119 @@
+#
+# Manual compaction of rows written before and after an instant ADD COLUMN.
+#
+# With rocksdb_enable_instant_ddl_for_append_column=ON, ALTER TABLE ... ADD
+# COLUMN changes only the table definition: rows already in SST files and
+# in the memtable keep the old format and are read with the column's
+# default. A manual compaction rewrites those rows together with rows in the
+# new format and with keys of a neighbour table in the same column
+# families. Every row must keep its values (old rows read the default, or
+# the value set by a later UPDATE) through every index, after each
+# compaction trigger, after a second instant ADD COLUMN, after a restart
+# and after a COPY ALTER that rewrites all rows in the new format.
+#
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--source suite/rocksdb/include/mc3_setup.inc
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+--let $mc3_rows = 300
+--let $mc3_t = mc3.t_live
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_inst
+--let $mc3_off = 10000
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_t = mc3.t_inst_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_create.inc
+--let $mc3_off = 0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--echo # Old-format rows in the memtable too.
+--let $mc3_rows = 30
+--let $mc3_off = 20000
+--let $mc3_t = mc3.t_inst
+--let $mc3_shape = live
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_t = mc3.t_inst_hid
+--let $mc3_shape = hid
+--source suite/rocksdb/include/mc3_fill.inc
+--let $mc3_off = 0
+
+ALTER TABLE mc3.t_inst ADD COLUMN c1 INT NOT NULL DEFAULT 7,
+  ADD COLUMN c2 VARCHAR(20) DEFAULT 'def', ALGORITHM=INSTANT;
+ALTER TABLE mc3.t_inst_hid ADD COLUMN c1 INT DEFAULT 5, ALGORITHM=INSTANT;
+
+INSERT INTO mc3.t_inst VALUES (30001, 'new row', 30001, 'blob', 1, 'one'),
+  (30002, 'new row 2', 30002, NULL, 2, NULL);
+INSERT INTO mc3.t_inst_hid VALUES (40001, 'Cnew', 9);
+UPDATE mc3.t_inst SET c1 = 70, c2 = 'upd' WHERE id % 10 = 0 AND id < 30000;
+UPDATE mc3.t_inst_hid SET c1 = 50 WHERE a % 10 = 0;
+
+--let $i = 0
+while ($i < 2)
+{
+  --disable_query_log
+  DELETE FROM mc3.chk;
+  CALL mc3.snap('before', 'mc3.t_inst', 'id, a, u, CRC32(b), c1, c2',
+                'PRIMARY,ka,ku');
+  CALL mc3.snap('before', 'mc3.t_inst_hid', 'a, c, c1', ',kc');
+  --enable_query_log
+  --let $mc3_label = before
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+
+  --source suite/rocksdb/include/mc3_compact_all.inc
+  --disable_result_log
+  OPTIMIZE TABLE mc3.t_inst, mc3.t_inst_hid, mc3.t_live;
+  --enable_result_log
+
+  --disable_query_log
+  CALL mc3.snap('after', 'mc3.t_inst', 'id, a, u, CRC32(b), c1, c2',
+                'PRIMARY,ka,ku');
+  CALL mc3.snap('after', 'mc3.t_inst_hid', 'a, c, c1', ',kc');
+  --enable_query_log
+  --let $mc3_label = after
+  --let $mc3_t = mc3.t_live
+  --let $mc3_shape = live
+  --source suite/rocksdb/include/mc3_snap.inc
+  --let $mc3_from = before
+  --let $mc3_to = after
+  --source suite/rocksdb/include/mc3_compare.inc
+  SELECT c1, c2, COUNT(*) FROM mc3.t_inst GROUP BY c1, c2 ORDER BY c1, c2;
+  SELECT c1, COUNT(*) FROM mc3.t_inst_hid GROUP BY c1 ORDER BY c1;
+
+  if ($i == 0) {
+    --echo # A second instant ADD COLUMN on top of the compacted rows.
+    ALTER TABLE mc3.t_inst ADD COLUMN c3 INT DEFAULT 3, ALGORITHM=INSTANT;
+    SELECT c3, COUNT(*) FROM mc3.t_inst GROUP BY c3;
+    --let $restart_parameters = restart: --rocksdb_validate_tables=1
+    --source include/restart_mysqld.inc
+    SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+  }
+  --inc $i
+}
+
+--echo # COPY ALTER rewrites every row in the newest format.
+--disable_query_log
+DELETE FROM mc3.chk;
+CALL mc3.snap('before', 'mc3.t_inst', 'id, a, u, CRC32(b), c1, c2, c3',
+              'PRIMARY,ka,ku');
+--enable_query_log
+ALTER TABLE mc3.t_inst FORCE, ALGORITHM=COPY;
+--source suite/rocksdb/include/mc3_compact_all.inc
+--disable_query_log
+CALL mc3.snap('after', 'mc3.t_inst', 'id, a, u, CRC32(b), c1, c2, c3',
+              'PRIMARY,ka,ku');
+--enable_query_log
+--let $mc3_from = before
+--let $mc3_to = after
+--source suite/rocksdb/include/mc3_compare.inc
+CHECK TABLE mc3.t_inst, mc3.t_inst_hid, mc3.t_live;
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+DROP DATABASE mc3;
+DROP DATABASE mc3b;
+--source include/wait_until_count_sessions.inc
