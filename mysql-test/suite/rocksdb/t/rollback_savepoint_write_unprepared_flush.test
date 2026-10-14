@@ -1,0 +1,28 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11879: MyRocks rejects ROLLBACK TO SAVEPOINT once a transaction has
+# modified rows. Under write_unprepared the check looked only at the
+# unflushed write batch: after the batch was flushed and a later statement
+# was rolled back, ROLLBACK TO SAVEPOINT succeeded without undoing anything
+# and COMMIT committed the rows written after the savepoint.
+#
+
+CREATE TABLE t1 (a INT PRIMARY KEY, c VARCHAR(100)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'x');
+
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 VALUES (20, 'a');
+SAVEPOINT s1;
+INSERT INTO t1 VALUES (21, 'b');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (22, 'c'), (1, 'dup');
+--error ER_ROLLBACK_TO_SAVEPOINT
+ROLLBACK TO SAVEPOINT s1;
+--error ER_ROLLBACK_ONLY
+COMMIT;
+SELECT * FROM t1 ORDER BY a;
+
+SET SESSION rocksdb_write_batch_flush_threshold = DEFAULT;
+DROP TABLE t1;
