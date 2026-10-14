@@ -1,0 +1,32 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11880: a NULL written into an instantly added column after the ALTER
+# must read back as NULL. The decoder applied the instant default whenever
+# no bytes were left in the stored value, and trailing NULL columns store
+# no bytes.
+#
+
+SET @saved_append = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+ALTER TABLE t1 ADD COLUMN x1 INT DEFAULT 7, ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES (2, 2, NULL), (3, 3, 3), (4, NULL, NULL);
+UPDATE t1 SET x1 = NULL WHERE a = 3;
+SELECT * FROM t1 ORDER BY a;
+SELECT a FROM t1 WHERE x1 IS NULL ORDER BY a;
+
+ALTER TABLE t1 ADD COLUMN x2 VARCHAR(10) DEFAULT 'd',
+  ADD COLUMN x3 INT DEFAULT 9, ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES (5, 5, 5, NULL, NULL), (6, 6, NULL, 'v', NULL);
+SELECT * FROM t1 ORDER BY a;
+
+--echo # An UPDATE of another column keeps the NULLs.
+UPDATE t1 SET b = b + 10;
+SELECT * FROM t1 ORDER BY a;
+CHECK TABLE t1;
+
+DROP TABLE t1;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append;
