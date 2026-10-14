@@ -682,7 +682,9 @@ int Rdb_iterator_partial::materialize_prefix() {
 
   auto wb = std::unique_ptr<rocksdb::WriteBatch>(new rocksdb::WriteBatch);
   // Write sentinel key with empty value.
-  s = wb->Put(m_kd.get_cf(), cur_prefix_key, rocksdb::Slice());
+  s = RDB_INJECT_ERROR(
+      Rdb_inject_class::WRITE, "partial_index_put_sentinel",
+      wb->Put(m_kd.get_cf(), cur_prefix_key, rocksdb::Slice()));
   if (!s.ok()) {
     rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
     rdb_tx_release_lock(tx, m_kd, cur_prefix_key, true /* force */);
@@ -721,10 +723,12 @@ int Rdb_iterator_partial::materialize_prefix() {
         false /* store_row_debug_checksums */, 0 /* hidden_pk_id */, 0, nullptr,
         m_converter.get_ttl_bytes_buffer());
 
-    s = wb->Put(m_kd.get_cf(),
+    s = RDB_INJECT_ERROR(
+        Rdb_inject_class::WRITE, "partial_index_put",
+        wb->Put(m_kd.get_cf(),
                 rocksdb::Slice((const char *)m_sk_packed_tuple, sk_packed_size),
                 rocksdb::Slice((const char *)m_sk_tails.ptr(),
-                               m_sk_tails.get_current_pos()));
+                               m_sk_tails.get_current_pos())));
     if (!s.ok()) {
       rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
       goto exit;
@@ -737,7 +741,9 @@ int Rdb_iterator_partial::materialize_prefix() {
   if (rc != HA_ERR_END_OF_FILE) goto exit;
   rc = HA_EXIT_SUCCESS;
 
-  s = rdb_get_rocksdb_db()->Write(options, optimize, wb.get());
+  s = RDB_INJECT_ERROR(
+      Rdb_inject_class::WRITE, "partial_index_write",
+      rdb_get_rocksdb_db()->Write(options, optimize, wb.get()));
   if (!s.ok()) {
     rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
     goto exit;

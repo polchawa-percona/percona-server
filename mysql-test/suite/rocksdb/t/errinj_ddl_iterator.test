@@ -1,0 +1,31 @@
+#
+# Systematic error injection into the iterator steps of DDL statements (see
+# suite/rocksdb/include/errinj_loop.inc). INPLACE ADD INDEX and COPY ALTER
+# scan the table; a failed step must fail the statement, not build the index
+# or the new table from part of the rows.
+#
+# PS-11704: is_valid_iterator() turns any iterator error that does not abort
+# the server into the end of the scan.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+
+--source suite/rocksdb/include/errinj_ddl_setup.inc
+
+--let $errinj_bulk_load = 2
+--let $errinj_class = ITERATOR
+--let $errinj_status = INCOMPLETE
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+
+--let $errinj_state_proc =
+--let $errinj_bulk_load =
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;

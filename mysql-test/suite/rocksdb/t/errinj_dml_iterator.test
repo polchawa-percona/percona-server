@@ -1,0 +1,25 @@
+#
+# Systematic error injection into the iterator steps of DML statements and
+# transactions (see suite/rocksdb/include/errinj_loop.inc). Every step of
+# each scan fails in turn with a status that does not abort the server; the
+# statement must then fail, not return or change fewer rows.
+#
+# PS-11704: is_valid_iterator() turns any iterator error that does not abort
+# the server into the end of the scan, so the statement succeeds on a
+# truncated scan.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+
+--source suite/rocksdb/include/errinj_dml_setup.inc
+
+--let $errinj_class = ITERATOR
+--let $errinj_status = INCOMPLETE
+--source suite/rocksdb/include/errinj_dml_workloads.inc
+
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

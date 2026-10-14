@@ -1,0 +1,24 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+# ITERATOR/INCOMPLETE INPLACE ADD INDEX: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE INPLACE ADD UNIQUE INDEX: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE INPLACE DROP INDEX: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE COPY ALTER: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE TRUNCATE: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE bulk load: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE OPTIMIZE TABLE: the statement does not change the state
+# ITERATOR/INCOMPLETE OPTIMIZE TABLE: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE ANALYZE TABLE: the statement does not change the state
+# ITERATOR/INCOMPLETE ANALYZE TABLE: every injected failure was handled correctly
+# ITERATOR/INCOMPLETE RENAME TABLE: the statement does not change the state
+# ITERATOR/INCOMPLETE RENAME TABLE: no RocksDB call of this class was made
+# ITERATOR/INCOMPLETE DROP TABLE: no RocksDB call of this class was made
+DROP TABLE IF EXISTS t2;
+Warnings:
+Note	1051	Unknown table 'test.t2'
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;

@@ -1,0 +1,35 @@
+#
+# Systematic error injection into the SST file writes and the ingest of a bulk
+# load into a table with a secondary index (see
+# suite/rocksdb/include/errinj_loop.inc). A failed bulk load must leave the
+# table as it was.
+#
+# PS-11759: the secondary-index entries of the bulk-loaded rows are committed
+# by each INSERT; when writing or ingesting the primary key SST file fails,
+# they stay and the table is corrupt.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+
+--source suite/rocksdb/include/errinj_ddl_setup.inc
+
+--let $errinj_bulk_load = 1
+--let $errinj_class = SST
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+--let $errinj_class = INGEST
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+
+--let $errinj_state_proc =
+--let $errinj_bulk_load =
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;
