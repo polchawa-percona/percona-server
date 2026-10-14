@@ -1,0 +1,43 @@
+SET @saved_append = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_store_row_debug_checksums = ON;
+INSERT INTO t1 VALUES (1, 1), (2, NULL);
+SET SESSION rocksdb_store_row_debug_checksums = OFF;
+INSERT INTO t1 VALUES (3, 3);
+ALTER TABLE t1 ADD COLUMN c INT DEFAULT 5, ALGORITHM=INSTANT;
+SELECT * FROM t1 ORDER BY a;
+a	b	c
+1	1	5
+2	NULL	5
+3	3	5
+SELECT a, c FROM t1 WHERE a = 1;
+a	c
+1	5
+ALTER TABLE t1 ADD COLUMN d VARCHAR(10) DEFAULT 'dflt', ADD COLUMN e INT,
+ALGORITHM=INSTANT;
+SELECT * FROM t1 ORDER BY a;
+a	b	c	d	e
+1	1	5	dflt	NULL
+2	NULL	5	dflt	NULL
+3	3	5	dflt	NULL
+# The checksums of the old rows still verify.
+SET SESSION rocksdb_verify_row_debug_checksums = ON;
+SELECT * FROM t1 ORDER BY a;
+a	b	c	d	e
+1	1	5	dflt	NULL
+2	NULL	5	dflt	NULL
+3	3	5	dflt	NULL
+SET SESSION rocksdb_verify_row_debug_checksums = OFF;
+# An UPDATE must not write a wrong value back.
+UPDATE t1 SET b = b + 10;
+SELECT * FROM t1 ORDER BY a;
+a	b	c	d	e
+1	11	5	dflt	NULL
+2	NULL	5	dflt	NULL
+3	13	5	dflt	NULL
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append;
