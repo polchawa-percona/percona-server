@@ -1,0 +1,58 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11876: rocksdb_max_latest_deadlocks accepts values up to UINT32_MAX
+# (ha_rocksdb.cc, MYSQL_SYSVAR_UINT(max_latest_deadlocks, ..., UINT32_MAX)).
+# rocksdb_set_max_latest_deadlocks() passes the value unchanged to
+# TransactionDB::SetDeadlockInfoBufferSize(), which resizes a std::vector of
+# deadlock paths to that many elements. For a large value the allocation
+# throws std::bad_alloc, nothing catches it and the server aborts while
+# executing the SET statement.
+#
+# The test asserts that setting the maximum value keeps the server running
+# and that deadlocks are still reported afterwards.
+#
+
+SET @prior_max_latest_deadlocks = @@global.rocksdb_max_latest_deadlocks;
+SET @prior_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @prior_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 10000;
+
+# A fixed server may clamp or reject the value; only survival matters here.
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--error 0, ER_WRONG_VALUE_FOR_VAR, ER_WRONG_ARGUMENTS
+SET GLOBAL rocksdb_max_latest_deadlocks = 4294967295;
+--enable_warnings
+--enable_result_log
+--enable_query_log
+SELECT 1 AS server_alive;
+
+# Needed by simple_deadlock.inc
+let $engine = rocksdb;
+
+--source include/count_sessions.inc
+connect (con1,localhost,root,,);
+let $con1 = `SELECT CONNECTION_ID()`;
+connect (con2,localhost,root,,);
+let $con2 = `SELECT CONNECTION_ID()`;
+
+connection default;
+CREATE TABLE t (i INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1), (2);
+
+--source ../include/simple_deadlock.inc
+
+connection default;
+SELECT COUNT(DISTINCT DEADLOCK_ID) > 0 AS deadlock_reported
+  FROM information_schema.ROCKSDB_DEADLOCK;
+
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc
+SET GLOBAL rocksdb_max_latest_deadlocks = @prior_max_latest_deadlocks;
+SET GLOBAL rocksdb_lock_wait_timeout = @prior_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @prior_deadlock_detect;
+DROP TABLE t;
