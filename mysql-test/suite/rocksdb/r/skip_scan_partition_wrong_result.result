@@ -1,0 +1,38 @@
+#
+# PS-11793: skip scan on a partitioned MyRocks table returns wrong rows: in
+# each partition only the rows of the first distinct prefix group are read,
+# the following groups are skipped. A non-partitioned MyRocks table and a
+# partitioned InnoDB table return all matching rows. Found while writing
+# rocksdb.skip_scan_rec_per_key_race (PS-11840).
+# Expected: the same rows with and without skip scan.
+#
+CREATE TABLE t (ip_col INT, ipkey INT, PRIMARY KEY (ipkey, ip_col))
+ENGINE=ROCKSDB
+PARTITION BY RANGE (ip_col) (PARTITION p1 VALUES LESS THAN (1000));
+INSERT INTO t VALUES (150,1),(160,2),(170,3),(150,4),(160,5),(170,6);
+EXPLAIN SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 160;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	p1	range	PRIMARY	PRIMARY	8	NULL	#	100.00	Using where; Using index for skip scan
+Warnings:
+Note	1003	/* select#1 */ select /*+ SKIP_SCAN(`t`@`select#1` `PRIMARY`) */ `test`.`t`.`ip_col` AS `ip_col`,`test`.`t`.`ipkey` AS `ipkey` from `test`.`t` where (`test`.`t`.`ip_col` = 160)
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 150;
+ip_col	ipkey
+150	1
+150	4
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 160;
+ip_col	ipkey
+160	2
+160	5
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col > 155;
+ip_col	ipkey
+160	2
+170	3
+160	5
+170	6
+SELECT /*+ NO_SKIP_SCAN(t) */ * FROM t WHERE ip_col > 155;
+ip_col	ipkey
+160	2
+170	3
+160	5
+170	6
+DROP TABLE t;
