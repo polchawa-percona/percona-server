@@ -138,6 +138,8 @@ rocksdb.xa_prepared_shutdown : BUG#11830 PS-11830 RocksDB debug assert in Prepar
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.ddl_crash_create_lctn2 : BUG#0 PS-11833 lower_case_table_names=2 CREATE crash not recovered
 rocksdb.ddl_truncate_leftover_rename : BUG#0 PS-11831 TRUNCATE leftover restored after rename
+rocksdb.power_loss_ctas_flush_log_lazy : BUG#11763 PS-11763 CTAS not atomic on power loss
+rocksdb.power_loss_bulk_load_flush_log_lazy : BUG#11696 PS-11696 SK lost on power loss
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

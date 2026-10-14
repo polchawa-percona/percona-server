@@ -1,0 +1,50 @@
+SET SESSION cte_max_recursion_depth = 10000;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (100000, 1);
+#
+# 1. Crash in the middle of a bulk load: nothing of it is visible.
+#    t1 has no secondary key: with one, a crash here leaves the
+#    secondary key without the rows (PS-11696).
+#
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+# restart
+SET SESSION cte_max_recursion_depth = 10000;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+0
+SELECT COUNT(*) FROM t2 FORCE INDEX (PRIMARY);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2 FORCE INDEX (ka) WHERE a >= 0;
+COUNT(*)
+1
+# Temporary bulk load files left:
+0
+#
+# 2. Bulk loads that finished before the crash are kept whole.
+#
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load = 0;
+# restart
+SET SESSION cte_max_recursion_depth = 10000;
+SELECT COUNT(*), SUM(id), SUM(a) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(id)	SUM(a)
+5000	12502500	247500
+SELECT COUNT(*), SUM(id), SUM(a) FROM t2 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(id)	SUM(a)
+5001	37597500	247501
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (ka) WHERE a >= 0;
+COUNT(*)	SUM(a)
+5001	247501
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+DROP TABLE t1, t2;
