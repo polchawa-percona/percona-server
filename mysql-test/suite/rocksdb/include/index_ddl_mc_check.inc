@@ -1,0 +1,26 @@
+# Checks that every secondary index of the mc2 tables holds exactly the rows of
+# the primary key (row count and a checksum over the indexed column).
+--disable_query_log
+--let $ccic_table = ta
+--let $ccic_col = a
+--let $ccic_key = ka0
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--let $ccic_col = c
+--let $ccic_key = kc0
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--let $ccic_col = b
+--let $ccic_key = kba0
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--let $ccic_table = tn
+--let $ccic_col = a
+--let $ccic_key = ka
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--let $ccic_table = th
+--let $ccic_key = ka
+--let $mcc_base = IGNORE INDEX (ka)
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--let $mcc_base =
+--let $ccic_table = tr
+--let $ccic_key = ka
+--source suite/rocksdb/include/index_ddl_mc_idx.inc
+--enable_query_log

@@ -1,0 +1,49 @@
+#
+# When the ingest of an INPLACE index build fails, the error names the SST file as
+# "(null)": ha_rocksdb.cc calls Rdb_sst_info::report_error_msg(s, nullptr), and
+# the message is built with "[%s] bulk load error: %s". The failure is forced as
+# in rocksdb.ddl_concurrent_index_build_ingest (round 4): another index's data in
+# the bottom level spans the new index id and
+# rocksdb_bulk_load_fail_if_not_bottommost_level=ON.
+# Expected: the message names the table, index or file, never "(null)".
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+
+call mtr.add_suppression("Failed to bulk load. status code = 13");
+call mtr.add_suppression("Error finishing bulk load");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+CREATE TABLE t3 (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000) SELECT n, n FROM v;
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000) SELECT n, n FROM v;
+INSERT INTO t3 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000) SELECT n, n FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+connect (c1,localhost,root,,);
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--disable_result_log
+--error ER_UNKNOWN_ERROR
+--reap
+--enable_result_log
+--let $msg = query_get_value(SHOW WARNINGS, Message, 1)
+--disable_query_log
+eval SELECT LOCATE('(null)', '$msg') = 0 AS message_names_the_failed_object;
+--enable_query_log
+connection default;
+SET DEBUG_SYNC = 'RESET';
+disconnect c1;
+DROP TABLE t1, t2, t3;

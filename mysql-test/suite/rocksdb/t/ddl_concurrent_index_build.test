@@ -1,0 +1,223 @@
+#
+# Concurrent INPLACE ADD/DROP INDEX on several tables that share a column family.
+# One SST file can hold the keys of many indexes, so an index build that ingests
+# its SST files can collide with what other sessions do in the same column family
+# at the same time. The interleavings are forced with the index-build sync points:
+#   S1  two builds in one column family, both paused just before ingest, released
+#       in reverse order (the later index id is ingested first);
+#   S2  a build paused before ingest while other tables in the same column family
+#       are updated, deleted, flushed and compacted;
+#   S3  a DROP INDEX with rocksdb_enable_delete_range_for_drop_index=ON (DeleteRange
+#       plus DeleteFilesInRange on the dropped id) while the build of the next index
+#       id waits before ingest, in the default and in a reverse column family;
+#   S4  a good UNIQUE build and a failing UNIQUE build (duplicate key) interleaved;
+#   S5  a build paused in its primary-key scan while another table gets an index,
+#       a further table is created and dropped, and the drop thread and a manual
+#       compaction run.
+# After all steps every index must hold exactly the primary key's rows, CHECK TABLE
+# must pass, no data of dropped indexes may remain after the drop thread and a
+# compaction, and a restart with rocksdb_validate_tables=1 must be clean.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+
+SET SESSION cte_max_recursion_depth = 100000;
+--let $n = 3000
+--let $i = 1
+while ($i <= 4)
+{
+  eval CREATE TABLE t$i (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+  eval INSERT INTO t$i WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < $n)
+    SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+  --inc $i
+}
+CREATE TABLE r1 (pk INT PRIMARY KEY COMMENT 'cfname=rev:cc3r', a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO r1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+  SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE r2 (pk INT PRIMARY KEY COMMENT 'cfname=rev:cc3r', a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO r2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+  SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+
+connect (c1,localhost,root,,);
+connect (c2,localhost,root,,);
+
+--echo # S1: two builds in the same CF, both paused before ingest, released in reverse order
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE
+connection c2;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p2 WAIT_FOR g2';
+--send ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p2';
+SET DEBUG_SYNC = 'now SIGNAL g2';
+connection c2;
+--reap
+connection default;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+connection default;
+SELECT INDEX_NUMBER INTO @t1ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t1' AND INDEX_NAME='ka';
+SELECT INDEX_NUMBER INTO @t2ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t2' AND INDEX_NAME='ka';
+SELECT @t2ka - @t1ka AS id_gap;
+
+--echo # S2: build paused before ingest; DML + flush + manual compaction of the CF meanwhile
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t3 ADD INDEX ka(a), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+UPDATE t4 SET a = a + 1 WHERE pk <= 1000;
+DELETE FROM t4 WHERE pk > 2900;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t4 SET a = a - 1 WHERE pk <= 1000;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+
+--echo # S3: drop of the adjacent lower index id (DeleteRange) while the next build waits before ingest
+connection default;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+ALTER TABLE t4 ADD INDEX kb(b), ALGORITHM=INPLACE;
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t4 ADD INDEX ka(a), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+--echo # (t4 is MDL-locked by c1: drop on t2 instead, whose ka is a lower id in the same CF)
+ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+connection default;
+SELECT INDEX_NUMBER INTO @t4kb FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t4' AND INDEX_NAME='kb';
+SELECT INDEX_NUMBER INTO @t4ka FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t4' AND INDEX_NAME='ka';
+SELECT @t4ka - @t4kb AS id_gap;
+
+--echo # S3b: true adjacency: build index N, drop it with DeleteRange while index N+1 waits before ingest
+ALTER TABLE t3 ADD INDEX kx(b), ALGORITHM=INPLACE;
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SELECT INDEX_NUMBER INTO @t3kx FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t3' AND INDEX_NAME='kx';
+ALTER TABLE t3 DROP INDEX kx, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+connection default;
+SELECT INDEX_NUMBER INTO @t1kb FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME='t1' AND INDEX_NAME='kb';
+SELECT @t1kb - @t3kx AS id_gap;
+
+--echo # S3c: same adjacency in a reverse CF
+ALTER TABLE r2 ADD INDEX kx(b) COMMENT 'cfname=rev:cc3r', ALGORITHM=INPLACE;
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE r1 ADD INDEX ka(a) COMMENT 'cfname=rev:cc3r', ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE r2 DROP INDEX kx, ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+connection default;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = OFF;
+
+--echo # S4: good UNIQUE build paused before ingest while a failing UNIQUE build runs; then the
+--echo #     failing build paused before its merge while a good build runs to the end
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t3 ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+connection c2;
+--replace_regex /#sql-[0-9a-f_]*/#sql-temporary/
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE INDEX ua(a), ALGORITHM=INPLACE;
+connection default;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+connection c2;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p2 WAIT_FOR g2';
+--send ALTER TABLE t2 ADD UNIQUE INDEX ua(a), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p2';
+ALTER TABLE t1 ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now SIGNAL g2';
+connection c2;
+--replace_regex /#sql-[0-9a-f_]*/#sql-temporary/
+--error ER_DUP_ENTRY
+--reap
+
+--echo # S5: build paused in the PK scan while another table's build completes and the table is dropped
+connection c1;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t3 ADD INDEX kab(a, b), ALGORITHM=INPLACE
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t4 ADD INDEX kab(a, b), ALGORITHM=INPLACE;
+CREATE TABLE t5 (pk INT PRIMARY KEY, a INT, KEY(a)) ENGINE=ROCKSDB;
+INSERT INTO t5 VALUES (1,1),(2,2),(3,3);
+DROP TABLE t5;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+connection c1;
+--reap
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+--echo # checks
+--let $ccic_col = a
+--let $ccic_table = t1
+--let $ccic_key = ka
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t3
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t4
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = r1
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_col = b
+--let $ccic_table = t1
+--let $ccic_key = kb
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t3
+--let $ccic_key = ub
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t1
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t4
+--let $ccic_key = kb
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t3
+--let $ccic_key = kab
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+--let $ccic_table = t4
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+CHECK TABLE t1, t2, t3, t4, r1, r2;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cc3r';
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--let $wait_timeout = 180
+--source include/wait_condition.inc
+--echo # data of dropped indexes left in SST files after the drop thread and compaction
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+  WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+--let $restart_parameters = restart:--rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $ccic_col = a
+--let $ccic_table = t1
+--let $ccic_key = ka
+--source suite/rocksdb/include/ddl_concurrent_index_check.inc
+CHECK TABLE t1, t2, t3, t4, r1, r2;
+disconnect c1;
+disconnect c2;
+DROP TABLE t1, t2, t3, t4, r1, r2;
