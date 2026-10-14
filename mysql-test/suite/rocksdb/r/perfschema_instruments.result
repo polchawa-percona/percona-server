@@ -1,0 +1,26 @@
+# Registered thread classes
+SELECT NAME FROM performance_schema.setup_threads
+WHERE NAME LIKE 'thread/rocksdb/%' ORDER BY NAME;
+NAME
+thread/rocksdb/background
+thread/rocksdb/drop index
+thread/rocksdb/manual compaction
+thread/rocksdb/signal index stats calculation
+# Each MyRocks background thread runs instrumented
+SELECT NAME, TYPE FROM performance_schema.threads
+WHERE NAME LIKE 'thread/rocksdb/%' ORDER BY NAME;
+NAME	TYPE
+thread/rocksdb/background	BACKGROUND
+thread/rocksdb/drop index	BACKGROUND
+thread/rocksdb/manual compaction	BACKGROUND
+thread/rocksdb/signal index stats calculation	BACKGROUND
+# The index statistics signal mutex exists
+SELECT NAME FROM performance_schema.mutex_instances
+WHERE NAME = 'wait/synch/mutex/rocksdb/signal index stats calculation';
+NAME
+wait/synch/mutex/rocksdb/signal index stats calculation
+# The read_free_rpl_tables rwlock exists
+SELECT NAME FROM performance_schema.rwlock_instances
+WHERE NAME = 'wait/synch/rwlock/rocksdb/read_free_rpl_tables';
+NAME
+wait/synch/rwlock/rocksdb/read_free_rpl_tables
