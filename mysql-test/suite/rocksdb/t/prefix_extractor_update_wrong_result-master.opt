@@ -1,0 +1,1 @@
+--rocksdb_override_cf_options=cf_px={prefix_extractor=capped:4}
