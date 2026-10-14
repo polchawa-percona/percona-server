@@ -1,0 +1,67 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11895: with rocksdb_commit_in_the_middle=ON, a REPEATABLE READ transaction
+# scans a fresh database snapshot instead of its own. Scans see rows that other
+# transactions committed after the snapshot, miss rows they deleted, miss the
+# transaction's own uncommitted rows, and secondary-key lookups drop rows whose
+# primary-key row is not in the transaction snapshot. Point lookups by primary
+# key still use the transaction snapshot, so the two disagree. Under pstress
+# this made CHECK TABLE report healthy tables as corrupt ("failed to fetch row
+# by rowid").
+#
+# The expected results are the REPEATABLE READ results that the same
+# statements return with rocksdb_commit_in_the_middle=OFF.
+#
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+
+connect (con1, localhost, root,,);
+
+--let $i = 2
+while ($i)
+{
+  connection default;
+  if ($i == 2)
+  {
+    --echo # rocksdb_commit_in_the_middle=OFF
+    SET SESSION rocksdb_commit_in_the_middle = OFF;
+  }
+  if ($i == 1)
+  {
+    --echo # rocksdb_commit_in_the_middle=ON
+    SET SESSION rocksdb_commit_in_the_middle = ON;
+  }
+  SET SESSION transaction_isolation = 'REPEATABLE-READ';
+  BEGIN;
+  --echo # The first read takes the transaction snapshot.
+  SELECT * FROM t1 WHERE pk = 1;
+  INSERT INTO t1 VALUES (20, 20, 20);
+
+  connection con1;
+  INSERT INTO t1 VALUES (10, 10, 10);
+  DELETE FROM t1 WHERE pk = 2;
+  UPDATE t1 SET a = 30 WHERE pk = 3;
+
+  connection default;
+  --echo # Expected: 1, 2, 3 and the own row 20; not 10.
+  SELECT * FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk;
+  SELECT pk, a FROM t1 FORCE INDEX (ka) ORDER BY a;
+  SELECT * FROM t1 FORCE INDEX (ka) WHERE a >= 1 ORDER BY a;
+  SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 3;
+  SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 10;
+  SELECT * FROM t1 WHERE pk = 10;
+  COMMIT;
+
+  --echo # Restore the initial rows.
+  DELETE FROM t1 WHERE pk IN (10, 20);
+  INSERT INTO t1 VALUES (2, 2, 2);
+  UPDATE t1 SET a = 3 WHERE pk = 3;
+  --dec $i
+}
+
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+disconnect con1;
+DROP TABLE t1;
