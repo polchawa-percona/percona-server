@@ -1,0 +1,87 @@
+SET @saved_xa_detach_on_prepare = @@session.xa_detach_on_prepare;
+SET @saved_bulk_load_allow_sk = @@session.rocksdb_bulk_load_allow_sk;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+# Reference: xa_detach_on_prepare=OFF keeps the rows
+SET SESSION xa_detach_on_prepare = OFF;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x1';
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+XA END 'x1';
+XA PREPARE 'x1';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA COMMIT 'x1';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (1, 2);
+COUNT(*)
+2
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (1, 2);
+COUNT(*)
+2
+# xa_detach_on_prepare=ON, XA COMMIT in the same session
+SET SESSION xa_detach_on_prepare = ON;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x2';
+INSERT INTO t1 VALUES (3, 3), (4, 4);
+XA END 'x2';
+XA PREPARE 'x2';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA COMMIT 'x2';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (3, 4);
+COUNT(*)
+2
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (3, 4);
+COUNT(*)
+2
+# xa_detach_on_prepare=ON, XA COMMIT from another connection
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION xa_detach_on_prepare = ON;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x3';
+INSERT INTO t1 VALUES (5, 5), (6, 6);
+XA END 'x3';
+XA PREPARE 'x3';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA COMMIT 'x3';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (5, 6);
+COUNT(*)
+2
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (5, 6);
+COUNT(*)
+2
+# xa_detach_on_prepare=ON, disconnect, XA COMMIT from another connection
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x4';
+INSERT INTO t1 VALUES (7, 7), (8, 8);
+XA END 'x4';
+XA PREPARE 'x4';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+XA COMMIT 'x4';
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (7, 8);
+COUNT(*)
+2
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (7, 8);
+COUNT(*)
+2
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+SET SESSION xa_detach_on_prepare = @saved_xa_detach_on_prepare;
+SET SESSION rocksdb_bulk_load_allow_sk = @saved_bulk_load_allow_sk;

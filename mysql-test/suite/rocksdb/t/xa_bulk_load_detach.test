@@ -1,0 +1,85 @@
+#
+# PS-11898: bulk-loaded rows of an XA transaction are silently lost when
+# XA PREPARE detaches the transaction from the session.
+#
+# With xa_detach_on_prepare=ON (the default) XA PREPARE detaches the MyRocks
+# transaction and deletes it together with its unfinished bulk load, so the
+# primary key rows staged in SST files are discarded. XA COMMIT succeeds and
+# commits the secondary key entries from the write batch
+# (rocksdb_bulk_load_allow_sk=OFF), which then point to missing rows.
+#
+# Expected: every XA COMMIT keeps its rows in both indexes, as with
+# xa_detach_on_prepare=OFF, and the rows survive the later
+# SET rocksdb_bulk_load=0 or the disconnect of the preparing session.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+SET @saved_xa_detach_on_prepare = @@session.xa_detach_on_prepare;
+SET @saved_bulk_load_allow_sk = @@session.rocksdb_bulk_load_allow_sk;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+
+--echo # Reference: xa_detach_on_prepare=OFF keeps the rows
+SET SESSION xa_detach_on_prepare = OFF;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x1';
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+XA END 'x1';
+XA PREPARE 'x1';
+XA COMMIT 'x1';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (1, 2);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (1, 2);
+
+--echo # xa_detach_on_prepare=ON, XA COMMIT in the same session
+SET SESSION xa_detach_on_prepare = ON;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x2';
+INSERT INTO t1 VALUES (3, 3), (4, 4);
+XA END 'x2';
+XA PREPARE 'x2';
+XA COMMIT 'x2';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (3, 4);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (3, 4);
+
+--echo # xa_detach_on_prepare=ON, XA COMMIT from another connection
+--connect (con1, localhost, root,,)
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION xa_detach_on_prepare = ON;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x3';
+INSERT INTO t1 VALUES (5, 5), (6, 6);
+XA END 'x3';
+XA PREPARE 'x3';
+--connection default
+XA COMMIT 'x3';
+--connection con1
+SET SESSION rocksdb_bulk_load = 0;
+--connection default
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (5, 6);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (5, 6);
+
+--echo # xa_detach_on_prepare=ON, disconnect, XA COMMIT from another connection
+--connection con1
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x4';
+INSERT INTO t1 VALUES (7, 7), (8, 8);
+XA END 'x4';
+XA PREPARE 'x4';
+--disconnect con1
+--connection default
+--source include/wait_until_count_sessions.inc
+XA COMMIT 'x4';
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (7, 8);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (7, 8);
+
+SELECT * FROM t1 ORDER BY a;
+CHECK TABLE t1;
+
+DROP TABLE t1;
+SET SESSION xa_detach_on_prepare = @saved_xa_detach_on_prepare;
+SET SESSION rocksdb_bulk_load_allow_sk = @saved_bulk_load_allow_sk;
+--source include/wait_until_count_sessions.inc
