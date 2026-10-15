@@ -1,0 +1,26 @@
+# PS-11908: DROP KEY + ADD KEY of the same name that turns a unique index into
+# a non-unique one keeps the index in its old column family when the old and
+# the new index comments both name a column family. get_old_key_positions()
+# treats the pair as "only uniqueness changed" and reuses the old index.
+#
+# SHOW CREATE TABLE already shows the new column family, ROCKSDB_DDL does not.
+# A fixed server moves the index to the column family of the new comment,
+# like the same ALTER does when only one of the two indexes has a comment.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT,
+                 UNIQUE KEY kb (b) COMMENT 'cfname=cf_ps11908_a') ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SELECT INDEX_NAME, CF FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+
+ALTER TABLE t1 DROP KEY kb, ADD KEY kb (b) COMMENT 'cfname=cf_ps11908_b';
+SELECT INDEX_NAME, CF FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+# The index is no longer unique
+INSERT INTO t1 VALUES (4,2);
+SELECT a, b FROM t1 FORCE INDEX (kb) ORDER BY b, a;
+CHECK TABLE t1;
+
+DROP TABLE t1;
