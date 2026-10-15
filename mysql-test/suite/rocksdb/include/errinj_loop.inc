@@ -96,6 +96,22 @@ while (!$errinj_done) {
     # The include files above turn the query and result logs back on.
     --disable_query_log
     --disable_result_log
+    # Scratch: a multi-table RENAME of a non-atomic engine may stop halfway.
+    if ($ce_invariants) {
+      --let $ce_half = `SELECT COUNT(*) = 1 FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2_renamed'`
+      if ($ce_half) {
+        --exec echo "$errinj_label n=$errinj_n: multi-table RENAME stopped halfway" >> $MYSQLTEST_VARDIR/log/errinj_stats.log
+        RENAME TABLE t2_renamed TO t2;
+      }
+    }
+    # Scratch: open every table first, a pending ALTER record resolves at open.
+    --let $errinj_t = $errinj_tables
+    while ($errinj_t) {
+      --let $errinj_one = `SELECT SUBSTRING_INDEX('$errinj_t', ',', 1)`
+      --let $errinj_t = `SELECT IF(LOCATE(',', '$errinj_t') > 0, SUBSTRING('$errinj_t', LOCATE(',', '$errinj_t') + 1), '')`
+      --error 0,1146
+      eval SELECT 1 FROM $errinj_one LIMIT 0;
+    }
     --source suite/rocksdb/include/errinj_state_proc.inc
     --let $errinj_state_now = `$errinj_state`
     --let $errinj_ok = 0
