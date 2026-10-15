@@ -1,0 +1,39 @@
+call mtr.add_suppression(".*");
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL,
+d INT NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,1,'b1',299),(2,2,'b2',298),(3,3,'b3',297);
+ALTER TABLE t2 ADD COLUMN e INT NOT NULL DEFAULT 5, ADD INDEX ke (e), ALGORITHM=COPY;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+DROP TABLE t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL,
+d INT NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,1,'b1',299),(2,2,'b2',298),(3,3,'b3',297);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SELECT table_name, index_name, index_number FROM information_schema.rocksdb_ddl ORDER BY 1, 2;
+table_name	index_name	index_number
+t2	kb	262
+t2	PRIMARY	261
+SET SESSION rocksdb_debug_inject_trace = ON;
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'POWER_LOSS_AFTER';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+ALTER TABLE t2 ADD COLUMN e INT NOT NULL DEFAULT 5, ADD INDEX ke (e), ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT table_name, index_name, index_number FROM information_schema.rocksdb_ddl ORDER BY 1, 2;
+table_name	index_name	index_number
+t2		261
+t2		262
+SELECT name FROM information_schema.innodb_tables WHERE name LIKE 'test/%';
+name
+SELECT table_name FROM information_schema.tables WHERE table_schema = 'test';
+TABLE_NAME
+t2
+SELECT * FROM t2;
+pk	a	b	d
+1	1	b1	299
+2	2	b2	298
+3	3	b3	297
+# restart
+DROP TABLE IF EXISTS t2;

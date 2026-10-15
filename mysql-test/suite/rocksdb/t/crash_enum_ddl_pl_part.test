@@ -6,4 +6,5 @@
 call mtr.add_suppression(".*");
 --let $ce_power = 1
 --let $ce_shape = part
+--let $errinj_unique_cols = pk, a
 --source suite/rocksdb/include/crash_enum_ddl.inc

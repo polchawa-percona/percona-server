@@ -13,10 +13,16 @@ if ($errinj_bulk_load != 1) {
   --source suite/rocksdb/include/errinj_loop.inc
 }
 
+if (!$errinj_unique_cols) {
+  --let $errinj_unique_cols = a
+}
+# $errinj_no_unique: hidden-PK tables do not support INPLACE ADD UNIQUE INDEX.
+if (!$errinj_no_unique) {
 if ($errinj_bulk_load != 1) {
-  --let $errinj_stmt = ALTER TABLE t2 ADD UNIQUE INDEX ua (a), ALGORITHM=INPLACE
+  --let $errinj_stmt = ALTER TABLE t2 ADD UNIQUE INDEX ua ($errinj_unique_cols), ALGORITHM=INPLACE
   --let $errinj_label = $errinj_class/$errinj_status INPLACE ADD UNIQUE INDEX
   --source suite/rocksdb/include/errinj_loop.inc
+}
 }
 
 if ($errinj_bulk_load != 1) {

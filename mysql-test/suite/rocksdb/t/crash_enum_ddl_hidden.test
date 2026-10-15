@@ -5,4 +5,5 @@
 --source include/not_valgrind.inc
 call mtr.add_suppression(".*");
 --let $ce_shape = hidden
+--let $errinj_no_unique = 1
 --source suite/rocksdb/include/crash_enum_ddl.inc

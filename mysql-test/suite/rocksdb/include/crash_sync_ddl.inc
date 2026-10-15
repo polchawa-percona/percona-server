@@ -25,9 +25,14 @@ delimiter ;|
 --let $cs_stmt = ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE
 --let $cs_label = $ce_shape INPLACE ADD INDEX
 --source suite/rocksdb/include/crash_sync_loop.inc
---let $cs_stmt = ALTER TABLE t2 ADD UNIQUE INDEX ua (a), ALGORITHM=INPLACE
---let $cs_label = $ce_shape INPLACE ADD UNIQUE INDEX
---source suite/rocksdb/include/crash_sync_loop.inc
+if (!$errinj_unique_cols) {
+  --let $errinj_unique_cols = a
+}
+if (!$errinj_no_unique) {
+  --let $cs_stmt = ALTER TABLE t2 ADD UNIQUE INDEX ua ($errinj_unique_cols), ALGORITHM=INPLACE
+  --let $cs_label = $ce_shape INPLACE ADD UNIQUE INDEX
+  --source suite/rocksdb/include/crash_sync_loop.inc
+}
 --let $cs_stmt = ALTER TABLE t2 DROP INDEX kb, ALGORITHM=INPLACE
 --let $cs_label = $ce_shape INPLACE DROP INDEX
 --source suite/rocksdb/include/crash_sync_loop.inc
