@@ -1,0 +1,2 @@
+--binlog_format=row
+--binlog_row_image=FULL
