@@ -1,0 +1,74 @@
+#
+# PS-11899: a rollback during bulk load keeps the primary key rows but drops
+# their secondary index entries.
+#
+# With rocksdb_bulk_load=1 and rocksdb_bulk_load_allow_sk=OFF the primary key
+# is written to SST files and the secondary keys to the transaction write
+# batch. A rollback discards the write batch, but the SST files are still
+# ingested when the bulk load ends, so the table has rows that the secondary
+# key does not find. CHECK TABLE does not detect it.
+#
+# Expected: after each rollback both indexes have the same rows. The test
+# compares the counts only, so it holds whether a fix keeps the rows in both
+# indexes (as with rocksdb_bulk_load_allow_sk=ON) or in none.
+#
+--source include/have_rocksdb.inc
+
+SET @saved_bulk_load_allow_sk = @@session.rocksdb_bulk_load_allow_sk;
+SET @saved_xa_detach_on_prepare = @@session.xa_detach_on_prepare;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+
+--echo # Reference: rocksdb_bulk_load_allow_sk=ON, BEGIN ... ROLLBACK
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+BEGIN;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+ROLLBACK;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (1, 2)) =
+       (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (1, 2))
+       AS same_rows;
+
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+
+--echo # BEGIN ... ROLLBACK
+SET SESSION rocksdb_bulk_load = 1;
+BEGIN;
+INSERT INTO t1 VALUES (3, 3), (4, 4);
+ROLLBACK;
+SET SESSION rocksdb_bulk_load = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (3, 4)) =
+       (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (3, 4))
+       AS same_rows;
+
+--echo # XA ROLLBACK of a prepared transaction, xa_detach_on_prepare=OFF
+SET SESSION xa_detach_on_prepare = OFF;
+SET SESSION rocksdb_bulk_load = 1;
+XA START 'x1';
+INSERT INTO t1 VALUES (5, 5), (6, 6);
+XA END 'x1';
+# XA PREPARE returns warning 1031 until PS-11632 is fixed; unrelated to this bug.
+--disable_warnings
+XA PREPARE 'x1';
+--enable_warnings
+XA ROLLBACK 'x1';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (5, 6)) =
+       (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (5, 6))
+       AS same_rows;
+
+--echo # Autocommit INSERT that fails on its second row
+SET SESSION rocksdb_bulk_load = 1;
+--error ER_BAD_NULL_ERROR
+INSERT INTO t1 VALUES (7, 7), (8, NULL);
+SET SESSION rocksdb_bulk_load = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE a IN (7, 8)) =
+       (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (7, 8))
+       AS same_rows;
+
+CHECK TABLE t1;
+
+DROP TABLE t1;
+SET SESSION rocksdb_bulk_load_allow_sk = @saved_bulk_load_allow_sk;
+SET SESSION xa_detach_on_prepare = @saved_xa_detach_on_prepare;
