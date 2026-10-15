@@ -1,0 +1,214 @@
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE orphan_probe;
+#
+# 1. RENAME TABLE of a table with a pending record, interrupted after
+#    the MyRocks rename: recovery renames it back.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	3
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO t2
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT TABLE_NAME FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2')
+ORDER BY TABLE_NAME;
+TABLE_NAME
+t1
+SHOW CREATE TABLE test.t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT PARTITION_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME
+NULL	ka
+NULL	PRIMARY
+SELECT * FROM test.t1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, a FROM test.t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+SELECT id, b FROM test.t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+INSERT INTO test.t1 VALUES (4,40,40);
+UPDATE test.t1 SET a = a + 100, b = b + 100 WHERE id = 1;
+SELECT id, a FROM test.t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+2	20
+3	30
+4	40
+1	110
+SELECT id, b FROM test.t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+CHECK TABLE test.t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The ALTER TABLE was rolled back: ka exists, kb does not
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+2	20
+3	30
+4	40
+1	110
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+ERROR 42000: Key 'kb' doesn't exist in table 't1'
+include/assert_grep.inc [No pending ALTER TABLE record is left under the name t2]
+include/assert_grep.inc [The pending ALTER TABLE record moved back with the table to t1]
+DROP TABLE t1;
+#
+# 2. DROP TABLE of a table with a pending record and
+#    rocksdb_enable_delete_range_for_drop_index=ON, interrupted after the
+#    rows are deleted: recovery finishes the drop.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	3
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+# Crash at rocksdb_crash_after_delete_range during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+# A new table of the same name
+CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY kc(c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (7,70),(8,80);
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kc` (`c`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kc
+PRIMARY
+SELECT * FROM t1 ORDER BY id;
+id	c
+7	70
+8	80
+SELECT id, c FROM t1 FORCE INDEX(kc) WHERE c > 0 ORDER BY c;
+id	c
+7	70
+8	80
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+include/assert_grep.inc [The dropped table left no pending ALTER TABLE record]
+#
+# 2b. DROP TABLE as in 2, of a table whose committed DROP INDEX is not
+#     cleaned up yet (debug point): the index ka is only in the old
+#     index list of the pending record and must be dropped too.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+# Precondition: the data of ka is kept for the pending record (expect 1)
+kept_old_indexes
+1
+SET SESSION debug = "-d,rocksdb_fail_pending_alter_cleanup";
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+# Crash at rocksdb_crash_after_delete_range during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_myrocks
+0
+include/assert_grep.inc [The dropped table left no pending ALTER TABLE record]
+# Index data that belongs to no table, ka included (expect 0):
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+#
+# 3. TRUNCATE TABLE of a table whose committed ALTER TABLE is not cleaned
+#    up yet (debug point), interrupted after the table is renamed to
+#    #truncate_tmp#: recovery restores the table.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+# Precondition: the data of ka is kept for the pending record (expect 1)
+kept_old_indexes
+1
+# Crash at rocksdb_crash_after_rename during: TRUNCATE TABLE t1
+TRUNCATE TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+include/assert_grep.inc [No pending ALTER TABLE record is left under the #truncate_tmp# name]
+include/assert_grep.inc [Recovery restored t1, its pending ALTER TABLE record moved with it]
+DROP TABLE t1;
+#
+# No index data and no pending record are left behind.
+#
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# restart
+include/assert_grep.inc [No pending ALTER TABLE record is left]

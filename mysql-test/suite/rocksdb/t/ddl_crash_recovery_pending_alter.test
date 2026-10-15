@@ -1,0 +1,188 @@
+# PS-11896: startup DDL recovery must keep a pending inplace ALTER TABLE
+# record (Rdb_key_def::DDL_PENDING_ALTER) with its table.
+#
+# An index-changing inplace ALTER TABLE interrupted before the server data
+# dictionary commit leaves a pending record that the next open of the table
+# resolves. RENAME TABLE moves the record and DROP TABLE removes it, in the
+# same dictionary batch as the MyRocks change. If that RENAME, DROP or
+# TRUNCATE is interrupted in turn, startup DDL recovery
+# (rocksdb_recover_interrupted_ddl()) renames the table back or finishes the
+# drop, but it runs before the pending records are loaded and leaves the
+# record where it is:
+#  - RENAME: the record stays under the new name, the table is opened under
+#    the old name without it, and every statement on the table fails with
+#    ER_INTERNAL_ERROR 'Table definition differs between MyRocks and the data
+#    dictionary';
+#  - DROP (rocksdb_enable_delete_range_for_drop_index=ON): the record of the
+#    dropped table stays, so the indexes that only the old index list used
+#    are never dropped, and a new table of the same name is resolved against
+#    it: it gets the dropped table's index list, and DROP TABLE of it aborts
+#    the server;
+#  - TRUNCATE: the record stays under the #truncate_tmp# name and the data
+#    of the indexes that only the old index list used is never reclaimed.
+# The test asserts the correct behaviour: the table is usable after recovery,
+# no record is left under another name, and no index data is leaked.
+# On an unfixed server each case fails on its own, but mysqltest stops at the
+# first failure: case 1 at the first statement on t1, case 2 at the DROP TABLE
+# of the new t1, cases 2b and 3 at the log assertion.
+
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+CALL mtr.add_suppression("failed to finish an interrupted ALTER TABLE");
+CALL mtr.add_suppression("back to .*: RENAME TABLE was interrupted");
+CALL mtr.add_suppression("DROP TABLE was interrupted after the table was dropped in RocksDB");
+CALL mtr.add_suppression("TRUNCATE TABLE was interrupted");
+--enable_query_log
+
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $orphan_base = `SELECT INDEX_NUMBER - 1 FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'orphan_probe'`
+DROP TABLE orphan_probe;
+
+--let $ddl_cols = (id INT PRIMARY KEY, a INT, b INT, KEY ka(a))
+--let $ddl_alter = ADD INDEX kb(b)
+--let $ddl_part =
+
+--echo #
+--echo # 1. RENAME TABLE of a table with a pending record, interrupted after
+--echo #    the MyRocks rename: recovery renames it back.
+--echo #
+--let $crash_point = crash_commit_after_prepare
+--let $st = t1
+--source suite/rocksdb/include/ddl_crash_unresolved_setup.inc
+--let $crash_point = rocksdb_crash_after_rename
+--let $crash_stmt = RENAME TABLE t1 TO t2
+--source suite/rocksdb/include/ddl_crash.inc
+SELECT TABLE_NAME FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2')
+  ORDER BY TABLE_NAME;
+--let $vdb = test
+--let $vt = t1
+--source suite/rocksdb/include/ddl_crash_unresolved_verify.inc
+--echo # The ALTER TABLE was rolled back: ka exists, kb does not
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+--error ER_KEY_DOES_NOT_EXITS
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+--let $assert_text = No pending ALTER TABLE record is left under the name t2
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Table 'test[.]t2' has an unfinished ALTER TABLE
+--let $assert_only_after = starting as process
+--let $assert_count = 0
+--source include/assert_grep.inc
+--let $assert_text = The pending ALTER TABLE record moved back with the table to t1
+--let $assert_select = Table 'test[.]t1' has an unfinished ALTER TABLE
+--let $assert_count = 1
+--source include/assert_grep.inc
+DROP TABLE t1;
+
+--echo #
+--echo # 2. DROP TABLE of a table with a pending record and
+--echo #    rocksdb_enable_delete_range_for_drop_index=ON, interrupted after the
+--echo #    rows are deleted: recovery finishes the drop.
+--echo #
+--let $crash_point = crash_commit_after_prepare
+--let $st = t1
+--source suite/rocksdb/include/ddl_crash_unresolved_setup.inc
+# Only selects the DROP path that has the crash point; reset by the restart.
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+--let $crash_point = rocksdb_crash_after_delete_range
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--echo # A new table of the same name
+CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY kc(c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (7,70),(8,80);
+SHOW CREATE TABLE t1;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+SELECT * FROM t1 ORDER BY id;
+SELECT id, c FROM t1 FORCE INDEX(kc) WHERE c > 0 ORDER BY c;
+CHECK TABLE t1;
+DROP TABLE t1;
+--let $assert_text = The dropped table left no pending ALTER TABLE record
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Table 'test[.]t1' has an unfinished ALTER TABLE
+--let $assert_only_after = starting as process
+--let $assert_count = 0
+--source include/assert_grep.inc
+
+--echo #
+--echo # 2b. DROP TABLE as in 2, of a table whose committed DROP INDEX is not
+--echo #     cleaned up yet (debug point): the index ka is only in the old
+--echo #     index list of the pending record and must be dropped too.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $ka_id = `SELECT INDEX_NUMBER FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'ka'`
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+--echo # Precondition: the data of ka is kept for the pending record (expect 1)
+--disable_query_log
+--eval SELECT COUNT(DISTINCT f.COLUMN_FAMILY, f.INDEX_NUMBER) AS kept_old_indexes FROM information_schema.ROCKSDB_INDEX_FILE_MAP f WHERE f.INDEX_NUMBER = $ka_id AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d WHERE d.INDEX_NUMBER = f.INDEX_NUMBER AND d.COLUMN_FAMILY = f.COLUMN_FAMILY)
+--enable_query_log
+SET SESSION debug = "-d,rocksdb_fail_pending_alter_cleanup";
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+--let $crash_point = rocksdb_crash_after_delete_range
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+--let $assert_text = The dropped table left no pending ALTER TABLE record
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Table 'test[.]t1' has an unfinished ALTER TABLE
+--let $assert_only_after = starting as process
+--let $assert_count = 0
+--source include/assert_grep.inc
+--echo # Index data that belongs to no table, ka included (expect 0):
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+
+--echo #
+--echo # 3. TRUNCATE TABLE of a table whose committed ALTER TABLE is not cleaned
+--echo #    up yet (debug point), interrupted after the table is renamed to
+--echo #    #truncate_tmp#: recovery restores the table.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $ka_id = `SELECT INDEX_NUMBER FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'ka'`
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+--echo # Precondition: the data of ka is kept for the pending record (expect 1)
+--disable_query_log
+--eval SELECT COUNT(DISTINCT f.COLUMN_FAMILY, f.INDEX_NUMBER) AS kept_old_indexes FROM information_schema.ROCKSDB_INDEX_FILE_MAP f WHERE f.INDEX_NUMBER = $ka_id AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d WHERE d.INDEX_NUMBER = f.INDEX_NUMBER AND d.COLUMN_FAMILY = f.COLUMN_FAMILY)
+--enable_query_log
+# The debug point stays on: the crash happens in the TRUNCATE session, and the
+# record of the committed DROP INDEX must still exist when it starts.
+--let $crash_point = rocksdb_crash_after_rename
+--let $crash_stmt = TRUNCATE TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+SHOW CREATE TABLE t1;
+SELECT * FROM t1 ORDER BY id;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+CHECK TABLE t1;
+--let $assert_text = No pending ALTER TABLE record is left under the #truncate_tmp# name
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Table 'test[.]#truncate_tmp#t1' has an unfinished ALTER TABLE
+--let $assert_only_after = starting as process
+--let $assert_count = 0
+--source include/assert_grep.inc
+--let $assert_text = Recovery restored t1, its pending ALTER TABLE record moved with it
+--let $assert_select = Table 'test[.]t1' has an unfinished ALTER TABLE
+--let $assert_count = 1
+--source include/assert_grep.inc
+DROP TABLE t1;
+
+--echo #
+--echo # No index data and no pending record are left behind.
+--echo #
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+--source suite/rocksdb/include/ddl_crash_restart_no_pending.inc
