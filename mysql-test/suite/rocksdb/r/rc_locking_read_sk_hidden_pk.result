@@ -1,0 +1,37 @@
+CREATE TABLE t1 (a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t2 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+a	b
+2	2
+SELECT * FROM t2 WHERE pk = 2 FOR UPDATE;
+pk	a	b
+2	2	2
+SET @saved_isolation = @@session.transaction_isolation;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Hidden primary key: row (2, 2) is locked by con1
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 3 FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE t1 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 3;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+# Explicit primary key: the same statements fail as expected
+SELECT * FROM t2 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 3 FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE t2 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 3;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+COMMIT;
+SET SESSION transaction_isolation = @saved_isolation;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+SELECT * FROM t2 ORDER BY pk;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+DROP TABLE t1, t2;

@@ -1,0 +1,55 @@
+#
+# PS-11905: a READ COMMITTED locking read through a secondary key of a table
+# without a primary key loses the row-lock error.
+#
+# ha_rocksdb::secondary_index_read() fetches the row by its primary key, then
+# for a locking read at READ COMMITTED re-packs the secondary key to detect a
+# concurrent change. It does not look at the status of the fetch first. When
+# the row is locked by another transaction the fetch fails, but on a hidden
+# primary key read_hidden_pk_id_from_rowkey() overwrites the error with
+# success. The statement then returns the stale row buffer as a found row:
+# SELECT ... FOR UPDATE returns the wrong row and no error, and UPDATE fails
+# with "assume_tracked is set but it is not tracked yet" (a debug server
+# asserts !thd->is_error() in Sql_cmd_update::update_single_table).
+#
+# Expected: both statements fail with ER_LOCK_WAIT_TIMEOUT, as they do on a
+# table with an explicit primary key (second part).
+#
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO t2 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+
+--connect (con1, localhost, root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+SELECT * FROM t2 WHERE pk = 2 FOR UPDATE;
+
+--connection default
+SET @saved_isolation = @@session.transaction_isolation;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # Hidden primary key: row (2, 2) is locked by con1
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 3 FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 3;
+
+--echo # Explicit primary key: the same statements fail as expected
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t2 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 3 FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t2 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 3;
+
+--connection con1
+COMMIT;
+--disconnect con1
+
+--connection default
+SET SESSION transaction_isolation = @saved_isolation;
+SELECT * FROM t1 ORDER BY a;
+SELECT * FROM t2 ORDER BY pk;
+DROP TABLE t1, t2;
