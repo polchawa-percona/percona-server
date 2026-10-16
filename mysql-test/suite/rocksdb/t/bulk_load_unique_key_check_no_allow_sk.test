@@ -1,0 +1,29 @@
+--source include/have_rocksdb.inc
+
+# rocksdb_bulk_load_enable_unique_key_check=1 is documented as "Check the
+# violation of unique key constraint during bulk-load". With the default
+# rocksdb_bulk_load_allow_sk=0 the secondary keys go to the write batch, and
+# skip_unique_check() is true for the whole bulk load. The variable is read
+# only in the allow_sk=1 SST path (commit_bulk_load), so duplicates in a
+# UNIQUE key are accepted. A UNIQUE index must not hold duplicates when the
+# check was requested.
+
+call mtr.add_suppression("finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY ub(b)) ENGINE=ROCKSDB;
+SET rocksdb_bulk_load_enable_unique_key_check=1;
+SET rocksdb_bulk_load=1;
+INSERT INTO t1 VALUES (1, 1);
+# The duplicate may be reported by the INSERT or when the load is finished.
+--disable_query_log
+--disable_result_log
+--error 0,ER_DUP_ENTRY
+INSERT INTO t1 VALUES (2, 1);
+--error 0,ER_DUP_ENTRY
+SET rocksdb_bulk_load=0;
+--enable_result_log
+--enable_query_log
+SET rocksdb_bulk_load_enable_unique_key_check=DEFAULT;
+SELECT COUNT(*) - COUNT(DISTINCT b) AS dups FROM t1 FORCE INDEX(ub);
+DROP TABLE t1;

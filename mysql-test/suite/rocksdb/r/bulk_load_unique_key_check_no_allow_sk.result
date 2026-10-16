@@ -1,0 +1,11 @@
+call mtr.add_suppression("finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, UNIQUE KEY ub(b)) ENGINE=ROCKSDB;
+SET rocksdb_bulk_load_enable_unique_key_check=1;
+SET rocksdb_bulk_load=1;
+INSERT INTO t1 VALUES (1, 1);
+SET rocksdb_bulk_load_enable_unique_key_check=DEFAULT;
+SELECT COUNT(*) - COUNT(DISTINCT b) AS dups FROM t1 FORCE INDEX(ub);
+dups
+0
+DROP TABLE t1;

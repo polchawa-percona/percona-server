@@ -1,0 +1,16 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+SET rocksdb_bulk_load_enable_unique_key_check=1;
+SET rocksdb_bulk_load=1;
+ALTER TABLE t1 ADD UNIQUE KEY ub(b), ALGORITHM=COPY;
+ERROR 23000: Duplicate entry '1' for key 't1.ub'
+SET rocksdb_bulk_load=0;
+SET rocksdb_bulk_load_enable_unique_key_check=DEFAULT;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t1;

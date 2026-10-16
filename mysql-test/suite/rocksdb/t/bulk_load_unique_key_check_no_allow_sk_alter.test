@@ -1,0 +1,19 @@
+--source include/have_rocksdb.inc
+
+# A COPY ALTER ... ADD UNIQUE KEY under rocksdb_bulk_load=1 with the default
+# rocksdb_bulk_load_allow_sk=0 and rocksdb_bulk_load_enable_unique_key_check=1
+# must reject duplicates. The variable is read only in the allow_sk=1 SST
+# path (commit_bulk_load), so the ALTER builds a UNIQUE index that holds
+# duplicates. With rocksdb_bulk_load_enable_unique_key_check=0 duplicates
+# are accepted by design (rocksdb.bulk_load_unique_key).
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 1);
+SET rocksdb_bulk_load_enable_unique_key_check=1;
+SET rocksdb_bulk_load=1;
+--error ER_DUP_ENTRY
+ALTER TABLE t1 ADD UNIQUE KEY ub(b), ALGORITHM=COPY;
+SET rocksdb_bulk_load=0;
+SET rocksdb_bulk_load_enable_unique_key_check=DEFAULT;
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
