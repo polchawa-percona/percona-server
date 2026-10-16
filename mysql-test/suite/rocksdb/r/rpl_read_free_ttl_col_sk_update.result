@@ -1,0 +1,118 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection master]
+SET @now = UNIX_TIMESTAMP();
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, ts BIGINT UNSIGNED NOT NULL, KEY(b))
+ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts;';
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1, 1, @now), (2, 2, @now), (3, 3, @now);
+INSERT INTO t2 VALUES (1, 1, @now + 100000), (2, 2, @now + 100000),
+(3, 3, @now + 100000);
+INSERT INTO t3 VALUES (1, 1, @now), (2, 2, @now);
+include/rpl/sync_to_replica.inc
+FLUSH TABLES;
+[connection master]
+UPDATE t1 SET ts = @now + 100000;
+UPDATE t2 SET ts = @now;
+UPDATE t3 SET ts = @now + 100000 WHERE a = 1;
+UPDATE t3 SET ts = @now + 100000 WHERE a = 2;
+include/rpl/sync_to_replica.inc
+[connection master]
+# source, read 3600 s in the future
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(b) ORDER BY b;
+t	a	b
+# t2 non-covering SK read (needs a PK lookup for ts)
+SELECT 't2' t, a, b, ts > 0 FROM t2 FORCE INDEX(b) ORDER BY b;
+t	a	b	ts > 0
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t3	1	1
+t3	2	2
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t3	1	1
+t3	2	2
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+[connection slave]
+# replica, read 3600 s in the future
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(b) ORDER BY b;
+t	a	b
+# t2 non-covering SK read (needs a PK lookup for ts)
+SELECT 't2' t, a, b, ts > 0 FROM t2 FORCE INDEX(b) ORDER BY b;
+t	a	b	ts > 0
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t3	1	1
+t3	2	2
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t3	1	1
+t3	2	2
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+# replica: compaction 3600 s in the future, then read without time travel
+[connection slave]
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 3600;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t1	1	1
+t1	2	2
+t1	3	3
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(b) ORDER BY b;
+t	a	b
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(PRIMARY) ORDER BY a;
+t	a	b
+t3	1	1
+t3	2	2
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(b) ORDER BY b;
+t	a	b
+t3	1	1
+t3	2	2
+CHECK TABLE t1, t2, t3;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+[connection master]
+DROP TABLE t1, t2, t3;
+include/rpl/sync_to_replica.inc
+include/rpl/deinit.inc

@@ -1,0 +1,44 @@
+# Read-free replication of a multi-row UPDATE that changes the explicit TTL
+# column (ttl_col) of a table with a secondary key. The replica does not read
+# the stored row, so the "TTL bytes changed" check in
+# Rdb_converter::encode_value_slice compares the new TTL with the TTL left in
+# the handler by the previous row. When two rows get the same new TTL, the
+# second row's secondary key entry keeps the old TTL and is hidden (and later
+# compacted away) too early.
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_source.inc
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, ts BIGINT UNSIGNED NOT NULL, KEY(b))
+  ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts;';
+SET @now = UNIX_TIMESTAMP();
+INSERT INTO t1 VALUES (1, 1, @now), (2, 2, @now), (3, 3, @now);
+--source include/rpl/sync_to_replica.inc
+FLUSH TABLES;
+
+--source include/rpl/connection_source.inc
+--echo # One rows event, every row gets the same new TTL timestamp
+UPDATE t1 SET ts = @now + 100000;
+--source include/rpl/sync_to_replica.inc
+
+--echo # Read 3600 seconds in the future: the old TTL (now + 100) has expired,
+--echo # the new one (now + 100100) has not.
+--source include/rpl/connection_source.inc
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+--echo # source
+SELECT a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+SELECT a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+
+--source include/rpl/connection_replica.inc
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+--echo # replica
+SELECT a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+SELECT a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/deinit.inc

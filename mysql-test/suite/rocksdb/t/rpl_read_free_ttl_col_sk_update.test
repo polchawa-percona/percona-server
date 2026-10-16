@@ -1,0 +1,78 @@
+# Verification of R1: read-free replication of an UPDATE that changes the
+# explicit TTL column (ttl_col) can skip the secondary key rewrite, so the
+# SK entry keeps the old TTL. The expected result is the correct behaviour:
+# on the replica both indexes always return the same rows as on the source.
+#   t1: TTL raised for all rows in one statement   -> SK expires too early
+#   t2: TTL lowered for all rows in one statement  -> SK outlives the PK
+#   t3: TTL raised by two single-row statements    -> same as t1, across stmts
+# After the read-filter checks, a compaction 3600 s in the future physically
+# removes expired entries, and the indexes are compared with no time travel.
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_source.inc
+SET @now = UNIX_TIMESTAMP();
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, ts BIGINT UNSIGNED NOT NULL, KEY(b))
+  ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts;';
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1, 1, @now), (2, 2, @now), (3, 3, @now);
+INSERT INTO t2 VALUES (1, 1, @now + 100000), (2, 2, @now + 100000),
+                      (3, 3, @now + 100000);
+INSERT INTO t3 VALUES (1, 1, @now), (2, 2, @now);
+--source include/rpl/sync_to_replica.inc
+FLUSH TABLES;
+
+--source include/rpl/connection_source.inc
+UPDATE t1 SET ts = @now + 100000;
+UPDATE t2 SET ts = @now;
+UPDATE t3 SET ts = @now + 100000 WHERE a = 1;
+UPDATE t3 SET ts = @now + 100000 WHERE a = 2;
+--source include/rpl/sync_to_replica.inc
+
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0)
+  {
+    --source include/rpl/connection_source.inc
+    --echo # source, read 3600 s in the future
+  }
+  if ($i == 1)
+  {
+    --source include/rpl/connection_replica.inc
+    --echo # replica, read 3600 s in the future
+  }
+  SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+  SELECT 't1' t, a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+  SELECT 't1' t, a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+  SELECT 't2' t, a, b FROM t2 FORCE INDEX(PRIMARY) ORDER BY a;
+  SELECT 't2' t, a, b FROM t2 FORCE INDEX(b) ORDER BY b;
+  --echo # t2 non-covering SK read (needs a PK lookup for ts)
+  --error 0,ER_GET_ERRNO,1032
+  SELECT 't2' t, a, b, ts > 0 FROM t2 FORCE INDEX(b) ORDER BY b;
+  SELECT 't3' t, a, b FROM t3 FORCE INDEX(PRIMARY) ORDER BY a;
+  SELECT 't3' t, a, b FROM t3 FORCE INDEX(b) ORDER BY b;
+  SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+  --inc $i
+}
+
+--echo # replica: compaction 3600 s in the future, then read without time travel
+--source include/rpl/connection_replica.inc
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 3600;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+SELECT 't1' t, a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(PRIMARY) ORDER BY a;
+SELECT 't2' t, a, b FROM t2 FORCE INDEX(b) ORDER BY b;
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(PRIMARY) ORDER BY a;
+SELECT 't3' t, a, b FROM t3 FORCE INDEX(b) ORDER BY b;
+CHECK TABLE t1, t2, t3;
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1, t2, t3;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/deinit.inc

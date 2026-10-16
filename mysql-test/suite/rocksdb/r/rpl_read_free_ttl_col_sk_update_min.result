@@ -1,0 +1,50 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection master]
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, ts BIGINT UNSIGNED NOT NULL, KEY(b))
+ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts;';
+SET @now = UNIX_TIMESTAMP();
+INSERT INTO t1 VALUES (1, 1, @now), (2, 2, @now), (3, 3, @now);
+include/rpl/sync_to_replica.inc
+FLUSH TABLES;
+[connection master]
+# One rows event, every row gets the same new TTL timestamp
+UPDATE t1 SET ts = @now + 100000;
+include/rpl/sync_to_replica.inc
+# Read 3600 seconds in the future: the old TTL (now + 100) has expired,
+# the new one (now + 100100) has not.
+[connection master]
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+# source
+SELECT a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+SELECT a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+a	b
+1	1
+2	2
+3	3
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+[connection slave]
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = -3600;
+# replica
+SELECT a, b FROM t1 FORCE INDEX(PRIMARY) ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+SELECT a, b FROM t1 FORCE INDEX(b) ORDER BY b;
+a	b
+1	1
+2	2
+3	3
+SET GLOBAL rocksdb_debug_ttl_read_filter_ts = 0;
+[connection master]
+DROP TABLE t1;
+include/rpl/sync_to_replica.inc
+include/rpl/deinit.inc
