@@ -1,0 +1,57 @@
+# Crash safety of a replica that applies MyRocks changes through a write
+# batch (rocksdb_rpl_skip_tx_api=ON). The write batch is not prepared in
+# RocksDB, so binlog crash recovery cannot commit it, while the replica's
+# binlog and the InnoDB applier metadata already include the transaction.
+# The replica must not lose the transaction after a crash between the binlog
+# write and the engine commit.
+--source include/not_group_replication_plugin.inc
+--source include/have_binlog_format_row.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_source.inc
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+--source include/rpl/sync_to_replica.inc
+
+--let $i = 2
+while ($i <= 3)
+{
+  --source include/rpl/connection_replica.inc
+  if ($i == 2)
+  {
+    --echo # Control: the transaction API, the transaction is prepared in RocksDB
+    SET GLOBAL rocksdb_rpl_skip_tx_api = OFF;
+  }
+  if ($i == 3)
+  {
+    --echo # Write batch (rocksdb_rpl_skip_tx_api=ON from the option file)
+  }
+  SELECT @@global.rocksdb_rpl_skip_tx_api;
+  --source include/rpl/stop_replica.inc
+  --source include/rpl/start_replica.inc
+  --exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.2.expect
+  SET GLOBAL debug = "+d,crash_commit_after_log";
+
+  --source include/rpl/connection_source.inc
+  --eval INSERT INTO t1 VALUES ($i, $i)
+
+  --source include/rpl/connection_replica.inc
+  --source include/wait_until_disconnected.inc
+  --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.2.expect
+  --let $rpl_server_number = 2
+  --source include/rpl/reconnect.inc
+  --source include/rpl/start_replica.inc
+  --source include/rpl/connection_source.inc
+  --source include/rpl/sync_to_replica.inc
+  --echo # The replica has every row of the source
+  SELECT * FROM t1 ORDER BY a;
+  --inc $i
+}
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/deinit.inc

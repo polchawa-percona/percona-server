@@ -1,0 +1,55 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection master]
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+include/rpl/sync_to_replica.inc
+[connection slave]
+# Control: the transaction API, the transaction is prepared in RocksDB
+SET GLOBAL rocksdb_rpl_skip_tx_api = OFF;
+SELECT @@global.rocksdb_rpl_skip_tx_api;
+@@global.rocksdb_rpl_skip_tx_api
+0
+include/rpl/stop_replica.inc
+include/rpl/start_replica.inc
+SET GLOBAL debug = "+d,crash_commit_after_log";
+[connection master]
+INSERT INTO t1 VALUES (2, 2);
+[connection slave]
+include/rpl/reconnect.inc
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+# The replica has every row of the source
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+[connection slave]
+# Write batch (rocksdb_rpl_skip_tx_api=ON from the option file)
+SELECT @@global.rocksdb_rpl_skip_tx_api;
+@@global.rocksdb_rpl_skip_tx_api
+1
+include/rpl/stop_replica.inc
+include/rpl/start_replica.inc
+SET GLOBAL debug = "+d,crash_commit_after_log";
+[connection master]
+INSERT INTO t1 VALUES (3, 3);
+[connection slave]
+include/rpl/reconnect.inc
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+# The replica has every row of the source
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+[connection master]
+DROP TABLE t1;
+include/rpl/sync_to_replica.inc
+include/rpl/deinit.inc
