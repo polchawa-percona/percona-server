@@ -1,0 +1,11 @@
+CREATE DATABASE dump_db;
+CREATE TABLE dump_db.t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t1 VALUES (1, 1), (2, 2), (3, 3);
+DROP DATABASE dump_db;
+# Restore; the session value after the footer must be 0
+bulk_load_after_footer
+0
+SELECT COUNT(*) FROM dump_db.t1;
+COUNT(*)
+3
+DROP DATABASE dump_db;

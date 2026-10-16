@@ -1,0 +1,35 @@
+--source include/have_rocksdb.inc
+
+#
+# The header of a mysqldump file turns rocksdb_bulk_load on for the restore
+# session, and the footer must turn it back off, so that the session commits
+# the bulk load of the last table and continues with the previous value.
+#
+# The header stores the result of its check in @rocksdb_is_supported, while
+# the footer tests @is_rocksdb_supported and restores @old_rocksdb_bulk_load,
+# which no statement sets. The footer therefore never runs
+# SET SESSION rocksdb_bulk_load, and the restore session ends with the bulk
+# load still on.
+#
+# The test restores a dump with an extra statement appended after the footer
+# that shows the session value at the end of the restore.
+#
+
+CREATE DATABASE dump_db;
+CREATE TABLE dump_db.t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--let $dump_file = $MYSQLTEST_VARDIR/tmp/mysqldump_footer_bulk_load.sql
+--exec $MYSQL_DUMP --skip-comments --databases dump_db > $dump_file
+
+--append_file $dump_file
+SELECT @@session.rocksdb_bulk_load AS bulk_load_after_footer;
+EOF
+
+DROP DATABASE dump_db;
+--echo # Restore; the session value after the footer must be 0
+--exec $MYSQL < $dump_file
+SELECT COUNT(*) FROM dump_db.t1;
+
+--remove_file $dump_file
+DROP DATABASE dump_db;
