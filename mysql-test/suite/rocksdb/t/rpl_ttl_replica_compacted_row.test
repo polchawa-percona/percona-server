@@ -1,0 +1,42 @@
+# T2 (skipped FB 6b336de25f), compaction half: the replica's compaction
+# filter drops a TTL-expired row (the replica lags more than the row's
+# remaining lifetime) before the source's DELETE and UPDATE of that row
+# arrive. FB makes the replica ignore the missing-row error for TTL tables.
+# The expected result is that behaviour: replication keeps running. The
+# replica keeps none of the rows, because all three expired there (TTL runs
+# independently on source and replica).
+# A compaction 3600 s in the future (rocksdb_debug_ttl_snapshot_ts) stands
+# in for the lag.
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/rpl/init_source_replica.inc
+
+--source include/rpl/connection_source.inc
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c INT, KEY(b)) ENGINE=ROCKSDB
+  COMMENT 'ttl_duration=100;';
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+--source include/rpl/sync_to_replica.inc
+# FB 6b336de25f: the ignored error is still logged as a warning
+CALL mtr.add_suppression("handler error HA_ERR_KEY_NOT_FOUND");
+
+--echo # replica: compaction 3600 s in the future drops the expired rows
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 3600;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT * FROM t1 ORDER BY a;
+
+--echo # source: the rows have not expired yet
+--source include/rpl/connection_source.inc
+DELETE FROM t1 WHERE a = 2;
+UPDATE t1 SET c = c + 10 WHERE a = 1;
+SELECT * FROM t1 ORDER BY a;
+--source include/rpl/sync_to_replica.inc
+--let $status = query_get_value(SHOW REPLICA STATUS, Last_SQL_Errno, 1)
+--echo Last_SQL_Errno: $status
+SELECT * FROM t1 ORDER BY a;
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/deinit.inc

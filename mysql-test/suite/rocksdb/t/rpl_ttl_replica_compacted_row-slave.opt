@@ -1,0 +1,2 @@
+--binlog_format=row
+--replica-exec-mode=strict

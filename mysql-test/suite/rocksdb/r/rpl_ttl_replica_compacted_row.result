@@ -1,0 +1,34 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection master]
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c INT, KEY(b)) ENGINE=ROCKSDB
+COMMENT 'ttl_duration=100;';
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+include/rpl/sync_to_replica.inc
+CALL mtr.add_suppression("handler error HA_ERR_KEY_NOT_FOUND");
+# replica: compaction 3600 s in the future drops the expired rows
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 3600;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT * FROM t1 ORDER BY a;
+a	b	c
+# source: the rows have not expired yet
+[connection master]
+DELETE FROM t1 WHERE a = 2;
+UPDATE t1 SET c = c + 10 WHERE a = 1;
+SELECT * FROM t1 ORDER BY a;
+a	b	c
+1	1	11
+3	3	3
+include/rpl/sync_to_replica.inc
+Last_SQL_Errno: 0
+SELECT * FROM t1 ORDER BY a;
+a	b	c
+[connection master]
+DROP TABLE t1;
+include/rpl/sync_to_replica.inc
+include/rpl/deinit.inc
