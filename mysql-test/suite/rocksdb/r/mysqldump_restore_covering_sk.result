@@ -1,0 +1,38 @@
+CREATE DATABASE dump_db;
+CREATE TABLE dump_db.t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t1 VALUES (1, 2), (2, 1), (3, 4), (4, 3);
+CREATE TABLE dump_db.t2 (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t2 VALUES (1, 1, 1), (2, 2, 2);
+ANALYZE TABLE dump_db.t1, dump_db.t2;
+Table	Op	Msg_type	Msg_text
+dump_db.t1	analyze	status	OK
+dump_db.t2	analyze	status	OK
+# The dump writes the rows in this order
+INSERT INTO `t1` VALUES (2,1);
+INSERT INTO `t1` VALUES (1,2);
+INSERT INTO `t1` VALUES (4,3);
+INSERT INTO `t1` VALUES (3,4);
+INSERT INTO `t2` VALUES (1,1,1);
+INSERT INTO `t2` VALUES (2,2,2);
+DROP DATABASE dump_db;
+# The restore must succeed and restore every row
+SELECT * FROM dump_db.t1 ORDER BY a;
+a	b
+1	2
+2	1
+3	4
+4	3
+SELECT COUNT(*) FROM dump_db.t1 FORCE INDEX(b);
+COUNT(*)
+4
+CHECK TABLE dump_db.t1;
+Table	Op	Msg_type	Msg_text
+dump_db.t1	check	status	OK
+SELECT * FROM dump_db.t2 ORDER BY a;
+a	b	c
+1	1	1
+2	2	2
+CHECK TABLE dump_db.t2;
+Table	Op	Msg_type	Msg_text
+dump_db.t2	check	status	OK
+DROP DATABASE IF EXISTS dump_db;

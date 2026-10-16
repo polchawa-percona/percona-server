@@ -1,0 +1,37 @@
+--source include/have_rocksdb.inc
+
+#
+# T1 (skipped FB 85afa6f114), realistic restore: plain mysqldump, restored
+# with "mysql < dump.sql" and nothing else. The dump header turns
+# rocksdb_bulk_load on and the footer does not turn it off (C1), so t1 is
+# finished on the switch to t2 and t2 on disconnect.
+# t1's secondary key covers every column, so its rows are dumped in SK order
+# (PK order 2, 1, 4, 3). The restore must restore every row of both tables.
+#
+
+CREATE DATABASE dump_db;
+CREATE TABLE dump_db.t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t1 VALUES (1, 2), (2, 1), (3, 4), (4, 3);
+CREATE TABLE dump_db.t2 (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t2 VALUES (1, 1, 1), (2, 2, 2);
+ANALYZE TABLE dump_db.t1, dump_db.t2;
+
+--let $dump_file = $MYSQLTEST_VARDIR/tmp/mysqldump_restore_covering_sk.sql
+--exec $MYSQL_DUMP --skip-comments --skip-extended-insert --databases dump_db > $dump_file
+
+--echo # The dump writes the rows in this order
+--exec grep "^INSERT INTO" $dump_file
+
+DROP DATABASE dump_db;
+
+--echo # The restore must succeed and restore every row
+--error 0,1
+--exec $MYSQL < $dump_file 2>&1
+SELECT * FROM dump_db.t1 ORDER BY a;
+SELECT COUNT(*) FROM dump_db.t1 FORCE INDEX(b);
+CHECK TABLE dump_db.t1;
+SELECT * FROM dump_db.t2 ORDER BY a;
+CHECK TABLE dump_db.t2;
+
+--remove_file $dump_file
+DROP DATABASE IF EXISTS dump_db;

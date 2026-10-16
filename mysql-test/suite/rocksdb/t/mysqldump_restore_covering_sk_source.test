@@ -1,0 +1,40 @@
+--source include/have_rocksdb.inc
+
+#
+# T1 (skipped FB 85afa6f114): plain mysqldump enables rocksdb_bulk_load in its
+# header but adds ORDER BY PRIMARY KEY only with --order-by-primary. When a
+# secondary key covers every column, SELECT * may scan that key, so rows are
+# dumped out of PK order. The restore must still restore every row.
+#
+# The PK order in SK order is 2, 1, 4, 3: neither ascending nor descending
+# (a descending run is reversed by Rdb_sst_file_ordered and would load fine).
+# The restore session ends with SET SESSION rocksdb_bulk_load=0, so the bulk
+# load is completed explicitly and not left to disconnect (see C1).
+#
+
+CREATE DATABASE dump_db;
+CREATE TABLE dump_db.t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO dump_db.t1 VALUES (1, 2), (2, 1), (3, 4), (4, 3);
+ANALYZE TABLE dump_db.t1;
+
+--echo # The dump query scans the covering secondary key
+--replace_column 10 #
+EXPLAIN SELECT /*!40001 SQL_NO_CACHE */ * FROM dump_db.t1;
+
+--let $dump_file = $MYSQLTEST_VARDIR/tmp/mysqldump_restore_covering_sk_source.sql
+--exec $MYSQL_DUMP --skip-comments --skip-extended-insert --databases dump_db > $dump_file
+
+--echo # The dump writes the rows in this order
+--exec grep "^INSERT INTO" $dump_file
+
+DROP DATABASE dump_db;
+
+--echo # The restore must succeed and restore every row
+--error 0,1
+--exec $MYSQL -e "source $dump_file; SET SESSION rocksdb_bulk_load = 0;" 2>&1
+SELECT * FROM dump_db.t1 ORDER BY a;
+SELECT COUNT(*) FROM dump_db.t1 FORCE INDEX(b);
+CHECK TABLE dump_db.t1;
+
+--remove_file $dump_file
+DROP DATABASE IF EXISTS dump_db;
