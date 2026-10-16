@@ -1,0 +1,28 @@
+#
+# A statement rollback must not drop the REPEATABLE READ snapshot that an
+# earlier, read-only statement of the same transaction took.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 0);
+INSERT INTO t2 VALUES (1);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+# Takes the transaction snapshot (read-only statement, no new savepoint)
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	0
+UPDATE t1 SET b = 1 WHERE a = 1;
+INSERT INTO t1 VALUES (2, 0);
+# Writes row 2, then fails on row 1: the statement is rolled back
+INSERT INTO t2 VALUES (2), (1);
+ERROR 23000: Duplicate entry '1' for key 't2.PRIMARY'
+# Must still show only (1, 0)
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	0
+SELECT * FROM t2 ORDER BY a;
+a
+1
+COMMIT;
+DROP TABLE t1, t2;

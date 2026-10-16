@@ -1,0 +1,49 @@
+#
+# A statement rollback must not drop the transaction snapshot. If it
+# does, a later write is validated against a newer snapshot and
+# silently overwrites a change committed by another session after the
+# transaction snapshot (lost update).
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+# Case 0: no failing statement (reference)
+BEGIN;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+UPDATE t1 SET b = b + 100 WHERE a = 3;
+# Must fail: row a=3 changed after the transaction snapshot.
+UPDATE t1 SET b = 4 WHERE a = 3;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	103
+UPDATE t1 SET b = 3 WHERE a = 3;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+# Case 1: first write statement fails and is rolled back
+BEGIN;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+UPDATE t1 SET b = b + 100 WHERE a = 3;
+INSERT INTO t1 VALUES (5, 5), (1, 1);
+ERROR 23000: Duplicate entry '1' for key 't1.PRIMARY'
+# Must fail: row a=3 changed after the transaction snapshot.
+UPDATE t1 SET b = 4 WHERE a = 3;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	103
+UPDATE t1 SET b = 3 WHERE a = 3;
+DROP TABLE t1;

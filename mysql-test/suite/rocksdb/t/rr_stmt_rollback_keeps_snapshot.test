@@ -1,0 +1,35 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # A statement rollback must not drop the REPEATABLE READ snapshot that an
+--echo # earlier, read-only statement of the same transaction took.
+--echo #
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 0);
+INSERT INTO t2 VALUES (1);
+
+--connect (con1,localhost,root,,test)
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+--echo # Takes the transaction snapshot (read-only statement, no new savepoint)
+SELECT * FROM t1 ORDER BY a;
+
+--connection default
+UPDATE t1 SET b = 1 WHERE a = 1;
+INSERT INTO t1 VALUES (2, 0);
+
+--connection con1
+--echo # Writes row 2, then fails on row 1: the statement is rolled back
+--error ER_DUP_ENTRY
+INSERT INTO t2 VALUES (2), (1);
+
+--echo # Must still show only (1, 0)
+SELECT * FROM t1 ORDER BY a;
+SELECT * FROM t2 ORDER BY a;
+COMMIT;
+
+--disconnect con1
+--connection default
+DROP TABLE t1, t2;
