@@ -1,0 +1,26 @@
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+# A sync commit moves rocksdb_wal_synced (sanity check of the counter)
+INSERT INTO t1 VALUES (4, 40);
+include/assert.inc [A commit with rocksdb_flush_log_at_trx_commit=1 syncs the WAL]
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+# WAL syncs caused by the checkpoint: 0
+# Start the server on the checkpoint
+# restart: --rocksdb_datadir=[CHECKPOINT]
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+# Back to the original data directory
+# restart:
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+DROP TABLE t1;

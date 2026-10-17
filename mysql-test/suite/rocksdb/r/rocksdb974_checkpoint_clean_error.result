@@ -1,0 +1,14 @@
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+# Stale staging directory that holds a subdirectory
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+ERROR HY000: Got error 10 'Operation aborted: Failed to clean the temporary directory <DIR...>' from ROCKSDB
+SET SESSION rocksdb_create_temporary_checkpoint = '[CHECKPOINT]';
+ERROR HY000: Got error 10 'Operation aborted: Failed to clean the temporary directory <DIR...>' from ROCKSDB
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint IS NULL AS no_tmp_checkpoint;
+no_tmp_checkpoint
+1
+# The staging directory content is left alone
+# After manual cleanup the checkpoint succeeds
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+DROP TABLE t1;

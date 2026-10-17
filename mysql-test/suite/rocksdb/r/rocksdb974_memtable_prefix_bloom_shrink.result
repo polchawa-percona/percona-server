@@ -1,0 +1,121 @@
+SET @orig_update_cf_options = @@global.rocksdb_update_cf_options;
+CREATE TABLE t0 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+ENGINE=ROCKSDB COLLATE latin1_bin;
+INSERT INTO t0 VALUES (9, 9, 9, 9);
+SELECT cf_name, option_type, value FROM information_schema.rocksdb_cf_options
+WHERE cf_name = 'rdb974_h17_cf'
+  AND option_type IN ('PREFIX_EXTRACTOR', 'MEMTABLE_PREFIX_BLOOM_BITS_RATIO');
+cf_name	option_type	value
+rdb974_h17_cf	MEMTABLE_PREFIX_BLOOM_BITS_RATIO	0.100000
+rdb974_h17_cf	PREFIX_EXTRACTOR	rocksdb.CappedPrefix.20
+#
+# Shrink the prefix while rows stay in the memtable
+#
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:12};';
+SELECT cf_name, option_type, value FROM information_schema.rocksdb_cf_options
+WHERE cf_name = 'rdb974_h17_cf' AND option_type = 'PREFIX_EXTRACTOR';
+cf_name	option_type	value
+rdb974_h17_cf	PREFIX_EXTRACTOR	rocksdb.CappedPrefix.12
+CREATE TABLE t1 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+ENGINE=ROCKSDB COLLATE latin1_bin;
+SELECT COUNT(*) AS sst_files FROM information_schema.rocksdb_index_file_map m
+JOIN information_schema.rocksdb_ddl d ON m.index_number = d.index_number
+WHERE d.table_name = 't1';
+sst_files
+0
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+20
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+COUNT(*)
+20
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 LIMIT 3;
+id2
+1
+2
+3
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 DESC LIMIT 3;
+id2
+20
+19
+18
+SELECT id2 FROM t1 WHERE id1 = 2 AND id2 BETWEEN 5 AND 7 ORDER BY id2;
+id2
+5
+6
+7
+# The same queries with a total order scan
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+20
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+COUNT(*)
+20
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 LIMIT 3;
+id2
+1
+2
+3
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 DESC LIMIT 3;
+id2
+20
+19
+18
+SELECT id2 FROM t1 WHERE id1 = 2 AND id2 BETWEEN 5 AND 7 ORDER BY id2;
+id2
+5
+6
+7
+SET SESSION rocksdb_skip_bloom_filter_on_read = DEFAULT;
+# After a flush the rows are in an SST file and are still found
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+20
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+COUNT(*)
+20
+#
+# Grow the prefix while rows stay in the memtable (now built with capped:12)
+#
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:28};';
+CREATE TABLE t2 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+ENGINE=ROCKSDB COLLATE latin1_bin;
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4;
+id4
+5
+105
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4 DESC;
+id4
+105
+5
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 2 AND id3 = 7;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 1;
+COUNT(*)
+40
+# The same queries with a total order scan
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4;
+id4
+5
+105
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4 DESC;
+id4
+105
+5
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 2 AND id3 = 7;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 1;
+COUNT(*)
+40
+SET SESSION rocksdb_skip_bloom_filter_on_read = DEFAULT;
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:20};';
+SET @@global.rocksdb_update_cf_options = @orig_update_cf_options;
+DROP TABLE t0, t1, t2;

@@ -1,0 +1,130 @@
+# RocksDB 9.4..9.7 behaviour change: extra item X1 of the semantics triage.
+# It has no HISTORY.md line of its own. Two RocksDB commits in
+# db/db_impl/db_impl_write.cc DBImpl::WriteImpl():
+#  - 21db55f81 "Move WAL sync before memtable insertion" (#12869). The sync
+#    block (MarkLogsSynced, ApplyWALToManifest, FlushWAL(true)) now runs
+#    before the PreReleaseCallback and the memtable insert (9.7.4
+#    db_impl_write.cc:559-586). In 9.3.1 it ran after the memtable insert
+#    (9.3.1 db_impl_write.cc:620-646).
+#  - 9e4ee7f0c (#12866): `if (status.ok() && two_write_queues_)`
+#    (9.7.4 db_impl_write.cc:579).
+#
+# MyRocks path: MyRocks forces two_write_queues=ON and manual_wal_flush=ON
+# (ha_rocksdb.cc:1029-1030). A commit with rocksdb_flush_log_at_trx_commit=1
+# uses WriteOptions::sync=true (ha_rocksdb.cc:5127). ConcurrentWriteToWAL()
+# only fills the WAL buffer. The file write happens in FlushWAL(true), called
+# from the sync block. When that write fails, Rdb_transaction_impl::commit
+# gets an IOError (ha_rocksdb.cc:4875-4885). With
+# rocksdb_io_error_action=IGNORE_ERROR the client gets ER_ERROR_DURING_COMMIT
+# (ha_rocksdb.cc:16629-16633).
+#
+# With rocksdb_paranoid_checks=OFF, IOStatusCheck() resets the WAL writer
+# error instead of stopping the DB (9.3.1 db_impl_write.cc:1153-1166), so
+# later writes go on. In 9.3.1 the failed batch was already in the memtable,
+# above the last published sequence. The next successful write group
+# published a higher sequence, so the rows of the failed commit became
+# visible, and a flush made them durable.
+#
+# Correct behaviour, checked here: rows of a commit that returned an error
+# must never become visible.
+#
+# Fault injection: a private mysqld runs with RLIMIT_FSIZE set and SIGXFSZ
+# ignored. Once the WAL reaches the limit, write() fails with EFBIG
+# ("File too large"). Other files stay below the limit: the limit is the
+# largest file in the datadir plus 40 MB, and SST files are LZ4-compressed.
+
+--source include/have_rocksdb.inc
+--source include/not_windows.inc
+--source include/not_valgrind.inc
+
+--let $write_policy = write_committed
+
+--let $_server_id = `SELECT @@server_id`
+--let $_expect_file_name = $MYSQLTEST_VARDIR/tmp/mysqld.$_server_id.expect
+--let MYSQLD_DATADIR = `SELECT @@datadir`
+--let LOG = $MYSQLTEST_VARDIR/tmp/rdb974_semx1.err
+--let CAP_INC = $MYSQLTEST_VARDIR/tmp/rdb974_semx1_cap.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v MEDIUMBLOB) ENGINE=ROCKSDB;
+
+--exec echo "wait" > $_expect_file_name
+--shutdown_server
+--source include/wait_until_disconnected.inc
+
+perl;
+  use strict;
+  use File::Find;
+  my $max = 0;
+  find(sub { my $s = -s $_; $max = $s if -f $_ && defined $s && $s > $max; },
+       $ENV{'MYSQLD_DATADIR'});
+  my $cap_kb = int($max / 1024) + 40960;
+  open(my $f, '>', $ENV{'CAP_INC'}) or die;
+  print $f "--let \$cap_kb = $cap_kb\n";
+  close($f);
+EOF
+--source $CAP_INC
+--remove_file $CAP_INC
+
+--echo # Start a private mysqld with a file size limit (SIGXFSZ ignored).
+--exec_in_background sh -c 'trap "" XFSZ; ulimit -f $cap_kb; exec $MYSQLD_CMD --port=$MASTER_MYPORT --log-error=$LOG $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD" --skip-log-bin --rocksdb_write_policy=$write_policy --rocksdb_paranoid_checks=OFF --rocksdb_io_error_action=IGNORE_ERROR --rocksdb_flush_log_at_trx_commit=1 --rocksdb_db_write_buffer_size=0 "--rocksdb_default_cf_options=write_buffer_size=512m;compression=kLZ4Compression"'
+--let $wait_counter = 3000
+--source include/wait_until_connected_again.inc
+
+SELECT @@rocksdb_paranoid_checks, @@rocksdb_io_error_action,
+       @@rocksdb_flush_log_at_trx_commit, @@rocksdb_manual_wal_flush,
+       @@rocksdb_two_write_queues, @@rocksdb_write_policy;
+
+--echo # Sync commits of 200 KB rows until one fails on the WAL write.
+--disable_query_log
+--let $id = 0
+--let $fail_id = 0
+while (!$fail_id)
+{
+  --inc $id
+  if ($id > 5000)
+  {
+    --die WAL write never failed
+  }
+  --error 0, ER_ERROR_DURING_COMMIT
+  --eval INSERT INTO t1 VALUES ($id, REPEAT('x', 200000))
+  if ($mysql_errno)
+  {
+    --let $fail_id = $id
+  }
+}
+--enable_query_log
+--echo # A commit failed with ER_ERROR_DURING_COMMIT.
+
+--echo # The next commit uses the same broken WAL file and fails too.
+--error ER_ERROR_DURING_COMMIT
+INSERT INTO t1 VALUES (100001, 'a');
+
+--echo # A flush switches to a new WAL file; later commits succeed.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (100002, 'b');
+
+--echo # Only 100002 may be visible: the other two commits returned an error.
+--replace_result $fail_id FAIL_ID
+--eval SELECT id, LENGTH(v) FROM t1 WHERE id >= $fail_id ORDER BY id
+--let $last_ok = $fail_id
+--dec $last_ok
+--replace_result $last_ok LAST_OK $fail_id FAIL_ID
+--eval SELECT COUNT(*) = $last_ok AS all_committed_rows_present FROM t1 WHERE id < $fail_id
+
+--let SEARCH_FILE = $LOG
+--let SEARCH_PATTERN = WAL flush error IO error: While appending to file: .*\.log: File too large
+--source include/search_pattern.inc
+
+--echo # Stop the private mysqld and restart the MTR server without the limit.
+--shutdown_server
+--source include/wait_until_disconnected.inc
+--let $restart_parameters = restart:--rocksdb_write_policy=$write_policy
+--source include/start_mysqld.inc
+
+--replace_result $fail_id FAIL_ID
+--eval SELECT id, LENGTH(v) FROM t1 WHERE id >= $fail_id ORDER BY id
+--replace_result $last_ok LAST_OK $fail_id FAIL_ID
+--eval SELECT COUNT(*) = $last_ok AS all_committed_rows_present FROM t1 WHERE id < $fail_id
+
+DROP TABLE t1;
+--remove_file $LOG

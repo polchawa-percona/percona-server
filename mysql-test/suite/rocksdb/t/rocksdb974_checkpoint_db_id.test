@@ -1,0 +1,90 @@
+# RocksDB 9.7.0 HISTORY, Behavior Changes (item H11 of the 9.4-9.7 review):
+#   "Set write_dbid_to_manifest=true by default. This means DB ID will now be
+#    preserved through backups, checkpoints, etc. by default."
+#
+# MyRocks sets neither write_dbid_to_manifest nor write_identity_file, so it
+# takes the RocksDB default. rocksdb_create_checkpoint (ha_rocksdb.cc,
+# rocksdb_create_checkpoint() -> rocksdb::Checkpoint::CreateCheckpoint())
+# does not copy the IDENTITY file. A server started on a checkpoint can
+# therefore keep the source DB ID only if the MANIFEST carries it
+# (DBImpl::SetupDBId(), db/db_impl/db_impl_files.cc). With RocksDB 9.7 the
+# checkpoint keeps the source DB ID; with RocksDB 9.3.1 it got a new one.
+#
+# The test asserts the intended RocksDB 9.7 behaviour:
+#  - the newest OPTIONS file records write_dbid_to_manifest=true;
+#  - the checkpoint has no IDENTITY file before it is opened;
+#  - after mysqld is restarted with rocksdb_datadir pointing to the
+#    checkpoint, the data is readable and the checkpoint IDENTITY equals the
+#    IDENTITY of the source datadir.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+--let $rdb_ckpt = $MYSQL_TMP_DIR/rdb974_h11_ckpt
+--let rdb974_src_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+--let rdb974_ckpt_dir = $MYSQL_TMP_DIR/rdb974_h11_ckpt
+
+--echo # The newest OPTIONS file records write_dbid_to_manifest=true
+--perl
+  my $dir = $ENV{'rdb974_src_dir'};
+  my %num;
+  for my $f (glob("$dir/OPTIONS-*")) {
+    $num{$f} = $1 if $f =~ /OPTIONS-(\d+)$/;
+  }
+  my @opts = sort { $num{$a} <=> $num{$b} } keys %num;
+  die "no OPTIONS file in $dir" unless @opts;
+  open(my $fh, '<', $opts[-1]) or die "cannot open $opts[-1]: $!";
+  my $val = 'missing';
+  while (<$fh>) { $val = $1 if /^\s*write_dbid_to_manifest=(\S+)/; }
+  close($fh);
+  print "write_dbid_to_manifest=$val\n";
+EOF
+
+--echo # Create a checkpoint
+--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR
+eval SET GLOBAL rocksdb_create_checkpoint = '$rdb_ckpt';
+
+--echo # The checkpoint has no IDENTITY file: the DB ID can only come from the MANIFEST
+--perl
+  my $dir = $ENV{'rdb974_ckpt_dir'};
+  print "checkpoint IDENTITY exists: " . (-e "$dir/IDENTITY" ? "yes" : "no") . "\n";
+EOF
+
+--echo # Restart mysqld on the checkpoint
+--let $do_not_echo_parameters = 1
+--let $restart_parameters = restart: --rocksdb_datadir=$rdb_ckpt
+--source include/restart_mysqld.inc
+
+SELECT * FROM t1 ORDER BY pk;
+
+--echo # The checkpoint keeps the DB ID of the source datadir
+--perl
+  sub read_id {
+    my ($f) = @_;
+    open(my $fh, '<', $f) or die "cannot open $f: $!";
+    local $/;
+    my $id = <$fh>;
+    close($fh);
+    $id =~ s/\s+$//;
+    die "empty DB ID in $f" if $id eq '';
+    return $id;
+  }
+  my $src = read_id("$ENV{'rdb974_src_dir'}/IDENTITY");
+  my $ckpt = read_id("$ENV{'rdb974_ckpt_dir'}/IDENTITY");
+  print "checkpoint DB ID is "
+      . ($src eq $ckpt ? "equal to" : "different from")
+      . " the source DB ID\n";
+EOF
+
+--echo # Restart mysqld on the original datadir
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+--let $do_not_echo_parameters =
+
+SELECT * FROM t1 ORDER BY pk;
+
+DROP TABLE t1;
+--force-rmdir $rdb_ckpt

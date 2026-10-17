@@ -1,0 +1,32 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, v MEDIUMBLOB) ENGINE=ROCKSDB;
+# Start a private mysqld with a file size limit (SIGXFSZ ignored).
+SELECT @@rocksdb_paranoid_checks, @@rocksdb_io_error_action,
+@@rocksdb_flush_log_at_trx_commit, @@rocksdb_manual_wal_flush,
+@@rocksdb_two_write_queues, @@rocksdb_write_policy;
+@@rocksdb_paranoid_checks	@@rocksdb_io_error_action	@@rocksdb_flush_log_at_trx_commit	@@rocksdb_manual_wal_flush	@@rocksdb_two_write_queues	@@rocksdb_write_policy
+0	IGNORE_ERROR	1	1	1	write_committed
+# Sync commits of 200 KB rows until one fails on the WAL write.
+# A commit failed with ER_ERROR_DURING_COMMIT.
+# The next commit uses the same broken WAL file and fails too.
+INSERT INTO t1 VALUES (100001, 'a');
+ERROR HY000: Got error 503 - 'Unknown error 503' during COMMIT
+# A flush switches to a new WAL file; later commits succeed.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (100002, 'b');
+# Only 100002 may be visible: the other two commits returned an error.
+SELECT id, LENGTH(v) FROM t1 WHERE id >= FAIL_ID ORDER BY id;
+id	LENGTH(v)
+100002	1
+SELECT COUNT(*) = LAST_OK AS all_committed_rows_present FROM t1 WHERE id < FAIL_ID;
+all_committed_rows_present
+1
+Pattern "WAL flush error IO error: While appending to file: .*\.log: File too large" found
+# Stop the private mysqld and restart the MTR server without the limit.
+# restart:--rocksdb_write_policy=write_committed
+SELECT id, LENGTH(v) FROM t1 WHERE id >= FAIL_ID ORDER BY id;
+id	LENGTH(v)
+100002	1
+SELECT COUNT(*) = LAST_OK AS all_committed_rows_present FROM t1 WHERE id < FAIL_ID;
+all_committed_rows_present
+1
+DROP TABLE t1;

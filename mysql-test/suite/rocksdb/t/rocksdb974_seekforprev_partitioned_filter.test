@@ -1,0 +1,155 @@
+--source include/have_rocksdb.inc
+
+#
+# RocksDB 9.5.0 HISTORY, Bug Fixes (PR 6263 review item H35):
+#   "Fix a major bug in which an iterator using prefix filtering and
+#    SeekForPrev might miss data when the DB is using
+#    `whole_key_filtering=false` and `partition_filters=true`."
+#   (RocksDB commit 93b163d1a, facebook/rocksdb#12872)
+#
+# The bug is in the filter builder. When a new filter partition starts,
+# FullFilterBlockBuilder::Add() (table/block_based/full_filter_block.cc)
+# re-adds the last prefix of the previous partition so that SeekForPrev,
+# which picks the partition after that prefix, still finds it. With
+# whole_key_filtering=false, last_prefix_str_ was never set, so an empty
+# string was added instead. A SeekForPrev whose target lies past the last
+# key of a partition then checks the next partition's filter, which lacks
+# the prefix, and returns nothing.
+#
+# MyRocks reaches SeekForPrev with prefix filtering in two ways
+# (rocksdb_smart_seek, ha_rocksdb.h:1113-1120). get_iterator() sets
+# prefix_same_as_start=true when the bloom filter can be used
+# (ha_rocksdb.cc:4523-4530, can_use_bloom_filter ha_rocksdb.cc:17329):
+#  1. Reverse CF, equality lookup (HA_READ_KEY_EXACT): read_after_key()
+#     calls SeekForPrev(key) (rdb_iterator.cc:100-110).
+#  2. Forward CF, ORDER BY ... DESC (HA_READ_PREFIX_LAST):
+#     Rdb_iterator_base::seek() applies successor() to the key and keeps
+#     eq_cond_len = key length - changed bytes (rdb_iterator.cc:355-363,
+#     228-235). read_before_key() then calls SeekForPrev
+#     (rdb_iterator.cc:57-70). The bloom filter is used only when
+#     eq_cond_len >= the prefix length, so this test uses equality on
+#     (k1, k2) with a 12-byte prefix (index id + k1).
+#
+# The filter options reach RocksDB through rocksdb_default_cf_options
+# (Rdb_cf_options::get, rdb_cf_options.cc:70-90). index_shortening is set
+# to kNoShortening so that the partition separator is the last key of the
+# partition, as in RocksDB's DBBloomFilterTest.SeekForPrevWithPartitionedFilters.
+# Every k1 has exactly one row, so every filter partition boundary is also
+# a prefix boundary.
+#
+# Correct behaviour: each lookup finds its row, so the bloom-filtered
+# count equals the count with rocksdb_skip_bloom_filter_on_read=1.
+#
+
+# Check that the options took effect.
+SELECT CF_NAME, OPTION_TYPE, VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+  WHERE CF_NAME = 'default' AND
+        (OPTION_TYPE IN ('PREFIX_EXTRACTOR',
+                         'TABLE_FACTORY::PARTITION_FILTERS',
+                         'TABLE_FACTORY::WHOLE_KEY_FILTERING',
+                         'TABLE_FACTORY::INDEX_TYPE',
+                         'TABLE_FACTORY::INDEX_SHORTENING',
+                         'TABLE_FACTORY::METADATA_BLOCK_SIZE'))
+  ORDER BY OPTION_TYPE;
+
+CREATE TABLE ids (k1 BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+
+CREATE TABLE t_fwd (
+  k1 BIGINT NOT NULL,
+  k2 INT NOT NULL,
+  k3 INT NOT NULL,
+  v VARCHAR(16) NOT NULL,
+  PRIMARY KEY (k1, k2, k3) COMMENT 'cfname=cf_h35_fwd'
+) ENGINE=ROCKSDB;
+
+CREATE TABLE t_rev (
+  k1 BIGINT NOT NULL,
+  k2 INT NOT NULL,
+  k3 INT NOT NULL,
+  v VARCHAR(16) NOT NULL,
+  PRIMARY KEY (k1, k2, k3) COMMENT 'cfname=rev:cf_h35_rev'
+) ENGINE=ROCKSDB;
+
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO ids
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 4000)
+  SELECT n FROM s;
+INSERT INTO t_fwd SELECT k1, 1, 1, 'v' FROM ids;
+INSERT INTO t_rev SELECT k1, 1, 1, 'v' FROM ids;
+
+SELECT DISTINCT CF_NAME FROM information_schema.ROCKSDB_CF_OPTIONS
+  WHERE CF_NAME LIKE '%h35%' ORDER BY CF_NAME;
+SELECT TABLE_NAME, CF FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_NAME IN ('t_fwd', 't_rev') ORDER BY TABLE_NAME;
+
+# Move all rows to SST files. Rows in the memtable do not hit the bug.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+# The SST files must have partitioned index and filter blocks.
+SELECT COUNT(*) > 0 AS fwd_partitioned FROM information_schema.ROCKSDB_SST_PROPS p
+  JOIN information_schema.ROCKSDB_DDL d ON p.COLUMN_FAMILY = d.COLUMN_FAMILY
+  WHERE d.TABLE_NAME = 't_fwd' AND p.INDEX_PARTITIONS > 10;
+SELECT COUNT(*) > 0 AS rev_partitioned FROM information_schema.ROCKSDB_SST_PROPS p
+  JOIN information_schema.ROCKSDB_DDL d ON p.COLUMN_FAMILY = d.COLUMN_FAMILY
+  WHERE d.TABLE_NAME = 't_rev' AND p.INDEX_PARTITIONS > 10;
+
+--echo # Case 1: reverse CF, equality lookup (SeekForPrev on the key).
+# Nested loop with ref access: one prefix lookup per row of ids.
+let $q_rev = SELECT COUNT(*) FROM ids STRAIGHT_JOIN t_rev FORCE INDEX (PRIMARY) ON t_rev.k1 = ids.k1;
+
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+eval $q_rev;
+SET SESSION rocksdb_skip_bloom_filter_on_read = 0;
+eval $q_rev;
+
+--echo # Case 2: forward CF, ORDER BY DESC (SeekForPrev on the successor).
+# A correlated subquery would be planned with filesort (forward scan), so
+# each k1 is looked up with its own constant query. EXPLAIN shows
+# "Backward index scan", which is index_read_last_map / HA_READ_PREFIX_LAST.
+EXPLAIN SELECT v FROM t_fwd WHERE k1 = 5 AND k2 = 1 ORDER BY k3 DESC LIMIT 1;
+
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+let $i = 1;
+let $found = 0;
+--disable_query_log
+while ($i <= 4000) {
+  let $r = `SELECT COUNT(*) FROM (SELECT v FROM t_fwd WHERE k1 = $i AND k2 = 1 ORDER BY k3 DESC LIMIT 1) x`;
+  if ($r) {
+    inc $found;
+  }
+  inc $i;
+}
+--enable_query_log
+--echo found = $found
+SET SESSION rocksdb_skip_bloom_filter_on_read = 0;
+let $i = 1;
+let $found = 0;
+--disable_query_log
+while ($i <= 4000) {
+  let $r = `SELECT COUNT(*) FROM (SELECT v FROM t_fwd WHERE k1 = $i AND k2 = 1 ORDER BY k3 DESC LIMIT 1) x`;
+  if ($r) {
+    inc $found;
+  }
+  inc $i;
+}
+--enable_query_log
+--echo found = $found
+
+--echo # Case 3: compaction rewrites the SST files; results stay correct.
+SET GLOBAL rocksdb_compact_cf = 'cf_h35_fwd';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_h35_rev';
+eval $q_rev;
+let $i = 1;
+let $found = 0;
+--disable_query_log
+while ($i <= 4000) {
+  let $r = `SELECT COUNT(*) FROM (SELECT v FROM t_fwd WHERE k1 = $i AND k2 = 1 ORDER BY k3 DESC LIMIT 1) x`;
+  if ($r) {
+    inc $found;
+  }
+  inc $i;
+}
+--enable_query_log
+--echo found = $found
+
+DROP TABLE t_fwd, t_rev, ids;

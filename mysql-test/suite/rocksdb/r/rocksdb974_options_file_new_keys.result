@@ -1,0 +1,35 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Part 1: the newest OPTIONS file has every option added in 9.4..9.7
+background_close_inactive_wals: present
+prefix_seek_opt_in_only: present
+write_identity_file: present
+metadata_write_temperature: present
+wal_write_temperature: present
+paranoid_memory_checks: present
+uncache_aggressiveness: present
+decouple_partitioned_filters: present
+compaction_options_universal.max_read_amp: present
+# Part 2: an OPTIONS file in the 9.3.1 shape opens with rocksdb_ignore_unknown_options=OFF
+# restart:--log-error=LOG_FILE --rocksdb_ignore_unknown_options=0
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_loaded
+1
+Pattern "Compatibility check against existing database options failed" not found
+SELECT @@rocksdb_ignore_unknown_options;
+@@rocksdb_ignore_unknown_options
+0
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+# restart
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+DROP TABLE t1;

@@ -1,0 +1,63 @@
+CALL mtr.add_suppression('Found [0-9]+ prepared XA transactions');
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(64), KEY kv(v)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT,
+KEY kv(v) COMMENT 'cfname=rev:cf_rdb974_x3g5') ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 200)
+SELECT i, CONCAT('row-', i) FROM s;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 200)
+SELECT i, i * 10 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 201 UNION ALL SELECT i+1 FROM s WHERE i < 300)
+SELECT i, CONCAT('row-', i) FROM s;
+DELETE FROM t2 WHERE id <= 50;
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'rdb974_x3g5';
+INSERT INTO t1 VALUES (1000, 'prepared');
+UPDATE t2 SET v = -1 WHERE id = 100;
+XA END 'rdb974_x3g5';
+XA PREPARE 'rdb974_x3g5';
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+checkpoint has a non-empty WAL file: 1
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 301 UNION ALL SELECT i+1 FROM s WHERE i < 400)
+SELECT i, CONCAT('row-', i) FROM s;
+DELETE FROM t2 WHERE id > 190;
+# Server on the checkpoint
+# restart: --rocksdb_datadir=[CHECKPOINT]
+include/assert_grep.inc [Checkpoint recovery finds the prepared transaction in ROCKSDB]
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	rdb974_x3g5
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)
+300	1	300
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t2;
+COUNT(*)	MIN(id)	MAX(id)	SUM(v)
+150	51	200	188250
+SELECT COUNT(*) FROM t1 FORCE INDEX(kv) WHERE v LIKE 'row-%';
+COUNT(*)
+300
+SELECT COUNT(*), SUM(v) FROM t2 FORCE INDEX(kv) WHERE v >= 0;
+COUNT(*)	SUM(v)
+150	188250
+SELECT * FROM t1 WHERE id = 1000;
+id	v
+SELECT * FROM t2 WHERE id = 100;
+id	v
+100	1000
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+# Server on the original datadir
+# restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	rdb974_x3g5
+XA ROLLBACK 'rdb974_x3g5';
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+COUNT(*)	MIN(id)	MAX(id)
+400	1	400
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t2;
+COUNT(*)	MIN(id)	MAX(id)	SUM(v)
+140	51	190	168700
+DROP TABLE t1, t2;

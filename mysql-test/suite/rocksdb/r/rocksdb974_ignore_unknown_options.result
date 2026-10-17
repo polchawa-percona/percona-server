@@ -1,0 +1,34 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Case A: same version, unknown option, rocksdb_ignore_unknown_options=ON
+# restart:--log-error=LOG_FILE --rocksdb_ignore_unknown_options=1
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_loaded
+0
+Pattern "Compatibility check against existing database options failed" found
+# Case B: newer patch version, unknown option, rocksdb_ignore_unknown_options=ON
+# restart:--log-error=LOG_FILE --rocksdb_ignore_unknown_options=1
+rocksdb_loaded: 1
+Pattern "Compatibility check against existing database options failed" not found
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+# Case C: newer patch version, unknown option, rocksdb_ignore_unknown_options=OFF
+# restart:--log-error=LOG_FILE --rocksdb_ignore_unknown_options=0
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_loaded
+0
+Pattern "Compatibility check against existing database options failed" found
+# Restore the original OPTIONS file and remove any newer one.
+# restart
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+DROP TABLE t1;

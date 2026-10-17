@@ -1,0 +1,80 @@
+CALL mtr.add_suppression("Found .* prepared XA transactions");
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'h50_1';
+INSERT INTO t1 VALUES (10 + 9, 1);
+XA END 'h50_1';
+XA PREPARE 'h50_1';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (10 + 1, 1), (10 + 2, 1);
+INSERT INTO t1 VALUES (10 + 3, 1);
+FLUSH LOGS;
+SELECT JSON_LENGTH(storage_engines->'$.RocksDB.wal_files') >= 2 AS lists_live_wals
+FROM performance_schema.log_status;
+lists_live_wals
+1
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'h50_2';
+INSERT INTO t1 VALUES (20 + 9, 2);
+XA END 'h50_2';
+XA PREPARE 'h50_2';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (20 + 1, 2), (20 + 2, 2);
+INSERT INTO t1 VALUES (20 + 3, 2);
+FLUSH LOGS;
+SELECT JSON_LENGTH(storage_engines->'$.RocksDB.wal_files') >= 2 AS lists_live_wals
+FROM performance_schema.log_status;
+lists_live_wals
+1
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 0;
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'h50_0';
+INSERT INTO t1 VALUES (30 + 9, 0);
+XA END 'h50_0';
+XA PREPARE 'h50_0';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (30 + 1, 0), (30 + 2, 0);
+INSERT INTO t1 VALUES (30 + 3, 0);
+FLUSH LOGS;
+SELECT JSON_LENGTH(storage_engines->'$.RocksDB.wal_files') >= 2 AS lists_live_wals
+FROM performance_schema.log_status;
+lists_live_wals
+1
+# Kill and restart
+SELECT * FROM t1 ORDER BY id;
+id	v
+11	1
+12	1
+13	1
+21	2
+22	2
+23	2
+31	0
+32	0
+33	0
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	5	0	h50_0
+1	5	0	h50_1
+1	5	0	h50_2
+XA COMMIT 'h50_1';
+XA COMMIT 'h50_2';
+XA COMMIT 'h50_0';
+SELECT * FROM t1 ORDER BY id;
+id	v
+11	1
+12	1
+13	1
+19	1
+21	2
+22	2
+23	2
+29	2
+31	0
+32	0
+33	0
+39	0
+DROP TABLE t1;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;

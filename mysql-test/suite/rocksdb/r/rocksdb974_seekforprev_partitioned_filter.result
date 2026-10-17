@@ -1,0 +1,85 @@
+SELECT CF_NAME, OPTION_TYPE, VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+WHERE CF_NAME = 'default' AND
+(OPTION_TYPE IN ('PREFIX_EXTRACTOR',
+'TABLE_FACTORY::PARTITION_FILTERS',
+'TABLE_FACTORY::WHOLE_KEY_FILTERING',
+'TABLE_FACTORY::INDEX_TYPE',
+'TABLE_FACTORY::INDEX_SHORTENING',
+'TABLE_FACTORY::METADATA_BLOCK_SIZE'))
+ORDER BY OPTION_TYPE;
+CF_NAME	OPTION_TYPE	VALUE
+default	PREFIX_EXTRACTOR	rocksdb.CappedPrefix.12
+default	TABLE_FACTORY::INDEX_SHORTENING	0
+default	TABLE_FACTORY::INDEX_TYPE	2
+default	TABLE_FACTORY::METADATA_BLOCK_SIZE	128
+default	TABLE_FACTORY::PARTITION_FILTERS	1
+default	TABLE_FACTORY::WHOLE_KEY_FILTERING	0
+CREATE TABLE ids (k1 BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_fwd (
+k1 BIGINT NOT NULL,
+k2 INT NOT NULL,
+k3 INT NOT NULL,
+v VARCHAR(16) NOT NULL,
+PRIMARY KEY (k1, k2, k3) COMMENT 'cfname=cf_h35_fwd'
+) ENGINE=ROCKSDB;
+CREATE TABLE t_rev (
+k1 BIGINT NOT NULL,
+k2 INT NOT NULL,
+k3 INT NOT NULL,
+v VARCHAR(16) NOT NULL,
+PRIMARY KEY (k1, k2, k3) COMMENT 'cfname=rev:cf_h35_rev'
+) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO ids
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 4000)
+SELECT n FROM s;
+INSERT INTO t_fwd SELECT k1, 1, 1, 'v' FROM ids;
+INSERT INTO t_rev SELECT k1, 1, 1, 'v' FROM ids;
+SELECT DISTINCT CF_NAME FROM information_schema.ROCKSDB_CF_OPTIONS
+WHERE CF_NAME LIKE '%h35%' ORDER BY CF_NAME;
+CF_NAME
+cf_h35_fwd
+rev:cf_h35_rev
+SELECT TABLE_NAME, CF FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_NAME IN ('t_fwd', 't_rev') ORDER BY TABLE_NAME;
+TABLE_NAME	CF
+t_fwd	cf_h35_fwd
+t_rev	rev:cf_h35_rev
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*) > 0 AS fwd_partitioned FROM information_schema.ROCKSDB_SST_PROPS p
+JOIN information_schema.ROCKSDB_DDL d ON p.COLUMN_FAMILY = d.COLUMN_FAMILY
+WHERE d.TABLE_NAME = 't_fwd' AND p.INDEX_PARTITIONS > 10;
+fwd_partitioned
+1
+SELECT COUNT(*) > 0 AS rev_partitioned FROM information_schema.ROCKSDB_SST_PROPS p
+JOIN information_schema.ROCKSDB_DDL d ON p.COLUMN_FAMILY = d.COLUMN_FAMILY
+WHERE d.TABLE_NAME = 't_rev' AND p.INDEX_PARTITIONS > 10;
+rev_partitioned
+1
+# Case 1: reverse CF, equality lookup (SeekForPrev on the key).
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+SELECT COUNT(*) FROM ids STRAIGHT_JOIN t_rev FORCE INDEX (PRIMARY) ON t_rev.k1 = ids.k1;
+COUNT(*)
+4000
+SET SESSION rocksdb_skip_bloom_filter_on_read = 0;
+SELECT COUNT(*) FROM ids STRAIGHT_JOIN t_rev FORCE INDEX (PRIMARY) ON t_rev.k1 = ids.k1;
+COUNT(*)
+4000
+# Case 2: forward CF, ORDER BY DESC (SeekForPrev on the successor).
+EXPLAIN SELECT v FROM t_fwd WHERE k1 = 5 AND k2 = 1 ORDER BY k3 DESC LIMIT 1;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_fwd	NULL	ref	PRIMARY	PRIMARY	12	const,const	1	100.00	Backward index scan
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t_fwd`.`v` AS `v` from `test`.`t_fwd` where ((`test`.`t_fwd`.`k2` = 1) and (`test`.`t_fwd`.`k1` = 5)) order by `test`.`t_fwd`.`k3` desc limit 1
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+found = 4000
+SET SESSION rocksdb_skip_bloom_filter_on_read = 0;
+found = 4000
+# Case 3: compaction rewrites the SST files; results stay correct.
+SET GLOBAL rocksdb_compact_cf = 'cf_h35_fwd';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_h35_rev';
+SELECT COUNT(*) FROM ids STRAIGHT_JOIN t_rev FORCE INDEX (PRIMARY) ON t_rev.k1 = ids.k1;
+COUNT(*)
+4000
+found = 4000
+DROP TABLE t_fwd, t_rev, ids;

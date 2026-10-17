@@ -1,0 +1,195 @@
+# RocksDB 9.4..9.7 behaviour change: extra item X2 of the semantics triage.
+# It has no HISTORY.md line of its own. RocksDB commit 4b1d59530 "Fix and
+# clarify ignore_unknown_options" (#12989), options/options_parser.cc:296-307.
+#
+# MyRocks path: at startup rocksdb_init_internal() calls
+# check_rocksdb_options_compatibility() (ha_rocksdb.cc:7823). That runs
+# LoadLatestOptions() and CheckOptionsCompatibility() with
+# ConfigOptions::ignore_unknown_options = rocksdb_ignore_unknown_options
+# (ha_rocksdb.cc:7110, 7156; default ON at 755). If the check fails, plugin
+# init fails and the server comes up without ROCKSDB (ha_rocksdb.cc:7830-7835).
+#
+# Intended behaviour, documented in options_parser.cc since #12989:
+# ignore_unknown_options applies to an OPTIONS file written by any newer
+# RocksDB version. That includes a newer patch release of the same
+# major.minor, for example a later 8.4 build that carries RocksDB X.Y.(Z+n).
+# In an OPTIONS file from the same or an older version, an unknown option
+# means corruption and is always refused.
+#
+# RocksDB 9.6 and older compared only major.minor. A newer patch release
+# counted as the same version, so the unknown option was refused even with
+# rocksdb_ignore_unknown_options=ON.
+#
+# Case A: same version, unknown option, ON  -> refused (all versions).
+# Case B: newer patch, unknown option, ON   -> accepted (fixed in 9.7).
+# Case C: newer patch, unknown option, OFF  -> refused.
+# The version comes from the OPTIONS file itself, so the test does not
+# depend on the RocksDB version.
+
+--source include/not_as_root.inc
+--source include/have_rocksdb.inc
+
+--disable_query_log
+call mtr.add_suppression("Compatibility check against existing database options failed");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Unknown storage engine 'ROCKSDB'");
+call mtr.add_suppression("Plugin rocksdb reported");
+call mtr.add_suppression("RocksDB: ");
+--enable_query_log
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--let RDB_DIR = $MYSQLD_DATADIR/.rocksdb
+--let OPT_BACKUP = $MYSQLTEST_VARDIR/tmp/rdb974_semx2_options.bak
+
+--source include/shutdown_mysqld.inc
+
+# Save the newest OPTIONS file (the one RocksDB loads).
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  opendir(my $dh, $dir) or die "opendir $dir: $!";
+  my @f = sort { ($a =~ /(\d+)$/)[0] <=> ($b =~ /(\d+)$/)[0] }
+          grep { /^OPTIONS-\d+$/ } readdir($dh);
+  closedir($dh);
+  die "no OPTIONS file" unless @f;
+  my $latest = "$dir/$f[-1]";
+  open(my $in, '<', $latest) or die "$latest: $!";
+  my $txt = do { local $/; <$in> };
+  close($in);
+  $txt =~ /rocksdb_version=\d+\.\d+\.\d+/ or die "no rocksdb_version line";
+  open(my $o, '>', $ENV{'OPT_BACKUP'}) or die;
+  print $o "$latest\n$txt";
+  close($o);
+EOF
+
+--echo # Case A: same version, unknown option, rocksdb_ignore_unknown_options=ON
+--let MODE = same
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  open(my $b, '<', $ENV{'OPT_BACKUP'}) or die;
+  my $name = <$b>; chomp $name;
+  my $txt = do { local $/; <$b> };
+  close($b);
+  opendir(my $dh, $dir) or die;
+  foreach my $x (grep { /^OPTIONS-\d+$/ } readdir($dh)) {
+    unlink("$dir/$x") if "$dir/$x" ne $name;
+  }
+  closedir($dh);
+  if ($ENV{'MODE'} eq 'patch') {
+    $txt =~ s/rocksdb_version=(\d+)\.(\d+)\.(\d+)/"rocksdb_version=$1.$2.".($3+50)/e;
+  }
+  $txt .= "  rdb974_semx2_unknown_option=1\n";
+  open(my $o, '>', $name) or die;
+  print $o $txt;
+  close($o);
+EOF
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/tmp/rdb974_semx2_a.err
+--let $restart_parameters = restart:--log-error=$SEARCH_FILE --rocksdb_ignore_unknown_options=1
+--replace_result $SEARCH_FILE LOG_FILE
+--source include/start_mysqld.inc
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+--let SEARCH_PATTERN = Compatibility check against existing database options failed
+--source include/search_pattern.inc
+--source include/shutdown_mysqld.inc
+
+--echo # Case B: newer patch version, unknown option, rocksdb_ignore_unknown_options=ON
+--let MODE = patch
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  open(my $b, '<', $ENV{'OPT_BACKUP'}) or die;
+  my $name = <$b>; chomp $name;
+  my $txt = do { local $/; <$b> };
+  close($b);
+  opendir(my $dh, $dir) or die;
+  foreach my $x (grep { /^OPTIONS-\d+$/ } readdir($dh)) {
+    unlink("$dir/$x") if "$dir/$x" ne $name;
+  }
+  closedir($dh);
+  if ($ENV{'MODE'} eq 'patch') {
+    $txt =~ s/rocksdb_version=(\d+)\.(\d+)\.(\d+)/"rocksdb_version=$1.$2.".($3+50)/e;
+  }
+  $txt .= "  rdb974_semx2_unknown_option=1\n";
+  open(my $o, '>', $name) or die;
+  print $o $txt;
+  close($o);
+EOF
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/tmp/rdb974_semx2_b.err
+--let $restart_parameters = restart:--log-error=$SEARCH_FILE --rocksdb_ignore_unknown_options=1
+--replace_result $SEARCH_FILE LOG_FILE
+--source include/start_mysqld.inc
+--let $loaded = `SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT')`
+--echo rocksdb_loaded: $loaded
+--let SEARCH_PATTERN = Compatibility check against existing database options failed
+--source include/search_pattern.inc
+if ($loaded)
+{
+  SELECT * FROM t1 ORDER BY a;
+}
+--source include/shutdown_mysqld.inc
+
+--echo # Case C: newer patch version, unknown option, rocksdb_ignore_unknown_options=OFF
+--let MODE = patch
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  open(my $b, '<', $ENV{'OPT_BACKUP'}) or die;
+  my $name = <$b>; chomp $name;
+  my $txt = do { local $/; <$b> };
+  close($b);
+  opendir(my $dh, $dir) or die;
+  foreach my $x (grep { /^OPTIONS-\d+$/ } readdir($dh)) {
+    unlink("$dir/$x") if "$dir/$x" ne $name;
+  }
+  closedir($dh);
+  if ($ENV{'MODE'} eq 'patch') {
+    $txt =~ s/rocksdb_version=(\d+)\.(\d+)\.(\d+)/"rocksdb_version=$1.$2.".($3+50)/e;
+  }
+  $txt .= "  rdb974_semx2_unknown_option=1\n";
+  open(my $o, '>', $name) or die;
+  print $o $txt;
+  close($o);
+EOF
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/tmp/rdb974_semx2_c.err
+--let $restart_parameters = restart:--log-error=$SEARCH_FILE --rocksdb_ignore_unknown_options=0
+--replace_result $SEARCH_FILE LOG_FILE
+--source include/start_mysqld.inc
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+--let SEARCH_PATTERN = Compatibility check against existing database options failed
+--source include/search_pattern.inc
+--source include/shutdown_mysqld.inc
+
+--echo # Restore the original OPTIONS file and remove any newer one.
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  open(my $b, '<', $ENV{'OPT_BACKUP'}) or die;
+  my $name = <$b>; chomp $name;
+  my $txt = do { local $/; <$b> };
+  close($b);
+  opendir(my $dh, $dir) or die;
+  foreach my $x (grep { /^OPTIONS-\d+$/ } readdir($dh)) {
+    unlink("$dir/$x") if "$dir/$x" ne $name;
+  }
+  closedir($dh);
+  open(my $o, '>', $name) or die;
+  print $o $txt;
+  close($o);
+  unlink($ENV{'OPT_BACKUP'});
+EOF
+
+--let $restart_parameters = restart
+--source include/start_mysqld.inc
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/rdb974_semx2_a.err
+--remove_file $MYSQLTEST_VARDIR/tmp/rdb974_semx2_b.err
+--remove_file $MYSQLTEST_VARDIR/tmp/rdb974_semx2_c.err

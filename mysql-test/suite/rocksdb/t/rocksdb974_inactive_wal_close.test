@@ -1,0 +1,83 @@
+# RocksDB 9.4.0 HISTORY (Behavior Changes): "Inactive WALs are immediately
+# closed upon being fully sync-ed rather than in a background thread. ...
+# an opt-out is available with new DB option background_close_inactive_wals."
+#
+# rocksdb db/db_impl/db_impl.cc SyncWAL now closes an inactive WAL right after
+# its final sync, and FindObsoleteFiles (db_impl_files.cc) closes it before
+# releasing it. MyRocks does not set background_close_inactive_wals (no
+# sysvar; the 9.7.4 default false applies), so the new behaviour is active.
+#
+# MyRocks paths that sync WALs: commit with rocksdb_flush_log_at_trx_commit=1
+# (write_opts.sync, ha_rocksdb.cc:5127), FLUSH LOGS / binlog group flush
+# (rocksdb_flush_wal(), ha_rocksdb.cc:6012-6045) and the background thread
+# FlushWAL(sync) for modes 0 and 2 (ha_rocksdb.cc:16705). A prepared XA
+# transaction keeps its old WAL live after a WAL switch, so that WAL is an
+# inactive, still-needed WAL that is now closed early.
+#
+# For each rocksdb_flush_log_at_trx_commit value 1, 2, 0: keep an XA
+# transaction prepared across a WAL switch, commit more rows, sync with
+# FLUSH LOGS, check that log_status still lists the live WALs, then kill the
+# server. After restart every committed row and every prepared XA
+# transaction must be there.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/have_perfschema.inc
+
+CALL mtr.add_suppression("Found .* prepared XA transactions");
+
+--let $saved_fltc = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+--let rocksdb_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+
+--let $fltc_list = 1,2,0
+--let $i = 0
+while ($i < 3)
+{
+  --let $fltc = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$fltc_list', ',', $i + 1), ',', -1)`
+  --eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $fltc
+  --let $base = `SELECT ($i + 1) * 10`
+
+  # The XA transaction stays attached to its own session until the kill
+  # (xa_detach_on_prepare=OFF), so the test does not depend on detached-XA
+  # support in MyRocks, which differs between the base and the PR branch.
+  --connect (con_xa_$fltc,localhost,root,,test)
+  SET SESSION xa_detach_on_prepare = OFF;
+  --eval XA START 'h50_$fltc'
+  --eval INSERT INTO t1 VALUES ($base + 9, $fltc)
+  --eval XA END 'h50_$fltc'
+  --eval XA PREPARE 'h50_$fltc'
+  --connection default
+
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --eval INSERT INTO t1 VALUES ($base + 1, $fltc), ($base + 2, $fltc)
+  --eval INSERT INTO t1 VALUES ($base + 3, $fltc)
+  FLUSH LOGS;
+
+  --perl
+    my $dir = $ENV{'rocksdb_dir'};
+    my @wals = glob("$dir/*.log");
+    die "expected at least 2 live WALs, found " . scalar(@wals) if @wals < 2;
+  EOF
+
+  SELECT JSON_LENGTH(storage_engines->'$.RocksDB.wal_files') >= 2 AS lists_live_wals
+    FROM performance_schema.log_status;
+
+  --inc $i
+}
+
+--source include/kill_and_restart_mysqld.inc
+--disconnect con_xa_1
+--disconnect con_xa_2
+--disconnect con_xa_0
+
+SELECT * FROM t1 ORDER BY id;
+--sorted_result
+XA RECOVER;
+XA COMMIT 'h50_1';
+XA COMMIT 'h50_2';
+XA COMMIT 'h50_0';
+SELECT * FROM t1 ORDER BY id;
+
+DROP TABLE t1;
+--eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $saved_fltc

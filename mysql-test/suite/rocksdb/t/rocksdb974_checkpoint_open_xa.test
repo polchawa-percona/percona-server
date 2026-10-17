@@ -1,0 +1,94 @@
+# RocksDB 9.4.0 HISTORY (Bug Fixes): "Fix a rare case in which a hard-linked
+# WAL in a Checkpoint is not fully synced (so might lose data on power loss)."
+#
+# The fix (rocksdb db/db_filesnapshot.cc DBImpl::GetLiveFilesStorageInfo)
+# copies every WAL that may still be open, at its known flushed size, and only
+# hard links closed, fully synced WALs. It also caps the WAL set at
+# logfile_number_ (max_log_num), and calls FlushWAL(sync=false) where 9.3.1
+# called FlushWAL(sync=track_and_verify_wals_in_manifest).
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint -> rocksdb_create_checkpoint()
+# (storage/rocksdb/ha_rocksdb.cc:323) -> Checkpoint::CreateCheckpoint(). MyRocks
+# runs a TransactionDB, so allow_2pc is on and the checkpoint keeps every WAL
+# from MinLogNumberToKeep(), including an old WAL that holds the prepare
+# record of a prepared XA transaction.
+#
+# The test keeps an XA transaction prepared across a WAL switch, writes more
+# rows with rocksdb_flush_log_at_trx_commit=2 (WAL written, not synced),
+# creates a checkpoint, then starts the server on the checkpoint with
+# --rocksdb_datadir. The checkpoint must open and hold exactly the rows
+# committed before it, and the XA transaction must still be prepared.
+# Power loss itself cannot be tested in MTR.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+CALL mtr.add_suppression("Found .* prepared XA transactions");
+
+--let $saved_fltc = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+# The XA transaction stays attached to its own session until the restart
+# (xa_detach_on_prepare=OFF), so the test does not depend on detached-XA
+# support in MyRocks, which differs between the base and the PR branch.
+--connect (con_xa,localhost,root,,test)
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'h51';
+INSERT INTO t1 VALUES (100, 100);
+XA END 'h51';
+XA PREPARE 'h51';
+--connection default
+
+# Switch to a new WAL. The WAL with the prepare record stays live.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+INSERT INTO t1 VALUES (4, 4), (5, 5), (6, 6);
+
+--let rocksdb_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+--perl
+  my $dir = $ENV{'rocksdb_dir'};
+  my @wals = glob("$dir/*.log");
+  die "expected at least 2 live WALs, found " . scalar(@wals) if @wals < 2;
+EOF
+
+--let $cp = $MYSQL_TMP_DIR/rdb974_h51_cp
+--replace_result $cp [CHECKPOINT]
+eval SET GLOBAL rocksdb_create_checkpoint = '$cp';
+
+# The checkpoint must carry the WAL with the prepare record and the active WAL.
+--let cp_dir = $cp
+--perl
+  my $dir = $ENV{'cp_dir'};
+  die "checkpoint has no CURRENT" unless -f "$dir/CURRENT";
+  my @wals = glob("$dir/*.log");
+  die "expected at least 2 WALs in the checkpoint, found " . scalar(@wals)
+    if @wals < 2;
+EOF
+
+# Written after the checkpoint: must not be in it.
+INSERT INTO t1 VALUES (7, 7), (8, 8);
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+
+--echo # Start the server on the checkpoint
+--let $restart_parameters = restart: --rocksdb_datadir=$cp
+--replace_result $cp [CHECKPOINT]
+--source include/restart_mysqld.inc
+--disconnect con_xa
+
+SELECT * FROM t1 ORDER BY id;
+XA RECOVER;
+CHECK TABLE t1;
+
+--echo # Back to the original data directory
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc
+
+XA RECOVER;
+XA ROLLBACK 'h51';
+SELECT * FROM t1 ORDER BY id;
+
+DROP TABLE t1;
+--eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $saved_fltc
+--force-rmdir $cp

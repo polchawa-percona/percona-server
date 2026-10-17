@@ -1,0 +1,67 @@
+SELECT @@GLOBAL.rocksdb_write_policy <> 'write_committed' AS policy_ok;
+policy_ok
+1
+CALL mtr.add_suppression('Found .* prepared XA transactions');
+CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1);
+XA START 'commit-me';
+INSERT INTO t VALUES (2, 2);
+UPDATE t SET v = 10 WHERE id = 1;
+XA END 'commit-me';
+XA PREPARE 'commit-me';
+XA START 'rollback-me';
+INSERT INTO t VALUES (3, 3);
+XA END 'rollback-me';
+XA PREPARE 'rollback-me';
+# Prepared rows are not visible before commit
+SELECT * FROM t ORDER BY id;
+id	v
+1	1
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	rollback-me
+1	9	0	commit-me
+# Clean shutdown with two prepared transactions
+# restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	rollback-me
+1	9	0	commit-me
+SELECT * FROM t ORDER BY id;
+id	v
+1	1
+# Second clean shutdown with the recovered prepared transactions
+# restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	11	0	rollback-me
+1	9	0	commit-me
+XA COMMIT 'commit-me';
+XA ROLLBACK 'rollback-me';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+SELECT * FROM t ORDER BY id;
+id	v
+1	10
+2	2
+# New writes after recovery
+INSERT INTO t VALUES (4, 4);
+BEGIN;
+UPDATE t SET v = v + 1 WHERE id = 1;
+UPDATE t SET v = v + 1 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 4;
+COMMIT;
+SELECT * FROM t ORDER BY id;
+id	v
+1	11
+2	3
+4	5
+# restart
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+SELECT * FROM t ORDER BY id;
+id	v
+1	11
+2	3
+4	5
+DROP TABLE t;

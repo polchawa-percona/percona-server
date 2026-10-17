@@ -1,0 +1,71 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), durability-lens extra item X1
+# (related to HISTORY 9.4.0 H51, "Fix a rare case in which a hard-linked WAL
+# in a Checkpoint is not fully synced"):
+#   DBImpl::GetLiveFilesStorageInfo() (rocksdb db/db_filesnapshot.cc) now calls
+#   FlushWAL(sync=false). RocksDB 9.3.1 called
+#   FlushWAL(sync=track_and_verify_wals_in_manifest), and MyRocks enables
+#   track_and_verify_wals_in_manifest by default (ha_rocksdb.cc:747, 7513).
+#   So with 9.3.1 every checkpoint synced the live WAL of the source DB as a
+#   side effect; with 9.7.4 it only writes the manual-WAL buffer out and copies
+#   the open WAL at its flushed size. The checkpoint's own files stay synced.
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint -> rocksdb_create_checkpoint()
+# (ha_rocksdb.cc:323) -> Checkpoint::CreateCheckpoint(). Observable through
+# the rocksdb_wal_synced status variable (ha_rocksdb.cc:16315, ticker
+# WAL_FILE_SYNCED, recorded by DBImpl::SyncWalImpl, rocksdb
+# db/db_impl/db_impl.cc:1651; 9.3.1: DBImpl::SyncWAL, db_impl.cc:1591).
+#
+# To keep the window free of other syncs:
+#  - rocksdb_flush_log_at_trx_commit stays 1, so the background thread does not
+#    call FlushWAL(sync) (ha_rocksdb.cc:16705), and no commit runs in the
+#    window;
+#  - the memtables are flushed first, so the flush the checkpoint forces
+#    (allow_2pc) finds empty memtables and does not run SyncClosedWals.
+#
+# Intended 9.7 behaviour: creating a checkpoint does not sync the source WAL
+# (rocksdb_wal_synced unchanged), and the checkpoint holds every committed row.
+
+--source include/have_rocksdb.inc
+
+--let $saved_fltc = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+--echo # A sync commit moves rocksdb_wal_synced (sanity check of the counter)
+--let $c0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_wal_synced', Value, 1)
+INSERT INTO t1 VALUES (4, 40);
+--let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_wal_synced', Value, 1)
+--let $assert_text = A commit with rocksdb_flush_log_at_trx_commit=1 syncs the WAL
+--let $assert_cond = $c1 > $c0
+--source include/assert.inc
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--let $cp = $MYSQL_TMP_DIR/rdb974_durx1g6_cp
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_wal_synced', Value, 1)
+--replace_result $cp [CHECKPOINT]
+eval SET GLOBAL rocksdb_create_checkpoint = '$cp';
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_wal_synced', Value, 1)
+
+--let $delta = `SELECT $after - $before`
+--echo # WAL syncs caused by the checkpoint: $delta
+
+--echo # Start the server on the checkpoint
+--let $restart_parameters = restart: --rocksdb_datadir=$cp
+--replace_result $cp [CHECKPOINT]
+--source include/restart_mysqld.inc
+
+SELECT * FROM t1 ORDER BY id;
+
+--echo # Back to the original data directory
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc
+
+SELECT * FROM t1 ORDER BY id;
+DROP TABLE t1;
+--disable_query_log
+--eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $saved_fltc
+--enable_query_log
+--force-rmdir $cp

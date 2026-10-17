@@ -1,0 +1,25 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+# The newest OPTIONS file records write_dbid_to_manifest=true
+write_dbid_to_manifest=true
+# Create a checkpoint
+SET GLOBAL rocksdb_create_checkpoint = 'MYSQL_TMP_DIR/rdb974_h11_ckpt';
+# The checkpoint has no IDENTITY file: the DB ID can only come from the MANIFEST
+checkpoint IDENTITY exists: no
+# Restart mysqld on the checkpoint
+# restart
+SELECT * FROM t1 ORDER BY pk;
+pk	v
+1	10
+2	20
+3	30
+# The checkpoint keeps the DB ID of the source datadir
+checkpoint DB ID is equal to the source DB ID
+# Restart mysqld on the original datadir
+# restart
+SELECT * FROM t1 ORDER BY pk;
+pk	v
+1	10
+2	20
+3	30
+DROP TABLE t1;

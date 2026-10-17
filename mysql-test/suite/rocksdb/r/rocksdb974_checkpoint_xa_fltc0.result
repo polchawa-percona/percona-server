@@ -1,0 +1,53 @@
+CALL mtr.add_suppression("Found .* prepared XA transactions");
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 0;
+INSERT INTO t1 VALUES (4, 4), (5, 5);
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'x1g6';
+INSERT INTO t1 VALUES (100, 100);
+XA END 'x1g6';
+XA PREPARE 'x1g6';
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+INSERT INTO t1 VALUES (7, 7);
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+# Start the server on the checkpoint
+# restart: --rocksdb_datadir=[CHECKPOINT]
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	1
+2	2
+3	3
+4	4
+5	5
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	4	0	x1g6
+XA COMMIT 'x1g6';
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	1
+2	2
+3	3
+4	4
+5	5
+100	100
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Back to the original data directory
+# restart:
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	4	0	x1g6
+XA ROLLBACK 'x1g6';
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	1
+2	2
+3	3
+4	4
+5	5
+7	7
+DROP TABLE t1;

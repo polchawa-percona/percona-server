@@ -1,0 +1,108 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), durability triage extra item X5.
+# RocksDB 9.4..9.7 added options that are persisted in every OPTIONS file
+# (HISTORY items H08, H20, H21, H49 and others):
+#   [DBOptions] background_close_inactive_wals, prefix_seek_opt_in_only,
+#     write_identity_file, metadata_write_temperature, wal_write_temperature
+#     (rocksdb/options/db_options.cc type map hunks);
+#   [CFOptions] paranoid_memory_checks, uncache_aggressiveness, and
+#     max_read_amp inside the compaction_options_universal={...} struct
+#     (rocksdb/options/cf_options.cc:239-245,523-537);
+#   [TableOptions/BlockBasedTable] decouple_partitioned_filters
+#     (rocksdb/table/block_based/block_based_table_factory.cc:304-310).
+# No option key was removed, so a 9.3.1 OPTIONS file has no key that 9.7.4
+# does not know.
+#
+# MyRocks path: at startup rocksdb_init_internal() calls
+# check_rocksdb_options_compatibility() (ha_rocksdb.cc:7102-7163), which loads
+# the newest OPTIONS file and runs CheckOptionsCompatibility() with
+# ignore_unknown_options = rocksdb_ignore_unknown_options (ha_rocksdb.cc:7110,
+# 7156; default ON at ha_rocksdb.cc:755). With OFF, any unknown key makes
+# plugin init fail ("Compatibility check against existing database options
+# failed") and the server starts without ROCKSDB.
+#
+# Part 1 asserts that the OPTIONS file written by this server carries every
+# new key: this is what a downgrade to a 9.3.1-based server has to skip, which
+# works only with rocksdb_ignore_unknown_options=ON (checked with two binaries
+# outside MTR, not MTR-testable). It fails on a 9.3.1 build by design.
+# Part 2 is the upgrade direction: the newest OPTIONS file is rewritten to the
+# 9.3.1 shape (rocksdb_version=9.3.1, the new keys removed) and the server is
+# restarted with rocksdb_ignore_unknown_options=OFF. The correct result is a
+# clean start with ROCKSDB loaded and the rows readable.
+
+--source include/not_as_root.inc
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--let RDB_DIR = $MYSQLD_DATADIR/.rocksdb
+--let KEYS_OUT = $MYSQLTEST_VARDIR/tmp/rdb974_x5g7_keys.txt
+
+--source include/shutdown_mysqld.inc
+
+--echo # Part 1: the newest OPTIONS file has every option added in 9.4..9.7
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  opendir(my $dh, $dir) or die "opendir $dir: $!";
+  my @f = sort { ($a =~ /(\d+)$/)[0] <=> ($b =~ /(\d+)$/)[0] }
+          grep { /^OPTIONS-\d+$/ } readdir($dh);
+  closedir($dh);
+  die "no OPTIONS file" unless @f;
+  open(my $in, '<', "$dir/$f[-1]") or die;
+  my $txt = do { local $/; <$in> };
+  close($in);
+  open(my $o, '>', $ENV{'KEYS_OUT'}) or die;
+  foreach my $k (qw(background_close_inactive_wals prefix_seek_opt_in_only
+                    write_identity_file metadata_write_temperature
+                    wal_write_temperature paranoid_memory_checks
+                    uncache_aggressiveness decouple_partitioned_filters)) {
+    print $o "$k: ", ($txt =~ /^\s*$k=/m ? "present" : "missing"), "\n";
+  }
+  print $o "compaction_options_universal.max_read_amp: ",
+    ($txt =~ /compaction_options_universal=\{[^}]*max_read_amp=/ ? "present" : "missing"), "\n";
+  close($o);
+EOF
+--cat_file $KEYS_OUT
+--remove_file $KEYS_OUT
+
+--echo # Part 2: an OPTIONS file in the 9.3.1 shape opens with rocksdb_ignore_unknown_options=OFF
+perl;
+  use strict;
+  my $dir = $ENV{'RDB_DIR'};
+  opendir(my $dh, $dir) or die "opendir $dir: $!";
+  my @f = sort { ($a =~ /(\d+)$/)[0] <=> ($b =~ /(\d+)$/)[0] }
+          grep { /^OPTIONS-\d+$/ } readdir($dh);
+  closedir($dh);
+  my $name = "$dir/$f[-1]";
+  open(my $in, '<', $name) or die;
+  my $txt = do { local $/; <$in> };
+  close($in);
+  $txt =~ s/rocksdb_version=\d+\.\d+\.\d+/rocksdb_version=9.3.1/ or die "no version";
+  $txt =~ s/^\s*(background_close_inactive_wals|prefix_seek_opt_in_only|write_identity_file|metadata_write_temperature|wal_write_temperature|paranoid_memory_checks|uncache_aggressiveness|decouple_partitioned_filters)=.*\n//mg;
+  $txt =~ s/max_read_amp=[^;}]*;//g;
+  die "new key left in rewritten OPTIONS"
+    if $txt =~ /background_close_inactive_wals|prefix_seek_opt_in_only|write_identity_file|metadata_write_temperature|wal_write_temperature|paranoid_memory_checks|uncache_aggressiveness|decouple_partitioned_filters|max_read_amp/;
+  open(my $o, '>', $name) or die;
+  print $o $txt;
+  close($o);
+EOF
+
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/tmp/rdb974_x5g7.err
+--let $restart_parameters = restart:--log-error=$SEARCH_FILE --rocksdb_ignore_unknown_options=0
+--replace_result $SEARCH_FILE LOG_FILE
+--source include/start_mysqld.inc
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+--let SEARCH_PATTERN = Compatibility check against existing database options failed
+--source include/search_pattern.inc
+SELECT @@rocksdb_ignore_unknown_options;
+SELECT * FROM t1 ORDER BY a;
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/rdb974_x5g7.err

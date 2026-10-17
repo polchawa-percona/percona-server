@@ -1,0 +1,64 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), triage item X6 (no HISTORY
+# entry): CheckpointImpl::CleanStagingDirectory() now returns a Status, and
+# CreateCheckpoint() returns
+#   Aborted: Failed to clean the temporary directory <dir>.tmp needed before
+#   checkpoint creation : <inner status>
+# when the stale "<dir>.tmp" staging directory cannot be removed
+# (rocksdb/utilities/checkpoint/checkpoint_impl.cc:49-84 and :130-135).
+# RocksDB 9.3.1 ignored the cleanup result (old checkpoint_impl.cc:49-71,
+# :112) and failed later in CreateDir() with an IOError ("While mkdir ...
+# File exists").
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint and SET SESSION
+# rocksdb_create_temporary_checkpoint -> rocksdb_create_checkpoint()
+# (ha_rocksdb.cc:323-350), which reports status.code() and status.ToString()
+# through ER_GET_ERRMSG (ha_rocksdb.cc:341-342).
+#
+# checkpoint_staging_dir already checks that the statement fails, that
+# no checkpoint is created and that a retry works, but it masks the error text.
+# This test pins the error code (10 = Status::kAborted, include/rocksdb/
+# status.h:86) and the message prefix, which is what a user or a backup tool
+# parsing the error sees. ER_GET_ERRMSG prints at most 100 characters of the
+# status text ('%-.100s' in share/messages_to_clients.txt), so the message is
+# cut inside the path; the path and the rest are masked.
+
+--source include/have_rocksdb.inc
+
+--let $checkpoint = $MYSQL_TMP_DIR/rdb974_x6g8_cp
+
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+
+--echo # Stale staging directory that holds a subdirectory
+--mkdir $checkpoint.tmp
+--mkdir $checkpoint.tmp/subdir
+--write_file $checkpoint.tmp/subdir/keep
+keep
+EOF
+
+--replace_result $checkpoint [CHECKPOINT]
+--replace_regex /temporary directory .*' from/temporary directory <DIR...>' from/
+--error ER_GET_ERRMSG
+--eval SET GLOBAL rocksdb_create_checkpoint = '$checkpoint'
+--error 1
+--file_exists $checkpoint
+
+--replace_result $checkpoint [CHECKPOINT]
+--replace_regex /temporary directory .*' from/temporary directory <DIR...>' from/
+--error ER_GET_ERRMSG
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$checkpoint'
+--error 1
+--file_exists $checkpoint
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint IS NULL AS no_tmp_checkpoint;
+
+--echo # The staging directory content is left alone
+--file_exists $checkpoint.tmp/subdir/keep
+
+--echo # After manual cleanup the checkpoint succeeds
+--force-rmdir $checkpoint.tmp
+--replace_result $checkpoint [CHECKPOINT]
+--eval SET GLOBAL rocksdb_create_checkpoint = '$checkpoint'
+--file_exists $checkpoint/CURRENT
+--force-rmdir $checkpoint
+
+DROP TABLE t1;

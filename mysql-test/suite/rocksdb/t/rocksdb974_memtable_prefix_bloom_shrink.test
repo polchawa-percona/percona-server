@@ -1,0 +1,126 @@
+# RocksDB 9.7.0 HISTORY, Bug Fixes (item H17 of the 9.4-9.7 review):
+#   "Fix handling of dynamic change of prefix_extractor with memtable prefix
+#    filter. Previously, prefix seek could mix different prefix
+#    interpretations between memtable and SST files. Now the latest
+#    prefix_extractor at the time of iterator creation or refresh is
+#    respected."
+#
+# MyRocks path:
+#  - rocksdb_update_cf_options calls DB::SetOptions() (ha_rocksdb.cc,
+#    rocksdb_set_update_cf_options()), which changes prefix_extractor without
+#    switching the active memtable. The memtable keeps the extractor and the
+#    prefix bloom it was created with (db/memtable.cc, MemTable::MemTable()).
+#  - A table created after the change caches the new extractor in its
+#    Rdb_key_def (rdb_datadic.cc, Rdb_key_def::setup()), so
+#    can_use_bloom_filter() accepts an equality prefix of the new length and
+#    get_iterator() sets prefix_same_as_start (ha_rocksdb.cc).
+#  - RocksDB 9.3.1 then checked the memtable bloom with the old, longer
+#    memtable extractor applied to the shorter seek key, and skipped the whole
+#    memtable, so rows that were not flushed yet were missing. RocksDB 9.7
+#    (MemTableIterator, db/memtable.cc) uses the memtable bloom only when the
+#    memtable extractor is the current CF extractor.
+#
+# Tables created before the change keep their cached extractor; that is
+# PS-11887 and is deliberately not exercised here.
+#
+# Key layout: 4 bytes index id + 8 bytes per BIGINT column.
+# capped:20 = index id + id1 + id2, capped:12 = index id + id1,
+# capped:28 = index id + id1 + id2 + id3.
+#
+# The test asserts the correct result: every query returns the same rows as
+# a total order scan (rocksdb_skip_bloom_filter_on_read=1).
+
+--source include/have_rocksdb.inc
+
+SET @orig_update_cf_options = @@global.rocksdb_update_cf_options;
+
+# Make sure the column family exists and owns an active memtable that was
+# created with prefix_extractor=capped:20 and a memtable prefix bloom.
+CREATE TABLE t0 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+  PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+  ENGINE=ROCKSDB COLLATE latin1_bin;
+INSERT INTO t0 VALUES (9, 9, 9, 9);
+
+--sorted_result
+SELECT cf_name, option_type, value FROM information_schema.rocksdb_cf_options
+WHERE cf_name = 'rdb974_h17_cf'
+  AND option_type IN ('PREFIX_EXTRACTOR', 'MEMTABLE_PREFIX_BLOOM_BITS_RATIO');
+
+--echo #
+--echo # Shrink the prefix while rows stay in the memtable
+--echo #
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:12};';
+--sorted_result
+SELECT cf_name, option_type, value FROM information_schema.rocksdb_cf_options
+WHERE cf_name = 'rdb974_h17_cf' AND option_type = 'PREFIX_EXTRACTOR';
+
+CREATE TABLE t1 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+  PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+  ENGINE=ROCKSDB COLLATE latin1_bin;
+--disable_query_log
+let $i = 1;
+while ($i <= 20) {
+  eval INSERT INTO t1 VALUES (1, $i, $i, $i), (2, $i, $i, $i);
+  inc $i;
+}
+--enable_query_log
+
+# Nothing is flushed: the rows are only in the memtable built with capped:20.
+SELECT COUNT(*) AS sst_files FROM information_schema.rocksdb_index_file_map m
+JOIN information_schema.rocksdb_ddl d ON m.index_number = d.index_number
+WHERE d.table_name = 't1';
+
+# Equality on id1 only: 12 bytes, usable with the new capped:12 extractor.
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 LIMIT 3;
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 DESC LIMIT 3;
+SELECT id2 FROM t1 WHERE id1 = 2 AND id2 BETWEEN 5 AND 7 ORDER BY id2;
+
+--echo # The same queries with a total order scan
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 LIMIT 3;
+SELECT id2 FROM t1 WHERE id1 = 1 ORDER BY id2 DESC LIMIT 3;
+SELECT id2 FROM t1 WHERE id1 = 2 AND id2 BETWEEN 5 AND 7 ORDER BY id2;
+SET SESSION rocksdb_skip_bloom_filter_on_read = DEFAULT;
+
+--echo # After a flush the rows are in an SST file and are still found
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+SELECT COUNT(*) FROM t1 WHERE id1 = 2;
+
+--echo #
+--echo # Grow the prefix while rows stay in the memtable (now built with capped:12)
+--echo #
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:28};';
+CREATE TABLE t2 (id1 BIGINT, id2 BIGINT, id3 BIGINT, id4 BIGINT,
+  PRIMARY KEY (id1, id2, id3, id4) COMMENT 'cfname=rdb974_h17_cf')
+  ENGINE=ROCKSDB COLLATE latin1_bin;
+--disable_query_log
+let $i = 1;
+while ($i <= 20) {
+  eval INSERT INTO t2 VALUES (1, 1, $i, $i), (1, 1, $i, $i + 100), (1, 2, $i, $i);
+  inc $i;
+}
+--enable_query_log
+
+# Equality on id1, id2, id3: 28 bytes, usable with the new capped:28 extractor.
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4;
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4 DESC;
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 2 AND id3 = 7;
+# Shorter equality: not usable with capped:28, total order seek.
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 1;
+
+--echo # The same queries with a total order scan
+SET SESSION rocksdb_skip_bloom_filter_on_read = 1;
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4;
+SELECT id4 FROM t2 WHERE id1 = 1 AND id2 = 1 AND id3 = 5 ORDER BY id4 DESC;
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 2 AND id3 = 7;
+SELECT COUNT(*) FROM t2 WHERE id1 = 1 AND id2 = 1;
+SET SESSION rocksdb_skip_bloom_filter_on_read = DEFAULT;
+
+SET @@global.rocksdb_update_cf_options = 'rdb974_h17_cf={prefix_extractor=capped:20};';
+SET @@global.rocksdb_update_cf_options = @orig_update_cf_options;
+DROP TABLE t0, t1, t2;

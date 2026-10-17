@@ -1,0 +1,81 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), triage item X7 (Percona RocksDB
+# patch, no HISTORY entry; findings.md L11): ~WritePreparedTxnDB() drains
+# prepared_txns_ after background work stops
+# (rocksdb/utilities/transactions/write_prepared_txn_db.cc:1079-1084), so a
+# clean close with prepared transactions no longer trips the assert in
+# ~PreparedHeap() (write_prepared_txn_db.h:549-553 in 9.3.1).
+#
+# MyRocks path: XA PREPARE detaches the prepared rocksdb::Transaction on
+# disconnect and at shutdown (Rdb_transaction_impl::detach_prepared(),
+# ha_rocksdb.cc:4812-4822, called from rocksdb_close_connection() and
+# rocksdb_replace_trx_in_thd(), ha_rocksdb.cc:5916-5934), so the
+# TransactionDB is closed with live prepared transactions and they are
+# recovered from the WAL at the next start. xa_clean_restart covers only the
+# default write_committed policy.
+#
+# Correct behaviour: prepared XA transactions survive two clean restarts,
+# their rows stay invisible until XA COMMIT, XA COMMIT / XA ROLLBACK apply
+# them, and later writes and a further restart keep the right data.
+# This variant: rocksdb_write_policy=write_prepared (-master.opt).
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+SELECT @@GLOBAL.rocksdb_write_policy <> 'write_committed' AS policy_ok;
+CALL mtr.add_suppression('Found .* prepared XA transactions');
+
+CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1);
+
+# Each XA transaction is prepared in its own connection, so the test does not
+# depend on reusing a session after a detached XA PREPARE.
+--connect (con1,localhost,root,,test)
+XA START 'commit-me';
+INSERT INTO t VALUES (2, 2);
+UPDATE t SET v = 10 WHERE id = 1;
+XA END 'commit-me';
+XA PREPARE 'commit-me';
+--disconnect con1
+
+--connect (con2,localhost,root,,test)
+XA START 'rollback-me';
+INSERT INTO t VALUES (3, 3);
+XA END 'rollback-me';
+XA PREPARE 'rollback-me';
+--disconnect con2
+
+--connection default
+--echo # Prepared rows are not visible before commit
+SELECT * FROM t ORDER BY id;
+--sorted_result
+XA RECOVER;
+
+--echo # Clean shutdown with two prepared transactions
+--source include/restart_mysqld.inc
+--sorted_result
+XA RECOVER;
+SELECT * FROM t ORDER BY id;
+
+--echo # Second clean shutdown with the recovered prepared transactions
+--source include/restart_mysqld.inc
+--sorted_result
+XA RECOVER;
+
+XA COMMIT 'commit-me';
+XA ROLLBACK 'rollback-me';
+XA RECOVER;
+SELECT * FROM t ORDER BY id;
+
+--echo # New writes after recovery
+INSERT INTO t VALUES (4, 4);
+BEGIN;
+UPDATE t SET v = v + 1 WHERE id = 1;
+UPDATE t SET v = v + 1 WHERE id = 2;
+UPDATE t SET v = v + 1 WHERE id = 4;
+COMMIT;
+SELECT * FROM t ORDER BY id;
+
+--source include/restart_mysqld.inc
+XA RECOVER;
+SELECT * FROM t ORDER BY id;
+DROP TABLE t;

@@ -1,0 +1,89 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), durability-lens extra item X1
+# (related to HISTORY 9.4.0 H51):
+#   DBImpl::GetLiveFilesStorageInfo() (rocksdb db/db_filesnapshot.cc) now calls
+#   FlushWAL(sync=false) instead of FlushWAL(sync=track_and_verify_wals_in_manifest)
+#   and copies every WAL that may still be open at its in-memory flushed size
+#   (DBImpl::GetOpenWalSizes, db/db_impl/db_impl.cc:1569), instead of the file
+#   size reported by the file system.
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint -> rocksdb_create_checkpoint()
+# (ha_rocksdb.cc:323) -> Checkpoint::CreateCheckpoint(). MyRocks opens the DB
+# with manual_wal_flush=true (ha_rocksdb.cc:1030). With
+# rocksdb_flush_log_at_trx_commit=0 a commit or XA PREPARE leaves its WAL
+# record in the manual-WAL buffer (ha_rocksdb.cc:6023-6043); only the
+# background thread (once per second, ha_rocksdb.cc:16705) or the checkpoint's
+# own FlushWAL writes it to the file. The prepare record of a prepared XA
+# transaction lives only in the WAL (the checkpoint flushes memtables, but the
+# transaction is not committed), so the checkpoint must copy the WAL bytes that
+# its own FlushWAL just wrote.
+#
+# rocksdb974_checkpoint_open_xa covers rocksdb_flush_log_at_trx_commit=2; this
+# test covers 0, where the WAL file is not written at all before the
+# checkpoint (unless the 1-second background flush runs in between, which is
+# timing dependent: the test then still passes but covers the H51 case only).
+#
+# Intended behaviour: a server started on the checkpoint has the committed rows
+# and the prepared XA transaction, which can then be committed.
+#
+# On the base build (8.4 with RocksDB 9.3.1) XA PREPARE on a RocksDB table does
+# not survive a restart for a MyRocks reason unrelated to RocksDB (no
+# set_prepared_in_tc / recover_prepared_in_tc), so
+# the XA steps can only be compared on the PR build.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+CALL mtr.add_suppression("Found .* prepared XA transactions");
+
+--let $saved_fltc = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 0;
+INSERT INTO t1 VALUES (4, 4), (5, 5);
+
+# The XA transaction stays attached to its own session until the restart
+# (xa_detach_on_prepare=OFF), as in rocksdb974_checkpoint_open_xa.
+--connect (con_xa,localhost,root,,test)
+SET SESSION xa_detach_on_prepare = OFF;
+XA START 'x1g6';
+INSERT INTO t1 VALUES (100, 100);
+XA END 'x1g6';
+XA PREPARE 'x1g6';
+--connection default
+
+--let $cp = $MYSQL_TMP_DIR/rdb974_durx1g6_xa_cp
+--replace_result $cp [CHECKPOINT]
+eval SET GLOBAL rocksdb_create_checkpoint = '$cp';
+
+# Written after the checkpoint: must not be in it.
+INSERT INTO t1 VALUES (7, 7);
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+
+--echo # Start the server on the checkpoint
+--let $restart_parameters = restart: --rocksdb_datadir=$cp
+--replace_result $cp [CHECKPOINT]
+--source include/restart_mysqld.inc
+--disconnect con_xa
+
+SELECT * FROM t1 ORDER BY id;
+XA RECOVER;
+XA COMMIT 'x1g6';
+SELECT * FROM t1 ORDER BY id;
+CHECK TABLE t1;
+
+--echo # Back to the original data directory
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc
+
+XA RECOVER;
+XA ROLLBACK 'x1g6';
+SELECT * FROM t1 ORDER BY id;
+
+DROP TABLE t1;
+--disable_query_log
+--eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $saved_fltc
+--enable_query_log
+--force-rmdir $cp
