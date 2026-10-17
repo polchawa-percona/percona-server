@@ -1,0 +1,16 @@
+SET @save_delete_range = @@global.rocksdb_enable_delete_range_for_drop_index;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+CREATE TABLE t_keep (id INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5o') ENGINE=ROCKSDB;
+INSERT INTO t_keep VALUES (1);
+CREATE TABLE t1 (id INT, v INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5o')
+ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 100)
+SELECT i, i FROM s;
+DROP TABLE t1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+tombstone_in_file_map
+1
+status_counts_tombstone
+1
+DROP TABLE t_keep;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @save_delete_range;

@@ -1,0 +1,48 @@
+# Pre-existing MyRocks bug found while reviewing the table properties collector
+# change of RocksDB 9.7.4 (PS-9766, PR 6263); not caused by the
+# upgrade.
+#
+# Rdb_tbl_prop_coll::Finish() (properties_collector.cc:230-232) does
+#   if (m_total_merges > 0) rocksdb_num_sst_entry_other += m_total_merges;
+# instead of adding m_total_others, so the status variable
+# rocksdb_number_sst_entry_other never counts range tombstones / kEntryOther
+# entries, which CollectStatsForRow() records in m_entry_others
+# (properties_collector.cc:170-172), and counts merges a second time.
+#
+# MyRocks writes a range tombstone when an index is dropped with
+# rocksdb_enable_delete_range_for_drop_index = ON (ha_rocksdb.cc:13616-13620,
+# 13753-13754). The tombstone reaches the collector on flush
+# (block_based_table_builder.cc:1108-1121).
+#
+# Correct behaviour: after the flush, INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP
+# shows the range tombstone in ENTRY_OTHERS, and rocksdb_number_sst_entry_other
+# has grown by at least that amount.
+
+--source include/have_rocksdb.inc
+
+SET @save_delete_range = @@global.rocksdb_enable_delete_range_for_drop_index;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+
+CREATE TABLE t_keep (id INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5o') ENGINE=ROCKSDB;
+INSERT INTO t_keep VALUES (1);
+CREATE TABLE t1 (id INT, v INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5o')
+  ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 100)
+  SELECT i, i FROM s;
+--let $pk1 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'PRIMARY'`
+# Keep the rows in the memtable so DeleteFilesInRange() has nothing to delete
+# and the drop really writes a range tombstone.
+
+--let $other_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_number_sst_entry_other', Value, 1)
+DROP TABLE t1;
+--source suite/rocksdb/include/drop_table_sync.inc
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $other_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rocksdb_number_sst_entry_other', Value, 1)
+
+--disable_query_log
+--eval SELECT SUM(ENTRY_OTHERS) > 0 AS tombstone_in_file_map FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER = $pk1
+--eval SELECT $other_after - $other_before >= (SELECT SUM(ENTRY_OTHERS) FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER = $pk1) AND $other_after > $other_before AS status_counts_tombstone
+--enable_query_log
+
+DROP TABLE t_keep;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @save_delete_range;
