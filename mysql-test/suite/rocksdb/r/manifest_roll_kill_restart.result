@@ -1,0 +1,16 @@
+SELECT @@global.rocksdb_max_manifest_file_size;
+@@global.rocksdb_max_manifest_file_size
+1
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+CURRENT names an existing MANIFEST
+# Kill and restart
+CURRENT names an existing MANIFEST
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+20	210
+INSERT INTO t1 VALUES (21, 21);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+21	231
+DROP TABLE t1;

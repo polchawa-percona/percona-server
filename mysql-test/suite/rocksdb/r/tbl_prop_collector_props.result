@@ -1,0 +1,32 @@
+CREATE TABLE t1 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5',
+KEY kk(k) COMMENT 'cfname=cf_x5g5') ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5')
+ENGINE=ROCKSDB;
+# Flush
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 100)
+SELECT i, i MOD 10 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DELETE FROM t1 WHERE id <= 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+idx	ssts	num_rows	deletes	merges	others
+kk	2	100	10	0	0
+PRIMARY	2	100	10	0	0
+# Compaction to the bottommost level drops the deleted rows
+SET GLOBAL rocksdb_compact_cf = 'cf_x5g5';
+idx	num_rows	deletes
+kk	90	0
+PRIMARY	90	0
+# Bulk load (SstFileWriter + ingestion)
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 50)
+SELECT i, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+num_rows	deletes
+50	0
+SELECT COUNT(*), SUM(k) FROM t1;
+COUNT(*)	SUM(k)
+90	405
+SELECT COUNT(*), SUM(k) FROM t2;
+COUNT(*)	SUM(k)
+50	1275
+DROP TABLE t1, t2;

@@ -1,0 +1,61 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), commit 319374ae6 (9.5.0/9.6.0
+# table properties rework): NotifyCollectTableCollectorsOnFinish() now gives
+# every collector its own UserCollectedProperties map, merges them once and
+# adds them to the property block after the loop; debug builds assert that two
+# collectors never write the same property name and that property block keys
+# are added in sorted order (rocksdb/table/meta_blocks.cc:62,172-179,221-252).
+# A collector whose Finish() fails no longer contributes properties.
+#
+# MyRocks path: Rdb_tbl_prop_coll is registered for every CF
+# (rdb_cf_options.cc:48-50) next to the built-in BlockBasedTablePropertiesCollector
+# (block_based_table_builder.cc:237) and, for bulk load, SstFileWriter's own
+# collector. It writes "__indexstats__" (properties_collector.cc:191,255) and
+# Finish() always returns OK, so the "non-OK Finish" change cannot apply.
+# INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP reads the per-index stats back from
+# "__indexstats__".
+#
+# Correct behaviour: SSTs written by flush, compaction and bulk load carry the
+# right per-index stats, and the debug assertions do not fire (both builds in
+# this check are debug builds, so a duplicate name would crash the server).
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5',
+  KEY kk(k) COMMENT 'cfname=cf_x5g5') ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_x5g5')
+  ENGINE=ROCKSDB;
+
+--let $pk1 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'PRIMARY'`
+--let $sk1 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'kk'`
+--let $pk2 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' AND INDEX_NAME = 'PRIMARY'`
+
+--echo # Flush
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 100)
+  SELECT i, i MOD 10 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DELETE FROM t1 WHERE id <= 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--disable_query_log
+--eval SELECT IF(INDEX_NUMBER = $pk1, 'PRIMARY', 'kk') AS idx, COUNT(*) AS ssts, SUM(NUM_ROWS) AS num_rows, SUM(ENTRY_DELETES + ENTRY_SINGLEDELETES) AS deletes, SUM(ENTRY_MERGES) AS merges, SUM(ENTRY_OTHERS) AS others FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN ($pk1, $sk1) GROUP BY idx ORDER BY idx
+--enable_query_log
+
+--echo # Compaction to the bottommost level drops the deleted rows
+SET GLOBAL rocksdb_compact_cf = 'cf_x5g5';
+--disable_query_log
+--eval SELECT IF(INDEX_NUMBER = $pk1, 'PRIMARY', 'kk') AS idx, SUM(NUM_ROWS) AS num_rows, SUM(ENTRY_DELETES + ENTRY_SINGLEDELETES) AS deletes FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN ($pk1, $sk1) GROUP BY idx ORDER BY idx
+--enable_query_log
+
+--echo # Bulk load (SstFileWriter + ingestion)
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 50)
+  SELECT i, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+--disable_query_log
+--eval SELECT SUM(NUM_ROWS) AS num_rows, SUM(ENTRY_DELETES + ENTRY_SINGLEDELETES) AS deletes FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER = $pk2
+--enable_query_log
+
+SELECT COUNT(*), SUM(k) FROM t1;
+SELECT COUNT(*), SUM(k) FROM t2;
+
+DROP TABLE t1, t2;

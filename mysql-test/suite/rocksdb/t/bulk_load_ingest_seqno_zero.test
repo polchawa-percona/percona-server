@@ -1,0 +1,84 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), durability triage extra item X3.
+# No HISTORY.md line of its own; it comes with the allow_db_generated_files
+# work (9.5/9.6). ExternalSstFileIngestionJob::GetIngestedFileInfo() now
+# rejects, for every ingest and not only with allow_db_generated_files:
+#   - a file whose table property key_largest_seqno is > 0 (Corruption
+#     "External file has non zero largest sequence number",
+#     rocksdb/db/external_sst_file_ingestion_job.cc:842-850);
+#   - a file with a range tombstone whose seqno != 0 (Corruption,
+#     external_sst_file_ingestion_job.cc:885-889).
+#
+# MyRocks path: bulk load (rocksdb_bulk_load=1, also rocksdb_bulk_load_allow_sk
+# and rocksdb_bulk_load_allow_unsorted) writes SST files with
+# Rdb_sst_info / SstFileWriter (rdb_sst_info.cc:74,102,131: Open, Add,
+# Finish only, never DeleteRange) and ingests them with IngestExternalFiles
+# (ha_rocksdb.cc:3783-3810, options at ha_rocksdb.cc:3191-3198). SstFileWriter
+# writes every key with seqno 0 (rocksdb/table/sst_file_writer.cc:113-115;
+# range tombstones too, :212), and BlockBasedTableBuilder starts
+# key_largest_seqno at 0 and takes the max over added keys
+# (rocksdb/table/block_based/block_based_table_builder.cc:941,1023), so the
+# property is 0 and neither new check fires. SQL cannot produce an external
+# file that trips them.
+#
+# Correct behaviour (both RocksDB versions): every bulk-load variant ingests
+# its files, all rows are readable through PK and SK, the data is in SST
+# files (ROCKSDB_INDEX_FILE_MAP, no flush was done) with no delete entries,
+# and no "Failed to bulk load" warning (ha_rocksdb.cc:4277-4282) is logged.
+# The table t1 is first filled, flushed and truncated, so the DB itself
+# holds deletes for the old index before the ingest.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, k INT, KEY kk(k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT, v INT,
+  PRIMARY KEY (pk) COMMENT 'rev:cf_x3g7_rev') ENGINE=ROCKSDB;
+CREATE TABLE t3 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 500)
+  SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+TRUNCATE TABLE t1;
+
+--let $pk1 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'PRIMARY'`
+--let $sk1 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'kk'`
+--let $pk2 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' AND INDEX_NAME = 'PRIMARY'`
+--let $pk3 = `SELECT INDEX_NUMBER FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't3' AND INDEX_NAME = 'PRIMARY'`
+
+--echo # Sorted bulk load with secondary key (t1), reverse CF (t2)
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+  SELECT i, 1001 - i FROM s;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+  SELECT 1001 - i, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = 0;
+
+--echo # Unsorted bulk load (t3)
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t3 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+  SELECT (i * 7919) MOD 1000 + 1, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 0;
+
+--echo # All rows readable
+SELECT COUNT(*), SUM(pk), SUM(k), MIN(pk), MAX(pk) FROM t1;
+SELECT COUNT(*), SUM(k) FROM t1 FORCE INDEX (kk) WHERE k BETWEEN 1 AND 1000;
+SELECT pk, k FROM t1 FORCE INDEX (kk) WHERE k IN (1, 500, 1000) ORDER BY k;
+SELECT COUNT(*), SUM(pk), SUM(v) FROM t2;
+SELECT pk, v FROM t2 ORDER BY pk DESC LIMIT 3;
+SELECT COUNT(*), SUM(pk), SUM(v), MIN(pk), MAX(pk) FROM t3;
+
+--echo # The rows are in ingested SST files, with no delete entries
+--disable_query_log
+--eval SELECT CASE INDEX_NUMBER WHEN $pk1 THEN 't1.PRIMARY' WHEN $sk1 THEN 't1.kk' WHEN $pk2 THEN 't2.PRIMARY' ELSE 't3.PRIMARY' END AS idx, SUM(NUM_ROWS) AS num_rows, SUM(ENTRY_DELETES + ENTRY_SINGLEDELETES) AS deletes, SUM(ENTRY_MERGES) AS merges FROM INFORMATION_SCHEMA.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN ($pk1, $sk1, $pk2, $pk3) GROUP BY idx ORDER BY idx
+--enable_query_log
+
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN = Failed to bulk load
+--source include/search_pattern.inc
+--let SEARCH_PATTERN = External file has
+--source include/search_pattern.inc
+
+DROP TABLE t1, t2, t3;

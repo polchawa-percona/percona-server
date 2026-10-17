@@ -1,0 +1,56 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, k INT, KEY kk(k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (pk INT, v INT,
+PRIMARY KEY (pk) COMMENT 'rev:cf_x3g7_rev') ENGINE=ROCKSDB;
+CREATE TABLE t3 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 500)
+SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+TRUNCATE TABLE t1;
+# Sorted bulk load with secondary key (t1), reverse CF (t2)
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+SELECT i, 1001 - i FROM s;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+SELECT 1001 - i, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = 0;
+# Unsorted bulk load (t3)
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t3 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 1000)
+SELECT (i * 7919) MOD 1000 + 1, i FROM s;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 0;
+# All rows readable
+SELECT COUNT(*), SUM(pk), SUM(k), MIN(pk), MAX(pk) FROM t1;
+COUNT(*)	SUM(pk)	SUM(k)	MIN(pk)	MAX(pk)
+1000	500500	500500	1	1000
+SELECT COUNT(*), SUM(k) FROM t1 FORCE INDEX (kk) WHERE k BETWEEN 1 AND 1000;
+COUNT(*)	SUM(k)
+1000	500500
+SELECT pk, k FROM t1 FORCE INDEX (kk) WHERE k IN (1, 500, 1000) ORDER BY k;
+pk	k
+1000	1
+501	500
+1	1000
+SELECT COUNT(*), SUM(pk), SUM(v) FROM t2;
+COUNT(*)	SUM(pk)	SUM(v)
+1000	500500	500500
+SELECT pk, v FROM t2 ORDER BY pk DESC LIMIT 3;
+pk	v
+1000	1
+999	2
+998	3
+SELECT COUNT(*), SUM(pk), SUM(v), MIN(pk), MAX(pk) FROM t3;
+COUNT(*)	SUM(pk)	SUM(v)	MIN(pk)	MAX(pk)
+1000	500500	500500	1	1000
+# The rows are in ingested SST files, with no delete entries
+idx	num_rows	deletes	merges
+t1.kk	1000	0	0
+t1.PRIMARY	1000	0	0
+t2.PRIMARY	1000	0	0
+t3.PRIMARY	1000	0	0
+Pattern "Failed to bulk load" not found
+Pattern "External file has" not found
+DROP TABLE t1, t2, t3;

@@ -1,0 +1,70 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), HISTORY 9.4.0 bug fix
+# "Fix a rare case in which a hard-linked WAL in a Checkpoint is not fully
+# synced" (H51) and the related rewrite of
+# DBImpl::GetLiveFilesStorageInfo() (rocksdb/db/db_filesnapshot.cc:397-491):
+#  - FlushWAL(sync=false) instead of FlushWAL(track_and_verify_wals_in_manifest)
+#  - WAL list is cut at max_log_num = logfile_number_
+#  - WALs still open (DBImpl::GetOpenWalSizes, db_impl.cc:1569) are copied with
+#    the known flushed size instead of hard linked.
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint ->
+# rocksdb_create_checkpoint() (ha_rocksdb.cc:323) -> Checkpoint::CreateCheckpoint
+# with log_size_for_flush = 0. TransactionDB forces allow_2pc = true
+# (pessimistic_transaction_db.cc:293), so the memtables are always flushed
+# (db_filesnapshot.cc:212) and the WALs that are kept are those >=
+# MinLogNumberToKeep, which an XA PREPAREd transaction pins. MyRocks runs with
+# track_and_verify_wals_in_manifest = true (ha_rocksdb.cc:747), so opening the
+# checkpoint also verifies the manifest/WAL pair.
+#
+# Correct behaviour: a server started on the checkpoint sees exactly the rows
+# committed before the checkpoint. rocksdb974_checkpoint_restart_xa adds a
+# prepared transaction that pins an older WAL.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(64), KEY kv(v)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT,
+                 KEY kv(v) COMMENT 'cfname=rev:cf_rdb974_x3g5') ENGINE=ROCKSDB;
+
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 200)
+  SELECT i, CONCAT('row-', i) FROM s;
+INSERT INTO t2 WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < 200)
+  SELECT i, i * 10 FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Rows only in the memtable / WAL at checkpoint time.
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 201 UNION ALL SELECT i+1 FROM s WHERE i < 300)
+  SELECT i, CONCAT('row-', i) FROM s;
+DELETE FROM t2 WHERE id <= 50;
+
+--let $checkpoint = $MYSQL_TMP_DIR/rdb974_x3g5_ck
+--replace_result $checkpoint [CHECKPOINT]
+--eval SET GLOBAL rocksdb_create_checkpoint = '$checkpoint'
+--file_exists $checkpoint/CURRENT
+
+# Changes after the checkpoint must not be in it.
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 301 UNION ALL SELECT i+1 FROM s WHERE i < 400)
+  SELECT i, CONCAT('row-', i) FROM s;
+DELETE FROM t2 WHERE id > 190;
+
+--echo # Server on the checkpoint
+--let $restart_parameters = restart: --rocksdb_datadir=$checkpoint
+--replace_result $checkpoint [CHECKPOINT]
+--source include/restart_mysqld.inc
+
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t2;
+SELECT COUNT(*) FROM t1 FORCE INDEX(kv) WHERE v LIKE 'row-%';
+SELECT COUNT(*), SUM(v) FROM t2 FORCE INDEX(kv) WHERE v >= 0;
+SELECT * FROM t1 WHERE id = 1000;
+SELECT * FROM t2 WHERE id = 100;
+CHECK TABLE t1, t2;
+
+--echo # Server on the original datadir
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+SELECT COUNT(*), MIN(id), MAX(id) FROM t1;
+SELECT COUNT(*), MIN(id), MAX(id), SUM(v) FROM t2;
+
+DROP TABLE t1, t2;
+--force-rmdir $checkpoint

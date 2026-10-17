@@ -1,0 +1,102 @@
+# RocksDB 9.3.1 -> 9.7.4 (PS-9766, PR 6263), commit 755010f8d (RocksDB #12862,
+# in 9.5.0): LevelIterator::Seek() compares the prefix of the seek target with
+# the prefix of the next file's first key bytewise (Slice::compare) instead of
+# with the user comparator (rocksdb/db/version_set.cc:1281-1285). When the
+# prefixes differ, prefix_exhausted_ is set and the iterator does not move into
+# the next file.
+#
+# MyRocks path: "rev:" column families use rocksdb::ReverseBytewiseComparator()
+# (rdb_cf_options.cc:339), other CFs BytewiseComparator() (rdb_cf_options.cc:341).
+# Only "== 0" is tested, and both comparators return 0 exactly for equal bytes,
+# so the result must be unchanged. Equality lookups on a key prefix that is at
+# least prefix_extractor long run with prefix seek (total_order_seek = false).
+#
+# Correct behaviour: on L1+ levels with several SST files, equality lookups on
+# present and absent prefixes and range scans return exactly the stored rows in
+# both forward and reverse column families.
+
+--source include/have_rocksdb.inc
+
+# capped:8 = 4-byte index id + 4-byte INT k.
+CREATE TABLE t_rev (k INT NOT NULL, id INT NOT NULL, pad CHAR(200) NOT NULL,
+  PRIMARY KEY (k, id) COMMENT 'cfname=rev:cf_x4g5') ENGINE=ROCKSDB;
+CREATE TABLE t_fwd (k INT NOT NULL, id INT NOT NULL, pad CHAR(200) NOT NULL,
+  PRIMARY KEY (k, id) COMMENT 'cfname=cf_x4g5f') ENGINE=ROCKSDB;
+
+SET SESSION cte_max_recursion_depth = 10000;
+# Odd k only, 20 rows per k: absent prefixes fall between files and inside them.
+INSERT INTO t_rev
+  WITH RECURSIVE s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i < 1999)
+  SELECT (i DIV 20) * 2 + 1, i MOD 20 + 1, REPEAT('x', 200) FROM s;
+INSERT INTO t_fwd
+  WITH RECURSIVE s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i < 1999)
+  SELECT (i DIV 20) * 2 + 1, i MOD 20 + 1, REPEAT('x', 200) FROM s;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_x4g5';
+SET GLOBAL rocksdb_compact_cf = 'cf_x4g5f';
+
+SELECT CF_NAME, COUNT(*) > 3 AS several_files, MIN(LEVEL) > 0 AS not_l0
+  FROM INFORMATION_SCHEMA.ROCKSDB_LIVE_FILES_METADATA
+  WHERE CF_NAME IN ('rev:cf_x4g5', 'cf_x4g5f')
+  GROUP BY CF_NAME ORDER BY CF_NAME;
+
+--disable_query_log
+let $bad = 0;
+let $k = 0;
+while ($k <= 201)
+{
+  let $exp = `SELECT IF($k % 2 = 1 AND $k < 200, 20, 0)`;
+  let $c1 = `SELECT COUNT(*) FROM t_rev WHERE k = $k`;
+  let $c2 = `SELECT COUNT(*) FROM t_fwd WHERE k = $k`;
+  let $c3 = `SELECT COUNT(*) FROM t_rev WHERE k = $k AND id >= 10`;
+  let $c4 = `SELECT COUNT(*) FROM t_fwd WHERE k = $k AND id >= 10`;
+  let $m1 = `SELECT IFNULL(MAX(id), 0) FROM t_rev WHERE k = $k`;
+  let $m2 = `SELECT IFNULL(MIN(id), 0) FROM t_fwd WHERE k = $k`;
+  let $exp3 = `SELECT IF($exp = 20, 11, 0)`;
+  let $expmax = `SELECT IF($exp = 20, 20, 0)`;
+  let $expmin = `SELECT IF($exp = 20, 1, 0)`;
+  if ($c1 != $exp)
+  {
+    let $bad = 1;
+    --echo t_rev k=$k count=$c1 expected=$exp
+  }
+  if ($c2 != $exp)
+  {
+    let $bad = 1;
+    --echo t_fwd k=$k count=$c2 expected=$exp
+  }
+  if ($c3 != $exp3)
+  {
+    let $bad = 1;
+    --echo t_rev k=$k id>=10 count=$c3 expected=$exp3
+  }
+  if ($c4 != $exp3)
+  {
+    let $bad = 1;
+    --echo t_fwd k=$k id>=10 count=$c4 expected=$exp3
+  }
+  if ($m1 != $expmax)
+  {
+    let $bad = 1;
+    --echo t_rev k=$k max=$m1 expected=$expmax
+  }
+  if ($m2 != $expmin)
+  {
+    let $bad = 1;
+    --echo t_fwd k=$k min=$m2 expected=$expmin
+  }
+  inc $k;
+}
+--echo equality lookups wrong: $bad
+--enable_query_log
+
+SELECT COUNT(*), SUM(k), SUM(id) FROM t_rev;
+SELECT COUNT(*), SUM(k), SUM(id) FROM t_fwd;
+SELECT COUNT(*) FROM t_rev WHERE k BETWEEN 50 AND 150;
+SELECT COUNT(*) FROM t_fwd WHERE k BETWEEN 50 AND 150;
+SELECT k, id FROM t_rev WHERE k IN (2, 99, 100, 101) ORDER BY k DESC, id DESC LIMIT 3;
+SELECT k, id FROM t_fwd WHERE k IN (2, 99, 100, 101) ORDER BY k, id LIMIT 3;
+
+DROP TABLE t_rev, t_fwd;
+SET SESSION cte_max_recursion_depth = DEFAULT;

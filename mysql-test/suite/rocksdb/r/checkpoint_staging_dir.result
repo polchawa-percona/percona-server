@@ -1,0 +1,25 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+# 1. Stale staging directory with files only
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+# Same with a temporary checkpoint
+SET SESSION rocksdb_create_temporary_checkpoint = '[CHECKPOINT]';
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+# 2. Staging directory that cannot be cleaned
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+ERROR HY000: Got error <ERR> from ROCKSDB
+SET SESSION rocksdb_create_temporary_checkpoint = '[CHECKPOINT]';
+ERROR HY000: Got error <ERR> from ROCKSDB
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint IS NULL AS no_tmp_checkpoint;
+no_tmp_checkpoint
+1
+# The server still works and a later checkpoint succeeds
+INSERT INTO t1 VALUES (4, 40);
+SET GLOBAL rocksdb_create_checkpoint = '[CHECKPOINT]';
+SELECT * FROM t1 ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+DROP TABLE t1;

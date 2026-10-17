@@ -1,0 +1,63 @@
+--source include/have_rocksdb.inc
+
+#
+# RocksDB 9.6.0 HISTORY, Bug Fixes (PR 6263 review item H29):
+#   "Fix a bug where file snapshot functions like backup, checkpoint may
+#    attempt to copy a non-existing manifest file. #12882"
+#   (RocksDB commit 9883b5f49, db/version_set.cc ProcessManifestWrites)
+#
+# In RocksDB 9.3.1, when a version edit had to start a new MANIFEST and
+# failed before the new file was created (LoadTableHandlers() failing with
+# paranoid_checks), manifest_io_status stayed OK. The code then set
+# manifest_file_number_ to the number of the MANIFEST that was never
+# written. DB::GetLiveFiles(), which Checkpoint uses, reports that number,
+# so a later checkpoint tries to copy a missing MANIFEST.
+#
+# MyRocks path: SET GLOBAL rocksdb_create_checkpoint calls
+# rocksdb_create_checkpoint() (ha_rocksdb.cc:323-351), which runs
+# rocksdb::Checkpoint::CreateCheckpoint(). rocksdb_max_manifest_file_size
+# (ha_rocksdb.cc:1886-1891) set to 1 makes every version edit start a new
+# MANIFEST, the code path the fix changes.
+#
+# The failing case needs LoadTableHandlers() to fail on a table open during
+# a MANIFEST roll, with the table not already in the table cache. That needs
+# a RocksDB SyncPoint or a fault-injection file system, which MyRocks does
+# not have; failing open() calls from outside (LD_PRELOAD) hit other opens
+# first. The bad state also heals at the next version edit, because the
+# error branch resets descriptor_log_, and CreateCheckpoint() flushes
+# non-empty memtables first. So this MTR test is coverage only: it checks
+# the success path of the same code with a MANIFEST roll on every flush.
+#
+# Correct behaviour: every checkpoint succeeds, and the MANIFEST named by
+# the checkpoint's CURRENT file exists in the checkpoint directory.
+#
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--let $ckpt_base = $MYSQL_TMP_DIR/rdb974_h29_ckpt
+--let $n = 1
+while ($n <= 5) {
+  --disable_query_log
+  eval INSERT INTO t1 VALUES ($n, $n);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --enable_query_log
+  --let $ckpt = $ckpt_base$n
+  --disable_query_log
+  eval SET GLOBAL rocksdb_create_checkpoint = '$ckpt';
+  --enable_query_log
+  --let CKPT_DIR = $ckpt
+  perl;
+    my $d = $ENV{CKPT_DIR};
+    open(my $fh, '<', "$d/CURRENT") or die "no CURRENT in checkpoint: $!";
+    my $cur = <$fh>;
+    close($fh);
+    chomp $cur;
+    my $ok = ($cur =~ /^MANIFEST-\d+$/ && -f "$d/$cur") ? "present" : "MISSING";
+    print "checkpoint CURRENT manifest: $ok\n";
+  EOF
+  --force-rmdir $ckpt
+  --inc $n
+}
+
+SELECT COUNT(*) FROM t1;
+DROP TABLE t1;

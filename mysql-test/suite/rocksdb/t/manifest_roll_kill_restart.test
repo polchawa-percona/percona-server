@@ -1,0 +1,67 @@
+# RocksDB 9.5.0 HISTORY (Bug Fixes): "Fixed a bug in handling MANIFEST write
+# error that caused the latest valid MANIFEST file to get deleted, resulting
+# in the DB being unopenable." (rocksdb commit 5aa675457, db/version_set.cc
+# VersionSet::ProcessManifestWrites: a failed WriteCurrentStateToManifest()
+# on a new MANIFEST now sets manifest_io_status, so manifest_file_number_ is
+# not moved to the bad file and the MANIFEST named by CURRENT is not purged.)
+#
+# MyRocks does not abort on a background IOError (only on Corruption,
+# storage/rocksdb/event_listener.cc:110-118), and
+# rocksdb_io_error_action=IGNORE_ERROR (ha_rocksdb.cc:17436) never aborts.
+# So with 9.3.1 the server could keep running after the good MANIFEST was
+# deleted and fail to start at the next restart.
+#
+# The write error itself needs fault injection that MyRocks cannot do from
+# MTR; it was reproduced outside MTR with an LD_PRELOAD shim during the
+# PS-9766 review of the RocksDB 9.7.4 upgrade. This test covers the
+# code path the fix touched without the error: with
+# rocksdb_max_manifest_file_size=1 every version edit rolls to a new
+# MANIFEST (ProcessManifestWrites new_descriptor_log branch). After many rolls
+# and kill -9, the MANIFEST named by CURRENT must exist, the server must
+# start, and all rows must be there.
+
+--source include/have_rocksdb.inc
+
+SELECT @@global.rocksdb_max_manifest_file_size;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--let $i = 1
+--disable_query_log
+while ($i <= 20)
+{
+  --eval INSERT INTO t1 VALUES ($i, $i)
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --inc $i
+}
+--enable_query_log
+
+--let rocksdb_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+--perl
+  my $dir = $ENV{'rocksdb_dir'};
+  open(my $fh, '<', "$dir/CURRENT") or die "no CURRENT: $!";
+  my $cur = <$fh>;
+  close($fh);
+  chomp $cur;
+  die "CURRENT names a missing MANIFEST $cur" unless -f "$dir/$cur";
+  print "CURRENT names an existing MANIFEST\n";
+EOF
+
+--source include/kill_and_restart_mysqld.inc
+
+--perl
+  my $dir = $ENV{'rocksdb_dir'};
+  open(my $fh, '<', "$dir/CURRENT") or die "no CURRENT: $!";
+  my $cur = <$fh>;
+  close($fh);
+  chomp $cur;
+  die "CURRENT names a missing MANIFEST $cur" unless -f "$dir/$cur";
+  print "CURRENT names an existing MANIFEST\n";
+EOF
+
+SELECT COUNT(*), SUM(v) FROM t1;
+INSERT INTO t1 VALUES (21, 21);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*), SUM(v) FROM t1;
+
+DROP TABLE t1;

@@ -1,0 +1,75 @@
+--source include/have_rocksdb.inc
+
+#
+# RocksDB 9.6.0 HISTORY, Bug Fixes (PR 6263 review item the RocksDB 9.6.0 write_unprepared fix):
+#   "Fixed a bug where we set unprep_seqs_ even when WriteImpl() fails. ...
+#    This may have incorrectly caused iteration creation failure for
+#    unvalidated writes or returned wrong result for
+#    WriteUnpreparedTxn::GetUnpreparedSequenceNumbers()."
+#   (RocksDB commit b99baa5ae, facebook/rocksdb#12927)
+#
+# The fix is in WriteUnpreparedTxn::FlushWriteBatchToDBInternal()
+# (utilities/transactions/write_unprepared_txn.cc): unprep_seqs_ is now
+# updated only when DBImpl::WriteImpl() succeeded.
+#
+# MyRocks path: rocksdb_write_policy=write_unprepared (ha_rocksdb.cc:794)
+# opens the TransactionDB with WriteUnpreparedTxn, and the session variable
+# rocksdb_write_batch_flush_threshold (ha_rocksdb.cc:1517-1522, copied into
+# TransactionOptions at ha_rocksdb.cc:5122-5123) makes the transaction flush
+# its batch to the DB while statements run. MyRocks sets a savepoint per
+# statement, so these flushes go through FlushWriteBatchWithSavePointToDB()
+# and FlushWriteBatchToDBInternal().
+#
+# The failing case needs WriteImpl() to fail during an unprepared flush.
+# When it does (for example after a background error), a debug server
+# aborts earlier, in WriteUnpreparedTxn::RollbackToSavePoint(), with both
+# RocksDB 9.3.1 and 9.7.4, before the state fixed by the RocksDB 9.6.0 write_unprepared fix is used (an
+# assertion inside the RocksDB library, not tested here). Other ways to make
+# WriteImpl() fail are not reachable: FlushWriteBatchToDBInternal() clears
+# disableWAL itself, MyRocks never sets no_slowdown or low_pri, and
+# rocksdb_protection_bytes_per_key=1/2/4 hits a WriteBatch assertion first
+# (PS-11835, rocksdb.protection_bytes_per_key_invalid).
+#
+# This test covers the success path that the fix touches: unprepared
+# flushes, a statement rollback over flushed data (a multi-row INSERT that
+# fails on a duplicate key rolls back to the statement savepoint,
+# Rdb_transaction::rollback_to_stmt_savepoint, ha_rocksdb.cc:4620), reads of
+# the transaction's own flushed writes, commit and rollback. A user
+# ROLLBACK TO SAVEPOINT after writes is refused by MyRocks
+# (ER_ROLLBACK_TO_SAVEPOINT, ha_rocksdb.cc:4646), so it is not used.
+#
+# Correct behaviour: the transaction sees its own rows, the failed
+# statement leaves no rows behind, COMMIT keeps the rest, and ROLLBACK
+# removes everything the transaction wrote.
+#
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(200)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'committed');
+
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+
+--echo # Flushed writes, failed statement, own reads, commit.
+BEGIN;
+INSERT INTO t1 VALUES (10, REPEAT('x', 100)), (11, REPEAT('y', 100));
+UPDATE t1 SET v = 'updated' WHERE id = 11;
+SELECT id, LEFT(v, 7) AS v FROM t1 ORDER BY id;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (12, REPEAT('z', 100)), (13, REPEAT('w', 100)), (10, 'dup');
+SELECT id, LEFT(v, 7) AS v FROM t1 ORDER BY id;
+COMMIT;
+
+--echo # Flushed writes, then full rollback.
+BEGIN;
+INSERT INTO t1 VALUES (20, REPEAT('a', 100)), (21, REPEAT('b', 100)), (22, REPEAT('c', 100));
+DELETE FROM t1 WHERE id = 1;
+SELECT id FROM t1 ORDER BY id;
+ROLLBACK;
+
+--echo # Other sessions see only committed rows.
+connect (con1, localhost, root,,);
+SELECT id, LEFT(v, 7) AS v FROM t1 ORDER BY id;
+disconnect con1;
+connection default;
+
+SET SESSION rocksdb_write_batch_flush_threshold = 0;
+DROP TABLE t1;

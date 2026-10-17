@@ -1,0 +1,10 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+checkpoint CURRENT manifest: present
+checkpoint CURRENT manifest: present
+checkpoint CURRENT manifest: present
+checkpoint CURRENT manifest: present
+checkpoint CURRENT manifest: present
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+5
+DROP TABLE t1;

@@ -1,0 +1,46 @@
+CREATE TABLE t_rev (k INT NOT NULL, id INT NOT NULL, pad CHAR(200) NOT NULL,
+PRIMARY KEY (k, id) COMMENT 'cfname=rev:cf_x4g5') ENGINE=ROCKSDB;
+CREATE TABLE t_fwd (k INT NOT NULL, id INT NOT NULL, pad CHAR(200) NOT NULL,
+PRIMARY KEY (k, id) COMMENT 'cfname=cf_x4g5f') ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t_rev
+WITH RECURSIVE s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i < 1999)
+SELECT (i DIV 20) * 2 + 1, i MOD 20 + 1, REPEAT('x', 200) FROM s;
+INSERT INTO t_fwd
+WITH RECURSIVE s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i < 1999)
+SELECT (i DIV 20) * 2 + 1, i MOD 20 + 1, REPEAT('x', 200) FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_x4g5';
+SET GLOBAL rocksdb_compact_cf = 'cf_x4g5f';
+SELECT CF_NAME, COUNT(*) > 3 AS several_files, MIN(LEVEL) > 0 AS not_l0
+FROM INFORMATION_SCHEMA.ROCKSDB_LIVE_FILES_METADATA
+WHERE CF_NAME IN ('rev:cf_x4g5', 'cf_x4g5f')
+GROUP BY CF_NAME ORDER BY CF_NAME;
+CF_NAME	several_files	not_l0
+cf_x4g5f	1	1
+rev:cf_x4g5	1	1
+equality lookups wrong: 0
+SELECT COUNT(*), SUM(k), SUM(id) FROM t_rev;
+COUNT(*)	SUM(k)	SUM(id)
+2000	200000	21000
+SELECT COUNT(*), SUM(k), SUM(id) FROM t_fwd;
+COUNT(*)	SUM(k)	SUM(id)
+2000	200000	21000
+SELECT COUNT(*) FROM t_rev WHERE k BETWEEN 50 AND 150;
+COUNT(*)
+1000
+SELECT COUNT(*) FROM t_fwd WHERE k BETWEEN 50 AND 150;
+COUNT(*)
+1000
+SELECT k, id FROM t_rev WHERE k IN (2, 99, 100, 101) ORDER BY k DESC, id DESC LIMIT 3;
+k	id
+101	20
+101	19
+101	18
+SELECT k, id FROM t_fwd WHERE k IN (2, 99, 100, 101) ORDER BY k, id LIMIT 3;
+k	id
+99	1
+99	2
+99	3
+DROP TABLE t_rev, t_fwd;
+SET SESSION cte_max_recursion_depth = DEFAULT;
