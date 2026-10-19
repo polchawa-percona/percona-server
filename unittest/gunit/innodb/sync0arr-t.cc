@@ -1,4 +1,5 @@
 /* Copyright (c) 2026, Oracle and/or its affiliates.
+   Copyright (c) 2026, Percona LLC and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,6 +26,7 @@
 
 #include <gtest/gtest.h>
 #include <cstdlib>
+#include <new>
 #include <vector>
 
 #include "os0event.h"
@@ -52,6 +54,9 @@ struct rw_lock_holder {
 
   rw_lock_holder() {
     lock = static_cast<rw_lock_t *>(std::malloc(sizeof(rw_lock_t)));
+    if (lock == nullptr) {
+      throw std::bad_alloc();
+    }
     rw_lock_create(PSI_NOT_INSTRUMENTED, lock, LATCH_ID_BUF_BLOCK_LOCK);
   }
 
@@ -61,21 +66,14 @@ struct rw_lock_holder {
   }
 };
 
-class sync0arr : public ::testing::Test {
+class sync0arr : public ::testing::TestWithParam<ulint> {
  protected:
-  /* innodb_sync_array_size max. One slot per instance. */
-  static constexpr ulint k_n_arrays = 1024;
-  static constexpr ulint k_n_threads = 1024;
-  /* Old independent sampling fails with P=((n-1)/n)^n ~ 1/e per call.
-  1024 successes is enough to expose that; 2/2 is not. */
-  static constexpr int k_trials = 1024;
-
   void SetUp() override {
     saved_sync_array_size = srv_sync_array_size;
-    srv_sync_array_size = k_n_arrays;
+    srv_sync_array_size = GetParam();
     os_event_global_init();
-    sync_check_init(k_n_threads);
-    ASSERT_EQ(sync_array_size, k_n_arrays);
+    sync_check_init(GetParam());
+    ASSERT_EQ(sync_array_size, GetParam());
     ASSERT_EQ(sync_wait_array[0]->n_cells, 1UL);
   }
 
@@ -88,24 +86,36 @@ class sync0arr : public ::testing::Test {
   ulong saved_sync_array_size{1};
 };
 
-TEST_F(sync0arr, reserve_succeeds_when_one_instance_has_space) {
+/* Start just after the free instance, forcing a complete walk and wraparound.
+Repeated sampling of this index can never find the free cell. */
+struct first_full_instance_indexer {
+  static size_t get_rnd_index() {
+    EXPECT_GT(sync_array_size, 1UL)
+        << "Single-array path must not sample a timer";
+    return 1;
+  }
+};
+
+TEST_P(sync0arr, reserve_succeeds_when_one_instance_has_space) {
   /* Destroy cells before lock: declare lock first. */
   rw_lock_holder lock;
-  std::vector<reserved_cell> filled(k_n_arrays - 1);
+  std::vector<reserved_cell> filled(GetParam() - 1);
 
-  for (ulint i = 0; i < k_n_arrays - 1; ++i) {
-    filled[i].arr = sync_wait_array[i];
+  for (ulint i = 0; i < GetParam() - 1; ++i) {
+    filled[i].arr = sync_wait_array[i + 1];
     filled[i].cell = sync_array_reserve_cell(filled[i].arr, lock.lock,
                                              RW_LOCK_S, UT_LOCATION_HERE);
     ASSERT_NE(filled[i].cell, nullptr) << "array " << i;
   }
 
-  for (int trial = 0; trial < k_trials; ++trial) {
-    reserved_cell extra;
-    extra.arr = sync_array_get_and_reserve_cell(lock.lock, RW_LOCK_S,
-                                                UT_LOCATION_HERE, &extra.cell);
-    ASSERT_NE(extra.cell, nullptr) << "trial " << trial;
-  }
+  reserved_cell extra;
+  extra.arr =
+      sync_array_get_and_reserve_cell_with_indexer<first_full_instance_indexer>(
+          lock.lock, RW_LOCK_S, UT_LOCATION_HERE, &extra.cell);
+  ASSERT_NE(extra.cell, nullptr);
+  EXPECT_EQ(extra.arr, sync_wait_array[0]);
 }
+
+INSTANTIATE_TEST_SUITE_P(array_sizes, sync0arr, ::testing::Values(1UL, 1024UL));
 
 }  // namespace innodb_sync0arr_unittest

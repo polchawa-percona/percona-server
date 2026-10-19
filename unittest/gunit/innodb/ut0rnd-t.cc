@@ -40,18 +40,31 @@
 
 namespace innodb_ut0rnd_unittest {
 
-/* Live get_rnd_index() path. On CPUs whose RDTSC low bits stick
-(strides 20-36, 64), dropping the XOR leaves few %64 buckets. */
-TEST(ut0counter, get_rnd_index_covers_mod64) {
-  if (my_timer_cycles() == 0) {
-    GTEST_SKIP() << "my_timer_cycles() is 0";
+/* Exercise the production path with reproducible samples, independent of the
+host timer's availability, frequency, or virtualization. */
+TEST(ut0counter, fixed_stride_bucket_coverage) {
+  for (size_t stride = 1; stride <= 64; ++stride) {
+    for (size_t modulus : {32U, 64U, 128U, 1024U}) {
+      for (size_t start : {1U, 31U, 63U, 127U}) {
+        SCOPED_TRACE(::testing::Message() << "stride=" << stride << " modulus="
+                                          << modulus << " start=" << start);
+        std::set<size_t> buckets;
+        /* The low log2(modulus)+6 input bits determine the bucket. */
+        for (size_t i = 0; i < modulus * 64; ++i) {
+          buckets.insert(
+              counter_indexer_t<>::get_rnd_index(start + i * stride) % modulus);
+        }
+        EXPECT_EQ(buckets.size(), modulus);
+      }
+    }
   }
-  std::set<size_t> buckets;
-  for (size_t i = 0; i < 4096; ++i) {
-    buckets.insert(counter_indexer_t<>::get_rnd_index() % 64);
-  }
-  EXPECT_EQ(buckets.size(), 64U);
 }
+
+#ifndef _WIN32
+TEST(ut0counter, zero_timer_uses_thread_hash) {
+  EXPECT_EQ(counter_indexer_t<>::get_rnd_index(0), ut::this_thread_hash);
+}
+#endif
 
 namespace old_impl {
 
