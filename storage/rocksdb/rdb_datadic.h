@@ -487,7 +487,9 @@ class Rdb_key_def {
     AUTO_INC = 9,
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
-    XA_PREPARED = 12,
+    // Not used by Percona Server. Reserved, as Facebook MySQL uses it.
+    SERVER_VERSION = 12,
+    XA_PREPARED = 13,
     END_DICT_INDEX_ID = 255
   };
 
@@ -1630,8 +1632,10 @@ class Rdb_ddl_manager : public Ensure_initialized {
   value: version, index_id
   index_id is 4 bytes
 
-  12. prepared XA transactions
-  key: Rdb_key_def::XA_PREPARED(0xc) + XID (RocksDB transaction name)
+  12. reserved (SERVER_VERSION in Facebook MySQL)
+
+  13. prepared XA transactions
+  key: Rdb_key_def::XA_PREPARED(0xd) + XID (RocksDB transaction name)
   value: version, flags, {cf_id, exclusive, key_length, key}*
   flags and exclusive are 1 byte, cf_id and key_length are 4 bytes.
   flags: XA_PREPARED_IN_TC (XA PREPARE completed in the transaction
