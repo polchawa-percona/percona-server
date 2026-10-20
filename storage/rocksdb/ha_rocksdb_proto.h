@@ -33,6 +33,11 @@
 #include "./rdb_global.h"
 #include "rdb_perf_context.h"
 
+struct HA_CREATE_INFO;
+namespace dd {
+class Table;
+}  // namespace dd
+
 namespace myrocks {
 
 class Rdb_tbl_def;
@@ -66,6 +71,11 @@ void rdb_get_global_perf_counters(Rdb_perf_counters *counters);
 void rdb_queue_save_stats_request();
 
 extern const std::string TRUNCATE_TABLE_PREFIX;
+
+/* DDL recovery log of CREATE TABLE, see rocksdb_recover_interrupted_ddl() */
+int rdb_ddl_log_create_table(const HA_CREATE_INFO *create_info,
+                             const dd::Table *table_obj);
+void rdb_ddl_log_create_done(const char *const name);
 
 /*
   Access to singleton objects.
