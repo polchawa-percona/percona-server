@@ -486,13 +486,14 @@ class Rdb_key_def {
     AUTO_INC = 9,
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
+    // 12 to 14 are used by SERVER_VERSION, XA_PREPARED and DDL_PENDING_ALTER.
     /*
       Recovery log of table DDL (CREATE, DROP, RENAME TABLE). MyRocks has no
       atomic DDL, so these records let startup bring the MyRocks dictionary
       in line with the server data dictionary after a crash, see
       rocksdb_recover_interrupted_ddl().
     */
-    DDL_RECOVERY_LOG = 13,
+    DDL_RECOVERY_LOG = 15,
     END_DICT_INDEX_ID = 255
   };
 
