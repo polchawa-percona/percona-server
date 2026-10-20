@@ -485,7 +485,8 @@ class Rdb_key_def {
     AUTO_INC = 9,
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
-    DDL_PENDING_ALTER = 12,
+    // 12 and 13 are used by SERVER_VERSION and XA_PREPARED.
+    DDL_PENDING_ALTER = 14,
     END_DICT_INDEX_ID = 255
   };
 
@@ -1643,9 +1644,9 @@ class Rdb_ddl_manager : public Ensure_initialized {
   value: version, index_id
   index_id is 4 bytes
 
-  12. pending inplace ALTER TABLE (index list changed, server data dictionary
+  14. pending inplace ALTER TABLE (index list changed, server data dictionary
   commit not confirmed yet)
-  key: Rdb_key_def::DDL_PENDING_ALTER(0xc) + dbname.tablename
+  key: Rdb_key_def::DDL_PENDING_ALTER(0xe) + dbname.tablename
   value: version, token, {cf_id, index_id}*n_indexes_of_the_table_before_alter
   version is 2 bytes, token is 8 bytes. cf_id and index_id are 4 bytes.
   The token is also stored in the server data dictionary entry of the table
