@@ -15,6 +15,7 @@
    USA */
 #include "ha_rockspart.h"
 #include "ha_rocksdb.h"
+#include "ha_rocksdb_proto.h"
 
 using myrocks::ha_rocksdb;
 namespace myrocks {
@@ -45,8 +46,20 @@ int ha_rockspart::create(const char *name, TABLE *form,
                          HA_CREATE_INFO *create_info, dd::Table *table_def) {
   int result =
       native_part::Partition_base::create(name, form, create_info, table_def);
+  /*
+    All partitions are created. On failure the record stays: the server
+    removes the table from its DD after this returns.
+  */
+  if (result == 0) myrocks::rdb_ddl_log_create_done(name);
   set_pk_can_be_decoded_for_each_partition();
   return result;
+}
+
+int ha_rockspart::get_extra_columns_and_keys(const HA_CREATE_INFO *create_info,
+                                             const List<Create_field> *,
+                                             const KEY *, uint,
+                                             dd::Table *table_obj) {
+  return myrocks::rdb_ddl_log_create_table(create_info, table_obj);
 }
 
 /**
