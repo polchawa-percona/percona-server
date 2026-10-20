@@ -488,15 +488,17 @@ class Rdb_key_def {
     AUTO_INC = 9,
     DROPPED_CF = 10,
     MAX_DD_INDEX_ID = 11,
-    DDL_PENDING_ALTER = 12,
+    // Not used by Percona Server. Reserved, as Facebook MySQL uses it.
+    SERVER_VERSION = 12,
+    XA_PREPARED = 13,
+    DDL_PENDING_ALTER = 14,
     /*
       Recovery log of table DDL (CREATE, DROP, RENAME TABLE). MyRocks has no
       atomic DDL, so these records let startup bring the MyRocks dictionary
       in line with the server data dictionary after a crash, see
       rocksdb_recover_interrupted_ddl().
     */
-    DDL_RECOVERY_LOG = 13,
-    XA_PREPARED = 14,
+    DDL_RECOVERY_LOG = 15,
     END_DICT_INDEX_ID = 255
   };
 
@@ -1672,18 +1674,10 @@ class Rdb_ddl_manager : public Ensure_initialized {
   value: version, index_id
   index_id is 4 bytes
 
-  12. pending inplace ALTER TABLE (index list changed, server data dictionary
-  commit not confirmed yet)
-  key: Rdb_key_def::DDL_PENDING_ALTER(0xc) + dbname.tablename
-  value: version, token, {cf_id, index_id}*n_indexes_of_the_table_before_alter
-  version is 2 bytes, token is 8 bytes. cf_id and index_id are 4 bytes.
-  The token is also stored in the server data dictionary entry of the table
-  that the ALTER TABLE commits (se_private_data). If the server data
-  dictionary has the token, the ALTER TABLE committed, otherwise the index
-  list before the ALTER TABLE is restored.
+  12. reserved (SERVER_VERSION in Facebook MySQL)
 
-  14. prepared XA transactions
-  key: Rdb_key_def::XA_PREPARED(0xe) + XID (RocksDB transaction name)
+  13. prepared XA transactions
+  key: Rdb_key_def::XA_PREPARED(0xd) + XID (RocksDB transaction name)
   value: version, flags, {cf_id, exclusive, key_length, key}*
   flags and exclusive are 1 byte, cf_id and key_length are 4 bytes.
   flags: XA_PREPARED_IN_TC (XA PREPARE completed in the transaction
@@ -1695,6 +1689,16 @@ class Rdb_ddl_manager : public Ensure_initialized {
   An externally coordinated (XA) transaction whose XA PREPARE completed in
   the server's transaction coordinator, kept until it is committed or
   rolled back, so that recovery keeps it prepared.
+
+  14. pending inplace ALTER TABLE (index list changed, server data dictionary
+  commit not confirmed yet)
+  key: Rdb_key_def::DDL_PENDING_ALTER(0xe) + dbname.tablename
+  value: version, token, {cf_id, index_id}*n_indexes_of_the_table_before_alter
+  version is 2 bytes, token is 8 bytes. cf_id and index_id are 4 bytes.
+  The token is also stored in the server data dictionary entry of the table
+  that the ALTER TABLE commits (se_private_data). If the server data
+  dictionary has the token, the ALTER TABLE committed, otherwise the index
+  list before the ALTER TABLE is restored.
 
   Data dictionary operations are atomic inside RocksDB. For example,
   when creating a table with two indexes, it is necessary to call Put
