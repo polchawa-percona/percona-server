@@ -1,0 +1,528 @@
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE orphan_probe;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at rocksdb_crash_before_finish_create_index during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY HASH (`id`)
+PARTITIONS 2 */
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+PRIMARY
+ka
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_after_index_create during: ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `kb` (`b`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+kb
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB ;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=ON
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+INDEX_NAME
+ka
+PRIMARY
+INSERT INTO t1 VALUES (4,40,40);
+UPDATE t1 SET b = b + 100 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	130
+2	20	20
+3	30	10
+4	40	40
+SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The data of the indexes that the table no longer uses is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+# The data of the rolled back indexes is reclaimed
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# INFORMATION_SCHEMA.TABLES statistics read the MyRocks definition
+# without opening the table. With an interrupted ALTER TABLE, the first
+# open may replace that definition: a statistics query that reads it
+# (debug sync point) makes the first open wait, before or after the data
+# dictionary commit.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_indexes_before_open FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+rocksdb_indexes_before_open
+3
+SET DEBUG_SYNC = 'rocksdb_table_statistics_pending_alter SIGNAL in_stats WAIT_FOR stats_done';
+SELECT TABLE_ROWS IS NOT NULL, DATA_LENGTH IS NOT NULL FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SET DEBUG_SYNC = 'now WAIT_FOR in_stats';
+SET DEBUG_SYNC = 'rocksdb_resolve_pending_alter_lock_busy SIGNAL open_waits';
+SHOW CREATE TABLE t1;
+# The first open waits for the statistics query
+SET DEBUG_SYNC = 'now WAIT_FOR open_waits TIMEOUT 60';
+SELECT COUNT(*) AS open_waits FROM performance_schema.processlist
+WHERE INFO = 'SHOW CREATE TABLE t1';
+open_waits
+1
+SET DEBUG_SYNC = 'now SIGNAL stats_done';
+TABLE_ROWS IS NOT NULL	DATA_LENGTH IS NOT NULL
+1	1
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+rocksdb_indexes
+2
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at crash_after_index_create during: ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD UNIQUE INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_indexes_before_open FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+rocksdb_indexes_before_open
+3
+SET DEBUG_SYNC = 'rocksdb_table_statistics_pending_alter SIGNAL in_stats WAIT_FOR stats_done';
+SELECT TABLE_ROWS IS NOT NULL, DATA_LENGTH IS NOT NULL FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+SET DEBUG_SYNC = 'now WAIT_FOR in_stats';
+SET DEBUG_SYNC = 'rocksdb_resolve_pending_alter_lock_busy SIGNAL open_waits';
+SHOW CREATE TABLE t1;
+# The first open waits for the statistics query
+SET DEBUG_SYNC = 'now WAIT_FOR open_waits TIMEOUT 60';
+SELECT COUNT(*) AS open_waits FROM performance_schema.processlist
+WHERE INFO = 'SHOW CREATE TABLE t1';
+open_waits
+1
+SET DEBUG_SYNC = 'now SIGNAL stats_done';
+TABLE_ROWS IS NOT NULL	DATA_LENGTH IS NOT NULL
+1	1
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `kb` (`b`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+rocksdb_indexes
+3
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# The cleanup after a committed ALTER TABLE fails (debug point): the
+# table stays usable with the new index list, and the next ALTER TABLE
+# first finishes the cleanup, or fails without changing anything.
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INSTANT;
+ERROR HY000: Internal error: Failed to finish an interrupted ALTER TABLE
+SET SESSION debug = "-d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INSTANT;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO t1 VALUES (4,40,40,4);
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# restart
+SELECT * FROM t1 ORDER BY id;
+id	a	b	c
+1	10	30	NULL
+2	20	20	NULL
+3	30	10	NULL
+4	40	40	4
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+DROP TABLE t1;
+# A server version without pending ALTER TABLE records left the index
+# list of MyRocks ahead of the data dictionary: the table cannot be
+# opened (instead of crashing the server) until the server is started
+# with rocksdb_validate_tables=2, which rebuilds the index list.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+# Crash at rocksdb_skip_pending_alter,crash_commit_after_prepare during: ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SET SESSION rocksdb_perf_context_level = 2;
+SELECT * FROM t1;
+ERROR HY000: Internal error: Table definition differs between MyRocks and the data dictionary
+# The failed open released the table handler (expect 0)
+SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+0
+# restart: --rocksdb_validate_tables=2
+# The rebuild fails (debug point): the open fails and releases the
+# table handler (expect 0)
+SET SESSION rocksdb_perf_context_level = 2;
+SET SESSION debug = "+d,rocksdb_open_fail_rebuild";
+SELECT * FROM t1;
+ERROR HY000: MyRocks failed creating new key definitions during alter.
+SET SESSION debug = "-d,rocksdb_open_fail_rebuild";
+SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+0
+SELECT * FROM t1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+INSERT INTO t1 VALUES (4,40,40);
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# restart

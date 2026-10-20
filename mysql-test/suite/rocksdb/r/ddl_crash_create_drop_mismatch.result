@@ -1,0 +1,38 @@
+# CREATE TABLE: crash before the MyRocks dictionary commit.
+# Crash at rocksdb_crash_before_create_table during: CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# DROP TABLE: crash after the MyRocks dictionary commit.
+# Crash at rocksdb_crash_after_delete_table during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+# The MyRocks data is gone, so the table must be gone too.
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_in_dd
+0
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1);
+SELECT * FROM t1;
+id	a
+1	1
+DROP TABLE t1;
