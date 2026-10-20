@@ -1,0 +1,52 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # A statement rollback must not release row locks taken by earlier
+--echo # statements of the transaction. If the failing statement rolls back to
+--echo # a savepoint taken before an earlier SELECT ... FOR UPDATE, the lock on
+--echo # the selected row is released and another session can change the row.
+--echo #
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--connect (con1,localhost,root,,)
+--connection con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+--let $i = 0
+while ($i < 2)
+{
+  --connection default
+  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  if ($i == 0)
+  {
+    --echo # Case $i: no failing statement (reference)
+  }
+  if ($i == 1)
+  {
+    --echo # Case $i: write statement after the locking read fails
+  }
+  BEGIN;
+  SELECT * FROM t1 WHERE a = 1 FOR UPDATE;
+  if ($i == 1)
+  {
+    --error ER_DUP_ENTRY
+    INSERT INTO t1 VALUES (5, 5), (2, 2);
+  }
+
+  --connection con1
+  --echo # Must time out: row a=1 is locked by the default connection.
+  --error ER_LOCK_WAIT_TIMEOUT
+  UPDATE t1 SET b = 100 WHERE a = 1;
+
+  --connection default
+  UPDATE t1 SET b = 10 WHERE a = 1;
+  COMMIT;
+  SELECT * FROM t1 ORDER BY a;
+  UPDATE t1 SET b = 1 WHERE a = 1;
+  --inc $i
+}
+
+--disconnect con1
+DROP TABLE t1;

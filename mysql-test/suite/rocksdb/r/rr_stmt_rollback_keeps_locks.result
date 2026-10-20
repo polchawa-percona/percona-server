@@ -1,0 +1,47 @@
+#
+# A statement rollback must not release row locks taken by earlier
+# statements of the transaction. If the failing statement rolls back to
+# a savepoint taken before an earlier SELECT ... FOR UPDATE, the lock on
+# the selected row is released and another session can change the row.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+# Case 0: no failing statement (reference)
+BEGIN;
+SELECT * FROM t1 WHERE a = 1 FOR UPDATE;
+a	b
+1	1
+# Must time out: row a=1 is locked by the default connection.
+UPDATE t1 SET b = 100 WHERE a = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE t1 SET b = 10 WHERE a = 1;
+COMMIT;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	2
+3	3
+UPDATE t1 SET b = 1 WHERE a = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+# Case 1: write statement after the locking read fails
+BEGIN;
+SELECT * FROM t1 WHERE a = 1 FOR UPDATE;
+a	b
+1	1
+INSERT INTO t1 VALUES (5, 5), (2, 2);
+ERROR 23000: Duplicate entry '2' for key 't1.PRIMARY'
+# Must time out: row a=1 is locked by the default connection.
+UPDATE t1 SET b = 100 WHERE a = 1;
+safe_process[682510]: Child process: 682511, exit: 1
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE t1 SET b = 10 WHERE a = 1;
+COMMIT;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	10
+2	2
+3	3
+UPDATE t1 SET b = 1 WHERE a = 1;
+DROP TABLE t1;
