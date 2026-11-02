@@ -1,0 +1,42 @@
+#
+# PS-9717: with rocksdb_log_dir set, MyRocks passes RocksDB an absolute
+# rocksdb_datadir path. Resolving it must follow symlinks before "..", like the
+# kernel does, or RocksDB would open a different directory than the one the
+# path really names.
+#
+--source include/have_rocksdb.inc
+--source include/not_windows.inc
+
+--let $base = $MYSQL_TMP_DIR/rdb_symlink
+--mkdir $base
+--mkdir $base/real
+--mkdir $base/real/sub
+--exec ln -s real/sub $base/lnk
+
+# $base/lnk/../rdbdata is $base/real/rdbdata, not $base/rdbdata
+--let $restart_parameters = restart: --rocksdb_datadir=$base/lnk/../rdbdata --rocksdb_log_dir=$base/logs
+--replace_result $base BASE
+--source include/restart_mysqld.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # The RocksDB files are in the directory the path names
+--file_exists $base/real/rdbdata/CURRENT
+--error 1
+--file_exists $base/rdbdata/CURRENT
+--echo # The info log is in rocksdb_log_dir and is named after the real path
+--replace_regex /^.*_real_rdbdata_LOG/PREFIX_real_rdbdata_LOG/
+--list_files $base/logs *_LOG
+
+--echo # The data is found again after a restart
+--replace_result $base BASE
+--source include/restart_mysqld.inc
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+--remove_file $base/lnk
+--force-rmdir $base

@@ -36,6 +36,7 @@
 #include <inttypes.h>
 #include <algorithm>
 #include <deque>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <set>
@@ -63,6 +64,7 @@
 
 /* RocksDB includes */
 #include "env/composite_env_wrapper.h"
+#include "file/filename.h"
 #include "monitoring/histogram.h"
 #include "rocksdb/compaction_filter.h"
 #include "rocksdb/convenience.h"
@@ -732,6 +734,7 @@ static unsigned long  // NOLINT(runtime/int)
     rocksdb_persistent_cache_size_mb = 0;
 static ulong rocksdb_info_log_level = rocksdb::InfoLogLevel::ERROR_LEVEL;
 static char *rocksdb_wal_dir = nullptr;
+static char *rocksdb_log_dir = nullptr;
 static char *rocksdb_persistent_cache_path = nullptr;
 static char *rocksdb_wsenv_path = nullptr;
 static bool rocksdb_use_io_uring = false;
@@ -1734,6 +1737,14 @@ static MYSQL_SYSVAR_STR(wal_dir, rocksdb_wal_dir,
                         PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
                         "DBOptions::wal_dir for RocksDB", nullptr, nullptr,
                         rocksdb_db_options->wal_dir.c_str());
+
+static MYSQL_SYSVAR_STR(log_dir, rocksdb_log_dir,
+                        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+                        "DBOptions::db_log_dir for RocksDB. Directory for the "
+                        "RocksDB info log files (LOG). If empty, the info log "
+                        "files are written to rocksdb_datadir",
+                        nullptr, nullptr,
+                        rocksdb_db_options->db_log_dir.c_str());
 
 static MYSQL_SYSVAR_STR(
     persistent_cache_path, rocksdb_persistent_cache_path,
@@ -2773,6 +2784,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(max_total_wal_size),
     MYSQL_SYSVAR(use_fsync),
     MYSQL_SYSVAR(wal_dir),
+    MYSQL_SYSVAR(log_dir),
     MYSQL_SYSVAR(persistent_cache_path),
     MYSQL_SYSVAR(persistent_cache_size_mb),
     MYSQL_SYSVAR(wsenv_path),
@@ -6374,6 +6386,65 @@ static void rocksdb_truncation_table_cleanup(void) {
 }
 
 /*
+  Returns the absolute, normalized form of a path. Symlinks are resolved
+  before ".." is applied, as the kernel does, so the result names the same
+  directory as the path. Purely lexical normalization would not: for
+  "link/../dir" it gives "dir", next to the link instead of next to its target.
+  Components that do not exist yet are normalized lexically.
+*/
+static std::string rdb_canonical_path(const std::string &path) {
+  std::error_code ec;
+  std::filesystem::path canonical_path =
+      std::filesystem::weakly_canonical(path, ec);
+  if (ec) return path;
+  return canonical_path.string();
+}
+
+static bool rdb_is_same_dir(const std::string &dir1, const std::string &dir2) {
+  std::error_code ec;
+  if (std::filesystem::equivalent(dir1, dir2, ec)) return true;
+  // equivalent() fails when a directory does not exist yet.
+  std::filesystem::path path1 = rdb_canonical_path(dir1);
+  std::filesystem::path path2 = rdb_canonical_path(dir2);
+  return path1 / "" == path2 / "";
+}
+
+/*
+  Checks that rocksdb_log_dir is safe to use. RocksDB purges files from
+  db_log_dir by their names, so a directory holding RocksDB data files (for
+  example the data directory of another RocksDB instance) could lose them.
+
+  @return the error message, or an empty string if the directory can be used
+*/
+static std::string rdb_check_log_dir(const std::string &log_dir,
+                                     const std::string &db_path,
+                                     const std::string &wal_dir) {
+  if (rdb_is_same_dir(log_dir, db_path)) {
+    return "it is the RocksDB data directory";
+  }
+  if (!wal_dir.empty() && rdb_is_same_dir(log_dir, wal_dir)) {
+    return "it is the RocksDB WAL directory (rocksdb_wal_dir)";
+  }
+
+  std::vector<std::string> files;
+  const rocksdb::Status s =
+      rocksdb::Env::Default()->GetChildren(log_dir, &files);
+  if (!s.ok()) {
+    // The directory does not exist yet. It is created with the info log.
+    return "";
+  }
+  for (const auto &file : files) {
+    uint64_t number;
+    rocksdb::FileType type;
+    // This overload of ParseFileName does not recognize info log files.
+    if (rocksdb::ParseFileName(file, &number, &type)) {
+      return "it contains the RocksDB data file '" + file + "'";
+    }
+  }
+  return "";
+}
+
+/*
   Storage Engine initialization function, invoked when plugin is loaded.
 */
 
@@ -6575,11 +6646,41 @@ static int rocksdb_init_internal(void *const p) {
     rocksdb_db_options->rate_limiter = rocksdb_rate_limiter;
   }
 
+  // db_log_dir must be set before the info log is created, and it must stay
+  // set for DB::Open, which purges old info log files from that directory.
+  rocksdb_db_options->db_log_dir = rocksdb_log_dir ? rocksdb_log_dir : "";
+
+  // The path RocksDB gets for the database. With db_log_dir set, RocksDB names
+  // the info log files after the absolute database path, but finds old info
+  // log files to purge using the path as given to DB::Open. For a relative
+  // path these differ, because Env::GetAbsolutePath() returns only the working
+  // directory for it, so old info log files would never be purged.
+  std::string rdb_db_path(rocksdb_datadir);
+  if (!rocksdb_db_options->db_log_dir.empty()) {
+    rdb_db_path = rdb_canonical_path(rdb_db_path);
+
+    const std::string err =
+        rdb_check_log_dir(rocksdb_db_options->db_log_dir, rdb_db_path,
+                          rocksdb_wal_dir ? rocksdb_wal_dir : "");
+    if (!err.empty()) {
+      LogPluginErrMsg(ERROR_LEVEL, 0, "rocksdb_log_dir '%s' cannot be used: %s",
+                      rocksdb_db_options->db_log_dir.c_str(), err.c_str());
+      DBUG_RETURN(HA_EXIT_FAILURE);
+    }
+  }
+
   std::shared_ptr<Rdb_logger> myrocks_logger = std::make_shared<Rdb_logger>();
   rocksdb::Status s = rocksdb::CreateLoggerFromOptions(
-      rocksdb_datadir, *rocksdb_db_options, &rocksdb_db_options->info_log);
+      rdb_db_path, *rocksdb_db_options, &rocksdb_db_options->info_log);
   if (s.ok()) {
     myrocks_logger->SetRocksDBLogger(rocksdb_db_options->info_log);
+  } else if (!rocksdb_db_options->db_log_dir.empty()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Failed to create the RocksDB info log in "
+                    "rocksdb_log_dir '%s': %s",
+                    rocksdb_db_options->db_log_dir.c_str(),
+                    s.ToString().c_str());
+    DBUG_RETURN(HA_EXIT_FAILURE);
   }
 
   rocksdb_db_options->info_log = myrocks_logger;
@@ -6667,7 +6768,7 @@ static int rocksdb_init_internal(void *const p) {
 
   std::vector<std::string> cf_names;
   rocksdb::Status status;
-  status = rocksdb::DB::ListColumnFamilies(*rocksdb_db_options, rocksdb_datadir,
+  status = rocksdb::DB::ListColumnFamilies(*rocksdb_db_options, rdb_db_path,
                                            &cf_names);
   DBUG_EXECUTE_IF("rocksdb_init_failure_list_cf", {
     // Simulate ListColumnFamilies failure
@@ -6892,8 +6993,8 @@ static int rocksdb_init_internal(void *const p) {
   tx_db_options.write_policy =
       static_cast<rocksdb::TxnDBWritePolicy>(rocksdb_write_policy);
 
-  status =
-      check_rocksdb_options_compatibility(rocksdb_datadir, main_opts, cf_descr);
+  status = check_rocksdb_options_compatibility(rdb_db_path.c_str(), main_opts,
+                                               cf_descr);
 
   DBUG_EXECUTE_IF("rocksdb_init_failure_incompatible_options", {
     // Simulate ListColumnFamilies failure
@@ -6910,8 +7011,8 @@ static int rocksdb_init_internal(void *const p) {
 
   LogPluginErrMsg(INFORMATION_LEVEL, 0, "Opening TransactionDB...");
 
-  status = rocksdb::TransactionDB::Open(
-      main_opts, tx_db_options, rocksdb_datadir, cf_descr, &cf_handles, &rdb);
+  status = rocksdb::TransactionDB::Open(main_opts, tx_db_options, rdb_db_path,
+                                        cf_descr, &cf_handles, &rdb);
 
   DBUG_EXECUTE_IF("rocksdb_init_failure_open_db", {
     // Simulate opening TransactionDB failure
