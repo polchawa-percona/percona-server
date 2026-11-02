@@ -1,0 +1,112 @@
+call mtr.add_suppression("Failed to create the RocksDB info log in rocksdb_log_dir");
+call mtr.add_suppression("rocksdb_log_dir '.*' cannot be used");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the background thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index stats calculation thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the manual compaction thread: \\(errno=22\\)'");
+#
+# Default (empty) value: the info log is written to rocksdb_datadir
+#
+SELECT @@global.rocksdb_log_dir;
+@@global.rocksdb_log_dir
+
+#
+# An empty value set explicitly behaves as the default
+#
+# restart: --rocksdb_log_dir=
+SELECT @@global.rocksdb_log_dir;
+@@global.rocksdb_log_dir
+
+#
+# Absolute path: the info log moves out of rocksdb_datadir. The file
+# name is prefixed with the absolute rocksdb_datadir path.
+#
+# restart: --rocksdb_log_dir=ABS_LOG_DIR --rocksdb_keep_log_file_num=2
+SELECT @@global.rocksdb_log_dir;
+@@global.rocksdb_log_dir
+ABS_LOG_DIR
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# rocksdb_datadir has no info log files
+# The info log is in rocksdb_log_dir
+PREFIX_.rocksdb_LOG
+# Each restart rotates the info log, and old info log files in
+# rocksdb_log_dir are purged according to rocksdb_keep_log_file_num
+# restart: --rocksdb_log_dir=ABS_LOG_DIR --rocksdb_keep_log_file_num=2
+PREFIX_.rocksdb_LOG
+PREFIX_.rocksdb_LOG.old.TIMESTAMP
+# restart: --rocksdb_log_dir=ABS_LOG_DIR --rocksdb_keep_log_file_num=2
+PREFIX_.rocksdb_LOG
+PREFIX_.rocksdb_LOG.old.TIMESTAMP
+# restart: --rocksdb_log_dir=ABS_LOG_DIR --rocksdb_keep_log_file_num=2
+PREFIX_.rocksdb_LOG
+PREFIX_.rocksdb_LOG.old.TIMESTAMP
+SELECT * FROM t1;
+a
+1
+2
+3
+#
+# Relative path: resolved against the server working directory (datadir)
+#
+# restart: --rocksdb_log_dir=rdb_rel_logs
+SELECT @@global.rocksdb_log_dir;
+@@global.rocksdb_log_dir
+rdb_rel_logs
+PREFIX_.rocksdb_LOG
+SELECT * FROM t1;
+a
+1
+2
+3
+#
+# A directory that cannot be created makes MyRocks initialization fail
+# instead of silently running without an info log
+#
+# restart: --rocksdb_log_dir=MYSQL_TMP_DIR/no_such_parent/rdb_logs
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+#
+# RocksDB purges files from rocksdb_log_dir by their names, so a directory
+# with RocksDB data files is refused
+#
+# The RocksDB data directory
+# restart: --rocksdb_log_dir=MYSQLD_DATADIR/.rocksdb
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+# The RocksDB data directory spelled differently
+# restart: --rocksdb_log_dir=MYSQLD_DATADIR/./.rocksdb/
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+# The RocksDB WAL directory
+# restart: --rocksdb_wal_dir=MYSQL_TMP_DIR/rdb_wal --rocksdb_log_dir=MYSQL_TMP_DIR/rdb_wal
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+# A directory with data files of another RocksDB instance
+# restart: --rocksdb_log_dir=MYSQL_TMP_DIR/other_rocksdb
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+# The data file was not touched
+#
+# Cleanup
+#
+# restart
+SELECT * FROM t1;
+a
+1
+2
+3
+DROP TABLE t1;

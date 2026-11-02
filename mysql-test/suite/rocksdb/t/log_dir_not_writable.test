@@ -1,0 +1,32 @@
+#
+# PS-9717: a rocksdb_log_dir the server cannot write to makes MyRocks
+# initialization fail instead of silently running without an info log.
+#
+--source include/have_rocksdb.inc
+# root can write to a read-only directory
+--source include/not_as_root.inc
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--let $ro_log_dir = $MYSQL_TMP_DIR/rdb_ro_logs
+--let $log_dir_test = log_dir_not_writable
+
+call mtr.add_suppression("Failed to create the RocksDB info log in rocksdb_log_dir");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the background thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index stats calculation thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the manual compaction thread: \\(errno=22\\)'");
+
+--mkdir $ro_log_dir
+--chmod 0555 $ro_log_dir
+
+--let $log_dir_opts = --rocksdb_log_dir=$ro_log_dir
+--let $log_dir_error = Failed to create the RocksDB info log in rocksdb_log_dir '.*/rdb_ro_logs': IO error: .*Permission denied
+--source suite/rocksdb/include/log_dir_rejected.inc
+--list_files $ro_log_dir
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+--chmod 0755 $ro_log_dir
+--force-rmdir $ro_log_dir

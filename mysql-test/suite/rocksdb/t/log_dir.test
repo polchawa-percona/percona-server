@@ -1,0 +1,136 @@
+#
+# PS-9717: rocksdb_log_dir sets the directory of the RocksDB info log files
+# (DBOptions::db_log_dir).
+#
+--source include/have_rocksdb.inc
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--let $rdb_datadir = $MYSQLD_DATADIR/.rocksdb
+--let $abs_log_dir = $MYSQL_TMP_DIR/rdb_logs
+--let $rel_log_dir = rdb_rel_logs
+--let $log_dir_test = log_dir
+
+call mtr.add_suppression("Failed to create the RocksDB info log in rocksdb_log_dir");
+call mtr.add_suppression("rocksdb_log_dir '.*' cannot be used");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the background thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index stats calculation thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the manual compaction thread: \\(errno=22\\)'");
+
+--echo #
+--echo # Default (empty) value: the info log is written to rocksdb_datadir
+--echo #
+SELECT @@global.rocksdb_log_dir;
+--file_exists $rdb_datadir/LOG
+
+--echo #
+--echo # An empty value set explicitly behaves as the default
+--echo #
+--source include/shutdown_mysqld.inc
+--remove_files_wildcard $rdb_datadir LOG*
+--let $restart_parameters = restart: --rocksdb_log_dir=
+--source include/start_mysqld.inc
+SELECT @@global.rocksdb_log_dir;
+--file_exists $rdb_datadir/LOG
+
+--echo #
+--echo # Absolute path: the info log moves out of rocksdb_datadir. The file
+--echo # name is prefixed with the absolute rocksdb_datadir path.
+--echo #
+--source include/shutdown_mysqld.inc
+--remove_files_wildcard $rdb_datadir LOG*
+--let $restart_parameters = restart: --rocksdb_log_dir=$abs_log_dir --rocksdb_keep_log_file_num=2
+--replace_result $abs_log_dir ABS_LOG_DIR
+--source include/start_mysqld.inc
+--replace_result $abs_log_dir ABS_LOG_DIR
+SELECT @@global.rocksdb_log_dir;
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # rocksdb_datadir has no info log files
+--list_files $rdb_datadir LOG*
+--echo # The info log is in rocksdb_log_dir
+--replace_regex /^.*_\.rocksdb_LOG/PREFIX_.rocksdb_LOG/
+--list_files $abs_log_dir *_LOG*
+
+--echo # Each restart rotates the info log, and old info log files in
+--echo # rocksdb_log_dir are purged according to rocksdb_keep_log_file_num
+--replace_result $abs_log_dir ABS_LOG_DIR
+--source include/restart_mysqld.inc
+--replace_regex /^.*_\.rocksdb_LOG/PREFIX_.rocksdb_LOG/ /\.old\.[0-9]+/.old.TIMESTAMP/
+--list_files $abs_log_dir *_LOG*
+--replace_result $abs_log_dir ABS_LOG_DIR
+--source include/restart_mysqld.inc
+--replace_regex /^.*_\.rocksdb_LOG/PREFIX_.rocksdb_LOG/ /\.old\.[0-9]+/.old.TIMESTAMP/
+--list_files $abs_log_dir *_LOG*
+--replace_result $abs_log_dir ABS_LOG_DIR
+--source include/restart_mysqld.inc
+--replace_regex /^.*_\.rocksdb_LOG/PREFIX_.rocksdb_LOG/ /\.old\.[0-9]+/.old.TIMESTAMP/
+--list_files $abs_log_dir *_LOG*
+--list_files $rdb_datadir LOG*
+SELECT * FROM t1;
+
+--echo #
+--echo # Relative path: resolved against the server working directory (datadir)
+--echo #
+--source include/shutdown_mysqld.inc
+--let $restart_parameters = restart: --rocksdb_log_dir=$rel_log_dir
+--source include/start_mysqld.inc
+SELECT @@global.rocksdb_log_dir;
+--replace_regex /^.*_\.rocksdb_LOG/PREFIX_.rocksdb_LOG/
+--list_files $MYSQLD_DATADIR/$rel_log_dir *_LOG*
+--list_files $rdb_datadir LOG*
+SELECT * FROM t1;
+
+--echo #
+--echo # A directory that cannot be created makes MyRocks initialization fail
+--echo # instead of silently running without an info log
+--echo #
+--let $log_dir_opts = --rocksdb_log_dir=$MYSQL_TMP_DIR/no_such_parent/rdb_logs
+--let $log_dir_error = Failed to create the RocksDB info log in rocksdb_log_dir '.*no_such_parent/rdb_logs'
+--source suite/rocksdb/include/log_dir_rejected.inc
+
+--echo #
+--echo # RocksDB purges files from rocksdb_log_dir by their names, so a directory
+--echo # with RocksDB data files is refused
+--echo #
+--echo # The RocksDB data directory
+--let $log_dir_opts = --rocksdb_log_dir=$rdb_datadir
+--let $log_dir_error = rocksdb_log_dir '.*/\.rocksdb' cannot be used: it is the RocksDB data directory
+--source suite/rocksdb/include/log_dir_rejected.inc
+
+--echo # The RocksDB data directory spelled differently
+--let $log_dir_opts = --rocksdb_log_dir=$MYSQLD_DATADIR/./.rocksdb/
+--let $log_dir_error = rocksdb_log_dir '.*/\./\.rocksdb/' cannot be used: it is the RocksDB data directory
+--source suite/rocksdb/include/log_dir_rejected.inc
+
+--echo # The RocksDB WAL directory
+--let $log_dir_opts = --rocksdb_wal_dir=$MYSQL_TMP_DIR/rdb_wal --rocksdb_log_dir=$MYSQL_TMP_DIR/rdb_wal
+--let $log_dir_error = rocksdb_log_dir '.*/rdb_wal' cannot be used: it is the RocksDB WAL directory
+--source suite/rocksdb/include/log_dir_rejected.inc
+
+--echo # A directory with data files of another RocksDB instance
+--let $other_db = $MYSQL_TMP_DIR/other_rocksdb
+--mkdir $other_db
+--write_file $other_db/000001.sst
+EOF
+--let $log_dir_opts = --rocksdb_log_dir=$other_db
+--let $log_dir_error = rocksdb_log_dir '.*/other_rocksdb' cannot be used: it contains the RocksDB data file '000001\.sst'
+--source suite/rocksdb/include/log_dir_rejected.inc
+--echo # The data file was not touched
+--file_exists $other_db/000001.sst
+
+--echo #
+--echo # Cleanup
+--echo #
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+SELECT * FROM t1;
+DROP TABLE t1;
+--file_exists $rdb_datadir/LOG
+--force-rmdir $abs_log_dir
+--force-rmdir $MYSQLD_DATADIR/$rel_log_dir
+--force-rmdir $other_db

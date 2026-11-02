@@ -1,0 +1,13 @@
+call mtr.add_suppression("Failed to create the RocksDB info log in rocksdb_log_dir");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB.*' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the background thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the index stats calculation thread: \\(errno=22\\)'");
+call mtr.add_suppression("Plugin rocksdb reported: 'Couldn't stop the manual compaction thread: \\(errno=22\\)'");
+# restart: --rocksdb_log_dir=MYSQL_TMP_DIR/rdb_ro_logs
+SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+COUNT(*)
+0
+include/assert_grep.inc [MyRocks reports why rocksdb_log_dir is refused]
+# restart
