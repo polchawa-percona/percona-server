@@ -1,0 +1,16 @@
+# restart: --rocksdb_datadir=BASE/lnk/../rdbdata --rocksdb_log_dir=BASE/logs
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2), (3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# The RocksDB files are in the directory the path names
+# The info log is in rocksdb_log_dir and is named after the real path
+PREFIX_real_rdbdata_LOG
+# The data is found again after a restart
+# restart: --rocksdb_datadir=BASE/lnk/../rdbdata --rocksdb_log_dir=BASE/logs
+SELECT * FROM t1;
+a
+1
+2
+3
+DROP TABLE t1;
+# restart

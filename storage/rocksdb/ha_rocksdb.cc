@@ -6385,19 +6385,27 @@ static void rocksdb_truncation_table_cleanup(void) {
   }
 }
 
-static std::string rdb_normalized_absolute_path(const std::string &path) {
+/*
+  Returns the absolute, normalized form of a path. Symlinks are resolved
+  before ".." is applied, as the kernel does, so the result names the same
+  directory as the path. Purely lexical normalization would not: for
+  "link/../dir" it gives "dir", next to the link instead of next to its target.
+  Components that do not exist yet are normalized lexically.
+*/
+static std::string rdb_canonical_path(const std::string &path) {
   std::error_code ec;
-  std::filesystem::path abs_path = std::filesystem::absolute(path, ec);
+  std::filesystem::path canonical_path =
+      std::filesystem::weakly_canonical(path, ec);
   if (ec) return path;
-  return abs_path.lexically_normal().string();
+  return canonical_path.string();
 }
 
 static bool rdb_is_same_dir(const std::string &dir1, const std::string &dir2) {
   std::error_code ec;
   if (std::filesystem::equivalent(dir1, dir2, ec)) return true;
   // equivalent() fails when a directory does not exist yet.
-  std::filesystem::path path1 = rdb_normalized_absolute_path(dir1);
-  std::filesystem::path path2 = rdb_normalized_absolute_path(dir2);
+  std::filesystem::path path1 = rdb_canonical_path(dir1);
+  std::filesystem::path path2 = rdb_canonical_path(dir2);
   return path1 / "" == path2 / "";
 }
 
@@ -6649,7 +6657,7 @@ static int rocksdb_init_internal(void *const p) {
   // directory for it, so old info log files would never be purged.
   std::string rdb_db_path(rocksdb_datadir);
   if (!rocksdb_db_options->db_log_dir.empty()) {
-    rdb_db_path = rdb_normalized_absolute_path(rdb_db_path);
+    rdb_db_path = rdb_canonical_path(rdb_db_path);
 
     const std::string err =
         rdb_check_log_dir(rocksdb_db_options->db_log_dir, rdb_db_path,
