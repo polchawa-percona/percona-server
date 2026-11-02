@@ -385,7 +385,6 @@ row4	val1
 show variables like 'rocksdb_lock_wait_timeout';
 Variable_name	Value
 rocksdb_lock_wait_timeout	1
-rocksdb_log_dir	
 set rocksdb_lock_wait_timeout=2;
 show variables like 'rocksdb_lock_wait_timeout';
 Variable_name	Value
