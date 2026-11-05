@@ -52,6 +52,17 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#else
+#include "my_rdtsc.h"
+#endif
 
 /** Aggregates LRU_list_mutex hold times, keyed by acquisition call-site
 (source file + line).  All members use relaxed atomics: this is measurement
@@ -70,15 +81,15 @@ struct LruHoldStats {
     std::atomic<unsigned> m_line{0};
     /** Number of times the latch was released from this call-site. */
     std::atomic<uint64_t> m_count{0};
-    /** Sum of hold durations, in nanoseconds. */
-    std::atomic<uint64_t> m_total_ns{0};
-    /** Longest single hold, in nanoseconds. */
-    std::atomic<uint64_t> m_max_ns{0};
-    /** Sum of the times spent waiting to acquire the latch, in
-    nanoseconds. */
-    std::atomic<uint64_t> m_wait_total_ns{0};
-    /** Longest single wait to acquire the latch, in nanoseconds. */
-    std::atomic<uint64_t> m_wait_max_ns{0};
+    /** Sum of hold durations, in timer cycles. */
+    std::atomic<uint64_t> m_total_cycles{0};
+    /** Longest single hold, in timer cycles. */
+    std::atomic<uint64_t> m_max_cycles{0};
+    /** Sum of the times spent waiting to acquire the latch, in timer
+    cycles. */
+    std::atomic<uint64_t> m_wait_total_cycles{0};
+    /** Longest single wait to acquire the latch, in timer cycles. */
+    std::atomic<uint64_t> m_wait_max_cycles{0};
   };
 
   Slot m_slots[MAX_SLOTS];
@@ -87,18 +98,49 @@ struct LruHoldStats {
   samples had to be dropped. */
   std::atomic<bool> m_overflow{false};
 
-  /** @return a monotonic timestamp in nanoseconds. */
-  static uint64_t now_ns() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+  /** @return the current value of the CPU timestamp counter.  Reading it is
+  several times cheaper than std::chrono::steady_clock::now(), which matters
+  because this runs three times per LRU list mutex acquisition.  Durations
+  are kept in cycles and converted to nanoseconds only when reported, using
+  the rate measured by calibrate() at startup. */
+  static uint64_t now_cycles() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return __rdtsc();
+#else
+    return my_timer_cycles();
+#endif
+  }
+
+  /** Measure the timer rate against std::chrono::steady_clock over a short
+  window and store it for cycles_to_ns().  The rate reported by
+  my_timer_info() cannot be used: it is hard-coded to 1e9 for the cycle
+  timer. */
+  static void calibrate() {
+    const uint64_t c0 = now_cycles();
+    const auto t0 = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    const uint64_t c1 = now_cycles();
+    const auto t1 = std::chrono::steady_clock::now();
+    const double ns = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    if (c1 > c0) {
+      s_ns_per_cycle.store(ns / static_cast<double>(c1 - c0),
+                           std::memory_order_relaxed);
+    }
+  }
+
+  /** @return the duration in nanoseconds, or 0 before calibrate() ran. */
+  static uint64_t cycles_to_ns(uint64_t cycles) {
+    return static_cast<uint64_t>(
+        static_cast<double>(cycles) *
+        s_ns_per_cycle.load(std::memory_order_relaxed));
   }
 
   /** Record one hold.
   @param[in]  file     source file of the acquisition call-site
   @param[in]  line     source line of the acquisition call-site
-  @param[in]  hold_ns  hold duration in nanoseconds */
-  void record(const char *file, unsigned line, uint64_t hold_ns) {
+  @param[in]  hold_cycles  hold duration in timer cycles */
+  void record(const char *file, unsigned line, uint64_t hold_cycles) {
     Slot *s = find_or_claim(file, line);
 
     if (s == nullptr) {
@@ -107,16 +149,17 @@ struct LruHoldStats {
     }
 
     s->m_count.fetch_add(1, std::memory_order_relaxed);
-    s->m_total_ns.fetch_add(hold_ns, std::memory_order_relaxed);
-    update_max(s->m_max_ns, hold_ns);
+    s->m_total_cycles.fetch_add(hold_cycles, std::memory_order_relaxed);
+    update_max(s->m_max_cycles, hold_cycles);
   }
 
   /** Record one wait to acquire the latch.  The acquisition itself is counted
   by record() when the latch is released.
   @param[in]  file     source file of the acquisition call-site
   @param[in]  line     source line of the acquisition call-site
-  @param[in]  wait_ns  time spent waiting for the latch, in nanoseconds */
-  void record_wait(const char *file, unsigned line, uint64_t wait_ns) {
+  @param[in]  wait_cycles  time spent waiting for the latch, in timer
+                           cycles */
+  void record_wait(const char *file, unsigned line, uint64_t wait_cycles) {
     Slot *s = find_or_claim(file, line);
 
     if (s == nullptr) {
@@ -124,8 +167,8 @@ struct LruHoldStats {
       return;
     }
 
-    s->m_wait_total_ns.fetch_add(wait_ns, std::memory_order_relaxed);
-    update_max(s->m_wait_max_ns, wait_ns);
+    s->m_wait_total_cycles.fetch_add(wait_cycles, std::memory_order_relaxed);
+    update_max(s->m_wait_max_cycles, wait_cycles);
   }
 
   /** Zero all accumulated statistics, keeping the call-site claims so that
@@ -133,16 +176,17 @@ struct LruHoldStats {
   void reset() {
     for (Slot &s : m_slots) {
       s.m_count.store(0, std::memory_order_relaxed);
-      s.m_total_ns.store(0, std::memory_order_relaxed);
-      s.m_max_ns.store(0, std::memory_order_relaxed);
-      s.m_wait_total_ns.store(0, std::memory_order_relaxed);
-      s.m_wait_max_ns.store(0, std::memory_order_relaxed);
+      s.m_total_cycles.store(0, std::memory_order_relaxed);
+      s.m_max_cycles.store(0, std::memory_order_relaxed);
+      s.m_wait_total_cycles.store(0, std::memory_order_relaxed);
+      s.m_wait_max_cycles.store(0, std::memory_order_relaxed);
     }
     m_overflow.store(false, std::memory_order_relaxed);
   }
 
   /** Invoke f(file, line, count, total_ns, max_ns, wait_total_ns,
-  wait_max_ns) for every claimed slot that has at least one sample. */
+  wait_max_ns) for every claimed slot that has at least one sample.  The
+  durations are converted from timer cycles to nanoseconds. */
   template <typename F>
   void iterate(F &&f) const {
     for (const Slot &s : m_slots) {
@@ -155,10 +199,10 @@ struct LruHoldStats {
         continue;
       }
       f(file, s.m_line.load(std::memory_order_relaxed), count,
-        s.m_total_ns.load(std::memory_order_relaxed),
-        s.m_max_ns.load(std::memory_order_relaxed),
-        s.m_wait_total_ns.load(std::memory_order_relaxed),
-        s.m_wait_max_ns.load(std::memory_order_relaxed));
+        cycles_to_ns(s.m_total_cycles.load(std::memory_order_relaxed)),
+        cycles_to_ns(s.m_max_cycles.load(std::memory_order_relaxed)),
+        cycles_to_ns(s.m_wait_total_cycles.load(std::memory_order_relaxed)),
+        cycles_to_ns(s.m_wait_max_cycles.load(std::memory_order_relaxed)));
     }
   }
 
@@ -166,6 +210,9 @@ struct LruHoldStats {
   bool overflowed() const { return m_overflow.load(std::memory_order_relaxed); }
 
  private:
+  /** Nanoseconds per timer cycle, set by calibrate(). */
+  static inline std::atomic<double> s_ns_per_cycle{0.0};
+
   /** Raise max to value if value is larger. */
   static void update_max(std::atomic<uint64_t> &max, uint64_t value) {
     uint64_t cur = max.load(std::memory_order_relaxed);
@@ -227,11 +274,11 @@ struct LruHoldStats {
 as an inline global regardless of static-destruction order at shutdown. */
 inline LruHoldStats lru_hold_stats;
 
-/** Time (ns) at which the current thread started waiting for an LRU list
+/** Timer cycle at which the current thread started waiting for an LRU list
 mutex, or 0 when it is not waiting for one.  Set in
 GenericPolicy::enter() and consumed in GenericPolicy::locked().  Waiters of the
 same mutex run concurrently, so this cannot live in the mutex policy. */
-inline thread_local uint64_t lru_wait_start_ns = 0;
+inline thread_local uint64_t lru_wait_start_cycles = 0;
 
 /** Background thread that appends a snapshot of lru_hold_stats to
 lru_mutex_contention_stats.csv in the data directory once a second. */

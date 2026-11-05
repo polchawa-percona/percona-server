@@ -294,7 +294,7 @@ struct GenericPolicy
              const char *filename [[maybe_unused]],
              ulint line [[maybe_unused]]) UNIV_NOTHROW {
     if (m_track_hold) {
-      lru_wait_start_ns = LruHoldStats::now_ns();
+      lru_wait_start_cycles = LruHoldStats::now_cycles();
     }
     ut_d(MutexDebug<MutexType>::enter(&mutex, filename, line));
   }
@@ -306,14 +306,14 @@ struct GenericPolicy
   void locked(const MutexType &mutex [[maybe_unused]], const char *filename,
               ulint line) UNIV_NOTHROW {
     if (m_track_hold) {
-      const uint64_t now = LruHoldStats::now_ns();
+      const uint64_t now = LruHoldStats::now_cycles();
       m_hold_file = filename;
       m_hold_line = static_cast<unsigned>(line);
-      m_hold_start_ns = now;
-      if (lru_wait_start_ns != 0) {
+      m_hold_start_cycles = now;
+      if (lru_wait_start_cycles != 0) {
         lru_hold_stats.record_wait(m_hold_file, m_hold_line,
-                                   now - lru_wait_start_ns);
-        lru_wait_start_ns = 0;
+                                   now - lru_wait_start_cycles);
+        lru_wait_start_cycles = 0;
       }
     }
     ut_d(MutexDebug<MutexType>::locked(&mutex, filename, line));
@@ -322,10 +322,10 @@ struct GenericPolicy
   /** Called when the mutex is released
   @param[in]    mutex           Mutex instance that is released */
   void release(const MutexType &mutex [[maybe_unused]]) UNIV_NOTHROW {
-    if (m_track_hold && m_hold_start_ns != 0) {
+    if (m_track_hold && m_hold_start_cycles != 0) {
       lru_hold_stats.record(m_hold_file, m_hold_line,
-                            LruHoldStats::now_ns() - m_hold_start_ns);
-      m_hold_start_ns = 0;
+                            LruHoldStats::now_cycles() - m_hold_start_cycles);
+      m_hold_start_cycles = 0;
     }
     ut_d(MutexDebug<MutexType>::release(&mutex));
   }
@@ -364,9 +364,9 @@ struct GenericPolicy
   /** Source line of the acquisition call-site of the current hold. */
   unsigned m_hold_line{0};
 
-  /** Monotonic start time (ns) of the current tracked hold, or 0 when the
+  /** Timer cycle at which the current tracked hold started, or 0 when the
   mutex is not held. */
-  uint64_t m_hold_start_ns{0};
+  uint64_t m_hold_start_cycles{0};
 };
 
 /** Track aggregate metrics policy, used by the page mutex. There are just

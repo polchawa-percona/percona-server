@@ -124,6 +124,10 @@ void lru_hold_stats_thread() {
   char path[FN_REFLEN];
   generate_csv_path(path, sizeof(path));
 
+  /* Durations are collected in timer cycles; measure the timer rate once,
+  before the first snapshot is written. */
+  LruHoldStats::calibrate();
+
   while (!shutting_down()) {
     os_event_wait_time(srv_lru_hold_stats_event, DUMP_INTERVAL);
     os_event_reset(srv_lru_hold_stats_event);
