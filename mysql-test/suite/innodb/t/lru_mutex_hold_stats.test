@@ -1,0 +1,59 @@
+# Verify per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
+#
+# The instrumentation is gated by the InnoDB latch monitor
+# (innodb_monitor_enable='latch').  When enabled, SHOW ENGINE INNODB MUTEX
+# emits one extra row per acquisition call-site named
+#   LRU_list_mutex_hold[<file>:<line>]
+# with a "count=...,total_ns=...,max_ns=...,avg_ns=..." status.
+#
+# The exact call-sites and counts are non-deterministic, so we do not record
+# the SHOW output itself.  search_pattern.inc prints a deterministic
+# "Pattern ... found" / "not found" line that IS recorded, and we assert:
+#   1. with the monitor enabled and after buffer-pool traffic, at least one
+#      hold row with a non-zero count is present ("found");
+#   2. after innodb_monitor_reset='latch' the hold rows are gone ("not found").
+
+--let $dump_file = $MYSQL_TMP_DIR/lru_hold_mutex.txt
+
+# Baseline: make sure the monitor starts from a clean, disabled state.
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset = 'latch';
+
+SET GLOBAL innodb_monitor_enable = 'latch';
+
+# Generate buffer-pool traffic so the LRU list mutex is taken from several
+# call-sites (page creation via buf_page_create, free-block search, etc.).
+CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT, pad CHAR(255)) ENGINE=InnoDB;
+--disable_query_log
+BEGIN;
+--let $i = 0
+while ($i < 2000)
+{
+  INSERT INTO t1 (pad) VALUES (REPEAT('x', 255));
+  --inc $i
+}
+COMMIT;
+--enable_query_log
+SELECT COUNT(*) FROM t1;
+
+# A hold row with a non-zero count must be present while the monitor is on.
+--exec $MYSQL -e "SHOW ENGINE INNODB MUTEX" > $dump_file
+--let SEARCH_FILE = $dump_file
+--let SEARCH_PATTERN = LRU_list_mutex_hold\[[a-zA-Z0-9_.]+\.cc:[0-9]+\].*count=[1-9]
+--echo # Expect the hold row to be present:
+--source include/search_pattern.inc
+
+# Reset must clear the hold rows: every slot then has count == 0 and is
+# skipped by the reporting code.
+SET GLOBAL innodb_monitor_reset = 'latch';
+--exec $MYSQL -e "SHOW ENGINE INNODB MUTEX" > $dump_file
+--let SEARCH_FILE = $dump_file
+--let SEARCH_PATTERN = LRU_list_mutex_hold\[
+--echo # Expect no hold rows after reset:
+--source include/search_pattern.inc
+
+# Cleanup.
+DROP TABLE t1;
+SET GLOBAL innodb_monitor_disable = 'latch';
+SET GLOBAL innodb_monitor_reset = 'latch';
+--remove_file $dump_file

@@ -40,6 +40,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "univ.i"
 
+#include "sync0lru_hold.h"
 #include "sync0rw.h"
 #include "sync0sync.h"
 
@@ -290,4 +291,7 @@ void MutexMonitor::reset() {
   }
 
   mutex_exit(&rw_lock_list_mutex);
+
+  /* Also clear the LRU_list_mutex hold-time statistics. */
+  lru_hold_stats.reset();
 }

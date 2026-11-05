@@ -176,6 +176,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "string_with_len.h"
+#include "sync0lru_hold.h"
 #include "sync0sync.h"
 #ifdef UNIV_DEBUG
 #include "trx0purge.h"
@@ -19469,6 +19470,56 @@ static int innodb_show_mutex_status(handlerton *hton, THD *thd,
 
   if (!collector.to_string(thd, stat_print)) {
     return 1;
+  }
+
+  /* Append per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
+  These are populated only while the latch monitor is enabled
+  (innodb_monitor_enable='latch'); when it has never been enabled the
+  registry is empty and nothing extra is printed. */
+  uint hton_name_len = (uint)strlen(innobase_hton_name);
+  int lru_err = 0;
+
+  lru_hold_stats.iterate([&](const char *file, unsigned line, uint64_t count,
+                             uint64_t total_ns, uint64_t max_ns) {
+    if (lru_err != 0) {
+      return;
+    }
+
+    char name_buf[IO_SIZE];
+    int name_len =
+        snprintf(name_buf, sizeof(name_buf), "LRU_list_mutex_hold[%s:%u]",
+                 innobase_basename(file), line);
+
+    char status_buf[IO_SIZE];
+    int status_len = snprintf(
+        status_buf, sizeof(status_buf),
+        "count=%llu,total_ns=%llu,max_ns=%llu,avg_ns=%llu",
+        (unsigned long long)count, (unsigned long long)total_ns,
+        (unsigned long long)max_ns, (unsigned long long)(total_ns / count));
+
+    if (stat_print(thd, innobase_hton_name, hton_name_len, name_buf,
+                   static_cast<uint>(name_len), status_buf,
+                   static_cast<uint>(status_len))) {
+      lru_err = 1;
+    }
+  });
+
+  if (lru_err != 0) {
+    return 1;
+  }
+
+  if (lru_hold_stats.overflowed()) {
+    char status_buf[IO_SIZE];
+    int status_len =
+        snprintf(status_buf, sizeof(status_buf),
+                 "note=some call-sites dropped, increase LruHoldStats::"
+                 "MAX_SLOTS");
+    if (stat_print(thd, innobase_hton_name, hton_name_len,
+                   "LRU_list_mutex_hold[overflow]",
+                   (uint)strlen("LRU_list_mutex_hold[overflow]"), status_buf,
+                   static_cast<uint>(status_len))) {
+      return 1;
+    }
   }
 
   return 0;
