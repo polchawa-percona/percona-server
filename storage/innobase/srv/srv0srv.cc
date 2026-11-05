@@ -88,6 +88,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #endif /* !UNIV_HOTBACKUP */
 #include "srv0srv.h"
 #include "srv0start.h"
+#include "sync0lru_hold.h"
 #include "sync0sync.h"
 #ifndef UNIV_HOTBACKUP
 #include "trx0i_s.h"
@@ -1176,6 +1177,8 @@ static void srv_init(void) {
 
     srv_buf_dump_event = os_event_create();
 
+    srv_lru_hold_stats_event = os_event_create();
+
     buf_flush_event = os_event_create();
 
     buf_flush_tick_event = os_event_create();
@@ -1227,6 +1230,7 @@ void srv_free(void) {
     os_event_destroy(srv_error_event);
     os_event_destroy(srv_monitor_event);
     os_event_destroy(srv_buf_dump_event);
+    os_event_destroy(srv_lru_hold_stats_event);
     os_event_destroy(buf_flush_event);
     os_event_destroy(buf_flush_tick_event);
   }

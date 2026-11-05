@@ -1,25 +1,23 @@
-# Verify per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
+# Verify per-call-site hold-time and wait-time statistics for
+# buf_pool->LRU_list_mutex.
 #
-# The instrumentation is gated by the InnoDB latch monitor
-# (innodb_monitor_enable='latch').  When enabled, SHOW ENGINE INNODB MUTEX
-# emits one extra row per acquisition call-site named
+# The statistics are always collected.  SHOW ENGINE INNODB MUTEX emits one
+# extra row per acquisition call-site named
 #   LRU_list_mutex_hold[<file>:<line>]
-# with a "count=...,total_ns=...,max_ns=...,avg_ns=..." status.
+# with a "count=...,total_ns=...,max_ns=...,avg_ns=...,wait_total_ns=...,
+# wait_max_ns=..." status, and a background thread appends the same data once
+# a second to lru_mutex_contention_stats.csv in the data directory.
 #
 # The exact call-sites and counts are non-deterministic, so we do not record
 # the SHOW output itself.  search_pattern.inc prints a deterministic
 # "Pattern ... found" / "not found" line that IS recorded, and we assert:
-#   1. with the monitor enabled and after buffer-pool traffic, at least one
-#      hold row with a non-zero count is present ("found");
-#   2. after innodb_monitor_reset='latch' the hold rows are gone ("not found").
+#   1. after buffer-pool traffic, at least one row with a non-zero count and
+#      the wait fields is present ("found");
+#   2. the CSV file gets the header and at least one data row ("found").
 
 --let $dump_file = $MYSQL_TMP_DIR/lru_hold_mutex.txt
-
-# Baseline: make sure the monitor starts from a clean, disabled state.
-SET GLOBAL innodb_monitor_disable = 'latch';
-SET GLOBAL innodb_monitor_reset = 'latch';
-
-SET GLOBAL innodb_monitor_enable = 'latch';
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--let $csv_file = $MYSQLD_DATADIR/lru_mutex_contention_stats.csv
 
 # Generate buffer-pool traffic so the LRU list mutex is taken from several
 # call-sites (page creation via buf_page_create, free-block search, etc.).
@@ -36,24 +34,33 @@ COMMIT;
 --enable_query_log
 SELECT COUNT(*) FROM t1;
 
-# A hold row with a non-zero count must be present while the monitor is on.
 --exec $MYSQL -e "SHOW ENGINE INNODB MUTEX" > $dump_file
 --let SEARCH_FILE = $dump_file
---let SEARCH_PATTERN = LRU_list_mutex_hold\[[a-zA-Z0-9_.]+\.cc:[0-9]+\].*count=[1-9]
---echo # Expect the hold row to be present:
+--let SEARCH_PATTERN = LRU_list_mutex_hold\[[a-zA-Z0-9_.]+\.cc:[0-9]+\].*count=[1-9].*wait_total_ns=[0-9]+,wait_max_ns=[0-9]+
+--echo # Expect a row with the wait fields:
 --source include/search_pattern.inc
 
-# Reset must clear the hold rows: every slot then has count == 0 and is
-# skipped by the reporting code.
-SET GLOBAL innodb_monitor_reset = 'latch';
---exec $MYSQL -e "SHOW ENGINE INNODB MUTEX" > $dump_file
---let SEARCH_FILE = $dump_file
---let SEARCH_PATTERN = LRU_list_mutex_hold\[
---echo # Expect no hold rows after reset:
+# The CSV dump thread writes once a second; wait until a data row appears.
+--let SEARCH_FILE = $csv_file
+perl;
+  my $file = $ENV{'SEARCH_FILE'};
+  for (my $i = 0; $i < 300; $i++) {
+    if (open(my $fh, '<', $file)) {
+      my @lines = <$fh>;
+      close($fh);
+      exit 0 if (grep { /\.cc:[0-9]+,[1-9]/ } @lines);
+    }
+    select(undef, undef, undef, 0.1);
+  }
+  die "No data row in $file";
+EOF
+--let SEARCH_PATTERN = ts_us,site,count,total_wait_ns,max_wait_ns,total_held_ns,max_held_ns
+--echo # Expect the CSV header:
+--source include/search_pattern.inc
+--let SEARCH_PATTERN = [0-9]+,[^,]+\.cc:[0-9]+,[1-9][0-9]*,[0-9]+,[0-9]+,[0-9]+,[0-9]+
+--echo # Expect a CSV data row:
 --source include/search_pattern.inc
 
 # Cleanup.
 DROP TABLE t1;
-SET GLOBAL innodb_monitor_disable = 'latch';
-SET GLOBAL innodb_monitor_reset = 'latch';
 --remove_file $dump_file

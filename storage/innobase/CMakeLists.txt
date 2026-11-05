@@ -244,6 +244,7 @@ SET(INNOBASE_SOURCES
   sync/sync0arr.cc
   sync/sync0rw.cc
   sync/sync0debug.cc
+  sync/sync0lru_hold.cc
   sync/sync0sync.cc
   trx/trx0i_s.cc
   trx/trx0purge.cc

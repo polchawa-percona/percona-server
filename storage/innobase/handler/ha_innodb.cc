@@ -821,6 +821,8 @@ static PSI_thread_info all_innodb_threads[] = {
                    0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(buf_dump_thread, "ib_buf_dump", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(lru_hold_stats_thread, "ib_lru_hold_st", PSI_FLAG_SINGLETON,
+                   0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(clone_ddl_thread, "ib_clone_ddl", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(clone_gtid_thread, "ib_clone_gtid", PSI_FLAG_SINGLETON, 0,
@@ -19472,15 +19474,15 @@ static int innodb_show_mutex_status(handlerton *hton, THD *thd,
     return 1;
   }
 
-  /* Append per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
-  These are populated only while the latch monitor is enabled
-  (innodb_monitor_enable='latch'); when it has never been enabled the
-  registry is empty and nothing extra is printed. */
+  /* Append per-call-site hold-time and wait-time statistics for
+  buf_pool->LRU_list_mutex. These are always collected; innodb_monitor_reset=
+  'latch' clears them. */
   uint hton_name_len = (uint)strlen(innobase_hton_name);
   int lru_err = 0;
 
   lru_hold_stats.iterate([&](const char *file, unsigned line, uint64_t count,
-                             uint64_t total_ns, uint64_t max_ns) {
+                             uint64_t total_ns, uint64_t max_ns,
+                             uint64_t wait_total_ns, uint64_t wait_max_ns) {
     if (lru_err != 0) {
       return;
     }
@@ -19493,9 +19495,11 @@ static int innodb_show_mutex_status(handlerton *hton, THD *thd,
     char status_buf[IO_SIZE];
     int status_len = snprintf(
         status_buf, sizeof(status_buf),
-        "count=%llu,total_ns=%llu,max_ns=%llu,avg_ns=%llu",
+        "count=%llu,total_ns=%llu,max_ns=%llu,avg_ns=%llu,wait_total_ns=%llu,"
+        "wait_max_ns=%llu",
         (unsigned long long)count, (unsigned long long)total_ns,
-        (unsigned long long)max_ns, (unsigned long long)(total_ns / count));
+        (unsigned long long)max_ns, (unsigned long long)(total_ns / count),
+        (unsigned long long)wait_total_ns, (unsigned long long)wait_max_ns);
 
     if (stat_print(thd, innobase_hton_name, hton_name_len, name_buf,
                    static_cast<uint>(name_len), status_buf,

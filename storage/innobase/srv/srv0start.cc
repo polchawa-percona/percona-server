@@ -89,6 +89,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "rem0rec.h"
 #include "srv0srv.h"
 #include "srv0start.h"
+#include "sync0lru_hold.h"
 #include "trx0sys.h"
 #include "trx0trx.h"
 #include "ut0mem.h"
@@ -173,6 +174,7 @@ mysql_pfs_key_t log_archiver_thread_key;
 mysql_pfs_key_t page_archiver_thread_key;
 mysql_pfs_key_t buf_pool_create_thread_key;
 mysql_pfs_key_t buf_dump_thread_key;
+mysql_pfs_key_t lru_hold_stats_thread_key;
 mysql_pfs_key_t buf_resize_thread_key;
 mysql_pfs_key_t clone_ddl_thread_key;
 mysql_pfs_key_t clone_gtid_thread_key;
@@ -1354,6 +1356,9 @@ static const Thread_to_stop threads_to_stop[]{
 
     {"buf_dump", srv_threads.m_buf_dump,
      []() { os_event_set(srv_buf_dump_event); }, SRV_SHUTDOWN_CLEANUP},
+
+    {"lru_hold_stats", srv_threads.m_lru_hold_stats,
+     []() { os_event_set(srv_lru_hold_stats_event); }, SRV_SHUTDOWN_CLEANUP},
 
     {"buf_resize", srv_threads.m_buf_resize,
      []() { os_event_set(srv_buf_resize_event); }, SRV_SHUTDOWN_CLEANUP},
@@ -2549,6 +2554,13 @@ void srv_start_threads_after_ddl_recovery() {
       os_thread_create(buf_dump_thread_key, 0, buf_dump_thread);
 
   srv_threads.m_buf_dump.start();
+
+  /* Dumps per-call-site LRU list mutex wait and hold times to a CSV file
+  once a second (PS-11141). */
+  srv_threads.m_lru_hold_stats =
+      os_thread_create(lru_hold_stats_thread_key, 0, lru_hold_stats_thread);
+
+  srv_threads.m_lru_hold_stats.start();
 
   /* Resume unfinished (un)encryption process in background thread. */
   if (!ts_encrypt_ddl_records.empty()) {

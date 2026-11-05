@@ -290,8 +290,12 @@ struct GenericPolicy
   @param[in]    mutex           Mutex instance to be locked
   @param[in]    filename        Filename from where it was called
   @param[in]    line            Line number from where it was called */
-  void enter(const MutexType &IF_DEBUG(mutex), const char *IF_DEBUG(filename),
-             ulint IF_DEBUG(line)) UNIV_NOTHROW {
+  void enter(const MutexType &mutex [[maybe_unused]],
+             const char *filename [[maybe_unused]],
+             ulint line [[maybe_unused]]) UNIV_NOTHROW {
+    if (m_track_hold) {
+      lru_wait_start_ns = LruHoldStats::now_ns();
+    }
     ut_d(MutexDebug<MutexType>::enter(&mutex, filename, line));
   }
 
@@ -301,10 +305,16 @@ struct GenericPolicy
   @param[in]    line            Line number from where it was called */
   void locked(const MutexType &mutex [[maybe_unused]], const char *filename,
               ulint line) UNIV_NOTHROW {
-    if (m_track_hold && m_count.m_enabled) {
+    if (m_track_hold) {
+      const uint64_t now = LruHoldStats::now_ns();
       m_hold_file = filename;
       m_hold_line = static_cast<unsigned>(line);
-      m_hold_start_ns = LruHoldStats::now_ns();
+      m_hold_start_ns = now;
+      if (lru_wait_start_ns != 0) {
+        lru_hold_stats.record_wait(m_hold_file, m_hold_line,
+                                   now - lru_wait_start_ns);
+        lru_wait_start_ns = 0;
+      }
     }
     ut_d(MutexDebug<MutexType>::locked(&mutex, filename, line));
   }
@@ -339,9 +349,9 @@ struct GenericPolicy
   /** Latch meta data ID */
   latch_id_t m_id;
 
-  /** true iff this latch's hold time is tracked (the buf_pool LRU list
-  mutex).  Set once in init(); false for every other mutex, so the hot-path
-  overhead elsewhere is a single boolean test. */
+  /** true iff this latch's wait and hold times are tracked (the buf_pool LRU
+  list mutex).  Set once in init(); false for every other mutex, so the
+  hot-path overhead elsewhere is a single boolean test. */
   bool m_track_hold{false};
 
   /* The following three fields describe the current hold and are written in
@@ -355,7 +365,7 @@ struct GenericPolicy
   unsigned m_hold_line{0};
 
   /** Monotonic start time (ns) of the current tracked hold, or 0 when the
-  current hold is not being sampled (monitor was off at acquire time). */
+  mutex is not held. */
   uint64_t m_hold_start_ns{0};
 };
 

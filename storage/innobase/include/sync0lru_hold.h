@@ -28,17 +28,21 @@ this program; if not, write to the Free Software Foundation, Inc.,
  Per-call-site hold-time statistics for buf_pool->LRU_list_mutex.
 
  Performance Schema and the InnoDB latch monitor both time only the wait to
- *acquire* a mutex; neither records how long a latch is *held*.  This small,
+ *acquire* a mutex; neither records how long a latch is *held*, and neither
+ attributes the wait to the call-site that acquired the latch.  This small,
  self-contained registry fills that gap for a single latch of interest, the
  buffer pool LRU list mutex, so we can measure per acquisition call-site how
- many times the latch is taken and how long it is held.
+ many times the latch is taken, how long threads waited to get it and how
+ long it is held.
 
- Collection is gated by the existing InnoDB latch monitor
- (innodb_monitor_enable='latch'); when it is off, the only overhead added to
- every other mutex is a single boolean test in GenericPolicy::locked/release.
+ Collection is always on for the LRU list mutex; the only overhead added to
+ every other mutex is a single boolean test in GenericPolicy::enter, locked
+ and release.  innodb_monitor_reset='latch' clears the statistics.
 
  Results are summed across all buffer pool instances and reported by
- SHOW ENGINE INNODB MUTEX.
+ SHOW ENGINE INNODB MUTEX.  A background thread (lru_hold_stats_thread) also
+ appends a snapshot of all call-sites with samples to
+ lru_mutex_contention_stats.csv in the data directory once a second.
  *******************************************************/
 
 #ifndef sync0lru_hold_h
@@ -70,6 +74,11 @@ struct LruHoldStats {
     std::atomic<uint64_t> m_total_ns{0};
     /** Longest single hold, in nanoseconds. */
     std::atomic<uint64_t> m_max_ns{0};
+    /** Sum of the times spent waiting to acquire the latch, in
+    nanoseconds. */
+    std::atomic<uint64_t> m_wait_total_ns{0};
+    /** Longest single wait to acquire the latch, in nanoseconds. */
+    std::atomic<uint64_t> m_wait_max_ns{0};
   };
 
   Slot m_slots[MAX_SLOTS];
@@ -99,11 +108,24 @@ struct LruHoldStats {
 
     s->m_count.fetch_add(1, std::memory_order_relaxed);
     s->m_total_ns.fetch_add(hold_ns, std::memory_order_relaxed);
+    update_max(s->m_max_ns, hold_ns);
+  }
 
-    uint64_t cur = s->m_max_ns.load(std::memory_order_relaxed);
-    while (hold_ns > cur && !s->m_max_ns.compare_exchange_weak(
-                                cur, hold_ns, std::memory_order_relaxed)) {
+  /** Record one wait to acquire the latch.  The acquisition itself is counted
+  by record() when the latch is released.
+  @param[in]  file     source file of the acquisition call-site
+  @param[in]  line     source line of the acquisition call-site
+  @param[in]  wait_ns  time spent waiting for the latch, in nanoseconds */
+  void record_wait(const char *file, unsigned line, uint64_t wait_ns) {
+    Slot *s = find_or_claim(file, line);
+
+    if (s == nullptr) {
+      m_overflow.store(true, std::memory_order_relaxed);
+      return;
     }
+
+    s->m_wait_total_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+    update_max(s->m_wait_max_ns, wait_ns);
   }
 
   /** Zero all accumulated statistics, keeping the call-site claims so that
@@ -113,12 +135,14 @@ struct LruHoldStats {
       s.m_count.store(0, std::memory_order_relaxed);
       s.m_total_ns.store(0, std::memory_order_relaxed);
       s.m_max_ns.store(0, std::memory_order_relaxed);
+      s.m_wait_total_ns.store(0, std::memory_order_relaxed);
+      s.m_wait_max_ns.store(0, std::memory_order_relaxed);
     }
     m_overflow.store(false, std::memory_order_relaxed);
   }
 
-  /** Invoke f(file, line, count, total_ns, max_ns) for every claimed slot
-  that has at least one sample. */
+  /** Invoke f(file, line, count, total_ns, max_ns, wait_total_ns,
+  wait_max_ns) for every claimed slot that has at least one sample. */
   template <typename F>
   void iterate(F &&f) const {
     for (const Slot &s : m_slots) {
@@ -132,7 +156,9 @@ struct LruHoldStats {
       }
       f(file, s.m_line.load(std::memory_order_relaxed), count,
         s.m_total_ns.load(std::memory_order_relaxed),
-        s.m_max_ns.load(std::memory_order_relaxed));
+        s.m_max_ns.load(std::memory_order_relaxed),
+        s.m_wait_total_ns.load(std::memory_order_relaxed),
+        s.m_wait_max_ns.load(std::memory_order_relaxed));
     }
   }
 
@@ -140,6 +166,14 @@ struct LruHoldStats {
   bool overflowed() const { return m_overflow.load(std::memory_order_relaxed); }
 
  private:
+  /** Raise max to value if value is larger. */
+  static void update_max(std::atomic<uint64_t> &max, uint64_t value) {
+    uint64_t cur = max.load(std::memory_order_relaxed);
+    while (value > cur &&
+           !max.compare_exchange_weak(cur, value, std::memory_order_relaxed)) {
+    }
+  }
+
   /** Locate the slot for (file, line), claiming a free slot on first use.
 
   The key is the pair (file pointer, line).  Each acquisition call-site has a
@@ -192,5 +226,19 @@ struct LruHoldStats {
 /** The single global registry.  Trivially destructible, so it is safe to use
 as an inline global regardless of static-destruction order at shutdown. */
 inline LruHoldStats lru_hold_stats;
+
+/** Time (ns) at which the current thread started waiting for an LRU list
+mutex, or 0 when it is not waiting for one.  Set in
+GenericPolicy::enter() and consumed in GenericPolicy::locked().  Waiters of the
+same mutex run concurrently, so this cannot live in the mutex policy. */
+inline thread_local uint64_t lru_wait_start_ns = 0;
+
+/** Background thread that appends a snapshot of lru_hold_stats to
+lru_mutex_contention_stats.csv in the data directory once a second. */
+void lru_hold_stats_thread();
+
+/** Event used to wake up lru_hold_stats_thread at shutdown. */
+struct os_event;
+extern os_event *srv_lru_hold_stats_event;
 
 #endif /* sync0lru_hold_h */
