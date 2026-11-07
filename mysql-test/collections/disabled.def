@@ -138,7 +138,6 @@ rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.ddl_crash_create_drop_mismatch : BUG#0 PS-11666 CREATE/DROP crash
 rocksdb.ddl_crash_rename_mismatch : BUG#0 PS-11667 RENAME crash
 rocksdb.ddl_crash_truncate : BUG#0 PS-11668 TRUNCATE crash
-rocksdb.ddl_crash_add_index : BUG#0 PS-11669 ADD INDEX crash
 rocksdb.ddl_crash_drop_index : BUG#0 PS-11670 DROP INDEX crash
 
 # rocksdb_rpl suite tests

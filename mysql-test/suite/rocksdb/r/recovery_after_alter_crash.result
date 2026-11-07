@@ -9,8 +9,10 @@ KEY k1 (c1)
 ) ENGINE=ROCKSDB;
 # 3. Insert sample data into the table
 INSERT INTO t VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
-# 4. Set debug sync to simulate crash after RocksDB commits an ALTER operation
-SET SESSION debug='+d,crash_commit_after_prepare';
+# 4. Simulate a crash after the MyRocks dictionary commit, without a
+# pending record (rocksdb_skip_pending_alter), so the rebuild path is
+# exercised
+SET SESSION debug='+d,crash_commit_after_prepare,rocksdb_skip_pending_alter';
 # 5. Expect the server to crash when committing the ALTER statement
 ALTER TABLE t ADD INDEX k2 (c2), ALGORITHM=INPLACE;
 ERROR HY000: Lost connection to MySQL server during query

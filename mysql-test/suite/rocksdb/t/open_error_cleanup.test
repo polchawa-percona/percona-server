@@ -1,0 +1,63 @@
+#
+# PS-11669: every error path of ha_rocksdb::open() after the table handler
+# was acquired must end the performance counter guard before it releases the
+# handler (the guard records into the handler's counters, and the release
+# frees the handler when it was the last reference), and must release the
+# handler exactly once. Each path is driven by a debug point, with
+# rocksdb_perf_context_level enabled and no other reference to the handler.
+# Run with --valgrind to see a use-after-free of the handler.
+#
+# A released handler is no longer listed in
+# INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT, which lists the open handlers.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+# Without a primary key: the hidden key value is loaded at the first open.
+CREATE TABLE t2 (a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,10),(2,20),(3,30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Restart: the hidden key value of t2 is not loaded yet
+--source include/restart_mysqld.inc
+SET SESSION rocksdb_perf_context_level = 2;
+
+--let $i = 0
+while ($i < 3)
+{
+  --let $tbl = t1
+  --let $point = rocksdb_open_fail_find_tbl_def
+  --let $err = ER_INTERNAL_ERROR
+  if ($i == 1)
+  {
+    --let $point = rocksdb_open_fail_alloc_key_buffers
+    --let $err = ER_OUT_OF_RESOURCES
+  }
+  if ($i == 2)
+  {
+    --let $tbl = t2
+    --let $point = rocksdb_open_fail_load_hidden_pk
+    --let $err = ER_GET_ERRNO
+  }
+  --echo # Open error at $point
+  FLUSH TABLES;
+  --eval SET SESSION debug = "+d,$point"
+  --error $err
+  --eval SELECT * FROM $tbl ORDER BY a
+  --eval SET SESSION debug = "-d,$point"
+  --echo # The table handler was released (expect 0)
+  --eval SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '$tbl'
+  --eval SELECT * FROM $tbl ORDER BY a
+  --eval SELECT COUNT(*) > 0 AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '$tbl'
+  --inc $i
+}
+
+--echo # The hidden key value was loaded by the successful open
+INSERT INTO t2 VALUES (4,40);
+SELECT * FROM t2 ORDER BY a;
+CHECK TABLE t1, t2;
+
+SET SESSION rocksdb_perf_context_level = DEFAULT;
+DROP TABLE t1, t2;
