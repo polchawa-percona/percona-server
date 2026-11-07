@@ -17,6 +17,7 @@ set @@global.debug = '+d,rocksdb_drop_cf';
 alter table t1 drop index secondary_key;
 set debug_sync = "now wait_for ready_to_mark_cf_dropped_after_commit_alter_table";
 set @@global.rocksdb_delete_cf = 'cf_secondary_key';
+ERROR HY000: Cannot drop Column family ('cf_secondary_key') because it is in use or does not exist.
 set debug_sync = "now signal mark_cf_dropped_done_after_commit_alter_table";
 show create table t1;
 Table	Create Table
@@ -25,6 +26,7 @@ t1	CREATE TABLE `t1` (
   `id2` int unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`id1`) COMMENT 'cfname=cf_primary_key'
 ) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+set @@global.rocksdb_delete_cf = 'cf_secondary_key';
 select count(*) > 0 from information_schema.rocksdb_cfstats where cf_name = 'cf_secondary_key' ;
 count(*) > 0
 1
