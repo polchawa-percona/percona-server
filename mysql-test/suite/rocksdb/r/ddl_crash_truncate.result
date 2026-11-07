@@ -12,9 +12,17 @@ rocksdb_available
 SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
 dictionaries_agree
 1
-SELECT COUNT(*) IN (0, 3) AS old_rows_or_empty FROM t1;
-old_rows_or_empty
+# The TRUNCATE is rolled back: the old rows are kept.
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+SELECT a FROM t1 FORCE INDEX (ka) ORDER BY a;
+a
 1
+2
+3
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -36,14 +44,45 @@ rocksdb_available
 SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
 dictionaries_agree
 1
-SELECT COUNT(*) AS p1_rows FROM t1 PARTITION (p1);
-p1_rows
-2
-SELECT COUNT(*) IN (0, 1) AS p0_old_rows_or_empty FROM t1 PARTITION (p0);
-p0_old_rows_or_empty
-1
+# The TRUNCATE PARTITION is rolled back: the old rows of p0 are kept.
+SELECT * FROM t1 PARTITION (p0) ORDER BY id;
+id	a
+1	1
+SELECT * FROM t1 PARTITION (p1) ORDER BY id;
+id	a
+2	2
+3	3
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
 INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
+# A crash during the startup recovery itself, after the old table is
+# restored: the next startup finds nothing left to do.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SET SESSION debug = "+d,rocksdb_truncate_failure_crash";
+TRUNCATE TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/assert_grep.inc [The recovery crashed after restoring the table]
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS leftovers FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#truncate_tmp#%';
+leftovers
+0
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
 DROP TABLE t1;
