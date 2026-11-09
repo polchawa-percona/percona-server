@@ -15593,6 +15593,17 @@ static void adjust_cardinality(
     if ((uint64_t)stat.m_rows > max_num_rows_scanned) {
       stat.adjust_cardinality(stat.m_rows / max_num_rows_scanned);
     }
+    // The sampled distinct-key estimate is scaled up for key sampling
+    // (AdjustStats) and for the row cap (above), which makes it an unbiased
+    // estimate of the whole-table distinct key count but not bounded by it:
+    // sampling noise can push it above the total number of rows, which is an
+    // absolute upper bound for the distinct key count. Cap each level at the
+    // row count, like Rdb_tbl_prop_coll::Finish() does for SST file stats.
+    for (size_t i = 0; i < stat.m_distinct_keys_per_prefix.size(); i++) {
+      if (stat.m_distinct_keys_per_prefix[i] > stat.m_rows) {
+        stat.m_distinct_keys_per_prefix[i] = stat.m_rows;
+      }
+    }
 #ifndef NDEBUG
     for (size_t i = 0; i < stat.m_distinct_keys_per_prefix.size(); i++) {
       assert(stat.m_distinct_keys_per_prefix[i] <= stat.m_rows);
