@@ -1,0 +1,137 @@
+--source include/have_rocksdb.inc
+# Hunt tests, part 2: integer composite key, bounds<->bloom flips in both
+# KEY orders and repeated alternation in one statement.
+# Differential vs an identical InnoDB table.
+# (Fix under test: aae69cc8f6b; per-test opt file:
+# prefix_extractor=capped:12, bloom eligible iff eq_cond_len >= 12.)
+#
+# Packed key arithmetic (packed key = 4-byte index id + parts; a
+# nullable int is 5B and a nullable bigint is 9B, i.e. value bytes plus
+# a 1-byte NULL flag), index idx_bcd(b, c, d):
+#   b only                  -> eq_cond 4+5    =  9 -> iterator bounds
+#   (b, c)                  -> eq_cond 4+5+9  = 18 -> prefix bloom
+#   (b, c, d-range)         -> eq_cond 4+5+9  = 18 -> prefix bloom
+#
+# The range optimizer scans OR-intervals in KEY order, so "textual order"
+# in the WHERE clause is not the scan order; the comments below state the
+# key order.
+#
+# Bloom-delta evidence: with session rocksdb_perf_context_level=2, the sum
+# of BLOOM_{SST,MEMTABLE}_{HIT,MISS}_COUNT in
+# INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL grows by exactly one per
+# range interval that takes the prefix bloom path (the single flushed SST
+# file is consulted once per interval seek, BLOOM_SST_HIT), and by zero per
+# bounds interval; a full-scan plan would read 0, so the exact expected
+# values double as a guard against silent plan changes.
+# Result sets are asserted identical to the InnoDB twin via
+# count+CRC32 fingerprint.
+
+create table t_r2(
+  a int,
+  b int,
+  c bigint,
+  d bigint,
+  primary key(a), key idx_bcd(b, c, d)
+) engine=rocksdb;
+create table t_i2(
+  a int,
+  b int,
+  c bigint,
+  d bigint,
+  primary key(a), key idx_bcd(b, c, d)
+) engine=innodb;
+insert into t_r2 values(1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4),(5,5,5,5),
+  (10,2,5,10),(11,2,5,20),(12,2,5,30);
+insert into t_i2 values(1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4),(5,5,5,5),
+  (10,2,5,10),(11,2,5,20),(12,2,5,30);
+--disable_query_log
+BEGIN;
+let $i = 100;
+while ($i < 400)
+{
+  eval insert into t_r2 values($i, $i, $i, $i);
+  eval insert into t_i2 values($i, $i, $i, $i);
+  inc $i;
+}
+COMMIT;
+--enable_query_log
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_r2;
+analyze table t_i2;
+set session rocksdb_perf_context_level = 2;
+
+# --- Q6 (key order: bounds -> bloom): b=2 -> eq_cond 9 (bounds), then
+#     b=3,c=3 -> eq_cond 18 (bloom, d spans); expected delta 1 ---
+--replace_column 10 # 11 #
+explain select a from t_r2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_r2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = Q6 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_i2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_r2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3)`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3)`
+--let $assert_text = Q6 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- Q7 (key order: bloom -> bounds): the bloom interval (b=2,c=5,
+#     d-range, eq_cond 18) sorts BEFORE the bounds interval (b=100,
+#     eq_cond 9); expected delta 1 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_r2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100 order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = Q7 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_i2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100 order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_r2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100`
+--let $assert_text = Q7 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- Q8 (key order: bounds -> bloom): bare bounds branch, then deep-range
+#     bloom branch (eq_cond 18 inside the b=2,c=5 prefix);
+#     expected delta 1 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100) order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = Q8 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100) order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100)`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100)`
+--let $assert_text = Q8 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- Q9 (repeated alternation, 5 intervals, 4 flips):
+#     b=1(bounds) b=2,c=2(bloom) b=3(bounds) b=4,c=4(bloom) b=5(bounds);
+#     expected delta 2 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5 order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = Q9 bloom delta is 2
+--let $assert_cond = ($bl1 - $bl0) = 2
+--source include/assert.inc
+select a from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5 order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5`
+--let $assert_text = Q9 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+drop table t_r2;
+drop table t_i2;

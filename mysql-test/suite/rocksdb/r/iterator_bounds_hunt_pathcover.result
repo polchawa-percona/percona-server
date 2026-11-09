@@ -1,0 +1,79 @@
+create table t(
+a int,
+b int,
+c bigint,
+d bigint,
+primary key(a), key idx_bcd(b, c, d)
+) engine=rocksdb;
+create table t_i(
+a int,
+b int,
+c bigint,
+d bigint,
+primary key(a), key idx_bcd(b, c, d)
+) engine=innodb;
+insert into t values(1,1,1,1),(2,2,2,2),(10,2,2,10),(11,2,2,20),(12,2,2,30);
+insert into t_i values(1,1,1,1),(2,2,2,2),(10,2,2,10),(11,2,2,20),(12,2,2,30);
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+analyze table t_i;
+Table	Op	Msg_type	Msg_text
+test.t_i	analyze	status	OK
+set session rocksdb_perf_context_level = 2;
+explain select a from t force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	NULL	range	idx_bcd	idx_bcd	14	NULL	#	#	Using where; Using index; Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t`.`a` AS `a` from `test`.`t` FORCE INDEX (`idx_bcd`) where ((`test`.`t`.`b` = 1) or ((`test`.`t`.`c` = 2) and (`test`.`t`.`b` = 2))) order by `test`.`t`.`a`
+SET @saved_bounds=@@global.rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds;
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=ON;
+SET optimizer_switch='mrr=off';
+SET SESSION rocksdb_perf_context_level = 2;
+SET DEBUG_SYNC='rocksdb.check_flags_nwd SIGNAL hunt_flip_reached WAIT_FOR hunt_flip_resume';
+SELECT a FROM t FORCE INDEX(idx_bcd) WHERE b = 1 OR (b = 2 AND c = 2) ORDER BY a;
+SET DEBUG_SYNC='now WAIT_FOR hunt_flip_reached';
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=OFF;
+SET DEBUG_SYNC='now SIGNAL hunt_flip_resume';
+a
+1
+2
+10
+11
+12
+bloom_intervals 1
+include/assert.inc [phase1 bloom delta is 1]
+select a from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+a
+1
+2
+10
+11
+12
+include/assert.inc [phase1 rocksdb == innodb]
+SET DEBUG_SYNC='RESET';
+SET DEBUG_SYNC='rocksdb.check_flags_nwd SIGNAL hunt_flip_reached2 WAIT_FOR hunt_flip_resume2';
+SELECT a FROM t FORCE INDEX(idx_bcd) WHERE b = 1 OR (b = 2 AND c = 2) ORDER BY a;
+SET DEBUG_SYNC='now WAIT_FOR hunt_flip_reached2';
+SET DEBUG_SYNC='now SIGNAL hunt_flip_resume2';
+a
+1
+2
+10
+11
+12
+bloom_intervals 1
+include/assert.inc [phase2 bloom delta is 1]
+select a from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+a
+1
+2
+10
+11
+12
+include/assert.inc [phase2 rocksdb == innodb]
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=@saved_bounds;
+SET DEBUG_SYNC='RESET';
+drop table t;
+drop table t_i;

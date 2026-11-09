@@ -1,0 +1,130 @@
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+# Hunt tests, part 6: path-coverage proof for the fixed scan-iterator
+# switching path, plus the live re-read of the escape-hatch global
+# (rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds) between two
+# intervals of one statement. Differential vs an identical InnoDB table.
+# (Fix under test: aae69cc8f6b; per-test opt file:
+# prefix_extractor=capped:12, bloom eligible iff eq_cond_len >= 12.)
+#
+# The statement scans two OR-intervals on idx_bcd(b, c, d) (b int,
+# c/d bigint; nullable columns pack as value bytes plus a 1-byte NULL
+# flag, so int=5B, bigint=9B):
+#   b=1             -> eq_cond 4+5    = 9  -> iterator bounds
+#   b=2 AND c=2     -> eq_cond 4+5+9=18 -> prefix bloom
+# so the reused scan iterator must flip bounds->bloom mid-statement and
+# be re-created (setup_scan_iterator).
+#
+# Coverage proof: the reader connection parks at the DEBUG_SYNC point
+# rocksdb.check_flags_nwd, which fires at the top of
+# next_with_direction() -- i.e. inside the very scan-iterator code the
+# fix touches -- and only once a range interval is actually executed. If
+# the statement never reached that path, the wait below would time out
+# (debug sync timeout) and fail the test.
+#
+# Phase 1 starts the query with the escape-hatch global ON and flips it
+# OFF between the two intervals (it is re-read per interval in
+# check_bloom_and_set_bounds); phase 2 is the control run with the global
+# OFF throughout. Both phases must complete with the same result set and
+# the same bloom delta of 1.
+#
+# Bloom-delta evidence: with session rocksdb_perf_context_level=2, the sum
+# of BLOOM_{SST,MEMTABLE}_{HIT,MISS}_COUNT in
+# INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL grows by exactly one per
+# range interval that takes the prefix bloom path, and by zero per bounds
+# interval; a full-scan plan would read 0, so the exact expected value
+# doubles as a guard against silent plan changes.
+# Result sets are asserted identical to the InnoDB twin via
+# count+CRC32 fingerprint.
+
+create table t(
+  a int,
+  b int,
+  c bigint,
+  d bigint,
+  primary key(a), key idx_bcd(b, c, d)
+) engine=rocksdb;
+create table t_i(
+  a int,
+  b int,
+  c bigint,
+  d bigint,
+  primary key(a), key idx_bcd(b, c, d)
+) engine=innodb;
+insert into t values(1,1,1,1),(2,2,2,2),(10,2,2,10),(11,2,2,20),(12,2,2,30);
+insert into t_i values(1,1,1,1),(2,2,2,2),(10,2,2,10),(11,2,2,20),(12,2,2,30);
+--disable_query_log
+BEGIN;
+let $i = 100;
+while ($i < 400)
+{
+  eval insert into t values($i, $i, $i, $i);
+  eval insert into t_i values($i, $i, $i, $i);
+  inc $i;
+}
+COMMIT;
+--enable_query_log
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t;
+analyze table t_i;
+set session rocksdb_perf_context_level = 2;
+--replace_column 10 # 11 #
+explain select a from t force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+
+# --- Phase 1: escape hatch ON at start, flipped OFF between the
+#     intervals; expected delta 1 ---
+SET @saved_bounds=@@global.rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds;
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=ON;
+--connect (reader,localhost,root,,test)
+SET optimizer_switch='mrr=off';
+SET SESSION rocksdb_perf_context_level = 2;
+SET DEBUG_SYNC='rocksdb.check_flags_nwd SIGNAL hunt_flip_reached WAIT_FOR hunt_flip_resume';
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--send SELECT a FROM t FORCE INDEX(idx_bcd) WHERE b = 1 OR (b = 2 AND c = 2) ORDER BY a
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR hunt_flip_reached';
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=OFF;
+SET DEBUG_SYNC='now SIGNAL hunt_flip_resume';
+--connection reader
+--reap
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = phase1 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t force index(idx_bcd) where b = 1 or (b = 2 and c = 2)`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2)`
+--let $assert_text = phase1 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- Phase 2 (control): escape hatch OFF throughout; expected delta 1 ---
+SET DEBUG_SYNC='RESET';
+SET DEBUG_SYNC='rocksdb.check_flags_nwd SIGNAL hunt_flip_reached2 WAIT_FOR hunt_flip_resume2';
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--send SELECT a FROM t FORCE INDEX(idx_bcd) WHERE b = 1 OR (b = 2 AND c = 2) ORDER BY a
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR hunt_flip_reached2';
+SET DEBUG_SYNC='now SIGNAL hunt_flip_resume2';
+--connection reader
+--reap
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = phase2 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+--connection default
+select a from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2) order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t force index(idx_bcd) where b = 1 or (b = 2 and c = 2)`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c,0x1f,d))),0)) from t_i force index(idx_bcd) where b = 1 or (b = 2 and c = 2)`
+--let $assert_text = phase2 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+SET GLOBAL rocksdb_debug_skip_bloom_filter_check_on_iterator_bounds=@saved_bounds;
+SET DEBUG_SYNC='RESET';
+--disconnect reader
+drop table t;
+drop table t_i;

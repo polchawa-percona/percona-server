@@ -1,0 +1,97 @@
+create table t_r2(
+a int,
+b int,
+c bigint,
+d bigint,
+primary key(a), key idx_bcd(b, c, d)
+) engine=rocksdb;
+create table t_i2(
+a int,
+b int,
+c bigint,
+d bigint,
+primary key(a), key idx_bcd(b, c, d)
+) engine=innodb;
+insert into t_r2 values(1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4),(5,5,5,5),
+(10,2,5,10),(11,2,5,20),(12,2,5,30);
+insert into t_i2 values(1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4),(5,5,5,5),
+(10,2,5,10),(11,2,5,20),(12,2,5,30);
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_r2;
+Table	Op	Msg_type	Msg_text
+test.t_r2	analyze	status	OK
+analyze table t_i2;
+Table	Op	Msg_type	Msg_text
+test.t_i2	analyze	status	OK
+set session rocksdb_perf_context_level = 2;
+explain select a from t_r2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_r2	NULL	range	idx_bcd	idx_bcd	14	NULL	#	#	Using where; Using index; Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t_r2`.`a` AS `a` from `test`.`t_r2` FORCE INDEX (`idx_bcd`) where ((`test`.`t_r2`.`b` = 2) or ((`test`.`t_r2`.`c` = 3) and (`test`.`t_r2`.`b` = 3))) order by `test`.`t_r2`.`a`
+select a from t_r2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+a
+2
+3
+10
+11
+12
+bloom_intervals 1
+include/assert.inc [Q6 bloom delta is 1]
+select a from t_i2 force index(idx_bcd) where b = 2 or (b = 3 and c = 3) order by a;
+a
+2
+3
+10
+11
+12
+include/assert.inc [Q6 rocksdb == innodb]
+select a from t_r2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100 order by a;
+a
+10
+11
+12
+100
+bloom_intervals 1
+include/assert.inc [Q7 bloom delta is 1]
+select a from t_i2 force index(idx_bcd) where (b = 2 and c = 5 and d between 0 and 100) or b = 100 order by a;
+a
+10
+11
+12
+100
+include/assert.inc [Q7 rocksdb == innodb]
+select a from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100) order by a;
+a
+1
+10
+11
+12
+bloom_intervals 1
+include/assert.inc [Q8 bloom delta is 1]
+select a from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 5 and d between 0 and 100) order by a;
+a
+1
+10
+11
+12
+include/assert.inc [Q8 rocksdb == innodb]
+select a from t_r2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5 order by a;
+a
+1
+2
+3
+4
+5
+bloom_intervals 2
+include/assert.inc [Q9 bloom delta is 2]
+select a from t_i2 force index(idx_bcd) where b = 1 or (b = 2 and c = 2) or b = 3 or (b = 4 and c = 4) or b = 5 order by a;
+a
+1
+2
+3
+4
+5
+include/assert.inc [Q9 rocksdb == innodb]
+drop table t_r2;
+drop table t_i2;

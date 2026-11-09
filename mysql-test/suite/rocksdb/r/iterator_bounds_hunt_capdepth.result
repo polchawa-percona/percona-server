@@ -1,0 +1,96 @@
+create table t_b_r(
+a int,
+b bigint NOT NULL,
+c bigint NOT NULL,
+primary key(a), key idx_bc(b, c)
+) engine=rocksdb;
+create table t_b_i(
+a int,
+b bigint NOT NULL,
+c bigint NOT NULL,
+primary key(a), key idx_bc(b, c)
+) engine=innodb;
+insert into t_b_r values(1,5,1),(2,7,2),(3,9,3),(4,5,4),(5,50,5);
+insert into t_b_i values(1,5,1),(2,7,2),(3,9,3),(4,5,4),(5,50,5);
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_b_r;
+Table	Op	Msg_type	Msg_text
+test.t_b_r	analyze	status	OK
+analyze table t_b_i;
+Table	Op	Msg_type	Msg_text
+test.t_b_i	analyze	status	OK
+set session rocksdb_perf_context_level = 2;
+explain select a from t_b_r force index(idx_bc) where b = 5 order by a;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_b_r	NULL	ref	idx_bc	idx_bc	8	const	#	#	Using index; Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t_b_r`.`a` AS `a` from `test`.`t_b_r` FORCE INDEX (`idx_bc`) where (`test`.`t_b_r`.`b` = 5) order by `test`.`t_b_r`.`a`
+select a from t_b_r force index(idx_bc) where b = 5 order by a;
+a
+1
+4
+bloom_intervals 1
+include/assert.inc [Q11 bloom delta is 1]
+select a from t_b_i force index(idx_bc) where b = 5 order by a;
+a
+1
+4
+include/assert.inc [Q11 rocksdb == innodb]
+select a from t_b_r force index(idx_bc) where b > 1 and b < 10 order by a;
+a
+1
+2
+3
+4
+bloom_intervals 0
+include/assert.inc [Q12 bloom delta is 0]
+select a from t_b_i force index(idx_bc) where b > 1 and b < 10 order by a;
+a
+1
+2
+3
+4
+include/assert.inc [Q12 rocksdb == innodb]
+select a from t_b_r force index(idx_bc) where (b > 1 and b < 10) or b = 50 order by a;
+a
+1
+2
+3
+4
+5
+bloom_intervals 1
+include/assert.inc [Q13 bloom delta is 1]
+select a from t_b_i force index(idx_bc) where (b > 1 and b < 10) or b = 50 order by a;
+a
+1
+2
+3
+4
+5
+include/assert.inc [Q13 rocksdb == innodb]
+select a from t_b_r force index(idx_bc) where b = 5 or (b > 10 and b < 15) order by a;
+a
+1
+4
+bloom_intervals 1
+include/assert.inc [Q14 bloom delta is 1]
+select a from t_b_i force index(idx_bc) where b = 5 or (b > 10 and b < 15) order by a;
+a
+1
+4
+include/assert.inc [Q14 rocksdb == innodb]
+select a from t_b_r force index(idx_bc) where b in (5, 7) order by a;
+a
+1
+2
+4
+bloom_intervals 2
+include/assert.inc [Q15 bloom delta is 2]
+select a from t_b_i force index(idx_bc) where b in (5, 7) order by a;
+a
+1
+2
+4
+include/assert.inc [Q15 rocksdb == innodb]
+drop table t_b_r;
+drop table t_b_i;

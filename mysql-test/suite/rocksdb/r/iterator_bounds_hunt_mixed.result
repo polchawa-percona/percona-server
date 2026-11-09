@@ -1,0 +1,398 @@
+create table t_r(
+a int,
+b varchar(36) CHARACTER SET latin1 COLLATE latin1_swedish_ci,
+c int,
+primary key(a), key idx_bc(b, c)
+) engine=rocksdb;
+create table t_i(
+a int,
+b varchar(36) CHARACTER SET latin1 COLLATE latin1_swedish_ci,
+c int,
+primary key(a), key idx_bc(b, c)
+) engine=innodb;
+insert into t_r values(1,'',1),(2,'ab',2),(3,'abcd',3),(4,'abcdefgh',4),
+(5,'abcdefghi',5),(6,'abcdefghijkl',6),(7,'abcdefghijklm',7),(8,'zyx',8);
+insert into t_i values(1,'',1),(2,'ab',2),(3,'abcd',3),(4,'abcdefgh',4),
+(5,'abcdefghi',5),(6,'abcdefghijkl',6),(7,'abcdefghijklm',7),(8,'zyx',8);
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_r;
+Table	Op	Msg_type	Msg_text
+test.t_r	analyze	status	OK
+analyze table t_i;
+Table	Op	Msg_type	Msg_text
+test.t_i	analyze	status	OK
+set session rocksdb_perf_context_level = 2;
+explain select a from t_r force index(idx_bc) where b in ('', 'abcd') order by a;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_r	NULL	range	idx_bc	idx_bc	39	NULL	#	#	Using where; Using index; Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t_r`.`a` AS `a` from `test`.`t_r` FORCE INDEX (`idx_bc`) where (`test`.`t_r`.`b` in ('','abcd')) order by `test`.`t_r`.`a`
+select a from t_r force index(idx_bc) where b in ('', 'abcd') order by a;
+a
+1
+3
+bloom_intervals 1
+include/assert.inc [Q1 bloom delta is 1]
+select a from t_i force index(idx_bc) where b in ('', 'abcd') order by a;
+a
+1
+3
+include/assert.inc [Q1 rocksdb == innodb]
+select a from t_r force index(idx_bc) where b = '' or b like 'filler%' order by a;
+a
+1
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+bloom_intervals 1
+include/assert.inc [Q2 bloom delta is 1]
+select a from t_i force index(idx_bc) where b = '' or b like 'filler%' order by a;
+a
+1
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+include/assert.inc [Q2 rocksdb == innodb]
+select a from t_r force index(idx_bc) where b like 'filler%' or (b > 'z' and b < 'zz') order by a;
+a
+8
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+bloom_intervals 1
+include/assert.inc [Q3 bloom delta is 1]
+select a from t_i force index(idx_bc) where b like 'filler%' or (b > 'z' and b < 'zz') order by a;
+a
+8
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+include/assert.inc [Q3 rocksdb == innodb]
+select a from t_r force index(idx_bc) where b in ('', 'ab', 'abcd', 'abcdefgh', 'abcdefghi', 'abcdefghijkl', 'abcdefghijklm') order by a;
+a
+1
+2
+3
+4
+5
+6
+7
+bloom_intervals 6
+include/assert.inc [Q4 bloom delta is 6]
+select a from t_i force index(idx_bc) where b in ('', 'ab', 'abcd', 'abcdefgh', 'abcdefghi', 'abcdefghijkl', 'abcdefghijklm') order by a;
+a
+1
+2
+3
+4
+5
+6
+7
+include/assert.inc [Q4 rocksdb == innodb]
+select a from t_r force index(idx_bc) where b like 'filler%' or (b > 'ab' and b < 'fil') order by a;
+a
+3
+4
+5
+6
+7
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+bloom_intervals 1
+include/assert.inc [Q5 bloom delta is 1]
+select a from t_i force index(idx_bc) where b like 'filler%' or (b > 'ab' and b < 'fil') order by a;
+a
+3
+4
+5
+6
+7
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+include/assert.inc [Q5 rocksdb == innodb]
+drop table t_r;
+drop table t_i;

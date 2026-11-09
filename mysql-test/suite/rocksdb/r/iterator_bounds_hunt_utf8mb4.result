@@ -1,0 +1,88 @@
+create table t_u(
+a int,
+b varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+c int,
+primary key(a), key k(b, c)
+) engine=rocksdb;
+create table t_ui(
+a int,
+b varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+c int,
+primary key(a), key k(b, c)
+) engine=innodb;
+insert into t_u values(1,'',1),(2,'a',2),(3,'aaa',3),(4,'é',4),(5,'ééé',5),
+(6,'aaaa',6);
+insert into t_ui values(1,'',1),(2,'a',2),(3,'aaa',3),(4,'é',4),(5,'ééé',5),
+(6,'aaaa',6);
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_u;
+Table	Op	Msg_type	Msg_text
+test.t_u	analyze	status	OK
+analyze table t_ui;
+Table	Op	Msg_type	Msg_text
+test.t_ui	analyze	status	OK
+set session rocksdb_perf_context_level = 2;
+explain select a from t_u force index(k) where b in ('', 'a') order by a;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_u	NULL	range	k	k	147	NULL	#	#	Using where; Using index; Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t_u`.`a` AS `a` from `test`.`t_u` FORCE INDEX (`k`) where (`test`.`t_u`.`b` in ('','a')) order by `test`.`t_u`.`a`
+select a from t_u force index(k) where b in ('', 'a') order by a;
+a
+1
+2
+bloom_intervals 1
+include/assert.inc [U1 bloom delta is 1]
+select a from t_ui force index(k) where b in ('', 'a') order by a;
+a
+1
+2
+include/assert.inc [U1 rocksdb == innodb]
+select a from t_u force index(k) where b in ('ééé','aaaa','') order by a;
+a
+1
+5
+6
+bloom_intervals 2
+include/assert.inc [U2 bloom delta is 2]
+select a from t_ui force index(k) where b in ('ééé','aaaa','') order by a;
+a
+1
+5
+6
+include/assert.inc [U2 rocksdb == innodb]
+select a from t_u force index(k) where b = 'é' or (b > '' and b < 'a') order by a;
+a
+4
+bloom_intervals 1
+include/assert.inc [U3 bloom delta is 1]
+select a from t_ui force index(k) where b = 'é' or (b > '' and b < 'a') order by a;
+a
+4
+include/assert.inc [U3 rocksdb == innodb]
+select a from t_u force index(k) where b = 'a' or (b > 'é' and b < 'éz') order by a;
+a
+2
+5
+bloom_intervals 1
+include/assert.inc [U4 bloom delta is 1]
+select a from t_ui force index(k) where b = 'a' or (b > 'é' and b < 'éz') order by a;
+a
+2
+5
+include/assert.inc [U4 rocksdb == innodb]
+select a from t_u force index(k) where b in ('a','é','aaa') order by a;
+a
+2
+3
+4
+bloom_intervals 3
+include/assert.inc [U5 bloom delta is 3]
+select a from t_ui force index(k) where b in ('a','é','aaa') order by a;
+a
+2
+3
+4
+include/assert.inc [U5 rocksdb == innodb]
+drop table t_u;
+drop table t_ui;

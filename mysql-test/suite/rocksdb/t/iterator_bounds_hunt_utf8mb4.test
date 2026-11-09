@@ -1,0 +1,159 @@
+--source include/have_rocksdb.inc
+# Hunt tests, part 5: utf8mb4 multibyte keys around the prefix cap.
+# Differential vs an identical InnoDB table.
+# (Fix under test: aae69cc8f6b; per-test opt file:
+# prefix_extractor=capped:12, bloom eligible iff eq_cond_len >= 12.)
+#
+# Packed key arithmetic (packed key = 4-byte index id + parts; a nullable
+# varchar carries a 1-byte NULL flag before the string bytes;
+# utf8mb4_general_ci strnxfrm: 3 bytes per char; PAD-SPACE varchar packs
+# into 9-byte segments: '' -> 1B, 1-8 xfrm bytes -> 9B, 9-16 -> 18B),
+# index k(b, c):
+#   b=''      -> eq_cond 4+1+1  =  6 -> iterator bounds
+#   b='a'     -> eq_cond 4+1+9  = 14 -> prefix bloom
+#   b='é'     -> eq_cond 4+1+9  = 14 -> prefix bloom
+#   b='aaa'   -> eq_cond 4+1+18 = 23 -> prefix bloom (2 segments)
+#   b='aaaa'  -> eq_cond 4+1+18 = 23 -> prefix bloom (2 segments)
+#   b='ééé'   -> eq_cond 4+1+18 = 23 -> prefix bloom (2 segments)
+#   (b>x AND b<y) -> eq_cond 4 -> iterator bounds
+#
+# Key order in utf8mb4_general_ci (the accented é sorts between a and z,
+# so 'ééé' < 'éz'):
+#   '' < 'a' < 'aaa' < 'aaaa' < 'é' < 'ééé' < 'éz'
+#
+# The range optimizer scans OR-intervals in KEY order; the comments below
+# state the key order.
+#
+# Bloom-delta evidence: with session rocksdb_perf_context_level=2, the sum
+# of BLOOM_{SST,MEMTABLE}_{HIT,MISS}_COUNT in
+# INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL grows by exactly one per
+# range interval that takes the prefix bloom path, and by zero per bounds
+# interval; a full-scan plan would read 0, so the exact expected values
+# double as a guard against silent plan changes.
+# Result sets are asserted identical to the InnoDB twin via
+# count+CRC32 fingerprint.
+
+create table t_u(
+  a int,
+  b varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+  c int,
+  primary key(a), key k(b, c)
+) engine=rocksdb;
+create table t_ui(
+  a int,
+  b varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+  c int,
+  primary key(a), key k(b, c)
+) engine=innodb;
+insert into t_u values(1,'',1),(2,'a',2),(3,'aaa',3),(4,'é',4),(5,'ééé',5),
+  (6,'aaaa',6);
+insert into t_ui values(1,'',1),(2,'a',2),(3,'aaa',3),(4,'é',4),(5,'ééé',5),
+  (6,'aaaa',6);
+--disable_query_log
+BEGIN;
+let $i = 100;
+while ($i < 200)
+{
+  eval insert into t_u values($i, concat('row_', $i), $i);
+  eval insert into t_ui values($i, concat('row_', $i), $i);
+  inc $i;
+}
+COMMIT;
+--enable_query_log
+set global rocksdb_force_flush_memtable_now = 1;
+analyze table t_u;
+analyze table t_ui;
+set session rocksdb_perf_context_level = 2;
+
+# --- U1 (key order: bounds -> bloom): '' (eq_cond 6), then 'a' (14);
+#     expected delta 1 ---
+--replace_column 10 # 11 #
+explain select a from t_u force index(k) where b in ('', 'a') order by a;
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_u force index(k) where b in ('', 'a') order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = U1 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_ui force index(k) where b in ('', 'a') order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_u force index(k) where b in ('', 'a')`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_ui force index(k) where b in ('', 'a')`
+--let $assert_text = U1 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- U2 (key order: bounds -> bloom -> bloom): '' (eq_cond 6), then
+#     'aaaa' (23, 2 segments) and 'ééé' (23, 2 segments);
+#     expected delta 2 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_u force index(k) where b in ('ééé','aaaa','') order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = U2 bloom delta is 2
+--let $assert_cond = ($bl1 - $bl0) = 2
+--source include/assert.inc
+select a from t_ui force index(k) where b in ('ééé','aaaa','') order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_u force index(k) where b in ('ééé','aaaa','')`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_ui force index(k) where b in ('ééé','aaaa','')`
+--let $assert_text = U2 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- U3 (key order: bounds -> bloom): the true range ('','a')
+#     (eq_cond 4, holds no row) sorts before 'é' (14);
+#     expected delta 1 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_u force index(k) where b = 'é' or (b > '' and b < 'a') order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = U3 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_ui force index(k) where b = 'é' or (b > '' and b < 'a') order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_u force index(k) where b = 'é' or (b > '' and b < 'a')`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_ui force index(k) where b = 'é' or (b > '' and b < 'a')`
+--let $assert_text = U3 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- U4 (key order: bloom -> bounds): 'a' (14) sorts before the true
+#     range ('é','éz') (4); 'ééé' is inside the range because é < z in
+#     utf8mb4_general_ci; expected delta 1 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_u force index(k) where b = 'a' or (b > 'é' and b < 'éz') order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = U4 bloom delta is 1
+--let $assert_cond = ($bl1 - $bl0) = 1
+--source include/assert.inc
+select a from t_ui force index(k) where b = 'a' or (b > 'é' and b < 'éz') order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_u force index(k) where b = 'a' or (b > 'é' and b < 'éz')`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_ui force index(k) where b = 'a' or (b > 'é' and b < 'éz')`
+--let $assert_text = U4 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+# --- U5 (all three intervals bloom, key order 'a' -> 'aaa' -> 'é'):
+#     14 / 23 / 14; expected delta 3 ---
+--let $bl0 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+select a from t_u force index(k) where b in ('a','é','aaa') order by a;
+--let $bl1 = `SELECT IFNULL(SUM(VALUE),0) FROM INFORMATION_SCHEMA.ROCKSDB_PERF_CONTEXT_GLOBAL WHERE STAT_TYPE IN ('BLOOM_SST_HIT_COUNT','BLOOM_MEMTABLE_HIT_COUNT','BLOOM_SST_MISS_COUNT','BLOOM_MEMTABLE_MISS_COUNT')`
+--let $delta = `SELECT $bl1 - $bl0`
+--echo bloom_intervals $delta
+--let $assert_text = U5 bloom delta is 3
+--let $assert_cond = ($bl1 - $bl0) = 3
+--source include/assert.inc
+select a from t_ui force index(k) where b in ('a','é','aaa') order by a;
+--let $f_r = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_u force index(k) where b in ('a','é','aaa')`
+--let $f_i = `select concat(count(*),':',ifnull(sum(crc32(concat(a,0x1f,b,0x1f,c))),0)) from t_ui force index(k) where b in ('a','é','aaa')`
+--let $assert_text = U5 rocksdb == innodb
+--let $assert_cond = "$f_r" = "$f_i"
+--source include/assert.inc
+
+drop table t_u;
+drop table t_ui;
