@@ -1,0 +1,256 @@
+--source include/have_rocksdb.inc
+
+#
+# Differential hunt: INSERT IGNORE where a trigger changes the duplicate
+# outcome or the warning set.
+#
+# db_inn.t (InnoDB) and db_my.t (MyRocks) run the same workload; all
+# observables (rows, affected rows, warnings text/count/order, error codes)
+# must be equal. The test asserts equality and FAILS on any divergence.
+#
+# Cases:
+#  A. BEFORE INSERT rewrites the key onto an existing row -> the duplicate
+#     is demoted to a warning and the row is skipped.
+#  B. Trigger whose own INSERT into an auxiliary table hits a unique key
+#     (non-ignorable context inside the trigger body).
+#  C. Non-ignorable trigger error (SIGNAL) under INSERT IGNORE; nothing
+#     must be persisted.
+#  D. Data-truncation warning from the trigger under IGNORE (non-strict).
+#  E. Row-dependent: trigger rewrites row 2's key onto row 1 inserted by
+#     the same statement.
+#  F. Combined: trigger truncation + duplicate -> two warnings, in order.
+#
+
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+
+CREATE TABLE db_inn.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(16) NOT NULL,
+  u  VARCHAR(16) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE db_my.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(16) NOT NULL,
+  u  VARCHAR(16) NOT NULL
+) ENGINE=RocksDB;
+
+CREATE TABLE db_inn.aux (id INT NOT NULL, note VARCHAR(32), UNIQUE KEY uq (id)) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT NOT NULL, note VARCHAR(32), UNIQUE KEY uq (id)) ENGINE=RocksDB;
+
+INSERT INTO db_inn.t VALUES (9,'a','ka');
+INSERT INTO db_my.t  VALUES (9,'a','ka');
+INSERT INTO db_inn.aux VALUES (1, 'seed');
+INSERT INTO db_my.aux  VALUES (1, 'seed');
+
+# ---------------------------------------------------------------- case A
+delimiter //;
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx'),(2,'y','ky');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx'),(2,'y','ky');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+
+# ---------------------------------------------------------------- case B
+# The trigger's own INSERT into the auxiliary table violates its unique
+# key (id 1 exists). Errors in trigger bodies are NOT demoted by IGNORE.
+delimiter //;
+CREATE TRIGGER db_inn.biB BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'note');
+END//
+CREATE TRIGGER db_my.biB BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'note');
+END//
+delimiter ;//
+
+--error 1062
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT COUNT(*) AS inn_rows FROM db_inn.t;
+
+--error 1062
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT COUNT(*) AS my_rows FROM db_my.t;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+
+DROP TRIGGER db_inn.biB;
+DROP TRIGGER db_my.biB;
+
+# ---------------------------------------------------------------- case C
+# SIGNAL is a non-ignorable error: the statement must abort and no row may
+# be persisted (autocommit).
+delimiter //;
+CREATE TRIGGER db_inn.biC BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 3 THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom';
+  END IF;
+END//
+CREATE TRIGGER db_my.biC BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 3 THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom';
+  END IF;
+END//
+delimiter ;//
+
+--error 1644
+INSERT IGNORE INTO db_inn.t VALUES (3,'c','kc'),(4,'d','kd');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+
+--error 1644
+INSERT IGNORE INTO db_my.t  VALUES (3,'c','kc'),(4,'d','kd');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+
+DROP TRIGGER db_inn.biC;
+DROP TRIGGER db_my.biC;
+
+# ---------------------------------------------------------------- case D
+# Trigger causes a data-truncation (non-strict); under IGNORE the row is
+# inserted with the truncated value. The non-strict mode is set BEFORE the
+# trigger creation: in this build the trigger's truncation strictness is
+# decided by the sql_mode in effect when the trigger is created.
+SET @save_sql_mode = @@SESSION.sql_mode;
+SET SESSION sql_mode = '';
+delimiter //;
+CREATE TRIGGER db_inn.biD BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 5 THEN SET NEW.u = REPEAT('a', 32); END IF;
+END//
+CREATE TRIGGER db_my.biD BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 5 THEN SET NEW.u = REPEAT('a', 32); END IF;
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (5,'e','ke');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_inn.t WHERE id = 5;
+
+INSERT IGNORE INTO db_my.t  VALUES (5,'e','ke');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_my.t  WHERE id = 5;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT u FROM db_inn.t WHERE id = 5) = (SELECT u FROM db_my.t WHERE id = 5) AS same_u;
+SET SESSION sql_mode = @save_sql_mode;
+
+DROP TRIGGER db_inn.biD;
+DROP TRIGGER db_my.biD;
+
+# ---------------------------------------------------------------- case E
+# Row-dependent: trigger rewrites id 2 -> 1; row 1 of the statement inserts
+# id 1, so row 2 must be skipped with a duplicate warning.
+delimiter //;
+CREATE TRIGGER db_inn.biE BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 2 THEN SET NEW.id = 1; END IF;
+END//
+CREATE TRIGGER db_my.biE BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 2 THEN SET NEW.id = 1; END IF;
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx'),(2,'y','ky');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx'),(2,'y','ky');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.biE;
+DROP TRIGGER db_my.biE;
+
+# ---------------------------------------------------------------- case F
+# Combined: trigger truncation followed by the demoted duplicate; count and
+# order must match. NOTE: in this build the truncation strictness of a
+# trigger is decided by the sql_mode in effect when the trigger is CREATED,
+# so the non-strict mode must be set before CREATE TRIGGER.
+SET @save_sql_mode = @@SESSION.sql_mode;
+SET SESSION sql_mode = '';
+delimiter //;
+CREATE TRIGGER db_inn.biF BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 6 THEN SET NEW.u = REPEAT('b', 32); END IF;
+  IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.biF BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 6 THEN SET NEW.u = REPEAT('b', 32); END IF;
+  IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (6,'f','kf'),(1,'x','kx');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+
+INSERT IGNORE INTO db_my.t  VALUES (6,'f','kf'),(1,'x','kx');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+SET SESSION sql_mode = @save_sql_mode;
+
+DROP TRIGGER db_inn.biF;
+DROP TRIGGER db_my.biF;
+
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

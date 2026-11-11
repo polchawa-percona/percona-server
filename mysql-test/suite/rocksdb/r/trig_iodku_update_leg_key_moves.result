@@ -1,0 +1,196 @@
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+CREATE TABLE db_inn.t (
+id INT NOT NULL PRIMARY KEY,
+k  INT NOT NULL,
+v  VARCHAR(16) NOT NULL,
+UNIQUE KEY uq (k)
+) ENGINE=InnoDB;
+CREATE TABLE db_my.t (
+id INT NOT NULL PRIMARY KEY,
+k  INT NOT NULL,
+v  VARCHAR(16) NOT NULL,
+UNIQUE KEY uq (k)
+) ENGINE=RocksDB;
+INSERT INTO db_inn.t VALUES (1,10,'a'),(2,20,'b');
+INSERT INTO db_my.t  VALUES (1,10,'a'),(2,20,'b');
+INSERT INTO db_inn.t (id, k, v) VALUES (1, 10, 'x')
+ON DUPLICATE KEY UPDATE id = 11, v = 'x';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (1, 10, 'x')
+ON DUPLICATE KEY UPDATE id = 11, v = 'x';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+INSERT INTO db_inn.t (id, k, v) VALUES (1, 10, 'y')
+ON DUPLICATE KEY UPDATE k = 20;
+ERROR 23000: Duplicate entry '20' for key 't.uq'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (1, 10, 'y')
+ON DUPLICATE KEY UPDATE k = 20;
+ERROR 23000: Duplicate entry '20' for key 't.uq'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+INSERT IGNORE INTO db_inn.t (id, k, v) VALUES (1, 10, 'y')
+ON DUPLICATE KEY UPDATE k = 20;
+Warnings:
+Warning	1062	Duplicate entry '20' for key 't.uq'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT IGNORE INTO db_my.t  (id, k, v) VALUES (1, 10, 'y')
+ON DUPLICATE KEY UPDATE k = 20;
+Warnings:
+Warning	1062	Duplicate entry '20' for key 't.uq'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+CREATE TRIGGER db_inn.buC BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.v = 'move' THEN SET NEW.id = 2; END IF;
+END//
+CREATE TRIGGER db_my.buC BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.v = 'move' THEN SET NEW.id = 2; END IF;
+END//
+INSERT INTO db_inn.t (id, k, v) VALUES (1, 10, 'move')
+ON DUPLICATE KEY UPDATE v = 'move';
+ERROR 23000: Duplicate entry '2' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (1, 10, 'move')
+ON DUPLICATE KEY UPDATE v = 'move';
+ERROR 23000: Duplicate entry '2' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+id	k	v
+2	20	b
+11	10	x
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+DROP TRIGGER db_inn.buC;
+DROP TRIGGER db_my.buC;
+CREATE TRIGGER db_inn.buD BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.v = 'free' THEN SET NEW.id = 99; END IF;
+END//
+CREATE TRIGGER db_my.buD BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.v = 'free' THEN SET NEW.id = 99; END IF;
+END//
+INSERT INTO db_inn.t (id, k, v) VALUES (2, 20, 'free')
+ON DUPLICATE KEY UPDATE v = 'free';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (2, 20, 'free')
+ON DUPLICATE KEY UPDATE v = 'free';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+id	k	v
+11	10	x
+99	20	free
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+id	k	v
+11	10	x
+99	20	free
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+DROP TRIGGER db_inn.buD;
+DROP TRIGGER db_my.buD;
+INSERT INTO db_inn.t VALUES (3, 30, 'c');
+INSERT INTO db_my.t  VALUES (3, 30, 'c');
+INSERT INTO db_inn.t (id, k, v) VALUES (4, 30, 'e'),(5, 30, 'f')
+ON DUPLICATE KEY UPDATE k = 30 + 100, v = 'moved';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (4, 30, 'e'),(5, 30, 'f')
+ON DUPLICATE KEY UPDATE k = 30 + 100, v = 'moved';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t WHERE k IN (30, 130) ORDER BY id;
+id	k	v
+3	130	moved
+5	30	f
+SELECT id, k, v FROM db_my.t  WHERE k IN (30, 130) ORDER BY id;
+id	k	v
+3	130	moved
+5	30	f
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq_all_rows;
+eq_all_rows
+1
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

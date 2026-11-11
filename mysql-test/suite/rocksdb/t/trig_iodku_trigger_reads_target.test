@@ -1,0 +1,190 @@
+--source include/have_rocksdb.inc
+
+#
+# Differential hunt: triggers that READ the target table while the IODKU or
+# INSERT IGNORE statement is in flight (same-statement visibility).
+#
+# db_inn.t (InnoDB) and db_my.t (MyRocks) run the same workload; all
+# observables must be equal. The test asserts equality and FAILS on any
+# engine divergence.
+#
+# Cases:
+#  A. BEFORE INSERT trigger decides a value from a point lookup on the
+#     target PK; row 2 of a multi-row statement depends on row 1 inserted
+#     earlier by the same statement.
+#  B. Same, but the lookup is a point lookup on the UNIQUE secondary key.
+#  C. IODKU: BEFORE UPDATE trigger on the update leg reads the target table
+#     (sees the pre-update state).
+#  D. INSERT IGNORE: trigger reads the target table to decide the rewrite.
+#
+
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+
+CREATE TABLE db_inn.t (
+  id INT NOT NULL PRIMARY KEY,
+  k  INT NOT NULL,
+  v  VARCHAR(10) NOT NULL,
+  UNIQUE KEY uq (k)
+) ENGINE=InnoDB;
+
+CREATE TABLE db_my.t (
+  id INT NOT NULL PRIMARY KEY,
+  k  INT NOT NULL,
+  v  VARCHAR(10) NOT NULL,
+  UNIQUE KEY uq (k)
+) ENGINE=RocksDB;
+
+# ---------------------------------------------------------------- case A
+# Point lookup on the PK: row 2 (id 21) must see row 1 (id 11) which is
+# inserted earlier by the same statement.
+delimiter //;
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_inn.t WHERE id = NEW.id - 10) THEN
+    SET NEW.v = 'seen';
+  ELSE
+    SET NEW.v = 'nseen';
+  END IF;
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_my.t WHERE id = NEW.id - 10) THEN
+    SET NEW.v = 'seen';
+  ELSE
+    SET NEW.v = 'nseen';
+  END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t VALUES (11,110,'a'),(21,210,'b');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t  VALUES (11,110,'a'),(21,210,'b');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+
+# ---------------------------------------------------------------- case B
+# Point lookup on the UNIQUE secondary key: row 2 (k 210) must see row 1
+# (k 110 + 100) inserted earlier by the same statement.
+delimiter //;
+CREATE TRIGGER db_inn.biB BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_inn.t WHERE k = NEW.k - 100) THEN
+    SET NEW.v = 'seen';
+  ELSE
+    SET NEW.v = 'nseen';
+  END IF;
+END//
+CREATE TRIGGER db_my.biB BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_my.t WHERE k = NEW.k - 100) THEN
+    SET NEW.v = 'seen';
+  ELSE
+    SET NEW.v = 'nseen';
+  END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t VALUES (31,310,'c'),(41,410,'d');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t  VALUES (31,310,'c'),(41,410,'d');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, k, v FROM db_inn.t WHERE k >= 300 ORDER BY id;
+SELECT id, k, v FROM db_my.t  WHERE k >= 300 ORDER BY id;
+
+DROP TRIGGER db_inn.biB;
+DROP TRIGGER db_my.biB;
+
+# ---------------------------------------------------------------- case C
+# IODKU update leg: BEFORE UPDATE trigger reads the target table. It must
+# observe the pre-update value of the row being updated.
+INSERT INTO db_inn.t VALUES (50,500,'old');
+INSERT INTO db_my.t  VALUES (50,500,'old');
+
+delimiter //;
+CREATE TRIGGER db_inn.buC BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+  DECLARE old_v VARCHAR(10);
+  SELECT v INTO old_v FROM db_inn.t WHERE id = NEW.id;
+  SET NEW.v = CONCAT(old_v, '+');
+END//
+CREATE TRIGGER db_my.buC BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+  DECLARE old_v VARCHAR(10);
+  SELECT v INTO old_v FROM db_my.t WHERE id = NEW.id;
+  SET NEW.v = CONCAT(old_v, '+');
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, k, v) VALUES (50, 500, 'upd')
+  ON DUPLICATE KEY UPDATE v = 'upd';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t  (id, k, v) VALUES (50, 500, 'upd')
+  ON DUPLICATE KEY UPDATE v = 'upd';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, k, v FROM db_inn.t WHERE id = 50;
+SELECT id, k, v FROM db_my.t  WHERE id = 50;
+SELECT (SELECT v FROM db_inn.t WHERE id = 50) = (SELECT v FROM db_my.t WHERE id = 50) AS same_v;
+
+DROP TRIGGER db_inn.buC;
+DROP TRIGGER db_my.buC;
+
+# ---------------------------------------------------------------- case D
+# INSERT IGNORE: trigger reads the target table to decide whether to
+# rewrite the key onto an existing row.
+INSERT INTO db_inn.t VALUES (60,600,'s60');
+INSERT INTO db_my.t  VALUES (60,600,'s60');
+
+delimiter //;
+CREATE TRIGGER db_inn.biD BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_inn.t WHERE k = NEW.k) THEN
+    SET NEW.id = 60;
+  END IF;
+END//
+CREATE TRIGGER db_my.biD BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF EXISTS (SELECT 1 FROM db_my.t WHERE k = NEW.k) THEN
+    SET NEW.id = 60;
+  END IF;
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (61,600,'dup');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, k, v FROM db_inn.t WHERE k = 600;
+
+INSERT IGNORE INTO db_my.t  VALUES (61,600,'dup');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT id, k, v FROM db_my.t  WHERE k = 600;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT v FROM db_inn.t WHERE k = 600) = (SELECT v FROM db_my.t WHERE k = 600) AS same_v;
+
+DROP TRIGGER db_inn.biD;
+DROP TRIGGER db_my.biD;
+
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

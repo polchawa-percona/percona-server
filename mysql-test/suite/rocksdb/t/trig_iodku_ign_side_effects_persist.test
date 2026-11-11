@@ -1,0 +1,169 @@
+--source include/have_rocksdb.inc
+
+#
+# Differential hunt: whether a trigger's side effects on OTHER tables are
+# persisted or rolled back when the statement row is skipped (INSERT IGNORE
+# duplicate demotion) or the statement is aborted (non-ignorable error
+# later in the statement). Statement atomicity must be identical.
+#
+# db_inn.t (InnoDB) and db_my.t (MyRocks) run the same workload; all
+# observables must be equal. The test asserts equality and FAILS on any
+# engine divergence.
+#
+# Cases:
+#  A. INSERT IGNORE: the BEFORE INSERT trigger of a row that is skipped
+#     (duplicate) already inserted an auxiliary row -> it must persist.
+#  B. IODKU: BEFORE UPDATE trigger inserts an auxiliary row, then the update
+#     leg fails with 1062 -> the auxiliary row must be rolled back.
+#  C. IODKU multi-row: row 1's trigger persists an auxiliary row, row 2
+#     aborts the statement with a non-ignorable error -> nothing
+#     (rows nor auxiliary rows) may persist.
+#
+
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+
+CREATE TABLE db_inn.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(16) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE db_my.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(16) NOT NULL
+) ENGINE=RocksDB;
+
+CREATE TABLE db_inn.aux (id INT NOT NULL, note VARCHAR(32)) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT NOT NULL, note VARCHAR(32)) ENGINE=RocksDB;
+
+INSERT INTO db_inn.t VALUES (7, 'pre');
+INSERT INTO db_my.t  VALUES (7, 'pre');
+
+# ---------------------------------------------------------------- case A
+# The trigger of the skipped row already ran and inserted an auxiliary row;
+# the duplicate is only demoted to a warning, so the auxiliary row persists.
+delimiter //;
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'bi');
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'bi');
+END//
+delimiter ;//
+
+INSERT IGNORE INTO db_inn.t VALUES (7, 'new'),(8, 'keep');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT IGNORE INTO db_my.t  VALUES (7, 'new'),(8, 'keep');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, v FROM db_inn.t ORDER BY id;
+SELECT id, v FROM db_my.t  ORDER BY id;
+SELECT id, note FROM db_inn.aux ORDER BY id;
+SELECT id, note FROM db_my.aux  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_inn.aux) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_my.aux)
+) AS eq_aux;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq_t;
+
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+
+# ---------------------------------------------------------------- case B
+# BEFORE UPDATE trigger persists an auxiliary row, then the update leg
+# collides (the trigger rewrites the PK onto another existing row): the
+# whole statement must roll back, auxiliary row included.
+INSERT INTO db_inn.t VALUES (9, 'pre9');
+INSERT INTO db_my.t  VALUES (9, 'pre9');
+
+delimiter //;
+CREATE TRIGGER db_inn.buB BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'bu');
+  IF NEW.v = 'collide' THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.buB BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'bu');
+  IF NEW.v = 'collide' THEN SET NEW.id = 9; END IF;
+END//
+delimiter ;//
+
+--error 1062
+INSERT INTO db_inn.t (id, v) VALUES (7, 'collide')
+  ON DUPLICATE KEY UPDATE v = 'collide';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+--error 1062
+INSERT INTO db_my.t  (id, v) VALUES (7, 'collide')
+  ON DUPLICATE KEY UPDATE v = 'collide';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+SELECT id, note FROM db_inn.aux ORDER BY id;
+SELECT id, note FROM db_my.aux  ORDER BY id;
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+SELECT (SELECT v FROM db_inn.t WHERE id = 7) = (SELECT v FROM db_my.t WHERE id = 7) AS same_v7;
+
+DROP TRIGGER db_inn.buB;
+DROP TRIGGER db_my.buB;
+
+# ---------------------------------------------------------------- case C
+# Row 1 inserts normally (trigger persists an auxiliary row); row 2 is
+# rewritten by its trigger into a non-ignorable error (SIGNAL) that aborts
+# the statement -> row 1 and both auxiliary rows must be rolled back.
+delimiter //;
+CREATE TRIGGER db_inn.biC BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 20 THEN
+    INSERT INTO db_inn.aux VALUES (20, 'row2');
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'abort-now';
+  END IF;
+  IF NEW.id = 10 THEN
+    INSERT INTO db_inn.aux VALUES (10, 'row1');
+  END IF;
+END//
+CREATE TRIGGER db_my.biC BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 20 THEN
+    INSERT INTO db_my.aux  VALUES (20, 'row2');
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'abort-now';
+  END IF;
+  IF NEW.id = 10 THEN
+    INSERT INTO db_my.aux  VALUES (10, 'row1');
+  END IF;
+END//
+delimiter ;//
+
+--error 1644
+INSERT INTO db_inn.t VALUES (10, 'c1'),(20, 'c2');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+--error 1644
+INSERT INTO db_my.t  VALUES (10, 'c1'),(20, 'c2');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+SELECT id, note FROM db_inn.aux ORDER BY id;
+SELECT id, note FROM db_my.aux  ORDER BY id;
+SELECT (SELECT COUNT(*) FROM db_inn.t WHERE id IN (10,20))
+     = (SELECT COUNT(*) FROM db_my.t WHERE id IN (10,20)) AS same_no_new_rows;
+
+DROP TRIGGER db_inn.biC;
+DROP TRIGGER db_my.biC;
+
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

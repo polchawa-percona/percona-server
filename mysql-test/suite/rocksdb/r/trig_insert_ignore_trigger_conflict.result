@@ -1,0 +1,258 @@
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+CREATE TABLE db_inn.t (
+id INT NOT NULL PRIMARY KEY,
+v  VARCHAR(16) NOT NULL,
+u  VARCHAR(16) NOT NULL
+) ENGINE=InnoDB;
+CREATE TABLE db_my.t (
+id INT NOT NULL PRIMARY KEY,
+v  VARCHAR(16) NOT NULL,
+u  VARCHAR(16) NOT NULL
+) ENGINE=RocksDB;
+CREATE TABLE db_inn.aux (id INT NOT NULL, note VARCHAR(32), UNIQUE KEY uq (id)) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT NOT NULL, note VARCHAR(32), UNIQUE KEY uq (id)) ENGINE=RocksDB;
+INSERT INTO db_inn.t VALUES (9,'a','ka');
+INSERT INTO db_my.t  VALUES (9,'a','ka');
+INSERT INTO db_inn.aux VALUES (1, 'seed');
+INSERT INTO db_my.aux  VALUES (1, 'seed');
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx'),(2,'y','ky');
+Warnings:
+Warning	1062	Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+id	v	u
+2	y	ky
+9	a	ka
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx'),(2,'y','ky');
+Warnings:
+Warning	1062	Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+id	v	u
+2	y	ky
+9	a	ka
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+CREATE TRIGGER db_inn.biB BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+INSERT INTO db_inn.aux VALUES (NEW.id, 'note');
+END//
+CREATE TRIGGER db_my.biB BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+INSERT INTO db_my.aux  VALUES (NEW.id, 'note');
+END//
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx');
+ERROR 23000: Duplicate entry '1' for key 'aux.uq'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT COUNT(*) AS inn_rows FROM db_inn.t;
+inn_rows
+2
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx');
+ERROR 23000: Duplicate entry '1' for key 'aux.uq'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT COUNT(*) AS my_rows FROM db_my.t;
+my_rows
+2
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+same_rowcount
+1
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+same_aux_count
+1
+DROP TRIGGER db_inn.biB;
+DROP TRIGGER db_my.biB;
+CREATE TRIGGER db_inn.biC BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 3 THEN
+SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom';
+END IF;
+END//
+CREATE TRIGGER db_my.biC BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 3 THEN
+SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom';
+END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (3,'c','kc'),(4,'d','kd');
+ERROR 45000: boom
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+id	v	u
+2	y	ky
+9	a	ka
+INSERT IGNORE INTO db_my.t  VALUES (3,'c','kc'),(4,'d','kd');
+ERROR 45000: boom
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+id	v	u
+2	y	ky
+9	a	ka
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+same_rowcount
+1
+DROP TRIGGER db_inn.biC;
+DROP TRIGGER db_my.biC;
+SET @save_sql_mode = @@SESSION.sql_mode;
+SET SESSION sql_mode = '';
+CREATE TRIGGER db_inn.biD BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 5 THEN SET NEW.u = REPEAT('a', 32); END IF;
+END//
+CREATE TRIGGER db_my.biD BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 5 THEN SET NEW.u = REPEAT('a', 32); END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (5,'e','ke');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_inn.t WHERE id = 5;
+id	v	u
+5	e	aaaaaaaaaaaaaaaa
+INSERT IGNORE INTO db_my.t  VALUES (5,'e','ke');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_my.t  WHERE id = 5;
+id	v	u
+5	e	aaaaaaaaaaaaaaaa
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT u FROM db_inn.t WHERE id = 5) = (SELECT u FROM db_my.t WHERE id = 5) AS same_u;
+same_u
+1
+SET SESSION sql_mode = @save_sql_mode;
+DROP TRIGGER db_inn.biD;
+DROP TRIGGER db_my.biD;
+CREATE TRIGGER db_inn.biE BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 2 THEN SET NEW.id = 1; END IF;
+END//
+CREATE TRIGGER db_my.biE BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 2 THEN SET NEW.id = 1; END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (1,'x','kx'),(2,'y','ky');
+Warnings:
+Warning	1062	Duplicate entry '1' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+id	v	u
+1	x	kx
+2	y	ky
+5	e	aaaaaaaaaaaaaaaa
+9	a	ka
+INSERT IGNORE INTO db_my.t  VALUES (1,'x','kx'),(2,'y','ky');
+Warnings:
+Warning	1062	Duplicate entry '1' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+id	v	u
+1	x	kx
+2	y	ky
+5	e	aaaaaaaaaaaaaaaa
+9	a	ka
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+DROP TRIGGER db_inn.biE;
+DROP TRIGGER db_my.biE;
+SET @save_sql_mode = @@SESSION.sql_mode;
+SET SESSION sql_mode = '';
+CREATE TRIGGER db_inn.biF BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 6 THEN SET NEW.u = REPEAT('b', 32); END IF;
+IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.biF BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 6 THEN SET NEW.u = REPEAT('b', 32); END IF;
+IF NEW.id = 1 THEN SET NEW.id = 9; END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (6,'f','kf'),(1,'x','kx');
+Warnings:
+Warning	1062	Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_inn.t ORDER BY id;
+id	v	u
+1	x	kx
+2	y	ky
+5	e	aaaaaaaaaaaaaaaa
+6	f	bbbbbbbbbbbbbbbb
+9	a	ka
+INSERT IGNORE INTO db_my.t  VALUES (6,'f','kf'),(1,'x','kx');
+Warnings:
+Warning	1062	Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, v, u FROM db_my.t  ORDER BY id;
+id	v	u
+1	x	kx
+2	y	ky
+5	e	aaaaaaaaaaaaaaaa
+6	f	bbbbbbbbbbbbbbbb
+9	a	ka
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+SET SESSION sql_mode = @save_sql_mode;
+DROP TRIGGER db_inn.biF;
+DROP TRIGGER db_my.biF;
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

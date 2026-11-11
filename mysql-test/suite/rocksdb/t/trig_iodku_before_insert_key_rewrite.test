@@ -1,0 +1,250 @@
+--source include/have_rocksdb.inc
+
+#
+# Differential hunt: INSERT ... ON DUPLICATE KEY UPDATE where a BEFORE INSERT
+# trigger rewrites the key into a duplicate.
+#
+# InnoDB is the oracle: db_inn.t (InnoDB) and db_my.t (MyRocks) get the exact
+# same workload; every observable (rows, order, count, affected rows,
+# warnings) must be equal. The test asserts equality and therefore FAILS on
+# any engine divergence.
+#
+# Cases:
+#  1. BEFORE INSERT rewrites a new key to an existing key (plain dup).
+#  2. BEFORE INSERT makes row 2 collide with row 1 inserted by the same
+#     statement (row-dependent, same-statement visibility).
+#  3. BEFORE INSERT rewrite where the rewritten key collides on a UNIQUE
+#     secondary key, not the PK.
+#  4. No-op IODKU update leg with and without a BEFORE UPDATE trigger
+#     (affected-rows 1 vs 2).
+#  5. AFTER INSERT / AFTER UPDATE triggers on the target stacking into an
+#     auxiliary table per leg.
+#
+
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+
+CREATE TABLE db_inn.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(20) NOT NULL,
+  u  VARCHAR(20) NOT NULL,
+  UNIQUE KEY uq (u)
+) ENGINE=InnoDB;
+
+CREATE TABLE db_my.t (
+  id INT NOT NULL PRIMARY KEY,
+  v  VARCHAR(20) NOT NULL,
+  u  VARCHAR(20) NOT NULL,
+  UNIQUE KEY uq (u)
+) ENGINE=RocksDB;
+
+INSERT INTO db_inn.t VALUES (1,'a','ka'),(7,'b','kb');
+INSERT INTO db_my.t  VALUES (1,'a','ka'),(7,'b','kb');
+
+CREATE TABLE db_inn.aux (id INT NOT NULL, note VARCHAR(32) NOT NULL) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT NOT NULL, note VARCHAR(32) NOT NULL) ENGINE=RocksDB;
+
+# ---------------------------------------------------------------- case 1
+# BEFORE INSERT rewrites NEW.id 1 -> 7, which already exists: the insert
+# becomes the IODKU update leg on row 7. Row 2 (id 9) is a plain insert.
+delimiter //;
+CREATE TRIGGER db_inn.bi1 BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 1 THEN SET NEW.id = 7; END IF;
+END//
+CREATE TRIGGER db_my.bi1 BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 1 THEN SET NEW.id = 7; END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, v, u)
+  VALUES (1,'x','kx'),(9,'z','kz') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v, u = CONCAT(t.u,'!');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t (id, v, u)
+  VALUES (1,'x','kx'),(9,'z','kz') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v, u = CONCAT(t.u,'!');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT * FROM db_inn.t ORDER BY id;
+SELECT * FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bi1;
+DROP TRIGGER db_my.bi1;
+
+# ---------------------------------------------------------------- case 2
+# Row-dependent: trigger rewrites id 3 -> 2; row 1 of the statement inserts
+# id 2, so row 2's rewrite must collide with a row inserted by the same
+# statement (same-transaction visibility).
+delimiter //;
+CREATE TRIGGER db_inn.bi2 BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 3 THEN SET NEW.id = 2; END IF;
+END//
+CREATE TRIGGER db_my.bi2 BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.id = 3 THEN SET NEW.id = 2; END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, v, u)
+  VALUES (2,'p','kp'),(3,'q','kq') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t (id, v, u)
+  VALUES (2,'p','kp'),(3,'q','kq') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT * FROM db_inn.t ORDER BY id;
+SELECT * FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bi2;
+DROP TRIGGER db_my.bi2;
+
+# ---------------------------------------------------------------- case 3
+# The rewrite creates the duplicate on the UNIQUE secondary key u, not PK.
+delimiter //;
+CREATE TRIGGER db_inn.bi3 BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.u = 'knew' THEN SET NEW.u = 'kz'; END IF;
+END//
+CREATE TRIGGER db_my.bi3 BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.u = 'knew' THEN SET NEW.u = 'kz'; END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, v, u)
+  VALUES (20,'m','knew') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t (id, v, u)
+  VALUES (20,'m','knew') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT * FROM db_inn.t ORDER BY id;
+SELECT * FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bi3;
+DROP TRIGGER db_my.bi3;
+
+# ---------------------------------------------------------------- case 4
+# No-op update leg: values identical to the stored row, so affected rows
+# must be 1 (touched) per row, not 2. Then a BEFORE UPDATE trigger that
+# changes the row, making the leg a real update (affected rows 2).
+INSERT INTO db_inn.t VALUES (5,'s','ks');
+INSERT INTO db_my.t  VALUES (5,'s','ks');
+
+INSERT INTO db_inn.t VALUES (5,'s','ks') ON DUPLICATE KEY UPDATE v = v, u = u;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t  VALUES (5,'s','ks') ON DUPLICATE KEY UPDATE v = v, u = u;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+
+delimiter //;
+CREATE TRIGGER db_inn.bu4 BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+  SET NEW.u = CONCAT(NEW.u,'*');
+END//
+CREATE TRIGGER db_my.bu4 BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+  SET NEW.u = CONCAT(NEW.u,'*');
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t VALUES (5,'s','ks') ON DUPLICATE KEY UPDATE v = v, u = u;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t  VALUES (5,'s','ks') ON DUPLICATE KEY UPDATE v = v, u = u;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT * FROM db_inn.t ORDER BY id;
+SELECT * FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v, u) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bu4;
+DROP TRIGGER db_my.bu4;
+
+# ---------------------------------------------------------------- case 5
+# Stacked trigger firing: AFTER INSERT and AFTER UPDATE triggers on the
+# target table append a note to an auxiliary table per leg; the IODKU
+# statement exercises both legs in one statement.
+delimiter //;
+CREATE TRIGGER db_inn.ai5 AFTER INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'inserted');
+END//
+CREATE TRIGGER db_inn.au5 AFTER UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'updated');
+END//
+CREATE TRIGGER db_my.ai5 AFTER INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'inserted');
+END//
+CREATE TRIGGER db_my.au5 AFTER UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'updated');
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, v, u)
+  VALUES (30,'n','kn'),(7,'b2','kb') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+INSERT INTO db_my.t (id, v, u)
+  VALUES (30,'n','kn'),(7,'b2','kb') AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, note FROM db_inn.aux ORDER BY id, note;
+SELECT id, note FROM db_my.aux  ORDER BY id, note;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_inn.aux) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_my.aux)
+) AS eq;
+SELECT * FROM db_inn.t WHERE id IN (7,30) ORDER BY id;
+SELECT * FROM db_my.t  WHERE id IN (7,30) ORDER BY id;
+
+DROP TRIGGER db_inn.ai5;
+DROP TRIGGER db_inn.au5;
+DROP TRIGGER db_my.ai5;
+DROP TRIGGER db_my.au5;
+
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

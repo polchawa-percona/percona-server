@@ -1,0 +1,174 @@
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+CREATE TABLE db_inn.t (
+id INT NOT NULL PRIMARY KEY,
+k  INT NOT NULL,
+v  VARCHAR(10) NOT NULL,
+UNIQUE KEY uq (k)
+) ENGINE=InnoDB;
+CREATE TABLE db_my.t (
+id INT NOT NULL PRIMARY KEY,
+k  INT NOT NULL,
+v  VARCHAR(10) NOT NULL,
+UNIQUE KEY uq (k)
+) ENGINE=RocksDB;
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_inn.t WHERE id = NEW.id - 10) THEN
+SET NEW.v = 'seen';
+ELSE
+SET NEW.v = 'nseen';
+END IF;
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_my.t WHERE id = NEW.id - 10) THEN
+SET NEW.v = 'seen';
+ELSE
+SET NEW.v = 'nseen';
+END IF;
+END//
+INSERT INTO db_inn.t VALUES (11,110,'a'),(21,210,'b');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  VALUES (11,110,'a'),(21,210,'b');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+id	k	v
+11	110	nseen
+21	210	seen
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+id	k	v
+11	110	nseen
+21	210	seen
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+eq
+1
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+CREATE TRIGGER db_inn.biB BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_inn.t WHERE k = NEW.k - 100) THEN
+SET NEW.v = 'seen';
+ELSE
+SET NEW.v = 'nseen';
+END IF;
+END//
+CREATE TRIGGER db_my.biB BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_my.t WHERE k = NEW.k - 100) THEN
+SET NEW.v = 'seen';
+ELSE
+SET NEW.v = 'nseen';
+END IF;
+END//
+INSERT INTO db_inn.t VALUES (31,310,'c'),(41,410,'d');
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  VALUES (31,310,'c'),(41,410,'d');
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t WHERE k >= 300 ORDER BY id;
+id	k	v
+31	310	seen
+41	410	seen
+SELECT id, k, v FROM db_my.t  WHERE k >= 300 ORDER BY id;
+id	k	v
+31	310	seen
+41	410	seen
+DROP TRIGGER db_inn.biB;
+DROP TRIGGER db_my.biB;
+INSERT INTO db_inn.t VALUES (50,500,'old');
+INSERT INTO db_my.t  VALUES (50,500,'old');
+CREATE TRIGGER db_inn.buC BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+DECLARE old_v VARCHAR(10);
+SELECT v INTO old_v FROM db_inn.t WHERE id = NEW.id;
+SET NEW.v = CONCAT(old_v, '+');
+END//
+CREATE TRIGGER db_my.buC BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+DECLARE old_v VARCHAR(10);
+SELECT v INTO old_v FROM db_my.t WHERE id = NEW.id;
+SET NEW.v = CONCAT(old_v, '+');
+END//
+INSERT INTO db_inn.t (id, k, v) VALUES (50, 500, 'upd')
+ON DUPLICATE KEY UPDATE v = 'upd';
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, k, v) VALUES (50, 500, 'upd')
+ON DUPLICATE KEY UPDATE v = 'upd';
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, k, v FROM db_inn.t WHERE id = 50;
+id	k	v
+50	500	old+
+SELECT id, k, v FROM db_my.t  WHERE id = 50;
+id	k	v
+50	500	old+
+SELECT (SELECT v FROM db_inn.t WHERE id = 50) = (SELECT v FROM db_my.t WHERE id = 50) AS same_v;
+same_v
+1
+DROP TRIGGER db_inn.buC;
+DROP TRIGGER db_my.buC;
+INSERT INTO db_inn.t VALUES (60,600,'s60');
+INSERT INTO db_my.t  VALUES (60,600,'s60');
+CREATE TRIGGER db_inn.biD BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_inn.t WHERE k = NEW.k) THEN
+SET NEW.id = 60;
+END IF;
+END//
+CREATE TRIGGER db_my.biD BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF EXISTS (SELECT 1 FROM db_my.t WHERE k = NEW.k) THEN
+SET NEW.id = 60;
+END IF;
+END//
+INSERT IGNORE INTO db_inn.t VALUES (61,600,'dup');
+Warnings:
+Warning	1062	Duplicate entry '60' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, k, v FROM db_inn.t WHERE k = 600;
+id	k	v
+60	600	s60
+INSERT IGNORE INTO db_my.t  VALUES (61,600,'dup');
+Warnings:
+Warning	1062	Duplicate entry '60' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT id, k, v FROM db_my.t  WHERE k = 600;
+id	k	v
+60	600	s60
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT v FROM db_inn.t WHERE k = 600) = (SELECT v FROM db_my.t WHERE k = 600) AS same_v;
+same_v
+1
+DROP TRIGGER db_inn.biD;
+DROP TRIGGER db_my.biD;
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

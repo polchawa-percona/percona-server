@@ -1,0 +1,228 @@
+--source include/have_rocksdb.inc
+
+#
+# Differential hunt: observable counters (affected rows, LAST_INSERT_ID(),
+# next autoinc) for INSERT ... ON DUPLICATE KEY UPDATE interacting with
+# triggers, especially LAST_INSERT_ID(expr) in the update list.
+#
+# db_inn.t (InnoDB) and db_my.t (MyRocks) run the same workload; all
+# observables must be equal. The test asserts equality and FAILS on any
+# engine divergence. Case E documents a known divergence (see the comment
+# above it); the recorded .result contains its red values.
+#
+# Cases:
+#  A. Plain autoinc IODKU that only inserts; check LAST_INSERT_ID() and the
+#     next autoinc value.
+#  B. IODKU update leg with LAST_INSERT_ID(expr) in the update list; the
+#     expr value must become LAST_INSERT_ID() and must NOT be consumed as
+#     an autoinc (next autoinc stays sequential).
+#  C. BEFORE UPDATE trigger capturing LAST_INSERT_ID() during the update
+#     leg (order of fill vs trigger).
+#  D. Multi-row IODKU where a BEFORE INSERT trigger rewrites a later row's
+#     key onto a row inserted earlier by the same statement
+#     (row-dependent outcome).
+#  E. BEFORE INSERT trigger capturing the autoinc id assigned to its row.
+#
+
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+
+CREATE TABLE db_inn.t (
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  k  INT NOT NULL,
+  v  INT NOT NULL,
+  UNIQUE KEY uq (k)
+) ENGINE=InnoDB;
+
+CREATE TABLE db_my.t (
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  k  INT NOT NULL,
+  v  INT NOT NULL,
+  UNIQUE KEY uq (k)
+) ENGINE=RocksDB;
+
+CREATE TABLE db_inn.aux (id INT, note VARCHAR(32)) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT, note VARCHAR(32)) ENGINE=RocksDB;
+
+# ---------------------------------------------------------------- case A
+INSERT INTO db_inn.t (k, v) VALUES (10,1),(20,2) ON DUPLICATE KEY UPDATE v = v;
+SET @ar_inn = ROW_COUNT();
+SET @lii_inn = LAST_INSERT_ID();
+INSERT INTO db_my.t  (k, v) VALUES (10,1),(20,2) ON DUPLICATE KEY UPDATE v = v;
+SET @ar_my = ROW_COUNT();
+SET @lii_my = LAST_INSERT_ID();
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT @lii_inn = @lii_my AS same_last_insert_id;
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+# next autoinc must be 3 on both engines
+INSERT INTO db_inn.t (k, v) VALUES (30,3);
+INSERT INTO db_my.t  (k, v) VALUES (30,3);
+SELECT id AS inn_next_id FROM db_inn.t WHERE k = 30;
+SELECT id AS my_next_id  FROM db_my.t  WHERE k = 30;
+
+# ---------------------------------------------------------------- case B
+# LAST_INSERT_ID(expr) in the IODKU update list: sets LAST_INSERT_ID() to the
+# expr (55) and must not disturb the autoinc sequence.
+INSERT INTO db_inn.t (id, k, v) VALUES (1, 10, 100)
+  ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(55);
+SET @ar_inn = ROW_COUNT();
+SET @lii_inn = LAST_INSERT_ID();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t  (id, k, v) VALUES (1, 10, 100)
+  ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(55);
+SET @ar_my = ROW_COUNT();
+SET @lii_my = LAST_INSERT_ID();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT @lii_inn = @lii_my AS same_last_insert_id;
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+
+# the autoinc sequence must continue at 4 (55 not consumed)
+INSERT INTO db_inn.t (k, v) VALUES (40,4);
+INSERT INTO db_my.t  (k, v) VALUES (40,4);
+SELECT id AS inn_next_id FROM db_inn.t WHERE k = 40;
+SELECT id AS my_next_id  FROM db_my.t  WHERE k = 40;
+
+# ---------------------------------------------------------------- case C
+# BEFORE UPDATE trigger captures LAST_INSERT_ID() during the update leg;
+# it must see the value set by LAST_INSERT_ID(expr) in the update list.
+delimiter //;
+CREATE TRIGGER db_inn.bu3 BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+  SET @lii_bu_inn = LAST_INSERT_ID();
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'bu');
+END//
+CREATE TRIGGER db_my.bu3 BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+  SET @lii_bu_my = LAST_INSERT_ID();
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'bu');
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, k, v) VALUES (2, 20, 200)
+  ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(77);
+SET @ar_inn = ROW_COUNT();
+SET @lii_inn = LAST_INSERT_ID();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t  (id, k, v) VALUES (2, 20, 200)
+  ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(77);
+SET @ar_my = ROW_COUNT();
+SET @lii_my = LAST_INSERT_ID();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT @lii_inn = @lii_my AS same_last_insert_id;
+SELECT @lii_bu_inn = @lii_bu_my AS same_trigger_last_insert_id;
+SELECT id, note FROM db_inn.aux ORDER BY id, note;
+SELECT id, note FROM db_my.aux  ORDER BY id, note;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bu3;
+DROP TRIGGER db_my.bu3;
+DELETE FROM db_inn.aux;
+DELETE FROM db_my.aux;
+
+# ---------------------------------------------------------------- case D
+# Row-dependent multi-row IODKU: row 2's key is rewritten by a BEFORE INSERT
+# trigger onto the unique key of the row inserted by row 1 of the same
+# statement, so row 2 must take the IODKU update leg on row 1's row.
+delimiter //;
+CREATE TRIGGER db_inn.bi4 BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  IF NEW.k = 80 THEN SET NEW.k = 70; END IF;
+END//
+CREATE TRIGGER db_my.bi4 BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  IF NEW.k = 80 THEN SET NEW.k = 70; END IF;
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (id, k, v)
+  VALUES (6, 70, 6),(7, 80, 7) AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+
+INSERT INTO db_my.t (id, k, v)
+  VALUES (6, 70, 6),(7, 80, 7) AS nw
+  ON DUPLICATE KEY UPDATE v = nw.v;
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+SELECT id, k, v FROM db_inn.t WHERE k IN (70,80) ORDER BY id;
+SELECT id, k, v FROM db_my.t  WHERE k IN (70,80) ORDER BY id;
+
+DROP TRIGGER db_inn.bi4;
+DROP TRIGGER db_my.bi4;
+
+# ---------------------------------------------------------------- case E
+# BEFORE INSERT trigger captures the autoinc id assigned to its own row.
+#
+# DOCUMENTED DIVERGENCE (the three assertions below evaluate to 0):
+# In case D, row 2 of the two-row IODKU (explicit id 7) took the update leg
+# (k=80 rewritten to 70 by bi4 -> duplicate; the row was NOT written).
+# InnoDB persists the reservation of that explicit autoinc id at INSERT
+# attempt time, before the duplicate check (row_ins_clust_index_entry_low,
+# storage/innobase/row/row0ins.cc:2504 -> dict_table_autoinc_log,
+# storage/innobase/dict/dict0dict.cc:763); MyRocks advances its counter only
+# for rows actually written (update_auto_incr_val_from_field <-
+# update_write_pk, storage/rocksdb/ha_rocksdb.cc:13246; get_auto_increment,
+# 15874). The trigger DDL around this case (DROP TRIGGER above, CREATE
+# TRIGGER below) re-opens the table and re-loads the persisted counters
+# (a server restart re-syncs too; ALTER TABLE ... COMMENT does not): the
+# next autoinc row gets id 8 on InnoDB (id 7 reserved) but id 7 on
+# MyRocks. LAST_INSERT_ID() is 8 vs 7, and the trigger captures the stale
+# 77 (InnoDB, from case C) vs the phantom 8 (MyRocks). See
+# trig_repro_autoinc_iodku_update_leg.test for the minimal trigger-free
+# repro and myrocks-notes/known-bug-signatures.tsv for the bug record.
+delimiter //;
+CREATE TRIGGER db_inn.bi5 BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+  SET @lii_bi_inn = LAST_INSERT_ID();
+  INSERT INTO db_inn.aux VALUES (NEW.id, 'bi');
+END//
+CREATE TRIGGER db_my.bi5 BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+  SET @lii_bi_my = LAST_INSERT_ID();
+  INSERT INTO db_my.aux  VALUES (NEW.id, 'bi');
+END//
+delimiter ;//
+
+INSERT INTO db_inn.t (k, v) VALUES (50,5);
+SET @lii_inn = LAST_INSERT_ID();
+SHOW WARNINGS;
+INSERT INTO db_my.t  (k, v) VALUES (50,5);
+SET @lii_my = LAST_INSERT_ID();
+SHOW WARNINGS;
+
+SELECT @lii_inn = @lii_my AS same_last_insert_id;
+SELECT @lii_bi_inn = @lii_bi_my AS same_trigger_captured_id;
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+SELECT id, note FROM db_inn.aux ORDER BY id;
+SELECT id, note FROM db_my.aux  ORDER BY id;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+
+DROP TRIGGER db_inn.bi5;
+DROP TRIGGER db_my.bi5;
+
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

@@ -1,0 +1,168 @@
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+CREATE TABLE db_inn.t (
+id INT NOT NULL PRIMARY KEY,
+v  VARCHAR(16) NOT NULL
+) ENGINE=InnoDB;
+CREATE TABLE db_my.t (
+id INT NOT NULL PRIMARY KEY,
+v  VARCHAR(16) NOT NULL
+) ENGINE=RocksDB;
+CREATE TABLE db_inn.aux (id INT NOT NULL, note VARCHAR(32)) ENGINE=InnoDB;
+CREATE TABLE db_my.aux  (id INT NOT NULL, note VARCHAR(32)) ENGINE=RocksDB;
+INSERT INTO db_inn.t VALUES (7, 'pre');
+INSERT INTO db_my.t  VALUES (7, 'pre');
+CREATE TRIGGER db_inn.biA BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+INSERT INTO db_inn.aux VALUES (NEW.id, 'bi');
+END//
+CREATE TRIGGER db_my.biA BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+INSERT INTO db_my.aux  VALUES (NEW.id, 'bi');
+END//
+INSERT IGNORE INTO db_inn.t VALUES (7, 'new'),(8, 'keep');
+Warnings:
+Warning	1062	Duplicate entry '7' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT IGNORE INTO db_my.t  VALUES (7, 'new'),(8, 'keep');
+Warnings:
+Warning	1062	Duplicate entry '7' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT id, v FROM db_inn.t ORDER BY id;
+id	v
+7	pre
+8	keep
+SELECT id, v FROM db_my.t  ORDER BY id;
+id	v
+7	pre
+8	keep
+SELECT id, note FROM db_inn.aux ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT id, note FROM db_my.aux  ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT (
+(SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_inn.aux) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, note) ORDER BY id SEPARATOR ';'), '') FROM db_my.aux)
+) AS eq_aux;
+eq_aux
+1
+SELECT (
+(SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq_t;
+eq_t
+1
+DROP TRIGGER db_inn.biA;
+DROP TRIGGER db_my.biA;
+INSERT INTO db_inn.t VALUES (9, 'pre9');
+INSERT INTO db_my.t  VALUES (9, 'pre9');
+CREATE TRIGGER db_inn.buB BEFORE UPDATE ON db_inn.t FOR EACH ROW
+BEGIN
+INSERT INTO db_inn.aux VALUES (NEW.id, 'bu');
+IF NEW.v = 'collide' THEN SET NEW.id = 9; END IF;
+END//
+CREATE TRIGGER db_my.buB BEFORE UPDATE ON db_my.t FOR EACH ROW
+BEGIN
+INSERT INTO db_my.aux  VALUES (NEW.id, 'bu');
+IF NEW.v = 'collide' THEN SET NEW.id = 9; END IF;
+END//
+INSERT INTO db_inn.t (id, v) VALUES (7, 'collide')
+ON DUPLICATE KEY UPDATE v = 'collide';
+ERROR 23000: Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  (id, v) VALUES (7, 'collide')
+ON DUPLICATE KEY UPDATE v = 'collide';
+ERROR 23000: Duplicate entry '9' for key 't.PRIMARY'
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+same_aux_count
+1
+SELECT id, note FROM db_inn.aux ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT id, note FROM db_my.aux  ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+same_rowcount
+1
+SELECT (SELECT v FROM db_inn.t WHERE id = 7) = (SELECT v FROM db_my.t WHERE id = 7) AS same_v7;
+same_v7
+1
+DROP TRIGGER db_inn.buB;
+DROP TRIGGER db_my.buB;
+CREATE TRIGGER db_inn.biC BEFORE INSERT ON db_inn.t FOR EACH ROW
+BEGIN
+IF NEW.id = 20 THEN
+INSERT INTO db_inn.aux VALUES (20, 'row2');
+SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'abort-now';
+END IF;
+IF NEW.id = 10 THEN
+INSERT INTO db_inn.aux VALUES (10, 'row1');
+END IF;
+END//
+CREATE TRIGGER db_my.biC BEFORE INSERT ON db_my.t FOR EACH ROW
+BEGIN
+IF NEW.id = 20 THEN
+INSERT INTO db_my.aux  VALUES (20, 'row2');
+SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'abort-now';
+END IF;
+IF NEW.id = 10 THEN
+INSERT INTO db_my.aux  VALUES (10, 'row1');
+END IF;
+END//
+INSERT INTO db_inn.t VALUES (10, 'c1'),(20, 'c2');
+ERROR 45000: abort-now
+SET @ar_inn = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+INSERT INTO db_my.t  VALUES (10, 'c1'),(20, 'c2');
+ERROR 45000: abort-now
+SET @ar_my = ROW_COUNT();
+SHOW WARNINGS;
+Level	Code	Message
+SELECT @ar_inn = @ar_my AS same_affected_rows;
+same_affected_rows
+1
+SELECT (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t) AS same_rowcount;
+same_rowcount
+1
+SELECT (SELECT COUNT(*) FROM db_inn.aux) = (SELECT COUNT(*) FROM db_my.aux) AS same_aux_count;
+same_aux_count
+1
+SELECT id, note FROM db_inn.aux ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT id, note FROM db_my.aux  ORDER BY id;
+id	note
+7	bi
+8	bi
+SELECT (SELECT COUNT(*) FROM db_inn.t WHERE id IN (10,20))
+= (SELECT COUNT(*) FROM db_my.t WHERE id IN (10,20)) AS same_no_new_rows;
+same_no_new_rows
+1
+DROP TRIGGER db_inn.biC;
+DROP TRIGGER db_my.biC;
+DROP DATABASE db_inn;
+DROP DATABASE db_my;

@@ -1,0 +1,74 @@
+--source include/have_rocksdb.inc
+
+#
+# Minimal repro - explicit AUTO_INCREMENT ids of rows that are NOT written
+# (IODKU update leg) are not reserved by MyRocks; the next autoinc id diverges
+# from InnoDB after the persisted counter is re-synced.
+#
+# DOCUMENTED RED: the assertions below evaluate to 0 (engine divergence).
+# The recorded .result contains the divergent values, so this test stays
+# green only while the bug exists; re-record it once fixed.
+#
+# Mechanism (code level):
+#  InnoDB persists the AUTO_INCREMENT reservation of an explicit id at
+#  INSERT attempt time, before the duplicate check:
+#    row_ins_clust_index_entry_low (storage/innobase/row/row0ins.cc:2504)
+#      -> dict_table_autoinc_log (storage/innobase/dict/dict0dict.cc:763,
+#         "Always log the counter change first, so it won't be affected by
+#          any follow-up failure").
+#  The reservation is kept even when the row is later rejected as a
+#  duplicate and converted to the IODKU update leg (or skipped by
+#  INSERT IGNORE), and is reloaded whenever the table is re-opened:
+#  server restart, or CREATE/DROP TRIGGER on the table. (ALTER TABLE ...
+#  COMMENT does NOT re-load the counter.)
+#  MyRocks advances the counter only for rows actually written:
+#    get_auto_increment (storage/rocksdb/ha_rocksdb.cc:15874) reserves for
+#    non-explicit rows; update_auto_incr_val_from_field (ha_rocksdb.cc:9461)
+#    bumps it from an explicit id but is called only from update_write_pk
+#    (ha_rocksdb.cc:13246) - i.e. only on actual PK writes. A row converted
+#    to the update leg never reaches update_write_pk, so its explicit id is
+#    never reserved.
+#
+# Workload (minimal; verified that no triggers and no
+# LAST_INSERT_ID(expr) statements are needed):
+#  1. ids 1,2 (autoinc IODKU insert) and id 3 (plain explicit insert)
+#  2. two-row IODKU: row 1 inserted with explicit id 6; row 2's explicit id 7
+#     collides on the unique key and takes the IODKU update leg (not written)
+#  3. server restart (the re-sync that reloads persisted counters)
+#  4. plain autoinc insert: InnoDB assigns 8 (id 7 reserved), MyRocks 7
+#
+# The same mechanism applies to INSERT IGNORE skipping an explicit-id row
+# (verified: identical 8/7 divergence after restart) and a plain failed
+# INSERT; verified during bisection on PS 8.4 (c6c14fa65a0).
+#
+CREATE DATABASE db_inn;
+CREATE DATABASE db_my;
+CREATE TABLE db_inn.t (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, k INT NOT NULL, v INT NOT NULL, UNIQUE KEY uq (k)) ENGINE=InnoDB;
+CREATE TABLE db_my.t  (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, k INT NOT NULL, v INT NOT NULL, UNIQUE KEY uq (k)) ENGINE=RocksDB;
+INSERT INTO db_inn.t (k, v) VALUES (10,1),(20,2) ON DUPLICATE KEY UPDATE v = v;
+INSERT INTO db_my.t  (k, v) VALUES (10,1),(20,2) ON DUPLICATE KEY UPDATE v = v;
+INSERT INTO db_inn.t (k, v) VALUES (30,3);
+INSERT INTO db_my.t  (k, v) VALUES (30,3);
+# row 1: explicit id 6, inserted. row 2: explicit id 7, k=70 collides with
+# row 1 -> takes the IODKU update leg; the row is NOT written.
+INSERT INTO db_inn.t (id, k, v) VALUES (6,70,6),(7,70,7) ON DUPLICATE KEY UPDATE v = v;
+INSERT INTO db_my.t  (id, k, v) VALUES (6,70,6),(7,70,7) ON DUPLICATE KEY UPDATE v = v;
+# re-sync: reload persisted autoinc counters from storage.
+--source include/restart_mysqld.inc
+# next autoinc id: InnoDB 8 (explicit id 7 reserved despite not being
+# written), MyRocks 7 (only written ids are reserved).
+INSERT INTO db_inn.t (k, v) VALUES (50,5);
+SET @inn_id = LAST_INSERT_ID();
+INSERT INTO db_my.t  (k, v) VALUES (50,5);
+SET @my_id  = LAST_INSERT_ID();
+SELECT @inn_id = @my_id AS same_next_autoinc;
+SELECT id, k, v FROM db_inn.t ORDER BY id;
+SELECT id, k, v FROM db_my.t  ORDER BY id;
+SELECT @inn_id AS inn_next;
+SELECT @my_id  AS my_next;
+SELECT (
+  (SELECT COUNT(*) FROM db_inn.t) = (SELECT COUNT(*) FROM db_my.t)
+  AND (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_inn.t) = (SELECT IFNULL(GROUP_CONCAT(CONCAT_WS(':', id, k, v) ORDER BY id SEPARATOR ';'), '') FROM db_my.t)
+) AS eq;
+DROP DATABASE db_inn;
+DROP DATABASE db_my;
