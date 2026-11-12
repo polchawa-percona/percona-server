@@ -1,0 +1,83 @@
+--source include/have_rocksdb.inc
+--source include/not_log_bin.inc
+
+#
+# PS-12025:
+# With the binary log off, the GTID that a session sets with gtid_next for
+# XA PREPARE, XA COMMIT and XA ROLLBACK of a MyRocks transaction must be in
+# gtid_executed after a restart, as it is for an InnoDB transaction.
+#
+# The server does not save the GTID of an XA statement to mysql.gtid_executed
+# (THD::se_persists_gtid() is true for any XA transaction). It leaves that to
+# the storage engine, and only InnoDB does it. For a MyRocks-only XA
+# transaction the GTID is only in the in-memory set and is lost at restart.
+# A replica that does not write the binary log applies the XA transactions
+# of its source this way.
+#
+
+CREATE TABLE t_inno (pk INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_rocks (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+--echo # InnoDB: i1 is committed
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1';
+XA START 'i1';
+INSERT INTO t_inno VALUES (1);
+XA END 'i1';
+XA PREPARE 'i1';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:2';
+XA COMMIT 'i1';
+
+--echo # MyRocks: r1 stays prepared, r2 is committed, r3 is rolled back
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:3';
+XA START 'r1';
+INSERT INTO t_rocks VALUES (1);
+XA END 'r1';
+XA PREPARE 'r1';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4';
+XA START 'r2';
+INSERT INTO t_rocks VALUES (2);
+XA END 'r2';
+XA PREPARE 'r2';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:5';
+XA COMMIT 'r2';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:6';
+XA START 'r3';
+INSERT INTO t_rocks VALUES (3);
+XA END 'r3';
+XA PREPARE 'r3';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:7';
+XA ROLLBACK 'r3';
+SET gtid_next = 'AUTOMATIC';
+
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-7',
+                   @@global.gtid_executed) AS all_executed;
+
+--source include/restart_mysqld.inc
+
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-2',
+                   @@global.gtid_executed) AS innodb_gtids_kept;
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:3',
+                   @@global.gtid_executed) AS rocksdb_prepare_gtid_kept;
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4-5',
+                   @@global.gtid_executed) AS rocksdb_commit_gtids_kept;
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:6-7',
+                   @@global.gtid_executed) AS rocksdb_rollback_gtids_kept;
+
+--echo # The data of the transactions is there
+XA RECOVER;
+SELECT * FROM t_inno ORDER BY pk;
+SELECT * FROM t_rocks ORDER BY pk;
+
+--echo # XA COMMIT of the transaction that stayed prepared over the restart
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:8';
+XA COMMIT 'r1';
+SET gtid_next = 'AUTOMATIC';
+SELECT * FROM t_rocks ORDER BY pk;
+
+--source include/restart_mysqld.inc
+
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:8',
+                   @@global.gtid_executed) AS commit_after_restart_gtid_kept;
+
+DROP TABLE t_inno, t_rocks;
+RESET BINARY LOGS AND GTIDS;

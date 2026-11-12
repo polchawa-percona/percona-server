@@ -1,0 +1,77 @@
+CREATE TABLE t_inno (pk INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_rocks (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+# InnoDB: i1 is committed
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1';
+XA START 'i1';
+INSERT INTO t_inno VALUES (1);
+XA END 'i1';
+XA PREPARE 'i1';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:2';
+XA COMMIT 'i1';
+# MyRocks: r1 stays prepared, r2 is committed, r3 is rolled back
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:3';
+XA START 'r1';
+INSERT INTO t_rocks VALUES (1);
+XA END 'r1';
+XA PREPARE 'r1';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4';
+XA START 'r2';
+INSERT INTO t_rocks VALUES (2);
+XA END 'r2';
+XA PREPARE 'r2';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:5';
+XA COMMIT 'r2';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:6';
+XA START 'r3';
+INSERT INTO t_rocks VALUES (3);
+XA END 'r3';
+XA PREPARE 'r3';
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:7';
+XA ROLLBACK 'r3';
+SET gtid_next = 'AUTOMATIC';
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-7',
+@@global.gtid_executed) AS all_executed;
+all_executed
+1
+# restart
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-2',
+@@global.gtid_executed) AS innodb_gtids_kept;
+innodb_gtids_kept
+1
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:3',
+@@global.gtid_executed) AS rocksdb_prepare_gtid_kept;
+rocksdb_prepare_gtid_kept
+1
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4-5',
+@@global.gtid_executed) AS rocksdb_commit_gtids_kept;
+rocksdb_commit_gtids_kept
+1
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:6-7',
+@@global.gtid_executed) AS rocksdb_rollback_gtids_kept;
+rocksdb_rollback_gtids_kept
+1
+# The data of the transactions is there
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	2	0	r1
+SELECT * FROM t_inno ORDER BY pk;
+pk
+1
+SELECT * FROM t_rocks ORDER BY pk;
+pk
+2
+# XA COMMIT of the transaction that stayed prepared over the restart
+SET gtid_next = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:8';
+XA COMMIT 'r1';
+SET gtid_next = 'AUTOMATIC';
+SELECT * FROM t_rocks ORDER BY pk;
+pk
+1
+2
+# restart
+SELECT GTID_SUBSET('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:8',
+@@global.gtid_executed) AS commit_after_restart_gtid_kept;
+commit_after_restart_gtid_kept
+1
+DROP TABLE t_inno, t_rocks;
+RESET BINARY LOGS AND GTIDS;
