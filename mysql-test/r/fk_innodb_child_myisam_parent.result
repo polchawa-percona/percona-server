@@ -1,0 +1,29 @@
+CREATE TABLE p (id INT PRIMARY KEY, x INT) ENGINE=MyISAM;
+INSERT INTO p VALUES (1, 10);
+SET foreign_key_checks = 0;
+CREATE TABLE c1 (id INT PRIMARY KEY, pid INT, KEY (pid),
+FOREIGN KEY (pid) REFERENCES p (id)) ENGINE=InnoDB;
+CREATE TABLE c2 (id INT PRIMARY KEY, px INT, KEY (px),
+FOREIGN KEY (px) REFERENCES p (x)) ENGINE=InnoDB;
+SET foreign_key_checks = 1;
+# The parent has no index on the referenced column
+INSERT INTO c2 VALUES (1, 10);
+ERROR 23000: Cannot add or update a child row: a foreign key constraint fails (`test`.`c2`, CONSTRAINT `c2_ibfk_1` FOREIGN KEY (`px`) REFERENCES `p` (`x`))
+INSERT INTO c2 VALUES (2, NULL);
+# The parent has an index on the referenced column
+INSERT INTO c1 VALUES (1, 1);
+ERROR 23000: Cannot add or update a child row: a foreign key constraint fails (`test`.`c1`, CONSTRAINT `c1_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`))
+INSERT INTO c1 VALUES (2, NULL);
+# The parent is not restricted by the children
+UPDATE p SET id = 2, x = 20 WHERE id = 1;
+DELETE FROM p;
+SELECT COUNT(*) FROM p;
+COUNT(*)
+0
+SELECT * FROM c1 ORDER BY id;
+id	pid
+2	NULL
+SELECT * FROM c2 ORDER BY id;
+id	px
+2	NULL
+DROP TABLE c1, c2, p;

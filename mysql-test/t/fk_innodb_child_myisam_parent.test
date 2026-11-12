@@ -1,0 +1,45 @@
+#
+# PS-12026:
+# An InnoDB table with a foreign key that references a table of another
+# storage engine can be created only with foreign_key_checks=0. The server
+# treats a parent in another engine as a missing parent, so with
+# foreign_key_checks=1 a child row with a non-NULL key is rejected, whatever
+# the parent table holds, and the parent is not restricted by its children.
+#
+# The foreign key checks of the SQL layer read the parent table without
+# checking its storage engine. When the parent has no index on the referenced
+# columns, get_key_index() in sql/sql_foreign_key_constraint.cc asserts on a
+# debug build and returns UINT_MAX, used as an index into TABLE::key_info, on
+# a release build. When the parent has such an index, the child row is
+# checked against the rows of the parent.
+#
+
+CREATE TABLE p (id INT PRIMARY KEY, x INT) ENGINE=MyISAM;
+INSERT INTO p VALUES (1, 10);
+
+SET foreign_key_checks = 0;
+CREATE TABLE c1 (id INT PRIMARY KEY, pid INT, KEY (pid),
+                 FOREIGN KEY (pid) REFERENCES p (id)) ENGINE=InnoDB;
+CREATE TABLE c2 (id INT PRIMARY KEY, px INT, KEY (px),
+                 FOREIGN KEY (px) REFERENCES p (x)) ENGINE=InnoDB;
+SET foreign_key_checks = 1;
+
+--echo # The parent has no index on the referenced column
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO c2 VALUES (1, 10);
+INSERT INTO c2 VALUES (2, NULL);
+
+--echo # The parent has an index on the referenced column
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO c1 VALUES (1, 1);
+INSERT INTO c1 VALUES (2, NULL);
+
+--echo # The parent is not restricted by the children
+UPDATE p SET id = 2, x = 20 WHERE id = 1;
+DELETE FROM p;
+SELECT COUNT(*) FROM p;
+
+SELECT * FROM c1 ORDER BY id;
+SELECT * FROM c2 ORDER BY id;
+
+DROP TABLE c1, c2, p;

@@ -82,6 +82,7 @@ main.print_stacktrace : Bug#36027494 Add mtr test for my_print_stacktrace
 # Disabled due to InnoDB issues
 
 main.events_time_zone         : BUG#2179 percona https://jira.percona.com/browse/PS-2179
+main.fk_innodb_child_myisam_parent         : BUG#0 PS-12026 FK parent of another engine: get_key_index() assert
 
 # max_parts suite tests
 max_parts.innodb-import-partition-1                         : BUG#27413612 Fails consistently on hudson jobs. Disabled until bug is fixed.
@@ -148,6 +149,7 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.fk_innodb_child_rocksdb_parent : BUG#0 PS-12026 FK parent of another engine: get_key_index() assert
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
