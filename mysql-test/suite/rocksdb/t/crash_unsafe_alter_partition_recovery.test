@@ -1,0 +1,35 @@
+#
+# Findings #14 and #15 (C4 and C5 in myrocks-notes/port-findings.md,
+# crash-durability.md): a crash during INPLACE DROP/ADD PARTITION allowed by
+# rocksdb_allow_unsafe_alter, after the engine dropped/created the
+# partitions but before the data dictionary transaction committed
+# (alter_before_close_temp_tables).
+#   - DROP PARTITION: every SELECT and INSERT then fails with "not present in
+#     RocksDB-SE data dictionary", plain DROP TABLE fails with error 3605,
+#     and DROP TABLE IF EXISTS discards the remaining partitions.
+#   - ADD PARTITION: orphan MyRocks dictionary entries survive DROP TABLE and
+#     block every later CREATE TABLE with the same partition name.
+#
+# The option is documented as crash unsafe, so the expectation here is the
+# minimal recoverable state, not atomicity: after recovery the table can be
+# read and written, CHECK TABLE passes, plain DROP TABLE works and leaves no
+# MyRocks dictionary entries, and the table can be re-created.
+# (rocksdb.crash_unsafe_alter_partition records the current state.)
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+call mtr.add_suppression("Table .* does not exist in RocksDB");
+call mtr.add_suppression("Schema mismatch");
+call mtr.add_suppression("MyRocks");
+--enable_query_log
+
+--let $alter = ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p2
+--let $sync_point = alter_before_close_temp_tables
+--source suite/rocksdb/include/crash_unsafe_alter_partition_recovery.inc
+
+--let $alter = ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400))
+--let $sync_point = alter_before_close_temp_tables
+--source suite/rocksdb/include/crash_unsafe_alter_partition_recovery.inc
