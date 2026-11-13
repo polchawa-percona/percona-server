@@ -489,6 +489,7 @@ class Rdb_key_def {
     // Not used by Percona Server. Reserved, as Facebook MySQL uses it.
     SERVER_VERSION = 12,
     XA_PREPARED = 13,
+    DDL_PENDING_ALTER = 14,
     END_DICT_INDEX_ID = 255
   };
 
@@ -505,6 +506,7 @@ class Rdb_key_def {
     AUTO_INCREMENT_VERSION = 1,
     DROPPED_CF_VERSION = 1,
     XA_PREPARED_VERSION = 1,
+    DDL_PENDING_ALTER_VERSION = 1,
     // Version for index stats is stored in IndexStats struct
   };
 
@@ -1526,11 +1528,22 @@ class Rdb_ddl_manager : public Ensure_initialized {
 
   void set_table_stats(const std::string &tbl_name);
 
+  /*
+    Build a table definition from a list of existing indexes (used to restore
+    the index list of a table after an interrupted inplace ALTER TABLE).
+    Returns nullptr on error.
+  */
+  [[nodiscard]] Rdb_tbl_def *build_tbl_def(
+      const std::string &tbl_name,
+      const std::vector<GL_INDEX_ID> &index_ids) const;
+
   /* Modify the mapping and write it to on-disk storage */
   [[nodiscard]] int put_and_write(Rdb_tbl_def *const key_descr,
                                   rocksdb::WriteBatch &batch);
   // Commit a replacement before changing the cache. Takes ownership on success.
   [[nodiscard]] int replace_and_commit(Rdb_tbl_def *tbl);
+  /* Change the mapping only, after write_to_batch() was committed */
+  void put_committed(Rdb_tbl_def *const tbl) { put(tbl); }
   void remove(Rdb_tbl_def *rec, rocksdb::WriteBatch &batch,
               uint table_default_cf_id, bool lock = true);
   [[nodiscard]] bool rename(const std::string &from, const std::string &to,
@@ -1551,10 +1564,14 @@ class Rdb_ddl_manager : public Ensure_initialized {
       const std::unordered_set<std::shared_ptr<Rdb_key_def>> &indexes);
   [[nodiscard]] int find_in_uncommitted_keydef(uint32_t cf_id) const;
 
- private:
+  /*
+    Append the table definition to a dictionary batch without publishing it in
+    the in-memory mapping. The caller commits the batch.
+  */
   [[nodiscard]] int write_to_batch(Rdb_tbl_def *tbl,
                                    rocksdb::WriteBatch &batch);
 
+ private:
   /* Put the data into in-memory table (only) */
   int put(Rdb_tbl_def *const key_descr, const bool lock = true);
 
@@ -1643,6 +1660,16 @@ class Rdb_ddl_manager : public Ensure_initialized {
   the server's transaction coordinator, kept until it is committed or
   rolled back, so that recovery keeps it prepared.
 
+  14. pending inplace ALTER TABLE (index list changed, server data dictionary
+  commit not confirmed yet)
+  key: Rdb_key_def::DDL_PENDING_ALTER(0xe) + dbname.tablename
+  value: version, token, {cf_id, index_id}*n_indexes_of_the_table_before_alter
+  version is 2 bytes, token is 8 bytes. cf_id and index_id are 4 bytes.
+  The token is also stored in the server data dictionary entry of the table
+  that the ALTER TABLE commits (se_private_data). If the server data
+  dictionary has the token, the ALTER TABLE committed, otherwise the index
+  list before the ALTER TABLE is restored.
+
   Data dictionary operations are atomic inside RocksDB. For example,
   when creating a table with two indexes, it is necessary to call Put
   three times. They have to be atomic. Rdb_dict_manager has a wrapper function
@@ -1701,6 +1728,9 @@ class Rdb_dict_manager : public Ensure_initialized {
   inline void lock() { RDB_MUTEX_LOCK_CHECK(m_mutex); }
 
   inline void unlock() { RDB_MUTEX_UNLOCK_CHECK(m_mutex); }
+
+  /* Whether the lock was free and is now held */
+  inline bool try_lock() { return mysql_mutex_trylock(&m_mutex) == 0; }
 
   inline void assert_lock_held() { mysql_mutex_assert_owner(&m_mutex); }
 
@@ -1810,6 +1840,20 @@ class Rdb_dict_manager : public Ensure_initialized {
     return is_index_operation_ongoing(gl_index_id,
                                       Rdb_key_def::DDL_DROP_INDEX_ONGOING);
   }
+
+  /* Pending inplace ALTER TABLE records, see the dictionary layout 14. above */
+  void put_pending_alter(rocksdb::WriteBatch &batch,
+                         const std::string &tbl_name, const uint64 token,
+                         const std::vector<GL_INDEX_ID> &old_index_ids) const;
+  /* OK: found; NotFound: no record; other: read error or invalid record */
+  [[nodiscard]] rocksdb::Status get_pending_alter(
+      const std::string &tbl_name, uint64 *const token,
+      std::vector<GL_INDEX_ID> *const old_index_ids) const;
+  void delete_pending_alter(rocksdb::WriteBatch &batch,
+                            const std::string &tbl_name) const;
+  [[nodiscard]] rocksdb::Status get_pending_alter_tables(
+      std::vector<std::string> *const names) const;
+  [[nodiscard]] bool is_cf_used_by_pending_alter(const uint32_t cf_id) const;
 
   bool get_max_index_id(uint32_t *const index_id, bool is_dd_tbl = false) const;
   bool update_max_index_id(rocksdb::WriteBatch &batch, uint32_t index_id,

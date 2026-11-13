@@ -1,0 +1,49 @@
+# TRUNCATE TABLE
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Crash at rocksdb_truncate_failure_crash during: TRUNCATE TABLE t1
+TRUNCATE TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) IN (0, 3) AS old_rows_or_empty FROM t1;
+old_rows_or_empty
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
+# ALTER TABLE ... TRUNCATE PARTITION
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Crash at rocksdb_truncate_failure_crash during: ALTER TABLE t1 TRUNCATE PARTITION p0
+ALTER TABLE t1 TRUNCATE PARTITION p0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT COUNT(*) AS p1_rows FROM t1 PARTITION (p1);
+p1_rows
+2
+SELECT COUNT(*) IN (0, 1) AS p0_old_rows_or_empty FROM t1 PARTITION (p0);
+p0_old_rows_or_empty
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
