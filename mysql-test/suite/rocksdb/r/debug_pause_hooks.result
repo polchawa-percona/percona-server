@@ -1,0 +1,120 @@
+CREATE TABLE t1 (id INT NOT NULL, a INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=cf_hooks',
+KEY ka (a) COMMENT 'cfname=cf_hooks') ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+#
+# Manual compaction hooks
+#
+# rocksdb_pause_manual_compaction_start
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_start';
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SELECT COUNT(*) AS compact_cf_running FROM performance_schema.processlist
+WHERE info LIKE 'SET GLOBAL rocksdb_compact_cf%';
+compact_cf_running
+1
+SELECT COUNT(*) > 0 AS compaction_active
+FROM information_schema.rocksdb_active_compaction_stats
+WHERE cf_name = 'cf_hooks';
+compaction_active
+1
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_start';
+# rocksdb_pause_manual_compaction_index
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_index';
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SELECT COUNT(*) AS compact_cf_running FROM performance_schema.processlist
+WHERE info LIKE 'SET GLOBAL rocksdb_compact_cf%';
+compact_cf_running
+1
+SELECT COUNT(*) > 0 AS compaction_active
+FROM information_schema.rocksdb_active_compaction_stats
+WHERE cf_name = 'cf_hooks';
+compaction_active
+1
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_index';
+# rocksdb_pause_manual_compaction_middle
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_middle';
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SELECT COUNT(*) AS compact_cf_running FROM performance_schema.processlist
+WHERE info LIKE 'SET GLOBAL rocksdb_compact_cf%';
+compact_cf_running
+1
+SELECT COUNT(*) > 0 AS compaction_active
+FROM information_schema.rocksdb_active_compaction_stats
+WHERE cf_name = 'cf_hooks';
+compaction_active
+1
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_middle';
+# rocksdb_pause_manual_compaction_completed
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_completed';
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SELECT COUNT(*) AS compact_cf_running FROM performance_schema.processlist
+WHERE info LIKE 'SET GLOBAL rocksdb_compact_cf%';
+compact_cf_running
+1
+SELECT COUNT(*) > 0 AS compaction_active
+FROM information_schema.rocksdb_active_compaction_stats
+WHERE cf_name = 'cf_hooks';
+compaction_active
+1
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_completed';
+include/assert_grep.inc [Each compaction hook paused once in cf_hooks]
+#
+# A keyword that is only a prefix of a hook does not pause it
+#
+UPDATE t1 SET a = a + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_star';
+SET GLOBAL rocksdb_compact_cf = 'cf_hooks';
+SET GLOBAL debug = '-d,rocksdb_pause_manual_compaction_star';
+include/assert_grep.inc [The prefix keyword did not pause the compaction]
+#
+# rocksdb_pause_drop_index_thread
+#
+CREATE TABLE t2 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+DROP TABLE t2;
+SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = 'T2_INDEX';
+ongoing_drop
+T2_INDEX
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
+#
+# Shutdown ends a pause of the drop-index thread
+#
+CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2')
+ENGINE=ROCKSDB;
+INSERT INTO t3 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+SELECT i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_thread';
+DROP TABLE t3;
+SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = 'T3_INDEX';
+ongoing_drop
+T3_INDEX
+# restart
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+COUNT(*)
+2000
+DROP TABLE t1;
