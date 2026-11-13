@@ -1,0 +1,10 @@
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 0;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 10;
+SELECT COUNT(*), SUM(table_rows) FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name LIKE 'ar\_%';
+COUNT(*)	SUM(table_rows)
+200	0
+# Drop the tables while the queue is being processed.
+# Wait for the recalculation queue to drain.
+include/assert.inc [No background statistics recalculation failed]

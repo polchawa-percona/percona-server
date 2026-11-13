@@ -1,0 +1,143 @@
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 0;
+Test 1:- Uncommitted delete test
+CREATE TABLE t1 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+val INT UNSIGNED NOT NULL,
+INDEX (val)) ENGINE=ROCKSDB;
+INSERT INTO t1 (val) VALUES (4);
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4096
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+START TRANSACTION;
+DELETE FROM t1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+Test correctly estimates the number of rows as > 2000
+even when in other uncommitted transaction
+all rows have been deleted.
+COMMIT;
+Test 2:- Insert and rollback test
+CREATE TABLE t2 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+val INT UNSIGNED NOT NULL,
+INDEX (val)) ENGINE=ROCKSDB;
+START TRANSACTION;
+INSERT INTO t2 (val) VALUES (4);
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+4096
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	analyze	status	OK
+Rows inserted by the uncommitted transaction are not counted.
+Rollback the insert
+ROLLBACK;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	analyze	status	OK
+Test correctly estimates the number of rows as 1
+after rollback.
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_table_stats_use_table_scan = 1;
+Test 1:- Uncommitted delete test
+CREATE TABLE t1 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+val INT UNSIGNED NOT NULL,
+INDEX (val)) ENGINE=ROCKSDB;
+INSERT INTO t1 (val) VALUES (4);
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+INSERT INTO t1 (val) SELECT val FROM t1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4096
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+START TRANSACTION;
+DELETE FROM t1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+Test correctly estimates the number of rows as > 2000
+even when in other uncommitted transaction
+all rows have been deleted.
+COMMIT;
+Test 2:- Insert and rollback test
+CREATE TABLE t2 (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+val INT UNSIGNED NOT NULL,
+INDEX (val)) ENGINE=ROCKSDB;
+START TRANSACTION;
+INSERT INTO t2 (val) VALUES (4);
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+INSERT INTO t2 (val) SELECT val FROM t2;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+4096
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	analyze	status	OK
+Rows inserted by the uncommitted transaction are not counted.
+Rollback the insert
+ROLLBACK;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	analyze	status	OK
+Test correctly estimates the number of rows as 1
+after rollback.
+DROP TABLE t1, t2;
