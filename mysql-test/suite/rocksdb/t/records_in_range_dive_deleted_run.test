@@ -1,0 +1,32 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11883: the records_in_range() index dive (PS-10110) must not give up
+# when the range contains a run of deleted rows. It allowed only 8 skipped
+# internal keys per Next(), so a few consecutive deleted rows made the dive
+# fail and the estimate fell back to 1 row for a range with 160 rows.
+#
+
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t (id INT, k INT, PRIMARY KEY (id) COMMENT 'cfname=cf_dive',
+  KEY kk (k) COMMENT 'cfname=cf_dive') ENGINE=ROCKSDB;
+INSERT INTO t
+  WITH RECURSIVE q (x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM q WHERE x < 20000)
+  SELECT x, x % 1000 FROM q;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_dive';
+
+--echo # Delete every row with id % 4 = 0: all 20 rows of k = 12, 16 and 20.
+DELETE FROM t WHERE id % 4 = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ANALYZE TABLE t;
+
+SELECT COUNT(*) FROM t WHERE k BETWEEN 10 AND 20;
+--let $rows = query_get_value(EXPLAIN SELECT id FROM t WHERE k BETWEEN 10 AND 20, rows, 1)
+--let $threshold = `SELECT @@rocksdb_records_in_range_dive_threshold`
+--echo # The estimate is at least the dive threshold (or the exact count).
+--disable_query_log
+--eval SELECT $rows >= LEAST($threshold, 160) AS estimate_ok
+--enable_query_log
+
+DROP TABLE t;
