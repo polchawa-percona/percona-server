@@ -1,0 +1,127 @@
+################################################################################
+# ==== Purpose ====
+# Port of rpl.rpl_filters_check_counter to MyRocks tables: verify the
+# per-filter hit counters of the replica's replication filters.
+#
+# The counters differ from the InnoDB test, and this is expected. MyRocks
+# does not support atomic DDL (no HTON_SUPPORTS_ATOMIC_DDL), so the server
+# binlogs a multi-table DROP TABLE as one "DROP TABLE IF EXISTS" statement
+# per table, and DROP DATABASE first binlogs a DROP TABLE for each table in
+# the database. The replica evaluates the filters once per binlogged
+# statement, so these statements add hits:
+# - DROP TABLE test.t1, test.t2, test.itable, test.itable2 is four statements:
+#   REPLICATE_DO_DB +3 compared to InnoDB, and REPLICATE_WILD_DO_TABLE,
+#   REPLICATE_IGNORE_TABLE and REPLICATE_WILD_IGNORE_TABLE +1 each.
+# - DROP DATABASE db1 adds DROP TABLE db1.t1: REPLICATE_DO_DB,
+#   REPLICATE_REWRITE_DB and REPLICATE_DO_TABLE +1 each.
+# - DROP DATABASE nodb adds DROP TABLE nodb.t1, which is ignored.
+#
+# The XA part of the original test is left out: MyRocks XA is covered by
+# rocksdb.xa_basic and rocksdb.xa_prepared_restart, and the XA statements do
+# not change the counters.
+#
+# The servers run at READ COMMITTED: at REPEATABLE READ, the UPDATE and
+# DELETE without an index in the multi-statement transaction are refused by
+# the gap-lock check.
+#
+# ==== References ====
+# WL#7361 MSR: per-channel replication filters
+# rpl.rpl_filters_check_counter
+################################################################################
+
+# Test in this file only makes sense in standard replication,
+# so it is skipped in group replication.
+--source include/have_rocksdb.inc
+--source include/not_group_replication_plugin.inc
+# Test in this file is binlog format agnostic, thus no need
+# to rerun it for every format.
+--source include/have_binlog_format_row.inc
+--let $rpl_skip_start_slave= 1
+--source include/rpl/init_source_replica.inc
+
+--echo #
+--echo # Setup filters on the Slave.
+--echo #
+--source include/rpl/connection_replica.inc
+CHANGE REPLICATION FILTER REPLICATE_REWRITE_DB=        ((db1, db2));
+CHANGE REPLICATION FILTER REPLICATE_IGNORE_TABLE=      (test.itable);
+CHANGE REPLICATION FILTER REPLICATE_DO_TABLE=          (test.t1, db2.t1);
+CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE=     ('test.t%');
+CHANGE REPLICATION FILTER REPLICATE_WILD_IGNORE_TABLE= ('test.i%');
+CHANGE REPLICATION FILTER REPLICATE_IGNORE_DB=         (nodb);
+CHANGE REPLICATION FILTER REPLICATE_DO_DB=             (test, db1, db2);
+
+# WINT system can re-order the rules of REPLICATE_DO_TABLE and REPLICATE_IGNORE_TABLE.
+# Thus, using replace_result for that case.
+--let $rpl_do_tab_rule = `SELECT FILTER_RULE FROM performance_schema.replication_applier_global_filters WHERE FILTER_NAME="REPLICATE_DO_TABLE"`
+
+--echo
+--replace_result $rpl_do_tab_rule test.t1,db2.t1
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY FROM performance_schema.replication_applier_global_filters ORDER BY FILTER_NAME;
+--replace_result $rpl_do_tab_rule test.t1,db2.t1
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY, COUNTER FROM performance_schema.replication_applier_filters ORDER BY FILTER_NAME;
+--source include/rpl/start_replica.inc
+
+--echo #
+--echo # Execute transactions on the Master.
+--echo #
+--source include/rpl/connection_source.inc
+CREATE TABLE test.t1 (a INT) ENGINE=ROCKSDB;      # Counter: REPLICATE_DO_DB=1, REPLICATE_DO_TABLE=1.
+CREATE TABLE test.t2 (a INT) ENGINE=ROCKSDB;      # Counter: REPLICATE_DO_DB=2, REPLICATE_WILD_DO_TABLE=1.
+CREATE TABLE test.itable (a INT) ENGINE=ROCKSDB;  # Counter: REPLICATE_DO_DB=3, REPLICATE_IGNORE_TABLE=1.
+CREATE TABLE test.itable2 (a INT) ENGINE=ROCKSDB; # Counter: REPLICATE_DO_DB=4, REPLICATE_WILD_IGNORE_TABLE=1.
+CREATE DATABASE db1;          # Counter: REPLICATE_DO_DB=5.
+CREATE DATABASE db2;          # Counter: REPLICATE_DO_DB=6.
+CREATE DATABASE nodb;         # Counter: Should not increase based on existing implementation.
+USE nodb; CREATE TABLE t1 (a INT) ENGINE=ROCKSDB; # Counter: Should not increase based on existing implementation.
+USE db1; CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;  # Counter: REPLICATE_DO_DB=7, REPLICATE_REWRITE_DB=1, REPLICATE_DO_TABLE=2.
+USE test;
+BEGIN;
+USE test; INSERT INTO test.t1 VALUES (1);   # Counter: REPLICATE_DO_DB=8, REPLICATE_DO_TABLE=3.
+USE test; UPDATE test.t1 SET a=2 WHERE a=1; # Counter: REPLICATE_DO_DB=9, REPLICATE_DO_TABLE=4.
+USE test; DELETE FROM test.t1;              # Counter: REPLICATE_DO_DB=10, REPLICATE_DO_TABLE=5.
+USE db1;  INSERT INTO db1.t1 VALUES (1);    # Counter: REPLICATE_DO_DB=11, REPLICATE_REWRITE_DB=2, REPLICATE_DO_TABLE=6.
+USE db1;  UPDATE db1.t1 SET a=2 WHERE a=1;  # Counter: REPLICATE_DO_DB=12, REPLICATE_REWRITE_DB=3, REPLICATE_DO_TABLE=7.
+USE db1;  DELETE FROM db1.t1;               # Counter: REPLICATE_DO_DB=13, REPLICATE_REWRITE_DB=4, REPLICATE_DO_TABLE=8
+USE nodb; INSERT INTO nodb.t1 VALUES (1);   # Counter: Should not increase based on existing implementation.
+USE test; INSERT INTO test.t2 VALUES (1);   # Counter: REPLICATE_DO_DB=14, REPLICATE_WILD_DO_TABLE=2.
+USE test; INSERT INTO test.itable VALUES (1);             # Counter: REPLICATE_DO_DB=15, REPLICATE_IGNORE_TABLE=2.
+USE test; INSERT INTO test.itable2 SELECT * FROM nodb.t1; # Counter: REPLICATE_DO_DB=16, REPLICATE_WILD_IGNORE_TABLE=2.
+COMMIT;
+
+DROP TABLE IF EXISTS test.t1, test.t2, test.itable, test.itable2; # Counter: one statement per table: REPLICATE_DO_DB=20, REPLICATE_DO_TABLE=9, REPLICATE_WILD_DO_TABLE=3, REPLICATE_IGNORE_TABLE=3, REPLICATE_WILD_IGNORE_TABLE=3.
+DROP DATABASE db1;  # Counter: DROP TABLE db1.t1: REPLICATE_DO_DB=21, REPLICATE_REWRITE_DB=5, REPLICATE_DO_TABLE=10; then REPLICATE_DO_DB=22.
+DROP DATABASE db2;  # Counter: REPLICATE_DO_DB=23.
+DROP DATABASE nodb; # Counter: Should not increase based on existing implementation.
+
+--source include/rpl/sync_to_replica.inc
+--echo #
+--echo # Verify the filter couter on the Slave.
+--echo # REPLICATE_DO_DB=23,       REPLICATE_IGNORE_DB=0,     REPLICATE_DO_TABLE=10,
+--echo # REPLICATE_IGNORE_TABLE=3, REPLICATE_WILD_DO_TABLE=3,
+--echo # REPLICATE_WILD_IGNORE_TABLE=3, REPLICATE_REWRITE_DB=5.
+--echo # (InnoDB: 19, 0, 9, 2, 2, 2, 4; see the header for the difference.)
+--echo #
+--replace_result $rpl_do_tab_rule test.t1,db2.t1
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY FROM performance_schema.replication_applier_global_filters ORDER BY FILTER_NAME;
+--replace_result $rpl_do_tab_rule test.t1,db2.t1
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY, COUNTER FROM performance_schema.replication_applier_filters ORDER BY FILTER_NAME;
+--let $rpl_do_tab_rule=
+
+--echo #
+--echo # Clean up and Verify filter couter after unsetting the rules. Expect 0 count.
+--echo #
+--source include/rpl/stop_replica.inc
+# Unset filter rules.
+CHANGE REPLICATION FILTER REPLICATE_REWRITE_DB=        ();
+CHANGE REPLICATION FILTER REPLICATE_IGNORE_TABLE=      ();
+CHANGE REPLICATION FILTER REPLICATE_DO_TABLE=          ();
+CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE=     ();
+CHANGE REPLICATION FILTER REPLICATE_WILD_IGNORE_TABLE= ();
+CHANGE REPLICATION FILTER REPLICATE_IGNORE_DB=         ();
+CHANGE REPLICATION FILTER REPLICATE_DO_DB=             ();
+--echo
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY FROM performance_schema.replication_applier_global_filters ORDER BY FILTER_NAME;
+SELECT FILTER_NAME, FILTER_RULE, CONFIGURED_BY, COUNTER FROM performance_schema.replication_applier_filters ORDER BY FILTER_NAME;
+--source include/rpl/start_replica.inc
+--source include/rpl/deinit.inc

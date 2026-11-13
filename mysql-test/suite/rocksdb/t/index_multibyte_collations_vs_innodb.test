@@ -1,0 +1,102 @@
+# Extension of the suite/innodb/t/innodb-index_ucs2.test port to other
+# multi-byte character sets and to PAD SPACE vs NO PAD collations.
+#
+# Part 1 runs the innodb-index.inc flow (MyRocks copy) for utf16, utf32 and
+# several utf8mb4 and ucs2 collations.
+# Part 2 stores the same strings (trailing spaces, case, accents, expansions,
+# supplementary characters) in a MyRocks table and in an InnoDB twin, with a
+# full-column and a prefix secondary index. It checks that:
+# - the unique-key decisions (which inserts are duplicates) are the same as
+#   InnoDB's;
+# - every MyRocks secondary index returns the same data as its primary key;
+# - equality, LIKE-prefix and range lookups return the same rows as InnoDB.
+
+--source include/have_rocksdb.inc
+
+call mtr.add_suppression("Plugin rocksdb reported: 'Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Plugin rocksdb reported: 'Will handle this collation internally as if it had a NO_PAD attribute.'");
+
+--echo #
+--echo # Part 1: innodb-index.inc flow for other character sets
+--echo #
+--let $charset = utf16
+--source suite/rocksdb/include/innodb_port_index.inc
+--let $charset = utf32
+--source suite/rocksdb/include/innodb_port_index.inc
+--let $charset = utf8mb4
+--source suite/rocksdb/include/innodb_port_index.inc
+--let $charset = utf8mb4
+--let $collation = utf8mb4_general_ci
+--source suite/rocksdb/include/innodb_port_index.inc
+--let $charset = utf8mb4
+--let $collation = utf8mb4_bin
+--source suite/rocksdb/include/innodb_port_index.inc
+--let $charset = ucs2
+--let $collation = ucs2_bin
+--source suite/rocksdb/include/innodb_port_index.inc
+
+--echo #
+--echo # Part 2: MyRocks vs InnoDB on PAD SPACE / NO PAD collations
+--echo #
+
+# Strings shared by all character sets in the list below. Supplementary
+# characters (outside the BMP) are added only where the charset can store them.
+--let $bmp_values = ('a'),('a '),('A'),('á'),('ä'),('ß'),('ss'),('ae'),('æ'),(''),(' '),('abc'),('abd'),('abc  '),('ﬁ'),('fi'),('Ǆ'),('ǅ'),(NULL)
+--let $smp_values = ('😀'),('😀 '),('𝐀'),('A😀')
+
+--let $i = 1
+while ($i <= 8)
+{
+  if ($i == 1)
+  {
+    --let $cs = utf8mb4
+    --let $coll = utf8mb4_0900_ai_ci
+    --let $smp = 1
+  }
+  if ($i == 2)
+  {
+    --let $coll = utf8mb4_0900_as_cs
+  }
+  if ($i == 3)
+  {
+    --let $coll = utf8mb4_general_ci
+  }
+  if ($i == 4)
+  {
+    --let $coll = utf8mb4_unicode_520_ci
+  }
+  if ($i == 5)
+  {
+    --let $cs = ucs2
+    --let $coll = ucs2_general_ci
+    --let $smp = 0
+  }
+  if ($i == 6)
+  {
+    --let $coll = ucs2_unicode_ci
+  }
+  if ($i == 7)
+  {
+    --let $cs = utf16
+    --let $coll = utf16_unicode_ci
+    --let $smp = 1
+  }
+  if ($i == 8)
+  {
+    --let $cs = utf32
+    --let $coll = utf32_general_ci
+  }
+  --let $values = $bmp_values
+  if ($smp)
+  {
+    --let $values = $bmp_values,$smp_values
+  }
+  # utf8mb4_0900_as_cs prefix keys hit the "sort key longer than the column"
+  # read bug; that case is in index_long_collation_weights (disabled until
+  # the fix lands).
+  if ($coll != utf8mb4_0900_as_cs)
+  {
+    --source suite/rocksdb/include/innodb_port_compare_collation.inc
+  }
+  --inc $i
+}

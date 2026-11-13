@@ -1,0 +1,42 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(10,10);
+SET SESSION rocksdb_max_row_locks = 5;
+# Without SKIP LOCKED: the lock limit is reported.
+BEGIN;
+SELECT * FROM t1 FOR UPDATE;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+ROLLBACK;
+# With SKIP LOCKED: the same error must be reported, not hidden.
+BEGIN;
+SELECT * FROM t1 FOR UPDATE SKIP LOCKED;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+ROLLBACK;
+# Same for a secondary-key driven locking read.
+ALTER TABLE t1 ADD KEY k (v);
+BEGIN;
+SELECT * FROM t1 FORCE INDEX (k) WHERE v > 0 FOR UPDATE SKIP LOCKED;
+ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
+ROLLBACK;
+# SKIP LOCKED still skips rows that are really locked.
+SET SESSION rocksdb_max_row_locks = DEFAULT;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+id	v
+3	3
+BEGIN;
+SELECT id FROM t1 FOR UPDATE SKIP LOCKED;
+id
+1
+2
+4
+5
+6
+7
+8
+9
+10
+ROLLBACK;
+ROLLBACK;
+DROP TABLE t1;
