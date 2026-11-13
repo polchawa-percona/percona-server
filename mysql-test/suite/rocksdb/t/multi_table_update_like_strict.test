@@ -1,0 +1,46 @@
+#
+# Finding #7 (myrocks-notes/port-findings.md, update-warning.md): a valid
+# multi-table UPDATE with a LIKE 'prefix%' range on an indexed utf8mb4
+# VARCHAR column fails with ER_DATA_TOO_LONG under the default strict
+# sql_mode. InnoDB runs it.
+#
+# Query_result_update::start_execution() enables CHECK_FIELD_WARN for the
+# whole statement. MyRocks' Rdb_key_def::pack_index_tuple() restores the
+# LIKE range key, padded to the column's maximum byte length, into the
+# record through key_restore() -> Field_varstring::store(), which reports
+# the truncation. The search itself is correct.
+#
+# The test expects InnoDB's behaviour: the UPDATE succeeds without warnings.
+#
+--source include/have_rocksdb.inc
+
+# READ COMMITTED: at REPEATABLE READ MyRocks rejects the multi-table UPDATE
+# with the gap-lock error before the bug is reached.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION sql_mode = DEFAULT;
+
+CREATE TABLE t6 (a CHAR(2) NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL,
+                 KEY (b)) ENGINE=ROCKSDB;
+CREATE TABLE t7 (a CHAR(2) NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL,
+                 KEY (b)) ENGINE=ROCKSDB;
+INSERT INTO t6 VALUES ('AB','MySQLAB'),('UN','United Kingdom'),
+                      ('SU','Sun Microsystems');
+INSERT INTO t7 VALUES ('AB','Sweden');
+
+--echo # Multi-table UPDATE with a LIKE prefix range on the indexed column
+UPDATE t6, t7 SET t6.b = UPPER(t6.b) WHERE t6.b LIKE 'United%';
+SELECT a, b FROM t6 ORDER BY a;
+
+--echo # Multi-table DELETE and single-table UPDATE with the same range work
+--echo # already; keep them as a reference.
+UPDATE t6 SET b = LOWER(b) WHERE b LIKE 'UNITED%';
+DELETE t6 FROM t6, t7 WHERE t6.b LIKE 'Zzz%';
+SELECT a, b FROM t6 ORDER BY a;
+
+--echo # Non-strict mode: no truncation warning either
+SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION';
+UPDATE t6, t7 SET t6.b = UPPER(t6.b) WHERE t6.b LIKE 'united%';
+SELECT a, b FROM t6 ORDER BY a;
+SET SESSION sql_mode = DEFAULT;
+
+DROP TABLE t6, t7;

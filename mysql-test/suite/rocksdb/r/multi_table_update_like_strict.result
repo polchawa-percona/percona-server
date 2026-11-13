@@ -1,0 +1,35 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION sql_mode = DEFAULT;
+CREATE TABLE t6 (a CHAR(2) NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL,
+KEY (b)) ENGINE=ROCKSDB;
+CREATE TABLE t7 (a CHAR(2) NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL,
+KEY (b)) ENGINE=ROCKSDB;
+INSERT INTO t6 VALUES ('AB','MySQLAB'),('UN','United Kingdom'),
+('SU','Sun Microsystems');
+INSERT INTO t7 VALUES ('AB','Sweden');
+# Multi-table UPDATE with a LIKE prefix range on the indexed column
+UPDATE t6, t7 SET t6.b = UPPER(t6.b) WHERE t6.b LIKE 'United%';
+SELECT a, b FROM t6 ORDER BY a;
+a	b
+AB	MySQLAB
+SU	Sun Microsystems
+UN	UNITED KINGDOM
+# Multi-table DELETE and single-table UPDATE with the same range work
+# already; keep them as a reference.
+UPDATE t6 SET b = LOWER(b) WHERE b LIKE 'UNITED%';
+DELETE t6 FROM t6, t7 WHERE t6.b LIKE 'Zzz%';
+SELECT a, b FROM t6 ORDER BY a;
+a	b
+AB	MySQLAB
+SU	Sun Microsystems
+UN	united kingdom
+# Non-strict mode: no truncation warning either
+SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION';
+UPDATE t6, t7 SET t6.b = UPPER(t6.b) WHERE t6.b LIKE 'united%';
+SELECT a, b FROM t6 ORDER BY a;
+a	b
+AB	MySQLAB
+SU	Sun Microsystems
+UN	UNITED KINGDOM
+SET SESSION sql_mode = DEFAULT;
+DROP TABLE t6, t7;
