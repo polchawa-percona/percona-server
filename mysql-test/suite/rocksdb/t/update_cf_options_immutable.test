@@ -1,0 +1,42 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11886: when RocksDB rejects an option in rocksdb_update_cf_options
+# (ColumnFamily SetOptions() fails, for example because num_levels cannot be
+# changed on a live column family), rocksdb_set_update_cf_options() only
+# writes "Failed to apply the options for column family ..." to the error
+# log. The SET statement succeeds without a warning, and
+# @@rocksdb_update_cf_options shows the value that was not applied.
+#
+# The test changes num_levels of a live column family and asserts that the
+# client learns the truth: the statement fails, or it raises a warning, or
+# the new value is in effect.
+#
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Failed to apply the options");
+--enable_query_log
+
+CREATE TABLE t1 (pk INT, PRIMARY KEY (pk) COMMENT 'cfname=cf_imm') ENGINE=ROCKSDB;
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+  WHERE CF_NAME = 'cf_imm' AND OPTION_TYPE = 'NUM_LEVELS';
+
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--error 0, ER_WRONG_VALUE_FOR_VAR, ER_WRONG_ARGUMENTS
+SET GLOBAL rocksdb_update_cf_options = 'cf_imm={num_levels=3}';
+--let $set_errno = $mysql_errno
+--let $set_warnings = query_get_value(SHOW COUNT(*) WARNINGS, @@session.warning_count, 1)
+--enable_warnings
+--enable_result_log
+--enable_query_log
+
+--let $applied = `SELECT VALUE = '3' FROM information_schema.ROCKSDB_CF_OPTIONS WHERE CF_NAME = 'cf_imm' AND OPTION_TYPE = 'NUM_LEVELS'`
+--echo # The statement must fail, warn, or take effect
+--disable_query_log
+--eval SELECT ($set_errno <> 0 OR $set_warnings > 0 OR $applied) AS client_told_the_truth
+--enable_query_log
+
+SET GLOBAL rocksdb_update_cf_options = DEFAULT;
+DROP TABLE t1;
