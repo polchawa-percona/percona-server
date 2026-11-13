@@ -41,6 +41,10 @@ class ha_rockspart : public native_part::Partition_base,
            const dd::Table *table_def) override;
   int create(const char *name, TABLE *form, HA_CREATE_INFO *create_info,
              dd::Table *table_def) override;
+  int get_extra_columns_and_keys(const HA_CREATE_INFO *create_info,
+                                 const List<Create_field> *create_list,
+                                 const KEY *key_info, uint key_count,
+                                 dd::Table *table_obj) override;
   enum row_type get_partition_row_type(const dd::Table *, uint) override {
     return ROW_TYPE_NOT_USED;
   }
