@@ -1,0 +1,24 @@
+# WAL directory equal to the RocksDB data directory, relative path.
+# restart:--rocksdb-wal-dir=./.rocksdb
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1);
+# WAL directory equal to the RocksDB data directory, absolute path.
+# restart:--rocksdb-wal-dir=DATADIR/.rocksdb
+INSERT INTO t1 VALUES (2);
+# Separate WAL directory given as a relative path: it is locked.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# restart:--rocksdb-wal-dir=./rdb_wal_rel
+INSERT INTO t1 VALUES (3);
+SELECT @@rocksdb_wal_dir;
+@@rocksdb_wal_dir
+./rdb_wal_rel
+Lock file is locked by a running instance.
+# Back to the default WAL directory.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# restart
+SELECT * FROM t1;
+a
+1
+2
+3
+DROP TABLE t1;

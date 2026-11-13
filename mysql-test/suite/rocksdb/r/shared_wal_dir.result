@@ -1,0 +1,25 @@
+# Server A (the MTR server) uses the shared WAL directory.
+SELECT @@rocksdb_wal_dir LIKE '%shared_wal' AS a_uses_shared_wal;
+a_uses_shared_wal
+1
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Create instance B with its own private WAL directory, then stop it.
+# Restart B on A's WAL directory: B must refuse to start.
+# B refused to start.
+Pattern "Can't lock rocksdb_wal_dir directory .*shared_wal" found
+# A keeps its committed rows across a crash.
+INSERT INTO t1 VALUES (4,4),(5,5);
+# Kill and restart
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+5	15
+# The restarted instance holds the lock again.
+Lock file is locked by a running instance.
+# A clean shutdown releases the lock, and A restarts on the same directory.
+Lock file is free.
+# restart
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+5	15
+DROP TABLE t1;

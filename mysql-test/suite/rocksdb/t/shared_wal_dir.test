@@ -1,0 +1,77 @@
+# Finding #32 (myrocks-notes/port-findings.md, section SD1).
+#
+# RocksDB locks only <db dir>/LOCK. A separate rocksdb_wal_dir has no lock, and at open
+# RocksDB deletes WAL files in it whose number is below its own log number and replays
+# every WAL file it finds there. Two instances pointed at the same rocksdb_wal_dir
+# therefore delete and replay each other's WAL files: committed rows are lost and
+# rows of one instance appear in the other.
+#
+# MyRocks therefore holds an fcntl lock on <rocksdb_wal_dir>/MYROCKS_WAL_DIR_LOCK
+# while the engine is running. Asserted here:
+#  1. A second instance whose RocksDB already exists refuses to start when its
+#     rocksdb_wal_dir is in use by a running instance, and says why.
+#  2. The running instance keeps every committed row across a crash.
+#  3. The lock is held while the instance runs and is released on a crash and on a
+#     clean shutdown, so the instance restarts on the same directory.
+#
+# Sharing the directory one after the other (B starts after A has stopped) is not
+# shown: it is still wrong, because B would replay or purge A's remaining WAL files.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/not_windows.inc
+--source include/linux.inc
+
+--let $b_dir= $MYSQL_TMP_DIR/sd_b
+--let $b_sock= $MYSQL_TMP_DIR/sd_b.sock
+--let $b_err= $MYSQL_TMP_DIR/sd_b.err
+# A port inside this test worker's reserved MTR port range (30 ports from
+# @@port) that the single-server configuration does not use.
+--let $b_port= `SELECT @@port + 10`
+--let $shared_wal= $MYSQL_TMP_DIR/shared_wal
+
+--echo # Server A (the MTR server) uses the shared WAL directory.
+SELECT @@rocksdb_wal_dir LIKE '%shared_wal' AS a_uses_shared_wal;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+
+--echo # Create instance B with its own private WAL directory, then stop it.
+--exec $MYSQLD --no-defaults --initialize-insecure --datadir=$b_dir --innodb-use-native-aio=0 > $MYSQL_TMP_DIR/sd_b_init.log 2>&1
+--let $b_cmd= $MYSQLD --no-defaults --datadir=$b_dir --socket=$b_sock --port=$b_port --mysqlx=OFF --log-error=$b_err --innodb-use-native-aio=0 $ROCKSDB_OPT --plugin-load-add=$ROCKSDB --default-storage-engine=rocksdb
+--exec_in_background $b_cmd --rocksdb-wal-dir=$MYSQL_TMP_DIR/sd_b_wal > /dev/null 2>&1
+--let $wait_counter= 600
+--source suite/rocksdb/include/shared_wal_dir_wait_b.inc
+--exec $MYSQLADMIN --no-defaults -uroot -S $b_sock shutdown
+--source suite/rocksdb/include/shared_wal_dir_wait_b_gone.inc
+
+--echo # Restart B on A's WAL directory: B must refuse to start.
+# A refused start exits with status 1. If B started anyway, timeout would stop it
+# after 60 s with status 124 and the test would fail here.
+--error 1
+--exec timeout 60 $b_cmd --rocksdb-wal-dir=$shared_wal > /dev/null 2>&1
+--echo # B refused to start.
+--let SEARCH_FILE= $b_err
+--let SEARCH_PATTERN= Can't lock rocksdb_wal_dir directory .*shared_wal
+--source include/search_pattern.inc
+
+--echo # A keeps its committed rows across a crash.
+INSERT INTO t1 VALUES (4,4),(5,5);
+--source include/kill_and_restart_mysqld.inc
+SELECT COUNT(*), SUM(v) FROM t1;
+
+--let WAL_LOCK_FILE= $shared_wal/MYROCKS_WAL_DIR_LOCK
+--echo # The restarted instance holds the lock again.
+--source suite/rocksdb/include/shared_dir_probe_lock.inc
+
+--echo # A clean shutdown releases the lock, and A restarts on the same directory.
+--source include/shutdown_mysqld.inc
+--source suite/rocksdb/include/shared_dir_probe_lock.inc
+--source include/start_mysqld.inc
+SELECT COUNT(*), SUM(v) FROM t1;
+
+DROP TABLE t1;
+--remove_files_wildcard $MYSQL_TMP_DIR sd_b*.log
+--remove_file $b_err
+--force-rmdir $b_dir
+--force-rmdir $MYSQL_TMP_DIR/sd_b_wal
