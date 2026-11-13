@@ -1,0 +1,42 @@
+#
+# TTL read filtering must work for UPDATE and DELETE with
+# rocksdb_commit_in_the_middle=ON in REPEATABLE READ. The scan uses its own
+# DB snapshot (rdb_tx_get_iterator), while the transaction only has a
+# delayed snapshot, so its TTL read time is still zero.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+COMMENT='ttl_duration=10;';
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -100;
+INSERT INTO t1 VALUES (1, 1);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
+INSERT INTO t1 VALUES (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Row 1 has expired
+SELECT * FROM t1 ORDER BY a;
+a	b
+2	2
+3	3
+SELECT variable_value INTO @unfiltered FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_unfiltered_no_snapshot';
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION rocksdb_commit_in_the_middle = ON;
+UPDATE t1 SET b = b + 10;
+affected rows: 2
+info: Rows matched: 2  Changed: 2  Warnings: 0
+SET SESSION rocksdb_commit_in_the_middle = OFF;
+# The expired row must stay hidden, not be restamped by the UPDATE
+SELECT * FROM t1 ORDER BY a;
+a	b
+2	12
+3	13
+SET SESSION rocksdb_commit_in_the_middle = ON;
+DELETE FROM t1 WHERE b > 0;
+affected rows: 2
+SET SESSION rocksdb_commit_in_the_middle = OFF;
+SELECT variable_value - @unfiltered AS unfiltered_no_snapshot
+FROM performance_schema.global_status
+WHERE variable_name = 'rocksdb_rows_unfiltered_no_snapshot';
+unfiltered_no_snapshot
+0
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;

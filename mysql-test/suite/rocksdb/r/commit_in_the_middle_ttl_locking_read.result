@@ -1,0 +1,20 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a))
+ENGINE=ROCKSDB COMMENT='ttl_duration=3600;';
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET SESSION rocksdb_commit_in_the_middle = ON;
+# Secondary-key and full scans with row locks.
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+pk	a	b
+2	2	2
+SELECT * FROM t1 WHERE b BETWEEN 1 AND 3 ORDER BY pk FOR UPDATE;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+SELECT * FROM t1 WHERE b = 3 FOR SHARE;
+pk	a	b
+3	3	3
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;

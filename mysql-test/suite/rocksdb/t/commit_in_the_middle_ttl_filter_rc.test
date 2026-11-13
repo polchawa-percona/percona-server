@@ -1,0 +1,50 @@
+--source include/have_debug.inc
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # TTL read filtering must work for UPDATE and DELETE with
+--echo # rocksdb_commit_in_the_middle=ON in READ COMMITTED. A batch commit
+--echo # (flush_batch) ends the transaction and zeroes its TTL read time, while
+--echo # the scan goes on with its own DB snapshot (rdb_tx_get_iterator).
+--echo #
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+  COMMENT='ttl_duration=10;';
+
+INSERT INTO t1 VALUES (1, 1);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -100;
+INSERT INTO t1 VALUES (2, 2);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
+INSERT INTO t1 VALUES (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Row 2 has expired
+SELECT * FROM t1 ORDER BY a;
+
+SELECT variable_value INTO @unfiltered FROM performance_schema.global_status
+  WHERE variable_name = 'rocksdb_rows_unfiltered_no_snapshot';
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_bulk_load_size = 1;
+SET SESSION rocksdb_commit_in_the_middle = ON;
+--enable_info
+UPDATE t1 SET b = b + 10;
+--disable_info
+SET SESSION rocksdb_commit_in_the_middle = OFF;
+
+--echo # The expired row must stay hidden, not be restamped by the UPDATE
+SELECT * FROM t1 ORDER BY a;
+
+SET SESSION rocksdb_commit_in_the_middle = ON;
+--enable_info
+DELETE FROM t1 WHERE b > 0;
+--disable_info
+SET SESSION rocksdb_commit_in_the_middle = OFF;
+
+SELECT variable_value - @unfiltered AS unfiltered_no_snapshot
+  FROM performance_schema.global_status
+  WHERE variable_name = 'rocksdb_rows_unfiltered_no_snapshot';
+
+SET SESSION rocksdb_bulk_load_size = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;

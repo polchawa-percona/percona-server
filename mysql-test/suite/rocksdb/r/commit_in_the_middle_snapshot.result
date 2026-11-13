@@ -1,0 +1,91 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
+# rocksdb_commit_in_the_middle=OFF
+SET SESSION rocksdb_commit_in_the_middle = OFF;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+# The first read takes the transaction snapshot.
+SELECT * FROM t1 WHERE pk = 1;
+pk	a	b
+1	1	1
+INSERT INTO t1 VALUES (20, 20, 20);
+INSERT INTO t1 VALUES (10, 10, 10);
+DELETE FROM t1 WHERE pk = 2;
+UPDATE t1 SET a = 30 WHERE pk = 3;
+# Expected: 1, 2, 3 and the own row 20; not 10.
+SELECT * FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+20	20	20
+SELECT pk, a FROM t1 FORCE INDEX (ka) ORDER BY a;
+pk	a
+1	1
+2	2
+3	3
+20	20
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a >= 1 ORDER BY a;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+20	20	20
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 3;
+pk	a	b
+3	3	3
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 10;
+pk	a	b
+SELECT * FROM t1 WHERE pk = 10;
+pk	a	b
+COMMIT;
+# Restore the initial rows.
+DELETE FROM t1 WHERE pk IN (10, 20);
+INSERT INTO t1 VALUES (2, 2, 2);
+UPDATE t1 SET a = 3 WHERE pk = 3;
+# rocksdb_commit_in_the_middle=ON
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+BEGIN;
+# The first read takes the transaction snapshot.
+SELECT * FROM t1 WHERE pk = 1;
+pk	a	b
+1	1	1
+INSERT INTO t1 VALUES (20, 20, 20);
+INSERT INTO t1 VALUES (10, 10, 10);
+DELETE FROM t1 WHERE pk = 2;
+UPDATE t1 SET a = 30 WHERE pk = 3;
+# Expected: 1, 2, 3 and the own row 20; not 10.
+SELECT * FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+20	20	20
+SELECT pk, a FROM t1 FORCE INDEX (ka) ORDER BY a;
+pk	a
+1	1
+2	2
+3	3
+20	20
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a >= 1 ORDER BY a;
+pk	a	b
+1	1	1
+2	2	2
+3	3	3
+20	20	20
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 3;
+pk	a	b
+3	3	3
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 10;
+pk	a	b
+SELECT * FROM t1 WHERE pk = 10;
+pk	a	b
+COMMIT;
+# Restore the initial rows.
+DELETE FROM t1 WHERE pk IN (10, 20);
+INSERT INTO t1 VALUES (2, 2, 2);
+UPDATE t1 SET a = 3 WHERE pk = 3;
+SET SESSION rocksdb_commit_in_the_middle = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;
