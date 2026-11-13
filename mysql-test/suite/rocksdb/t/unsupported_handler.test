@@ -1,0 +1,32 @@
+#
+# MyRocks negative test: HANDLER statements.
+#
+# rocksdb.truncate_table only notes in a comment that HANDLER is not supported,
+# and rocksdb.lock uses HANDLER on a non-MyRocks table. This test pins the
+# error for a MyRocks table and checks the session stays usable.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+
+--error ER_ILLEGAL_HA
+HANDLER t1 OPEN;
+--error ER_ILLEGAL_HA
+HANDLER t1 OPEN AS h;
+--error ER_UNKNOWN_TABLE
+HANDLER t1 READ FIRST;
+--error ER_UNKNOWN_TABLE
+HANDLER t1 READ `PRIMARY` FIRST;
+--error ER_UNKNOWN_TABLE
+HANDLER t1 CLOSE;
+
+--echo # Partitioned table
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 2;
+--error ER_ILLEGAL_HA
+HANDLER t2 OPEN;
+
+--echo # The session is still usable
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1, t2;

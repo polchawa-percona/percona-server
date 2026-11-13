@@ -1,0 +1,105 @@
+#
+# MyRocks negative tests: index types the engine does not support.
+#
+# Statements are taken from the InnoDB suite, rewritten to ENGINE=ROCKSDB:
+#   FULLTEXT:     innodb.create_index_excess_memory, innodb.alter_missing_tablespace
+#   SPATIAL:      innodb.innodb_cats, innodb.innodb_bug19164038
+#   DESC keys:    innodb.innodb-index, innodb.instant_add_column_long
+#   multi-valued: innodb.multi_value_basic, innodb.alter_multivalue
+#
+# Each statement must fail with a clear error and must leave no table or
+# index behind. Functional indexes are supported and are pinned at the end,
+# so a regression in either direction shows up here.
+#
+
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # FULLTEXT
+--echo #
+--error ER_TABLE_CANT_HANDLE_FT
+CREATE TABLE t1 (id INT PRIMARY KEY, t TEXT, FULLTEXT KEY ft (t)) ENGINE=ROCKSDB;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, t VARCHAR(100)) ENGINE=ROCKSDB;
+--error ER_TABLE_CANT_HANDLE_FT
+ALTER TABLE t1 ADD FULLTEXT INDEX ft (t);
+--error ER_TABLE_CANT_HANDLE_FT
+CREATE FULLTEXT INDEX ft ON t1 (t);
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo # An InnoDB table with a FULLTEXT index cannot be converted
+CREATE TABLE t1 (id INT PRIMARY KEY, t VARCHAR(100), FULLTEXT KEY ft (t)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 'abc');
+--error ER_TABLE_CANT_HANDLE_FT
+ALTER TABLE t1 ENGINE=ROCKSDB;
+SELECT ENGINE FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA='test' AND TABLE_NAME='t1';
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # SPATIAL / GEOMETRY: any geometry column is rejected, indexed or not
+--echo #
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (id INT PRIMARY KEY, g GEOMETRY NOT NULL SRID 0,
+                 SPATIAL KEY sp (g)) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (id INT PRIMARY KEY, g GEOMETRY NOT NULL SRID 0) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (id INT PRIMARY KEY, g POINT NOT NULL, KEY k (g)) ENGINE=ROCKSDB;
+
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+ALTER TABLE t1 ADD COLUMN g POINT;
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo # An InnoDB table with a geometry column cannot be converted
+CREATE TABLE t1 (id INT PRIMARY KEY, g POINT NOT NULL SRID 0,
+                 SPATIAL KEY sp (g)) ENGINE=InnoDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+ALTER TABLE t1 ENGINE=ROCKSDB;
+DROP TABLE t1;
+
+--echo #
+--echo # Descending key parts
+--echo #
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kb (b DESC)) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kab (a ASC, b DESC)) ENGINE=ROCKSDB;
+
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a)) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+ALTER TABLE t1 ADD INDEX kb (b DESC);
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE INDEX kb ON t1 (b DESC);
+--echo # Explicit ASC is accepted
+CREATE INDEX kb ON t1 (b ASC);
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Multi-valued (JSON array) indexes
+--echo #
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE TABLE t1 (a INT PRIMARY KEY, j JSON,
+                 KEY mv ((CAST(j->'$.tags' AS UNSIGNED ARRAY)))) ENGINE=ROCKSDB;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, j JSON) ENGINE=ROCKSDB;
+--error ER_CHECK_NOT_IMPLEMENTED
+ALTER TABLE t1 ADD INDEX mv ((CAST(j->'$.tags' AS UNSIGNED ARRAY)));
+--error ER_CHECK_NOT_IMPLEMENTED
+CREATE INDEX mv ON t1 ((CAST(j->'$.tags' AS CHAR(10) ARRAY)));
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Functional indexes ARE supported (positive control)
+--echo #
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(20), KEY fk ((UPPER(b)))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'x'), (2, 'y'), (3, 'X');
+SELECT a FROM t1 FORCE INDEX (fk) WHERE UPPER(b) = 'X' ORDER BY a;
+CHECK TABLE t1;
+DROP TABLE t1;

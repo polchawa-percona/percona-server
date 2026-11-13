@@ -1,0 +1,61 @@
+#
+# MyRocks negative tests: foreign keys across storage engines.
+# The misleading error for an InnoDB child of a MyRocks parent is reported as PS-11700.
+#
+# rocksdb.foreign_key already covers FOREIGN KEY on MyRocks tables (CREATE and
+# ALTER). This test adds the cross-engine cases, taken from the InnoDB suite
+# (innodb.add_foreign_key, innodb.innodb-alter-varchar) and rewritten so one
+# side of the relationship is MyRocks.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE rp (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE ip (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO rp VALUES (1);
+INSERT INTO ip VALUES (1);
+
+--echo # InnoDB child referencing a MyRocks parent.
+--echo # The server reports that it cannot open the parent, which is misleading:
+--echo # the parent exists, but its engine cannot hold the constraint.
+--error ER_FK_CANNOT_OPEN_PARENT
+CREATE TABLE ic (id INT PRIMARY KEY, p INT,
+                 FOREIGN KEY (p) REFERENCES rp(id)) ENGINE=InnoDB;
+
+CREATE TABLE ic (id INT PRIMARY KEY, p INT) ENGINE=InnoDB;
+--error ER_FK_CANNOT_OPEN_PARENT
+ALTER TABLE ic ADD FOREIGN KEY (p) REFERENCES rp(id);
+DROP TABLE ic;
+
+--echo # MyRocks child referencing an InnoDB parent
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+                 FOREIGN KEY (p) REFERENCES ip(id)) ENGINE=ROCKSDB;
+
+--echo # Referential actions and foreign_key_checks=0 do not change this
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+                 CONSTRAINT fk1 FOREIGN KEY (p) REFERENCES rp(id)
+                 ON DELETE CASCADE ON UPDATE SET NULL) ENGINE=ROCKSDB;
+SET SESSION foreign_key_checks = 0;
+--error ER_NOT_SUPPORTED_YET
+CREATE TABLE rc (id INT PRIMARY KEY, p INT,
+                 FOREIGN KEY (p) REFERENCES rp(id)) ENGINE=ROCKSDB;
+SET SESSION foreign_key_checks = 1;
+
+--echo # InnoDB tables in a foreign key relationship cannot move to MyRocks
+CREATE TABLE ic (id INT PRIMARY KEY, p INT,
+                 FOREIGN KEY (p) REFERENCES ip(id)) ENGINE=InnoDB;
+--error ER_FK_CANNOT_CHANGE_ENGINE
+ALTER TABLE ic ENGINE=ROCKSDB;
+--error ER_FK_CANNOT_CHANGE_ENGINE
+ALTER TABLE ip ENGINE=ROCKSDB;
+SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA='test' ORDER BY TABLE_NAME;
+
+--echo # CREATE TABLE ... LIKE an InnoDB child does not copy the constraint
+CREATE TABLE rl LIKE ic;
+ALTER TABLE rl ENGINE=ROCKSDB;
+SHOW CREATE TABLE rl;
+
+DROP TABLE rl, ic, ip, rp;

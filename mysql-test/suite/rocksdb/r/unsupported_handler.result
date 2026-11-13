@@ -1,0 +1,22 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+HANDLER t1 OPEN;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+HANDLER t1 OPEN AS h;
+ERROR HY000: Table storage engine for 'h' doesn't have this option
+HANDLER t1 READ FIRST;
+ERROR 42S02: Unknown table 't1' in HANDLER
+HANDLER t1 READ `PRIMARY` FIRST;
+ERROR 42S02: Unknown table 't1' in HANDLER
+HANDLER t1 CLOSE;
+ERROR 42S02: Unknown table 't1' in HANDLER
+# Partitioned table
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 2;
+HANDLER t2 OPEN;
+ERROR HY000: Table storage engine for 't2' doesn't have this option
+# The session is still usable
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+DROP TABLE t1, t2;

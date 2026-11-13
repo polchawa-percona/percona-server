@@ -1,0 +1,58 @@
+#
+# MyRocks: table options that are accepted but have no effect.
+# The silent acceptance of InnoDB-only options is reported as PS-11701.
+#
+# Statements are taken from the InnoDB suite (innodb.alter-compressed,
+# innodb.default_row_format_16k), rewritten to ENGINE=ROCKSDB.
+#
+# This pins current behaviour, not desired behaviour:
+#   - ROW_FORMAT=COMPRESSED and KEY_BLOCK_SIZE are accepted without a warning
+#     and kept in SHOW CREATE TABLE, although MyRocks ignores them.
+#   - STATS_PERSISTENT / STATS_AUTO_RECALC / STATS_SAMPLE_PAGES are accepted
+#     without a warning (InnoDB-only statistics options).
+#   - sql_generate_invisible_primary_key=ON adds no invisible primary key to a
+#     MyRocks table, because the server limits GIPK to engines that set
+#     HTON_SUPPORTS_GENERATED_INVISIBLE_PK. MyRocks uses its own hidden key.
+# CHECK constraints are supported and are pinned at the end as a positive control.
+#
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB ROW_FORMAT=COMPRESSED;
+SHOW WARNINGS;
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB KEY_BLOCK_SIZE=8;
+SHOW WARNINGS;
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB
+  STATS_PERSISTENT=1 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=10;
+SHOW WARNINGS;
+DROP TABLE t1;
+
+--echo # sql_generate_invisible_primary_key does not apply to MyRocks
+SET SESSION sql_generate_invisible_primary_key = ON;
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+SHOW CREATE TABLE t1;
+SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA='test' AND TABLE_NAME='t1' AND COLUMN_NAME='my_row_id';
+SET SESSION sql_generate_invisible_primary_key = OFF;
+INSERT INTO t1 VALUES (1), (1);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo # CHECK constraints ARE supported (positive control)
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, CONSTRAINT ck CHECK (b > 0)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+--error ER_CHECK_CONSTRAINT_VIOLATED
+INSERT INTO t1 VALUES (2, -1);
+ALTER TABLE t1 ADD CONSTRAINT ck2 CHECK (b < 100);
+--error ER_CHECK_CONSTRAINT_VIOLATED
+INSERT INTO t1 VALUES (3, 200);
+ALTER TABLE t1 DROP CHECK ck;
+INSERT INTO t1 VALUES (4, -5);
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1;
