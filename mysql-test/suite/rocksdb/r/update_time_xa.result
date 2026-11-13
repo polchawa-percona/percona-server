@@ -1,0 +1,42 @@
+SET SESSION information_schema_stats_expiry = 0;
+CREATE TABLE t (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+# XA PREPARE, then XA COMMIT in the same server run
+XA START 'x1';
+INSERT INTO t VALUES (1);
+XA END 'x1';
+XA PREPARE 'x1';
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+UPDATE_TIME
+NULL
+XA COMMIT 'x1';
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+COUNT(*)
+1
+# Restart with a prepared XA transaction (innodb.update_time)
+XA START 'xatrx';
+INSERT INTO t VALUES (5);
+XA END 'xatrx';
+XA PREPARE 'xatrx';
+call mtr.add_suppression("Found 1 prepared XA transactions");
+# Kill and restart
+SET SESSION information_schema_stats_expiry = 0;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+UPDATE_TIME
+NULL
+XA COMMIT 'xatrx';
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+COUNT(*)
+1
+SELECT * FROM t ORDER BY a;
+a
+1
+5
+DROP TABLE t;

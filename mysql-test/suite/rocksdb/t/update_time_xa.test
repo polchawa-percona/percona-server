@@ -1,0 +1,45 @@
+#
+# INFORMATION_SCHEMA.TABLES.UPDATE_TIME after XA transactions on a MyRocks
+# table. Port of the XA part of innodb.update_time, plus a detached XA
+# COMMIT in the same server run. Port-findings #56: rocksdb_commit_by_xid()
+# commits the prepared transaction without the bookkeeping that sets
+# UPDATE_TIME. Disabled until #56 and the MyRocks XA bugs (PS-11631: crash
+# after XA PREPARE + XA COMMIT; PS-11632: prepared XA lost on restart) are
+# fixed.
+#
+--source include/have_rocksdb.inc
+
+SET SESSION information_schema_stats_expiry = 0;
+CREATE TABLE t (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+--echo # XA PREPARE, then XA COMMIT in the same server run
+XA START 'x1';
+INSERT INTO t VALUES (1);
+XA END 'x1';
+XA PREPARE 'x1';
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+XA COMMIT 'x1';
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+
+--echo # Restart with a prepared XA transaction (innodb.update_time)
+XA START 'xatrx';
+INSERT INTO t VALUES (5);
+XA END 'xatrx';
+XA PREPARE 'xatrx';
+
+CONNECT (con1,localhost,root,,);
+CONNECTION con1;
+call mtr.add_suppression("Found 1 prepared XA transactions");
+--source include/kill_and_restart_mysqld.inc
+SET SESSION information_schema_stats_expiry = 0;
+
+ANALYZE TABLE t;
+SELECT update_time FROM information_schema.tables WHERE table_name = 't';
+XA COMMIT 'xatrx';
+ANALYZE TABLE t;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 't'
+AND update_time IS NOT NULL OR FALSE;
+SELECT * FROM t ORDER BY a;
+
+DROP TABLE t;

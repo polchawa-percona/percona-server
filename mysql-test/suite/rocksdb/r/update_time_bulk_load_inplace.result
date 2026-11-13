@@ -1,0 +1,26 @@
+SET SESSION information_schema_stats_expiry = 0;
+# Bulk load
+CREATE TABLE b (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO b VALUES (1), (2), (3);
+SET SESSION rocksdb_bulk_load = 0;
+SELECT COUNT(*) FROM b;
+COUNT(*)
+3
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'b'
+AND update_time IS NOT NULL OR FALSE;
+COUNT(*)
+1
+# INPLACE ADD INDEX keeps the value (InnoDB: kept)
+CREATE TABLE z (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO z VALUES (1, 1);
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'z'
+AND update_time IS NOT NULL OR FALSE;
+COUNT(*)
+1
+ALTER TABLE z ADD INDEX kb (b), ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'z'
+AND update_time IS NOT NULL OR FALSE;
+COUNT(*)
+1
+DROP TABLE b, z;
