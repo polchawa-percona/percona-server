@@ -1,0 +1,79 @@
+#
+# Port of innodb.optimizer_temporary_table
+# (mysql-test/suite/innodb/t/optimizer_temporary_table.test) to MyRocks.
+# Changes from the original:
+#   - the workload tables are regular MyRocks tables (ENGINE=ROCKSDB, copies of the
+#     includes in suite/rocksdb/include/innodb_port_*_workload_itt.inc); the internal
+#     temporary tables the optimizer creates for them are unchanged. MyRocks user temporary
+#     tables are out of scope (unsupported-options.md)
+#   - --big-tables=1 is a server option in -master.opt instead of a restart
+#   - runs at READ COMMITTED (-master.opt): the multi-table UPDATE of the workload is
+#     rejected by the MyRocks gap-lock rule at REPEATABLE READ
+#   - EXPLAIN FORMAT=JSON output is not recorded (engine-specific cost estimates)
+#   - the second workload run in innodb_read_only mode is replaced by a run with
+#     big_tables=0 (in-memory internal temporary tables), on the same data and also without
+#     the multi-table UPDATE; its results must match the first run
+#   - the BUG#20762059 (innodb_thread_concurrency, INFORMATION_SCHEMA.INNODB_TABLES) and
+#     Bug#21871451 (INNODB_CMPMEM) parts are removed: they exercise InnoDB only
+#
+--source include/have_rocksdb.inc
+--source include/no_valgrind_without_big.inc
+--source include/have_binlog_format_row.inc
+
+#-----------------------------------------------------------------------------
+#
+# create test bed.
+#
+let $wl6737_auto_inc = auto_increment;
+--source suite/rocksdb/include/innodb_port_create_workload_itt.inc
+
+#-----------------------------------------------------------------------------
+#
+# Workload with big_tables=1 (internal temporary tables on disk).
+#
+select @@big_tables;
+let $skip_update = 0;
+--source suite/rocksdb/include/innodb_port_query_workload_itt.inc
+
+#-----------------------------------------------------------------------------
+#
+# Same workload with big_tables=0, without the multi-table UPDATE.
+#
+set session big_tables = 0;
+let $skip_update = 1;
+--source suite/rocksdb/include/innodb_port_query_workload_itt.inc
+set session big_tables = default;
+
+#-----------------------------------------------------------------------------
+#
+# Specialized used-cases.
+# Intrinsic table being used as part of trx workload.
+#
+select @@big_tables;
+let $big_tables = `select @@big_tables`;
+create table t0 (m int, n int, key(m)) engine=rocksdb;
+begin;
+select count(*) from t0;
+set @@session.sql_mode = ANSI;
+set @@session.tmp_table_size = 0;
+set @@session.big_tables = 1;
+select @@big_tables;
+--disable_result_log
+select event_name, e.min_timer_wait, min(t.min_timer_wait) from
+	performance_schema.events_waits_summary_global_by_event_name as e JOIN
+	performance_schema.events_waits_summary_by_thread_by_event_name as t USING
+	(event_name) group by event_name;
+--enable_result_log
+select * from t0;
+commit;
+drop table t0;
+eval set session big_tables = $big_tables;
+select @@big_tables;
+set @@session.sql_mode = default;
+set @@session.tmp_table_size = default;
+
+#-----------------------------------------------------------------------------
+#
+# remove test bed.
+#
+--source suite/innodb/include/drop_workload_itt.inc

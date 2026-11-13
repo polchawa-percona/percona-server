@@ -1,0 +1,278 @@
+#
+# Port of innodb.iodku (mysql-test/suite/innodb/t/iodku.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB (also for the trigger's helper table tt)
+#   - the wait in scenario 3 uses INFORMATION_SCHEMA.ROCKSDB_TRX.WAITING_KEY instead of
+#     INFORMATION_SCHEMA.INNODB_TRX (innodb_port_wait_for_lock.inc)
+#   - innodb_lock_wait_timeout -> rocksdb_lock_wait_timeout
+#   - scenario 3 runs the waiting session at READ COMMITTED (see the comment there)
+#   - MyRocks has no gap locks; the scenarios still check which unique-key conflicts make
+#     INSERT ... ON DUPLICATE KEY UPDATE wait and which rows result
+#
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Bug #28799261 IODKU UNNECESSARILY GAP-LOCKS SECONDARY INDEXES
+--echo # AFTER DUPLICATE IS ALREADY FOUND
+--echo #
+
+--source include/count_sessions.inc
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+
+#Test 1
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+--echo # Scenario 1: Serialized transactions (trx1, trx2)
+INSERT INTO t1 VALUES (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Transaction trx1
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Transaction trx2
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 1, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+INSERT INTO t1 VALUES (2, 3, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+
+#Test 2
+
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+--echo # Scenario 2: Serialized transactions (trx2, trx1)
+INSERT INTO t1 VALUES (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Transaction trx2
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 1, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+INSERT INTO t1 VALUES (2, 3, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Transaction trx1
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+
+--echo #
+--echo # Bug #11758237 INSERT ON DUPLICATE KEY UPDATE SOMETIMES
+--echo # WRITES BINLOG POSITION INCORRECT
+--echo #
+
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+# Following two lines are added because of Bug#28523025
+# We don't really care about tt's content, nor about the exact body
+# of the TRIGGER. What we care is that the mere fact of processing the
+# TRIGGER before each inserted row, can impact the state of flags set
+# for the transaction and table t1.
+CREATE TABLE tt (i INT) ENGINE = ROCKSDB;
+CREATE TRIGGER t1_bi BEFORE INSERT ON t1
+  FOR EACH ROW
+    INSERT INTO tt SELECT a as i FROM t1 WHERE a=0;
+
+--echo # Scenario 3: Interleaved transactions (trx1 conflicts on index b)
+INSERT INTO t1 VALUES (0,0,0), (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Connection default:
+
+--echo # Transaction trx1:
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 1, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+SELECT * FROM t1;
+
+--echo # Connection other:
+--connect (other,localhost,root,,test,,)
+--let $other_id= `SELECT CONNECTION_ID()`
+# At REPEATABLE READ the waiting statement would fail with ER_LOCK_DEADLOCK (MyRocks
+# snapshot conflict: the duplicate row was changed after the statement's snapshot); at
+# READ COMMITTED MyRocks does not validate the snapshot and gives the InnoDB result.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+--send
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+
+--echo # Connection default:
+--connection default
+--let $wait_conn_id= $other_id
+--source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+
+INSERT INTO t1 VALUES (2, 3, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+SELECT * FROM t1;
+COMMIT;
+
+--echo # Connection other:
+--connection other
+reap;
+
+--echo # Connection default:
+connection default;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+DROP TABLE tt;
+
+#Test 4
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+--echo # Scenario 4: Serialized transactions (trx1, trx2)
+INSERT INTO t1 VALUES (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Transaction trx1
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Transaction trx2
+START TRANSACTION;
+INSERT INTO t1 VALUES (1, 2, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+INSERT INTO t1 VALUES (3, 2, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+
+#Test 5
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+--echo # Scenario 5: Serialized transactions (trx2, trx1)
+INSERT INTO t1 VALUES (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Transaction trx2
+START TRANSACTION;
+INSERT INTO t1 VALUES (1, 2, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+INSERT INTO t1 VALUES (3, 2, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Transaction trx1
+START TRANSACTION;
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+
+#Test 6
+CREATE TABLE t1 (a INT UNIQUE KEY, b INT UNIQUE KEY, c INT) ENGINE = ROCKSDB;
+SHOW CREATE TABLE t1;
+
+--echo # Scenario 6: Interleaved transactions (trx1 conflicts on index a)
+INSERT INTO t1 VALUES (1, 1, 1);
+SELECT * FROM t1;
+
+--echo # Connection default:
+
+--echo # Transaction trx1:
+START TRANSACTION;
+INSERT INTO t1 VALUES (1, 2, 2) ON DUPLICATE KEY UPDATE c=VALUES(c);
+SELECT * FROM t1;
+
+--echo # Connection other:
+connection other;
+START TRANSACTION;
+SET rocksdb_lock_wait_timeout = 1;
+# InnoDB times out here on the gap lock trx1 holds on unique index b. MyRocks has no gap
+# locks and trx1 locked only the duplicate it found (a=1), so the insert succeeds.
+INSERT INTO t1 VALUES (2, 2, 3) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Connection default:
+--connection default
+# b=2 now belongs to the row other committed after trx1's snapshot was taken. At
+# REPEATABLE READ MyRocks validates the snapshot when locking that row and fails with
+# ER_LOCK_DEADLOCK (snapshot conflict). Unlike a real deadlock, a snapshot conflict rolls
+# back only the statement: the COMMIT below keeps trx1's first statement (c=2 for a=1).
+--error ER_LOCK_DEADLOCK
+INSERT INTO t1 VALUES (3, 2, 4) ON DUPLICATE KEY UPDATE c=VALUES(c);
+COMMIT;
+
+--echo # Result:
+SELECT * FROM t1;
+
+--echo # Cleanup
+DROP TABLE t1;
+
+#test 7
+CREATE TABLE t1(f1 INT PRIMARY KEY,
+                f2 INT, f3 INT, UNIQUE KEY(f2))ENGINE=ROCKSDB;
+
+SHOW CREATE TABLE t1;
+
+INSERT INTO t1(f1, f2, f3) VALUES(1, 10, 100);
+SELECT * FROM t1;
+
+--echo # Connection other:
+connection other;
+START TRANSACTION;
+INSERT INTO t1 VALUES(2, 10, 200) ON DUPLICATE KEY UPDATE f3 = 120;
+
+--echo # Connection default
+connection default;
+START TRANSACTION;
+SET rocksdb_lock_wait_timeout = 1;
+--error  ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES(2, 20, 300) ON DUPLICATE KEY UPDATE f3 = 500;
+COMMIT;
+
+--echo # Connection other:
+--connection other
+COMMIT;
+
+--echo # Connection default
+connection default;
+
+--echo # Verify Results:
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+disconnect other;
+
+#Test 8
+#Test added to cover the undo update path
+CREATE TABLE t1(f1 INT AUTO_INCREMENT PRIMARY KEY, f2 INT, f3 INT,
+UNIQUE KEY(f2),UNIQUE KEY(f3))ENGINE=ROCKSDB;
+INSERT INTO t1(f2,f3) VALUES(10, 100);
+INSERT INTO t1(f2,f3) VALUES(20, 200);
+
+--error ER_DUP_ENTRY
+UPDATE t1 SET f2=30,f3=100 WHERE f2 = 20;
+SELECT * FROM t1;
+COMMIT;
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;

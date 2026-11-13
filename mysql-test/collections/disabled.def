@@ -135,6 +135,8 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.innodb_port_deadlock_detect_full_query : BUG#11636 PS-11636 ROCKSDB_TRX.QUERY has NUL bytes
+rocksdb.innodb_port_select_count_perf_ddl : BUG#11627 PS-11627 old snapshot reads rebuilt table empty
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

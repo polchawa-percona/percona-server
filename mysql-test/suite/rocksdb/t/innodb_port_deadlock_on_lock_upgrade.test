@@ -1,0 +1,146 @@
+#
+# Port of innodb.deadlock_on_lock_upgrade
+# (mysql-test/suite/innodb/t/deadlock_on_lock_upgrade.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - MyRocks has no gap locks and no "half" (record-only vs gap) locks, so there is no lock
+#     upgrade; the scenarios check that the same statement sequences complete without a false
+#     deadlock (with rocksdb_deadlock_detect=ON) and with the right data
+#   - the InnoDB debug sync points (lock_sec_rec_read_check_and_lock_has_locked,
+#     lock_wait_will_wait) do not exist in MyRocks; the deleter holds its lock in an open
+#     transaction instead, and waits are detected with INFORMATION_SCHEMA.ROCKSDB_TRX
+#     (innodb_port_wait_for_lock.inc), so the test needs no debug build
+#   - scenario 2 runs twice: at REPEATABLE READ the holder's full-table locking scan inside a
+#     multi-statement transaction is rejected by the MyRocks gap-lock rule; at READ COMMITTED
+#     it succeeds and must not deadlock with the waiter
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+
+--echo #
+--echo # Bug #23755664 DEADLOCK WITH 3 CONCURRENT DELETES BY UNIQUE KEY
+--echo #
+
+--echo # SCENARIO 1: three sessions delete the same row by its unique secondary key
+
+CREATE TABLE `t`(
+  `id` INT,
+  `a` INT DEFAULT NULL,
+  PRIMARY KEY(`id`),
+  UNIQUE KEY `u`(`a`)
+) ENGINE=ROCKSDB;
+
+INSERT INTO t (`id`,`a`) VALUES
+  (1,1),
+  (2,9999),
+  (3,10000);
+
+--connect(deleter,localhost,root,,)
+--connect(holder,localhost,root,,)
+--connect(waiter,localhost,root,,)
+
+--connection deleter
+  BEGIN;
+  DELETE FROM t WHERE a = 9999;
+
+--connection holder
+  --let $holder_id= `SELECT CONNECTION_ID()`
+  --send DELETE FROM t WHERE a = 9999
+
+--connection waiter
+  --let $waiter_id= `SELECT CONNECTION_ID()`
+  --let $wait_conn_id= $holder_id
+  --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+  --send DELETE FROM t WHERE a = 9999
+
+--connection deleter
+  --let $wait_conn_id= $waiter_id
+  --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+  COMMIT;
+
+--connection holder
+  --reap
+  SELECT ROW_COUNT() AS holder_deleted;
+
+--connection waiter
+  --reap
+  SELECT ROW_COUNT() AS waiter_deleted;
+
+--connection default
+SELECT * FROM t ORDER BY id;
+
+--disconnect deleter
+--disconnect holder
+--disconnect waiter
+
+DROP TABLE `t`;
+
+--echo # SCENARIO 2: the holder re-locks rows it already holds while the waiter waits
+
+let $iso= 2;
+while ($iso)
+{
+  if ($iso == 2) {
+    --let $iso_name= REPEATABLE READ
+  }
+  if ($iso == 1) {
+    --let $iso_name= READ COMMITTED
+  }
+  --echo # Isolation level: $iso_name
+
+  CREATE TABLE `t`(
+    `id` INT NOT NULL PRIMARY KEY
+  ) ENGINE=ROCKSDB;
+
+  INSERT INTO t (`id`) VALUES (1), (2);
+
+  --connect(holder,localhost,root,,)
+  --connect(waiter,localhost,root,,)
+
+  --connection holder
+    --eval SET SESSION TRANSACTION ISOLATION LEVEL $iso_name
+    BEGIN;
+    SELECT id FROM t WHERE id=1 FOR UPDATE;
+    SELECT id FROM t WHERE id=2 FOR UPDATE;
+
+  --connection waiter
+    --let $waiter_id= `SELECT CONNECTION_ID()`
+    --eval SET SESSION TRANSACTION ISOLATION LEVEL $iso_name
+    --send SELECT id FROM t WHERE id = 1 FOR UPDATE
+
+  --connection holder
+    --let $wait_conn_id= $waiter_id
+    --source suite/rocksdb/include/innodb_port_wait_for_lock.inc
+    if ($iso == 2) {
+      --echo # A locking full scan in a multi-statement transaction is rejected at RR.
+      --replace_regex /Query: .*/Query: <query>/
+      --error ER_UNKNOWN_ERROR
+      SELECT * FROM t FOR UPDATE;
+    }
+    if ($iso == 1) {
+      SELECT * FROM t FOR UPDATE;
+    }
+    COMMIT;
+
+  --connection waiter
+    --reap
+
+  --connection default
+
+  --disconnect holder
+  --disconnect waiter
+
+  DROP TABLE `t`;
+  --dec $iso
+}
+
+--source include/wait_until_count_sessions.inc
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET SESSION rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
