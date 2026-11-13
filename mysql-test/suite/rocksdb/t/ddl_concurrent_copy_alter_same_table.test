@@ -1,0 +1,22 @@
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+--source include/count_sessions.inc
+
+#
+# Four sessions run COPY and INSTANT ALTER TABLE loops on the same table,
+# each with rocksdb_commit_in_the_middle, so the ALTERs queue on the
+# metadata lock and their copies commit in batches; a reader reads that
+# table throughout. See include/ddl_concurrent_copy_alter.inc.
+#
+# Combinations: a session rocksdb_write_batch_max_bytes larger than one
+# commit_in_the_middle chunk, and write_unprepared with a small flush
+# threshold (commit_in_the_middle is ignored there). A write batch limit with
+# write_unprepared is not combined: the COPY ALTER loses rows (PS-11683).
+#
+
+--let $ntab= 4
+--let $nrows= 20000
+--let $iters= 8
+--let $same_table= 1
+--let $alter_setup= SET SESSION rocksdb_commit_in_the_middle = ON, SESSION rocksdb_bulk_load_size = 500
+--source suite/rocksdb/include/ddl_concurrent_copy_alter.inc

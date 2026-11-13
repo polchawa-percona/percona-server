@@ -1,0 +1,167 @@
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 VARCHAR(20) NOT NULL)
+ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n % 100, CONCAT('row', n) FROM v;
+call mtr.add_suppression("Error retrieving index entry from primary key");
+#
+# 1. Paused in the primary key scan: readers proceed, writers wait, and the
+#    queued writes are in the new index afterwards.
+#
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+ALTER TABLE t1 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+1000	49500
+SELECT * FROM t1 WHERE c1 = 500;
+c1	c2	c3
+500	0	row500
+INSERT INTO t1 VALUES (1001, 7, 'new'), (1002, 7, 'new');
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+UPDATE t1 SET c2 = c2 + 1000 WHERE c1 BETWEEN 10 AND 19;
+DELETE FROM t1 WHERE c1 BETWEEN 20 AND 29;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+AS k_c2_matches_table;
+k_c2_matches_table
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (k_c2) WHERE c2 = 7;
+COUNT(*)
+12
+ALTER TABLE t1 DROP INDEX k_c2;
+#
+# 2. The same, paused after the scan (before the merge sort) and after the
+#    SST files are written (before they are ingested).
+#
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL paused WAIT_FOR go_on';
+ALTER TABLE t1 ADD INDEX k_c3(c3), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+992
+DELETE FROM t1 WHERE c3 = 'new';
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+INSERT INTO t1 VALUES (1001, 7, 'new'), (1002, 7, 'new');
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+AS k_c3_matches_table;
+k_c3_matches_table
+1
+ALTER TABLE t1 DROP INDEX k_c3;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL paused WAIT_FOR go_on';
+ALTER TABLE t1 ADD INDEX k_c3(c3), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+992
+DELETE FROM t1 WHERE c3 = 'new';
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+INSERT INTO t1 VALUES (1001, 7, 'new'), (1002, 7, 'new');
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+AS k_c3_matches_table;
+k_c3_matches_table
+1
+ALTER TABLE t1 DROP INDEX k_c3;
+#
+# 3. ADD UNIQUE INDEX on a column with duplicates, paused in the scan: the
+#    duplicate is found later, in the merge, and nothing is left behind.
+#
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+ALTER TABLE t1 ADD UNIQUE INDEX u_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+992
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+ERROR 23000: Duplicate entry '0' for key '#sql-temporary.u_c2'
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'u_c2';
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# 4. KILL QUERY in the middle of the scan: the index is not created and the
+#    table is unchanged. The error code is port-findings.md #30.
+#
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+992	59269
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR killed';
+ALTER TABLE t1 ADD INDEX k_kill(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+KILL QUERY ID;
+SET DEBUG_SYNC = 'now SIGNAL killed';
+Got one of the listed errors
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'k_kill';
+COUNT(*)
+0
+SELECT COUNT(*), SUM(c2) FROM t1;
+COUNT(*)	SUM(c2)
+992	59269
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+ALTER TABLE t1 ADD INDEX k_kill(c2), ALGORITHM = INPLACE;
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_kill)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_kill))
+AS k_kill_matches_table;
+k_kill_matches_table
+1
+DROP TABLE t1;
+#
+# 5. Partitioned table: the scan runs once per partition. Pause in the first
+#    partition's scan, queue writes to every partition.
+#
+CREATE TABLE t2 (c1 INT PRIMARY KEY, c2 INT NOT NULL) ENGINE = ROCKSDB
+PARTITION BY RANGE (c1) (PARTITION p0 VALUES LESS THAN (500),
+PARTITION p1 VALUES LESS THAN (1000),
+PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1500)
+SELECT n, n % 50 FROM v;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+ALTER TABLE t2 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1500
+UPDATE t2 SET c2 = 99 WHERE c1 IN (1, 600, 1200);
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t2 FORCE INDEX (k_c2)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t2 IGNORE INDEX (k_c2))
+AS k_c2_matches_table;
+k_c2_matches_table
+1
+SELECT c1 FROM t2 FORCE INDEX (k_c2) WHERE c2 = 99 ORDER BY c1;
+c1
+1
+600
+1200
+DROP TABLE t2;

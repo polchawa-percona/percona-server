@@ -1,0 +1,78 @@
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c INT GENERATED ALWAYS AS (a + b) VIRTUAL,
+d VARCHAR(20), e INT GENERATED ALWAYS AS (b * 2 + 1) STORED) ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t (a, b, d) WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n % 10, CONCAT('d', n % 37) FROM v;
+# INPLACE ADD INDEX idx (c) paused in the primary key scan
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL start_dml WAIT_FOR resume_ddl';
+ALTER TABLE t ADD INDEX idx (c), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR start_dml';
+SELECT COUNT(*), SUM(c) FROM t;
+COUNT(*)	SUM(c)
+1000	505000
+SET @i = 1;
+UPDATE t SET b = b + 100 * @i WHERE a % 50 = 0;
+SET DEBUG_SYNC = 'now SIGNAL resume_ddl';
+INSERT INTO t (a, b, d) VALUES (2000 + @i, 7, 'new');
+DELETE FROM t WHERE a = 3;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', c)))) FROM t FORCE INDEX (idx)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', c)))) FROM t IGNORE INDEX (idx))
+AS index_matches_table;
+index_matches_table
+1
+ALTER TABLE t DROP INDEX idx;
+# INPLACE ADD INDEX idx (c, b) paused in the primary key scan
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL start_dml WAIT_FOR resume_ddl';
+ALTER TABLE t ADD INDEX idx (c, b), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR start_dml';
+SELECT COUNT(*), SUM(c) FROM t;
+COUNT(*)	SUM(c)
+1000	509002
+SET @i = 2;
+UPDATE t SET b = b + 100 * @i WHERE a % 50 = 0;
+SET DEBUG_SYNC = 'now SIGNAL resume_ddl';
+INSERT INTO t (a, b, d) VALUES (2000 + @i, 7, 'new');
+DELETE FROM t WHERE a = 3;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', c, b)))) FROM t FORCE INDEX (idx)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', c, b)))) FROM t IGNORE INDEX (idx))
+AS index_matches_table;
+index_matches_table
+1
+ALTER TABLE t DROP INDEX idx;
+# INPLACE ADD INDEX idx (e, c) paused in the primary key scan
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL start_dml WAIT_FOR resume_ddl';
+ALTER TABLE t ADD INDEX idx (e, c), ALGORITHM = INPLACE, LOCK = SHARED;
+SET DEBUG_SYNC = 'now WAIT_FOR start_dml';
+SELECT COUNT(*), SUM(c) FROM t;
+COUNT(*)	SUM(c)
+1001	515011
+SET @i = 3;
+UPDATE t SET b = b + 100 * @i WHERE a % 50 = 0;
+SET DEBUG_SYNC = 'now SIGNAL resume_ddl';
+INSERT INTO t (a, b, d) VALUES (2000 + @i, 7, 'new');
+DELETE FROM t WHERE a = 3;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+SELECT
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', e, c)))) FROM t FORCE INDEX (idx)) =
+(SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', e, c)))) FROM t IGNORE INDEX (idx))
+AS index_matches_table;
+index_matches_table
+1
+ALTER TABLE t DROP INDEX idx;
+SELECT COUNT(*), SUM(b), SUM(c), SUM(e) FROM t;
+COUNT(*)	SUM(b)	SUM(c)	SUM(e)
+1002	16518	523021	34038
+DROP TABLE t;
