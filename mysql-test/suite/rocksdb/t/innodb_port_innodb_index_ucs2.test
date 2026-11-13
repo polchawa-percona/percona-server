@@ -1,0 +1,10 @@
+#
+# Port of innodb.innodb-index_ucs2 (mysql-test/suite/innodb/t/innodb-index_ucs2.test) to MyRocks.
+# Secondary index create, unique-check failure and forced index scans on a
+# ucs2 table, using a MyRocks copy of include/innodb-index.inc that also
+# checks every secondary index against the primary key.
+
+--source include/have_rocksdb.inc
+
+-- let charset = ucs2
+-- source suite/rocksdb/include/innodb_port_index.inc

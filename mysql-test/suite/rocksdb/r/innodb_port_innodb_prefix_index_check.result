@@ -1,0 +1,138 @@
+#Bug #22445211   GCOLS: SIMPLE DML, FAILING ASSERTION:
+#!CURSOR->INDEX->IS_COMMITTED()
+#Create and alter table examples for virtual column for full
+#column index followed by prefix index.
+CREATE TABLE t1(
+f1 INT DEFAULT NULL,
+f2 CHAR(2) GENERATED ALWAYS AS ('11') VIRTUAL,
+f3 INT,
+UNIQUE KEY(f1),
+UNIQUE KEY(f3,f1),
+KEY(f2,f1),
+key(f1,f2(1))
+)ENGINE=ROCKSDB;
+REPLACE INTO t1(f3) VALUES (1),(1);
+SELECT * FROM t1;
+f1	f2	f3
+NULL	11	1
+NULL	11	1
+# t1.f1: index scan matches primary key scan
+# t1.f1: equality lookups match (0 pairs)
+# t1.f3: index scan matches primary key scan
+# t1.f3: equality lookups match (0 pairs)
+# t1.f2: index scan matches primary key scan
+# t1.f2: equality lookups match (0 pairs)
+# t1.f1_2: index scan matches primary key scan
+# t1.f1_2: equality lookups match (0 pairs)
+DROP TABLE t1;
+#Create and alter table examples for full column index followed by prefix index.
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1,f2),
+KEY(f1(5)))ENGINE=ROCKSDB;
+REPLACE INTO t1(f2) VALUES (1),(1);
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+f1	f2
+NULL	1
+NULL	1
+# t1.f1: index scan matches primary key scan
+# t1.f1: equality lookups match (0 pairs)
+# t1.f1_2: index scan matches primary key scan
+# t1.f1_2: equality lookups match (0 pairs)
+# t1.f2: index scan matches primary key scan
+# t1.f2: equality lookups match (0 pairs)
+DROP TABLE t1;
+#Create and alter table examples for small prefix index followed by large
+#prefix index.
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1(5),f2),
+KEY(f1(10)))ENGINE=ROCKSDB;
+REPLACE INTO t1(f2) VALUES (1),(1);
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+f1	f2
+NULL	1
+NULL	1
+DROP TABLE t1;
+#Create and alter table examples for prefix index followed by full column
+#index.
+CREATE TABLE t1(
+f1 VARCHAR(100),
+f2 char(2),
+KEY(f1(5),f2),
+KEY(f1))ENGINE=ROCKSDB;
+REPLACE INTO t1(f2) VALUES (1),(1);
+ALTER TABLE t1 ADD INDEX(f2,f1);
+SELECT * FROM t1;
+f1	f2
+NULL	1
+NULL	1
+DROP TABLE t1;
+#
+# MyRocks extension: the same index layouts with multi-byte data, where
+# rows differ only after the prefix, checked against the primary key.
+#
+# utf8mb4 COLLATE utf8mb4_0900_ai_ci
+CREATE TABLE t1 (id INT PRIMARY KEY, f1 VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, f2 CHAR(2), KEY k_full (f1, f2), KEY k_p5 (f1(5)), KEY k_p5f2 (f1(5), f2), KEY k_f2f1 (f2, f1)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+(1, 'ąęółżA', 'x'), (2, 'ąęółżB', 'x'), (3, 'ąęółż', 'x'), (4, 'ąęółż ', 'x'),
+(5, 'ĄĘÓŁŻa', 'y'), (6, 'abcde', 'y'), (7, 'abcdef', 'y'), (8, 'abcdE', 'y'),
+(9, 'ÀBCDÉF', 'z'), (10, NULL, 'z'), (11, '', 'z'), (12, 'ab', NULL);
+REPLACE INTO t1 VALUES (2, 'ąęółżC', 'x'), (13, 'abcdefg', 'y');
+UPDATE t1 SET f1 = CONCAT(f1, 'Q') WHERE id IN (6, 9);
+DELETE FROM t1 WHERE id = 3;
+# t1.k_full: index scan matches primary key scan
+# t1.k_full: equality lookups match (10 pairs)
+# t1.k_p5: index scan matches primary key scan
+# t1.k_p5: equality lookups match (13 pairs)
+# t1.k_p5f2: index scan matches primary key scan
+# t1.k_p5f2: equality lookups match (10 pairs)
+# t1.k_f2f1: index scan matches primary key scan
+# t1.k_f2f1: equality lookups match (10 pairs)
+# LIKE prefix: scan 1,2,4,5,6,7,8,9,13, k_full 1,2,4,5,6,7,8,9,13, k_p5 1,2,4,5,6,7,8,9,13
+DROP TABLE t1;
+# utf8mb4 COLLATE utf8mb4_general_ci
+CREATE TABLE t1 (id INT PRIMARY KEY, f1 VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci, f2 CHAR(2), KEY k_full (f1, f2), KEY k_p5 (f1(5)), KEY k_p5f2 (f1(5), f2), KEY k_f2f1 (f2, f1)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES
+(1, 'ąęółżA', 'x'), (2, 'ąęółżB', 'x'), (3, 'ąęółż', 'x'), (4, 'ąęółż ', 'x'),
+(5, 'ĄĘÓŁŻa', 'y'), (6, 'abcde', 'y'), (7, 'abcdef', 'y'), (8, 'abcdE', 'y'),
+(9, 'ÀBCDÉF', 'z'), (10, NULL, 'z'), (11, '', 'z'), (12, 'ab', NULL);
+REPLACE INTO t1 VALUES (2, 'ąęółżC', 'x'), (13, 'abcdefg', 'y');
+UPDATE t1 SET f1 = CONCAT(f1, 'Q') WHERE id IN (6, 9);
+DELETE FROM t1 WHERE id = 3;
+# t1.k_full: index scan matches primary key scan
+# t1.k_full: equality lookups match (10 pairs)
+# t1.k_p5: index scan matches primary key scan
+# t1.k_p5: equality lookups match (13 pairs)
+# t1.k_p5f2: index scan matches primary key scan
+# t1.k_p5f2: equality lookups match (10 pairs)
+# t1.k_f2f1: index scan matches primary key scan
+# t1.k_f2f1: equality lookups match (10 pairs)
+# LIKE prefix: scan 1,2,4,5,6,7,8,9,13, k_full 1,2,4,5,6,7,8,9,13, k_p5 1,2,4,5,6,7,8,9,13
+DROP TABLE t1;
+# ucs2 COLLATE ucs2_general_ci
+CREATE TABLE t1 (id INT PRIMARY KEY, f1 VARCHAR(100) CHARACTER SET ucs2 COLLATE ucs2_general_ci, f2 CHAR(2), KEY k_full (f1, f2), KEY k_p5 (f1(5)), KEY k_p5f2 (f1(5), f2), KEY k_f2f1 (f2, f1)) ENGINE=ROCKSDB;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+INSERT INTO t1 VALUES
+(1, 'ąęółżA', 'x'), (2, 'ąęółżB', 'x'), (3, 'ąęółż', 'x'), (4, 'ąęółż ', 'x'),
+(5, 'ĄĘÓŁŻa', 'y'), (6, 'abcde', 'y'), (7, 'abcdef', 'y'), (8, 'abcdE', 'y'),
+(9, 'ÀBCDÉF', 'z'), (10, NULL, 'z'), (11, '', 'z'), (12, 'ab', NULL);
+REPLACE INTO t1 VALUES (2, 'ąęółżC', 'x'), (13, 'abcdefg', 'y');
+UPDATE t1 SET f1 = CONCAT(f1, 'Q') WHERE id IN (6, 9);
+DELETE FROM t1 WHERE id = 3;
+# t1.k_full: index scan matches primary key scan
+# t1.k_full: equality lookups match (10 pairs)
+# t1.k_p5: index scan matches primary key scan
+# t1.k_p5: equality lookups match (13 pairs)
+# t1.k_p5f2: index scan matches primary key scan
+# t1.k_p5f2: equality lookups match (10 pairs)
+# t1.k_f2f1: index scan matches primary key scan
+# t1.k_f2f1: equality lookups match (10 pairs)
+# LIKE prefix: scan 1,2,4,5,6,7,8,9,13, k_full 1,2,4,5,6,7,8,9,13, k_p5 1,2,4,5,6,7,8,9,13
+DROP TABLE t1;
