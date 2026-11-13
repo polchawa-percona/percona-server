@@ -1,0 +1,39 @@
+# PS-11894: information_schema.ROCKSDB_DDL and ROCKSDB_PERF_CONTEXT show
+# schema, table and partition names in their file-name encoding (for
+# example `t-1` as t@002d1) instead of the names that the server's own
+# information_schema tables show. Each query below must return exactly the
+# names that information_schema.TABLES / PARTITIONS return.
+
+--source include/have_rocksdb.inc
+
+CREATE DATABASE `my-db`;
+CREATE TABLE `my-db`.`t-1` (a INT PRIMARY KEY, b INT, KEY `k-b` (b))
+  ENGINE=ROCKSDB;
+CREATE TABLE `my-db`.`p.1` (a INT PRIMARY KEY) ENGINE=ROCKSDB
+  PARTITION BY RANGE (a) (PARTITION `p-0` VALUES LESS THAN (10),
+                          PARTITION `p-1` VALUES LESS THAN MAXVALUE);
+INSERT INTO `my-db`.`t-1` VALUES (1, 1), (2, 2);
+INSERT INTO `my-db`.`p.1` VALUES (1), (20);
+SELECT COUNT(*) FROM `my-db`.`t-1`;
+SELECT COUNT(*) FROM `my-db`.`p.1`;
+
+--echo # Names as the server shows them
+SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'my-db' ORDER BY TABLE_NAME;
+SELECT TABLE_NAME, PARTITION_NAME FROM information_schema.PARTITIONS
+  WHERE TABLE_SCHEMA = 'my-db' AND PARTITION_NAME IS NOT NULL
+  ORDER BY TABLE_NAME, PARTITION_NAME;
+
+--echo # ROCKSDB_DDL must show the same schema and table names
+SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, INDEX_NAME
+  FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA IN ('my-db', 'my@002ddb')
+  ORDER BY TABLE_NAME, PARTITION_NAME, INDEX_NAME;
+
+--echo # ROCKSDB_PERF_CONTEXT must show the same names
+SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME
+  FROM information_schema.ROCKSDB_PERF_CONTEXT
+  WHERE TABLE_SCHEMA IN ('my-db', 'my@002ddb')
+  ORDER BY TABLE_NAME, PARTITION_NAME;
+
+DROP DATABASE `my-db`;
