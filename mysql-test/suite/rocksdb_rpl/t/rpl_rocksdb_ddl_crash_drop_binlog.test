@@ -1,0 +1,45 @@
+#
+# PS-11832: a DROP TABLE interrupted by a crash after the MyRocks dictionary
+# commit is rolled forward by the MyRocks DDL recovery at startup (PS-11666),
+# but the DROP was never written to the binary log, so the replica keeps the
+# table.
+#
+# Expected: after the source restarts, the replica no longer has the table.
+# Disabled until PS-11832 is fixed.
+#
+--source include/not_group_replication_plugin.inc
+--source include/have_binlog_format_row.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/rpl/init_source_replica.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Removing table .*: DROP TABLE was interrupted");
+--enable_query_log
+
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1),(2),(3);
+--source include/rpl/sync_to_replica.inc
+
+--source include/rpl/connection_source.inc
+--let $check_tables = 't1'
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = DROP TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--let $rpl_server_number = 1
+--source include/rpl/reconnect.inc
+--source include/rpl/connection_source.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--echo # Startup finished the DROP on the source.
+SELECT COUNT(*) AS t1_on_source FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--source include/rpl/sync_to_replica.inc
+--echo # The replica must not keep the table.
+SELECT COUNT(*) AS t1_on_replica FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--source include/rpl/connection_source.inc
+DROP TABLE IF EXISTS t1;
+--source include/rpl/deinit.inc

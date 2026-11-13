@@ -1,0 +1,201 @@
+CREATE DATABASE db2;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# RENAME TABLE within the database.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO t2
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# The RENAME is rolled back in both dictionaries.
+SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Each index of t1 has one MyRocks entry (two for the partitioned table).
+SELECT INDEX_TYPE, COUNT(*) AS myrocks_entries FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'db2') AND TABLE_NAME IN ('t1', 't2')
+GROUP BY INDEX_TYPE ORDER BY INDEX_TYPE;
+INDEX_TYPE	myrocks_entries
+1	1
+2	1
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# RENAME TABLE to another database.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO db2.t2
+RENAME TABLE t1 TO db2.t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# The RENAME is rolled back in both dictionaries.
+SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('db2','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('db2','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Each index of t1 has one MyRocks entry (two for the partitioned table).
+SELECT INDEX_TYPE, COUNT(*) AS myrocks_entries FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'db2') AND TABLE_NAME IN ('t1', 't2')
+GROUP BY INDEX_TYPE ORDER BY INDEX_TYPE;
+INDEX_TYPE	myrocks_entries
+1	1
+2	1
+DROP TABLE t1;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Partitioned RENAME TABLE: crash after the first partition.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO t2
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+# The RENAME is rolled back in both dictionaries.
+SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+TABLE_SCHEMA	TABLE_NAME
+test	t1
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Each index of t1 has one MyRocks entry (two for the partitioned table).
+SELECT INDEX_TYPE, COUNT(*) AS myrocks_entries FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA IN ('test', 'db2') AND TABLE_NAME IN ('t1', 't2')
+GROUP BY INDEX_TYPE ORDER BY INDEX_TYPE;
+INDEX_TYPE	myrocks_entries
+1	2
+2	2
+DROP TABLE t1;
+# Partitioned RENAME TABLE: crash after all partitions are renamed in
+# MyRocks, before the server's data dictionary commit.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# Crash at partition_crash_after_rename_all during: RENAME TABLE t1 TO t2
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2');
+TABLE_NAME
+t1
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# RENAME TABLE of two tables: crash after the first table is renamed in
+# MyRocks. Only that rename is rolled back; the second table was not
+# touched.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+CREATE TABLE t3 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (30);
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO t2, t3 TO t4
+RENAME TABLE t1 TO t2, t3 TO t4;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2','t3','t4')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2','t3','t4')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT TABLE_NAME FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2', 't3', 't4')
+ORDER BY TABLE_NAME;
+TABLE_NAME
+t1
+t3
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+SELECT * FROM t3;
+id
+30
+DROP TABLE t1, t3;
+# A crash during the startup recovery itself, after the first partition
+# of a partitioned table is renamed back: the next startup renames the
+# other partition back.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+SET SESSION debug = "+d,partition_crash_after_rename_all";
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/assert_grep.inc [The recovery crashed after renaming one partition back]
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1','t2')) AS dictionaries_agree;
+dictionaries_agree
+1
+SELECT DISTINCT TABLE_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1', 't2');
+TABLE_NAME
+t1
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	1
+2	2
+3	3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+DROP DATABASE db2;
