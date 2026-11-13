@@ -1,0 +1,26 @@
+#
+# Finding #44 (myrocks-notes/port-findings.md): with
+# rocksdb_write_policy=write_unprepared, a transaction that was rolled back
+# before a server kill comes back after the restart.
+#
+# The scenarios are those of rocksdb.innodb_port_lob_rollback_crash, run under
+# write_unprepared with rocksdb_write_batch_flush_threshold=1 (see the
+# -master.opt file):
+#   1. kill with a large transaction still open, restart;
+#   2. kill while ROLLBACK is running, restart;
+#   3. kill right after ROLLBACK returned, restart.
+# After round 3 the recovered data must equal the committed data. On the
+# current build, recovery reports "Found 1 prepared transaction(s) in ROCKSDB"
+# and "Successfully committed 1 internal transaction(s)", and the inserts and
+# updates of the rolled-back transaction are visible. Round 3 alone, or rounds
+# 2 and 3, recover correctly; round 1 followed by round 3 fails every time.
+#
+# The expected result is the one write_committed and write_prepared produce.
+# This test is disabled in collections/disabled.def until #44 is fixed.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+
+SELECT @@global.rocksdb_write_policy, @@global.rocksdb_write_batch_flush_threshold;
+--source suite/rocksdb/t/innodb_port_lob_rollback_crash.test
