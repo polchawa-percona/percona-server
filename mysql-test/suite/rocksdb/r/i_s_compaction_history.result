@@ -1,0 +1,86 @@
+SET @save_max_history = @@global.rocksdb_max_compaction_history;
+CREATE TABLE t1 (pk INT, v VARCHAR(100), PRIMARY KEY (pk) COMMENT 'cfname=cf_hist')
+ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'a'), (2, 'b'), (3, 'c');
+# With the default of 0, nothing is recorded.
+SET GLOBAL rocksdb_max_compaction_history = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t1 SET v = 'x' WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_hist';
+SELECT COUNT(*) FROM information_schema.rocksdb_compaction_history;
+COUNT(*)
+0
+SET GLOBAL rocksdb_max_compaction_history = 64;
+# Three manual compactions, each over two overlapping files, so that
+# RocksDB runs a real compaction job instead of a trivial move.
+UPDATE t1 SET v = 'round 0' WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t1 SET v = 'round 0' WHERE pk = 3;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_hist';
+UPDATE t1 SET v = 'round 1' WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t1 SET v = 'round 1' WHERE pk = 3;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_hist';
+UPDATE t1 SET v = 'round 2' WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t1 SET v = 'round 2' WHERE pk = 3;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_hist';
+# Each manual compaction of cf_hist left one record.
+SELECT COUNT(*) AS manual_compactions
+FROM information_schema.rocksdb_compaction_history
+WHERE cf_name = 'cf_hist' AND compaction_reason = 'ManualCompaction';
+manual_compactions
+3
+# Record contents are consistent.
+SELECT input_level, output_level > input_level AS moved_down,
+input_file_count >= 2 AS merged_files, output_file_count >= 1 AS has_output
+FROM information_schema.rocksdb_compaction_history
+WHERE cf_name = 'cf_hist' AND compaction_reason = 'ManualCompaction';
+input_level	moved_down	merged_files	has_output
+0	1	1	1
+0	1	1	1
+0	1	1	1
+SELECT COUNT(*) AS bad_records
+FROM information_schema.rocksdb_compaction_history
+WHERE end_timestamp < start_timestamp
+OR input_compaction_bytes = 0 OR output_compaction_bytes = 0
+OR input_files = '' OR output_files = ''
+     OR thread_id = 0 OR cf_name = '';
+bad_records
+0
+# Data is intact after the compactions.
+SELECT * FROM t1 ORDER BY pk;
+pk	v
+1	x
+2	round 2
+3	round 2
+# Lowering the limit trims the oldest records, and new records still
+# respect the limit.
+SET GLOBAL rocksdb_max_compaction_history = 1;
+SELECT COUNT(*) FROM information_schema.rocksdb_compaction_history;
+COUNT(*)
+1
+UPDATE t1 SET v = 'last' WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+UPDATE t1 SET v = 'last' WHERE pk = 3;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_hist';
+SELECT COUNT(*) FROM information_schema.rocksdb_compaction_history;
+COUNT(*)
+1
+# Setting the limit to 0 drops the history.
+SET GLOBAL rocksdb_max_compaction_history = 0;
+SELECT COUNT(*) FROM information_schema.rocksdb_compaction_history;
+COUNT(*)
+0
+# No manual compaction is running now.
+SELECT COUNT(*) FROM information_schema.rocksdb_active_compaction_stats
+WHERE cf_name = 'cf_hist' AND compaction_reason = 'ManualCompaction';
+COUNT(*)
+0
+DROP TABLE t1;
+SET GLOBAL rocksdb_max_compaction_history = @save_max_history;

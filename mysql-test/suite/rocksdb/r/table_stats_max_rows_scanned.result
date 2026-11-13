@@ -1,0 +1,72 @@
+SET @save_use_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_max_rows = @@global.rocksdb_table_stats_max_num_rows_scanned;
+SET @save_sampling = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 0;
+CREATE TABLE t1 (pk INT PRIMARY KEY, lo INT, hi INT, KEY klo (lo), KEY khi (hi), KEY kcomb (lo, hi)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+# No cap: exact cardinality from the full scan.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 0;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	CARDINALITY
+kcomb	1	10
+kcomb	2	1000
+khi	1	1000
+klo	1	10
+PRIMARY	1	1000
+# Cap at 100 rows: counts from the first 100 rows are scaled by 1000/100.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 100;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	CARDINALITY
+kcomb	1	10
+kcomb	2	1000
+khi	1	1000
+klo	1	10
+PRIMARY	1	1000
+# Cap at 300 rows: the scaling factor is 1000/300, truncated to 3.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 300;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	CARDINALITY
+kcomb	1	9
+kcomb	2	899
+khi	1	899
+klo	1	9
+PRIMARY	1	899
+# Cap above the row count: no scaling.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 5000;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+INDEX_NAME	SEQ_IN_INDEX	CARDINALITY
+kcomb	1	10
+kcomb	2	1000
+khi	1	1000
+klo	1	10
+PRIMARY	1	1000
+# Estimates never exceed the row count.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 7;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+SELECT COUNT(*) AS over_estimates FROM information_schema.statistics
+WHERE table_schema = 'test' AND table_name = 't1' AND cardinality > 1000;
+over_estimates
+0
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = @save_max_rows;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling;
+DROP TABLE t1;

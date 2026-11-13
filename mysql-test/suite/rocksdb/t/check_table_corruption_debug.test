@@ -1,0 +1,54 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+#
+# CHECK TABLE must report corruption. Existing tests only ever see
+# "status OK". Here checksum mismatches are injected while CHECK TABLE walks
+# each secondary index and fetches the row by primary key.
+#
+
+call mtr.add_suppression("CHECKTABLE .*index scan error");
+call mtr.add_suppression("CHECKTABLE .*failed to fetch row by rowid");
+call mtr.add_suppression("Checksum mismatch in key of key-value pair for index");
+call mtr.add_suppression("Checksum mismatch in value of key-value pair for index");
+call mtr.add_suppression("Data with incorrect checksum");
+
+SET @save_store = @@global.rocksdb_store_row_debug_checksums;
+SET GLOBAL rocksdb_store_row_debug_checksums = ON;
+SET SESSION rocksdb_store_row_debug_checksums = ON;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b VARCHAR(20), KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three'), (4, 40, 'four');
+
+# A table without a primary key uses the hidden PK path in CHECK TABLE.
+CREATE TABLE t2 (a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 1), (2, 2), (3, 3);
+
+CHECK TABLE t1;
+CHECK TABLE t2;
+
+--echo # 1. Bad checksum in a secondary key: the index scan fails.
+SET SESSION debug = "+d,myrocks_simulate_bad_key_checksum1";
+CHECK TABLE t1;
+CHECK TABLE t2;
+SET SESSION debug = "-d,myrocks_simulate_bad_key_checksum1";
+
+--echo # 2. Bad checksum in the primary key: the row fetch by rowid fails.
+SET SESSION debug = "+d,myrocks_simulate_bad_pk_checksum1";
+CHECK TABLE t1;
+CHECK TABLE t2;
+SET SESSION debug = "-d,myrocks_simulate_bad_pk_checksum1";
+
+--echo # 3. Bad checksum in the row value.
+SET SESSION debug = "+d,myrocks_simulate_bad_pk_checksum2";
+CHECK TABLE t1;
+CHECK TABLE t2;
+SET SESSION debug = "-d,myrocks_simulate_bad_pk_checksum2";
+
+--echo # 4. Without injected faults the tables are clean again.
+CHECK TABLE t1;
+CHECK TABLE t2;
+CHECK TABLE t1 EXTENDED;
+
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_store_row_debug_checksums = @save_store;

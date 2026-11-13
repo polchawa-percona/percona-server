@@ -1,0 +1,70 @@
+--source include/have_rocksdb.inc
+
+#
+# rocksdb_table_stats_max_num_rows_scanned caps the full-table scan that
+# computes index cardinality when rocksdb_table_stats_use_table_scan=ON.
+# The distinct-key counts from the scanned prefix are then scaled up by
+# rows / max_num_rows_scanned (adjust_cardinality()). Previously this
+# variable was covered by set/get tests only.
+#
+# Key sampling (rocksdb_table_stats_sampling_pct, default 10%) is random, so it
+# is disabled here. Each index is scanned in key order, so the results are
+# deterministic. Two effects are visible: the scaling factor is an integer
+# division (1000/300 gives 3, so 1000 distinct values are estimated as 899),
+# and a low-cardinality leading column is estimated from however many of its
+# values fit in the first max_num_rows_scanned keys.
+#
+
+SET @save_use_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_max_rows = @@global.rocksdb_table_stats_max_num_rows_scanned;
+SET @save_sampling = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 0;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, lo INT, hi INT, KEY klo (lo), KEY khi (hi), KEY kcomb (lo, hi)) ENGINE=ROCKSDB;
+
+--disable_query_log
+--let $i = 0
+while ($i < 1000)
+{
+  --eval INSERT INTO t1 VALUES ($i, $i % 10, $i)
+  --inc $i
+}
+--enable_query_log
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+
+--echo # No cap: exact cardinality from the full scan.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 0;
+ANALYZE TABLE t1;
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+
+--echo # Cap at 100 rows: counts from the first 100 rows are scaled by 1000/100.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 100;
+ANALYZE TABLE t1;
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+
+--echo # Cap at 300 rows: the scaling factor is 1000/300, truncated to 3.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 300;
+ANALYZE TABLE t1;
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+
+--echo # Cap above the row count: no scaling.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 5000;
+ANALYZE TABLE t1;
+SELECT index_name, seq_in_index, cardinality FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' ORDER BY index_name, seq_in_index;
+
+--echo # Estimates never exceed the row count.
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = 7;
+ANALYZE TABLE t1;
+SELECT COUNT(*) AS over_estimates FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' AND cardinality > 1000;
+
+SET GLOBAL rocksdb_table_stats_max_num_rows_scanned = @save_max_rows;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling;
+DROP TABLE t1;

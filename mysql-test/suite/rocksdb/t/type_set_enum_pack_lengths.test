@@ -1,0 +1,101 @@
+--source include/have_rocksdb.inc
+
+#
+# Indexed SET and ENUM columns of every storage size. MyRocks packs and
+# unpacks them with pack_unsigned<N>/unpack_unsigned<N>, where N is the
+# column's pack length: SET uses 1, 2, 3, 4 or 8 bytes (up to 8, 16, 24,
+# 32 or 64 members), ENUM uses 1 or 2 bytes (up to 255 or 65535 members).
+# The 3-byte SET size was not exercised by any test. Index-only reads
+# decode the column from the key, so they must return the same values as
+# reads through the primary key.
+#
+
+--let $members = 64
+--let $s64 =
+--let $i = 1
+while ($i <= $members)
+{
+  if ($i > 1)
+  {
+    --let $s64 = $s64,
+  }
+  --let $s64 = $s64'm$i'
+  --inc $i
+}
+
+--let $s8  = 'm1','m2','m3','m4','m5','m6','m7','m8'
+--let $s16 = $s8,'m9','m10','m11','m12','m13','m14','m15','m16'
+--let $s24 = $s16,'m17','m18','m19','m20','m21','m22','m23','m24'
+--let $s32 = $s24,'m25','m26','m27','m28','m29','m30','m31','m32'
+
+--let $e300 =
+--let $i = 1
+while ($i <= 300)
+{
+  if ($i > 1)
+  {
+    --let $e300 = $e300,
+  }
+  --let $e300 = $e300'e$i'
+  --inc $i
+}
+
+--let $cf_iter = 0
+while ($cf_iter < 2)
+{
+  --let $cf = cf
+  if ($cf_iter == 1)
+  {
+    --let $cf = rev:cf
+  }
+  --echo # Column family: $cf
+
+  --eval CREATE TABLE t1 (pk INT PRIMARY KEY, s8 SET($s8), s16 SET($s16), s24 SET($s24), s32 SET($s32), s64 SET($s64), e2 ENUM($e300), KEY k8 (s8) COMMENT 'cfname=$cf', KEY k16 (s16) COMMENT 'cfname=$cf', KEY k24 (s24) COMMENT 'cfname=$cf', KEY k32 (s32) COMMENT 'cfname=$cf', KEY k64 (s64) COMMENT 'cfname=$cf', KEY ke2 (e2) COMMENT 'cfname=$cf') ENGINE=ROCKSDB
+
+  # Empty set, single lowest and highest member, every member, and mixes.
+  INSERT INTO t1 VALUES
+    (1, '', '', '', '', '', 'e1'),
+    (2, 'm1', 'm1', 'm1', 'm1', 'm1', 'e2'),
+    (3, 'm8', 'm16', 'm24', 'm32', 'm64', 'e300'),
+    (4, 'm1,m8', 'm8,m9,m16', 'm16,m17,m24', 'm24,m25,m32', 'm32,m33,m64', 'e255'),
+    (5, 'm2,m3', 'm10', 'm17', 'm25', 'm33', 'e256'),
+    (6, 'm4', 'm1,m2,m3', 'm9,m24', 'm1,m32', 'm63', 'e257');
+  # Every member set, given as the numeric bitmask.
+  INSERT INTO t1 VALUES (7, 255, 65535, 16777215, 4294967295,
+                         18446744073709551615, 'e299');
+
+  --let $n = 1
+  while ($n <= 5)
+  {
+    --let $c = `SELECT ELT($n, 8, 16, 24, 32, 64)`
+    --echo # SET column s$c: index-only reads and range scans match the primary key.
+    # Compare in primary key order: for 64-member SETs the server's filesort
+    # orders values with the top bit set first (also on InnoDB), while the
+    # index orders them as unsigned.
+    --let $query1 = SELECT pk, CAST(s$c AS UNSIGNED) FROM t1 FORCE INDEX (k$c) ORDER BY pk
+    --let $query2 = SELECT pk, CAST(s$c AS UNSIGNED) FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk
+    --source include/diff_queries.inc
+    --let $query1 = SELECT pk, CAST(s$c AS UNSIGNED) FROM t1 FORCE INDEX (k$c) WHERE s$c >= 2 ORDER BY pk
+    --let $query2 = SELECT pk, CAST(s$c AS UNSIGNED) FROM t1 FORCE INDEX (PRIMARY) WHERE s$c >= 2 ORDER BY pk
+    --source include/diff_queries.inc
+    --eval SELECT pk, CAST(s$c AS UNSIGNED) AS bits FROM t1 FORCE INDEX (k$c) WHERE s$c = '' OR FIND_IN_SET('m1', s$c) ORDER BY pk
+    --inc $n
+  }
+
+  --echo # ENUM with a 2-byte pack length.
+  --let $query1 = SELECT pk, e2 + 0 FROM t1 FORCE INDEX (ke2) ORDER BY e2, pk
+  --let $query2 = SELECT pk, e2 + 0 FROM t1 FORCE INDEX (PRIMARY) ORDER BY e2, pk
+  --source include/diff_queries.inc
+  SELECT pk, e2 + 0 FROM t1 FORCE INDEX (ke2) WHERE e2 BETWEEN 'e255' AND 'e300' ORDER BY e2;
+
+  --echo # Values survive a flush (read back from SST files).
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SELECT pk, s8 + 0, s16 + 0, s24 + 0, s32 + 0, CAST(s64 AS UNSIGNED), e2 + 0
+    FROM t1 ORDER BY pk;
+  SELECT pk, s24 + 0 FROM t1 FORCE INDEX (k24) ORDER BY s24, pk;
+  SELECT pk, CAST(s64 AS UNSIGNED) FROM t1 FORCE INDEX (k64) ORDER BY s64, pk;
+
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $cf_iter
+}
