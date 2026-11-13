@@ -1,0 +1,49 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11887: Rdb_key_def::setup() caches the column family's prefix extractor
+# once per key definition. rocksdb_update_cf_options can change the
+# extractor of a live column family, but MyRocks keeps deciding whether a
+# lookup can use the prefix bloom filter (ha_rocksdb::can_use_bloom_filter())
+# with the old extractor and then sets ReadOptions::prefix_same_as_start,
+# while RocksDB iterates with the new one. When the new prefix is longer
+# than the equality condition, the iterator stops at once and the query
+# silently returns no rows. Reopening the table does not help.
+#
+# The column family starts with capped:4 (master.opt); the test changes it
+# to capped:12, which is longer than the 8-byte equality prefix
+# (index number + id1), and expects every query to return all matching
+# rows.
+#
+
+SET @orig_update_cf_options = @@global.rocksdb_update_cf_options;
+
+CREATE TABLE t1 (id1 INT, id2 INT,
+  PRIMARY KEY (id1, id2) COMMENT 'cfname=cf_px') ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 299)
+  SELECT n DIV 100, n FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+  WHERE CF_NAME = 'cf_px' AND OPTION_TYPE = 'PREFIX_EXTRACTOR';
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+
+SET GLOBAL rocksdb_update_cf_options = 'cf_px={prefix_extractor=capped:12}';
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+  WHERE CF_NAME = 'cf_px' AND OPTION_TYPE = 'PREFIX_EXTRACTOR';
+
+--echo # Old SST file, new prefix extractor
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+
+INSERT INTO t1 VALUES (1, 1000), (1, 1001);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--echo # Old and new SST files
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+
+FLUSH TABLES;
+--echo # After reopening the table
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+
+SET GLOBAL rocksdb_update_cf_options = 'cf_px={prefix_extractor=capped:4}';
+SET GLOBAL rocksdb_update_cf_options = @orig_update_cf_options;
+DROP TABLE t1;

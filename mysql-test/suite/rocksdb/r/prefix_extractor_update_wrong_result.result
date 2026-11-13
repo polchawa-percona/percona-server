@@ -1,0 +1,36 @@
+SET @orig_update_cf_options = @@global.rocksdb_update_cf_options;
+CREATE TABLE t1 (id1 INT, id2 INT,
+PRIMARY KEY (id1, id2) COMMENT 'cfname=cf_px') ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 299)
+SELECT n DIV 100, n FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+WHERE CF_NAME = 'cf_px' AND OPTION_TYPE = 'PREFIX_EXTRACTOR';
+VALUE
+rocksdb.CappedPrefix.4
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+100
+SET GLOBAL rocksdb_update_cf_options = 'cf_px={prefix_extractor=capped:12}';
+SELECT VALUE FROM information_schema.ROCKSDB_CF_OPTIONS
+WHERE CF_NAME = 'cf_px' AND OPTION_TYPE = 'PREFIX_EXTRACTOR';
+VALUE
+rocksdb.CappedPrefix.12
+# Old SST file, new prefix extractor
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+100
+INSERT INTO t1 VALUES (1, 1000), (1, 1001);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Old and new SST files
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+102
+FLUSH TABLES;
+# After reopening the table
+SELECT COUNT(*) FROM t1 WHERE id1 = 1;
+COUNT(*)
+102
+SET GLOBAL rocksdb_update_cf_options = 'cf_px={prefix_extractor=capped:4}';
+SET GLOBAL rocksdb_update_cf_options = @orig_update_cf_options;
+DROP TABLE t1;
