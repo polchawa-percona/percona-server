@@ -1,0 +1,67 @@
+#
+# Finding #13 (C3 in myrocks-notes/port-findings.md, crash-durability.md):
+# with rocksdb_commit_in_the_middle = ON, rows of a statement interrupted by
+# a crash stay in the engine but never reach the binary log, so replicas
+# and binlog-based recovery never see them.
+#
+# Every rocksdb_bulk_load_size rows the transaction is committed directly in
+# the engine (Rdb_transaction::flush_batch() -> commit_no_binlog()); the
+# binary log is written only when the statement completes.
+#
+# Expected: after crash recovery the engine and the binary log agree. The
+# statement never completed and is not in the binary log, so none of its
+# rows may remain in the engine.
+# (rocksdb.crash_commit_in_the_middle records the current state.)
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+
+--connect (con_big, localhost, root,,)
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION cte_max_recursion_depth = 100000;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL first_batch WAIT_FOR never_happens';
+--send INSERT INTO t1 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5000) SELECT n, n FROM seq
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR first_batch';
+--source include/kill_and_restart_mysqld.inc
+--disconnect con_big
+--connection default
+
+--let BINLOG_INDEX = `SELECT @@log_bin_index`
+--let XID_COUNT_FILE = $MYSQLTEST_VARDIR/tmp/citm_binlog_rows.inc
+--perl
+  use strict;
+  my $index = $ENV{'BINLOG_INDEX'};
+  my $mysqlbinlog = $ENV{'MYSQL_BINLOG'};
+  open(my $ih, '<', $index) or die "open $index: $!";
+  my $dir = $index; $dir =~ s{[^/]+$}{};
+  my $rows = 0;
+  while (my $f = <$ih>) {
+    chomp $f;
+    $f =~ s{^\./}{};
+    $f = $dir . $f unless $f =~ m{^/};
+    my $out = `$mysqlbinlog --base64-output=decode-rows -v $f 2>/dev/null`;
+    $rows++ while $out =~ /^### INSERT INTO `test`.`t1`/mg;
+  }
+  close $ih;
+  open(my $oh, '>', $ENV{'XID_COUNT_FILE'}) or die;
+  print $oh "--let \$binlog_rows = $rows\n";
+  close $oh;
+EOF
+--source $XID_COUNT_FILE
+--remove_file $XID_COUNT_FILE
+
+--let $engine_rows = `SELECT COUNT(*) FROM t1`
+--let $sk_rows = `SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0`
+--echo # Rows in the binary log: $binlog_rows
+--echo # Rows in the engine (PK): $engine_rows
+--echo # Rows in the engine (SK): $sk_rows
+
+DROP TABLE t1;

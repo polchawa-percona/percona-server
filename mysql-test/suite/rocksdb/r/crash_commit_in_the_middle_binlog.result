@@ -1,0 +1,13 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION cte_max_recursion_depth = 100000;
+SET DEBUG_SYNC = 'rocksdb.flush_batch SIGNAL first_batch WAIT_FOR never_happens';
+INSERT INTO t1 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5000) SELECT n, n FROM seq;
+SET DEBUG_SYNC = 'now WAIT_FOR first_batch';
+# Kill and restart
+# Rows in the binary log: 0
+# Rows in the engine (PK): 0
+# Rows in the engine (SK): 0
+DROP TABLE t1;
