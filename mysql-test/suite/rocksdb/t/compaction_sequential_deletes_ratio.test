@@ -1,0 +1,81 @@
+#
+# rocksdb_compaction_sequential_deletes / _window mark an SST file for
+# compaction when it is dominated by deletes. Rdb_tbl_prop_coll::NeedCompact()
+# has two conditions: more than rocksdb_compaction_sequential_deletes deletes
+# inside one window of rocksdb_compaction_sequential_deletes_window entries,
+# or (FilledWithDeletions) a delete ratio in the whole file above
+# deletes / window. The second condition matters for files with fewer entries
+# than the window.
+#
+# FilledWithDeletions() computes both ratios with integer division, so it is
+# true only for a file that consists of deletes alone. A file with 67% deletes
+# and a 50% threshold is not marked for compaction.
+#
+# Each file below is larger than one data block (the collector only marks
+# files whose size it has seen grow beyond rocksdb_compaction_sequential_
+# deletes_file_size, 0 here) and has fewer entries than the window.
+#
+--source include/have_rocksdb.inc
+
+SET @save_window = @@global.rocksdb_compaction_sequential_deletes_window;
+SET @save_deletes = @@global.rocksdb_compaction_sequential_deletes;
+SET @save_file_size = @@global.rocksdb_compaction_sequential_deletes_file_size;
+SET GLOBAL rocksdb_compaction_sequential_deletes_window = 1000;
+SET GLOBAL rocksdb_compaction_sequential_deletes = 500;
+SET GLOBAL rocksdb_compaction_sequential_deletes_file_size = 0;
+
+CREATE TABLE t (a INT PRIMARY KEY, b VARCHAR(100)) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 1000)
+{
+  inc $i;
+  eval INSERT INTO t VALUES ($i, REPEAT('x', 100));
+}
+--enable_query_log
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # File with 300 deletes only (100% deletes): marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+DELETE FROM t WHERE a <= 300;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+
+--echo # File with 200 puts and 400 deletes (67% deletes, threshold 50%): marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+--disable_query_log
+let $i = 1000;
+while ($i < 1200)
+{
+  inc $i;
+  eval INSERT INTO t VALUES ($i, REPEAT('y', 100));
+}
+--enable_query_log
+DELETE FROM t WHERE a > 300 AND a <= 700;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+
+--echo # File with 450 puts and 150 deletes (25% deletes): not marked.
+SELECT VARIABLE_VALUE INTO @t0 FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+--disable_query_log
+let $i = 1200;
+while ($i < 1650)
+{
+  inc $i;
+  eval INSERT INTO t VALUES ($i, REPEAT('z', 100));
+}
+--enable_query_log
+DELETE FROM t WHERE a > 700 AND a <= 850;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT VARIABLE_VALUE - @t0 AS files_marked FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rocksdb_additional_compaction_triggers';
+
+DROP TABLE t;
+SET GLOBAL rocksdb_compaction_sequential_deletes_window = @save_window;
+SET GLOBAL rocksdb_compaction_sequential_deletes = @save_deletes;
+SET GLOBAL rocksdb_compaction_sequential_deletes_file_size = @save_file_size;

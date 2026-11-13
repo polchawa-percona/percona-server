@@ -1,0 +1,26 @@
+CREATE TABLE t (a INT PRIMARY KEY, b VARCHAR(100)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Session scope: obsolete files are kept until the session turns it off.
+SET SESSION rocksdb_disable_file_deletions = ON;
+DELETE FROM t WHERE a <= 100;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+include/assert.inc [Obsolete SST files are kept while con1 disables deletions]
+SET SESSION rocksdb_disable_file_deletions = OFF;
+include/assert.inc [Obsolete SST files are deleted after con1 turns it off]
+# Global scope set by a connection that then disconnects.
+SET GLOBAL rocksdb_disable_file_deletions = ON;
+DELETE FROM t WHERE a <= 200;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+include/assert.inc [While the global value is ON obsolete SST files are kept]
+SET GLOBAL rocksdb_disable_file_deletions = OFF;
+# Global scope set, then the same connection turns its session value off.
+SET GLOBAL rocksdb_disable_file_deletions = ON;
+SET SESSION rocksdb_disable_file_deletions = OFF;
+DELETE FROM t WHERE a <= 300;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+include/assert.inc [While the global value is ON obsolete SST files are kept]
+SET GLOBAL rocksdb_disable_file_deletions = OFF;
+DROP TABLE t;

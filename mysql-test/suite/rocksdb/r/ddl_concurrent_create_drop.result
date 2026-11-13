@@ -1,0 +1,50 @@
+call mtr.add_suppression("Column family .* not found");
+unexpected errors: 0
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING';
+drop_index_ongoing
+0
+SELECT COUNT(*) AS orphan_sst_index_entries
+FROM information_schema.rocksdb_index_file_map m
+WHERE m.column_family IN (SELECT DISTINCT column_family
+FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE 'survivor%')
+AND m.num_rows > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = m.column_family
+AND d.index_number = m.index_number);
+orphan_sst_index_entries
+0
+t	pk_ok
+survivor_0	1
+t	sk_ok
+survivor_0	1
+t	pk_ok
+survivor_1	1
+t	sk_ok
+survivor_1	1
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING';
+drop_index_ongoing
+0
+SELECT COUNT(*) AS orphan_sst_index_entries
+FROM information_schema.rocksdb_index_file_map m
+WHERE m.column_family IN (SELECT DISTINCT column_family
+FROM information_schema.rocksdb_ddl
+WHERE table_name LIKE 'survivor%')
+AND m.num_rows > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = m.column_family
+AND d.index_number = m.index_number);
+orphan_sst_index_entries
+0
+t	pk_ok
+survivor_0	1
+t	sk_ok
+survivor_0	1
+t	pk_ok
+survivor_1	1
+t	sk_ok
+survivor_1	1
+DROP TABLE survivor_0, survivor_1;
