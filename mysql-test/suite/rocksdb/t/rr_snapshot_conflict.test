@@ -1,0 +1,185 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Compares how MyRocks and InnoDB handle concurrent updates at REPEATABLE READ
+# and READ COMMITTED: lost update, write skew and a phantom insert into an
+# updated range.
+#
+# MyRocks has no locking reads that see the latest committed version. At
+# REPEATABLE READ it instead validates every row it locks against the
+# transaction's snapshot, and fails with ER_LOCK_DEADLOCK when another
+# transaction has committed a change to that row since. That error must roll
+# back the whole transaction, as it does in InnoDB; earlier the server rolled
+# back only the failed statement and the transaction went on with its old
+# snapshot.
+#
+
+--let $i = 0
+while ($i < 4)
+{
+  --let $engine = ROCKSDB
+  if ($i >= 2)
+  {
+    --let $engine = InnoDB
+  }
+  --let $isolation = REPEATABLE READ
+  if ($i == 1)
+  {
+    --let $isolation = READ COMMITTED
+  }
+  if ($i == 3)
+  {
+    --let $isolation = READ COMMITTED
+  }
+
+  --echo
+  --echo ########################################################################
+  --echo # Engine: $engine, isolation: $isolation
+  --echo ########################################################################
+
+  --let $is_myrocks_rr = 0
+  if ($engine == ROCKSDB)
+  {
+    if ($isolation == "REPEATABLE READ")
+    {
+      --let $is_myrocks_rr = 1
+    }
+  }
+  --let $is_innodb_rr = 0
+  if ($engine == InnoDB)
+  {
+    if ($isolation == "REPEATABLE READ")
+    {
+      --let $is_innodb_rr = 1
+    }
+  }
+
+  connect (con1,localhost,root,,);
+  eval SET SESSION TRANSACTION ISOLATION LEVEL $isolation;
+  SET SESSION innodb_lock_wait_timeout = 1;
+  SET SESSION rocksdb_lock_wait_timeout = 1;
+  connect (con2,localhost,root,,);
+  eval SET SESSION TRANSACTION ISOLATION LEVEL $isolation;
+  SET SESSION innodb_lock_wait_timeout = 1;
+  SET SESSION rocksdb_lock_wait_timeout = 1;
+
+  --echo
+  --echo # Scenario A: lost update.
+  --echo # con1 reads a row, con2 updates it and commits, then con1 updates the
+  --echo # same row. MyRocks at REPEATABLE READ validates the row against con1's
+  --echo # snapshot and fails with ER_LOCK_DEADLOCK; the whole transaction must be
+  --echo # rolled back, as InnoDB does for that error. MyRocks at READ COMMITTED
+  --echo # and InnoDB at both levels update the latest committed version.
+
+  connection default;
+  eval CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=$engine;
+  eval CREATE TABLE t2 (id INT PRIMARY KEY) ENGINE=$engine;
+  INSERT INTO t1 VALUES (1, 10), (2, 20);
+
+  connection con1;
+  BEGIN;
+  SELECT v FROM t1 WHERE id = 1;
+  --echo # An earlier write in the same transaction.
+  INSERT INTO t2 VALUES (1);
+
+  connection con2;
+  UPDATE t1 SET v = v + 1 WHERE id = 1;
+
+  connection con1;
+  if ($is_myrocks_rr)
+  {
+    --error ER_LOCK_DEADLOCK
+  }
+  UPDATE t1 SET v = v + 100 WHERE id = 1;
+  --echo # Without a conflict con1 still sees its earlier write. After a snapshot
+  --echo # conflict the transaction is gone: the earlier write is rolled back and
+  --echo # the next statement sees the latest committed data.
+  SELECT * FROM t2;
+  SELECT v FROM t1 WHERE id = 1;
+  COMMIT;
+
+  connection default;
+  SELECT * FROM t1 ORDER BY id;
+  SELECT * FROM t2 ORDER BY id;
+  DROP TABLE t1, t2;
+
+  --echo
+  --echo # Scenario B: write skew.
+  --echo # Both transactions check that two doctors are on call, then each takes a
+  --echo # different doctor off call. Neither engine detects this at either level:
+  --echo # both commits succeed and nobody is left on call.
+
+  connection default;
+  eval CREATE TABLE t1 (id INT PRIMARY KEY, on_call INT) ENGINE=$engine;
+  INSERT INTO t1 VALUES (1, 1), (2, 1);
+
+  connection con1;
+  BEGIN;
+  SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+
+  connection con2;
+  BEGIN;
+  SELECT COUNT(*) FROM t1 WHERE on_call = 1;
+
+  connection con1;
+  UPDATE t1 SET on_call = 0 WHERE id = 1;
+
+  connection con2;
+  UPDATE t1 SET on_call = 0 WHERE id = 2;
+
+  connection con1;
+  COMMIT;
+
+  connection con2;
+  COMMIT;
+
+  connection default;
+  SELECT * FROM t1 ORDER BY id;
+  DROP TABLE t1;
+
+  --echo
+  --echo # Scenario C: phantom insert into an updated range.
+  --echo # con1 updates a secondary-key range inside a multi-statement transaction,
+  --echo # then con2 inserts a row into that range. InnoDB at REPEATABLE READ
+  --echo # blocks the insert with a gap lock. MyRocks has no gap locks; at
+  --echo # REPEATABLE READ it refuses con1's range update instead, and at READ
+  --echo # COMMITTED (like InnoDB at READ COMMITTED) the insert goes through and
+  --echo # the new row is not updated.
+
+  connection default;
+  eval CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v INT, KEY (k))
+    ENGINE=$engine;
+  INSERT INTO t1 VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+
+  connection con1;
+  BEGIN;
+  if ($is_myrocks_rr)
+  {
+    --error ER_UNKNOWN_ERROR
+  }
+  UPDATE t1 SET v = v + 1 WHERE k BETWEEN 10 AND 30;
+
+  connection con2;
+  if ($is_innodb_rr)
+  {
+    --error ER_LOCK_WAIT_TIMEOUT
+  }
+  INSERT INTO t1 VALUES (4, 15, 0);
+
+  connection con1;
+  SELECT * FROM t1 ORDER BY id;
+  COMMIT;
+
+  connection default;
+  SELECT * FROM t1 ORDER BY id;
+  DROP TABLE t1;
+
+  disconnect con1;
+  disconnect con2;
+  connection default;
+
+  --inc $i
+}
+
+--source include/wait_until_count_sessions.inc
