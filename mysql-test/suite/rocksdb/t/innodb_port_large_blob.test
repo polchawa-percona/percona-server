@@ -1,0 +1,85 @@
+#
+# Port of innodb_zip.large_blob (mysql-test/suite/innodb_zip/t/large_blob.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB
+#   - The InnoDB tablespace and row-format variants (system and file-per-table
+#     tablespaces, REDUNDANT/COMPACT/COMPRESSED/DYNAMIC) are reduced to one table:
+#     MyRocks stores every row the same way and ignores these options (pinned in
+#     rocksdb.unsupported_table_options)
+#   - The 200 MB value is checked after the UPDATE through the primary key and through
+#     the prefix index, after a memtable flush, and after a rolled-back second UPDATE
+#   - The limits that apply to a 200 MB row on MyRocks are pinned:
+#     rocksdb_write_batch_max_bytes below the row size makes the UPDATE fail and leaves
+#     the row unchanged, and max_allowed_packet (raised in -master.opt as in the
+#     original) bounds the value
+#   - Runs on debug builds too (the original is release-only because InnoDB is slow
+#     there; MyRocks is not)
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+
+--disable_query_log
+# Create a 200 MB blob that does not compress easily (the original comment says 20MB;
+# 1000 characters repeated 200000 times is 200 MB).
+# 1000 Random characters is enough to keep compression low.
+set @alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+set @r=abs(rand()*52) + 1;
+set @blob=substr(@alphabet,@r,1);
+let $1=1000;
+while ($1 > 1)
+{
+  set @r=abs(rand()*52) + 1;
+  set @letter=substr(@alphabet,@r,1);
+  set @blob=concat(@blob,@letter);
+  dec $1;
+}
+# The loop above is extremely slow compared to repeat().
+set @longblob=repeat(@blob,200000);
+set @longblob2=repeat(reverse(@blob),200000);
+--enable_query_log
+
+SELECT LENGTH(@longblob), LENGTH(@longblob2);
+
+CREATE TABLE t1 (
+	c1 INT DEFAULT NULL,
+	c2 LONGBLOB NOT NULL,
+	KEY k2 (c2(250), c1)
+) ENGINE=ROCKSDB DEFAULT CHARSET=latin1;
+INSERT INTO t1 VALUES (1, '');
+UPDATE t1 SET c2=@longblob;
+
+--echo # The full value reads back through the hidden primary key and the prefix index.
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1;
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1 FORCE INDEX (k2)
+ WHERE c2 = @longblob;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT c1, LENGTH(c2), c2 = @longblob AS same FROM t1 FORCE INDEX (k2)
+ WHERE c2 = @longblob;
+
+--echo # A second 200 MB UPDATE rolled back leaves the first value. It runs at
+--echo # READ COMMITTED: the table has no unique key, so the gap-lock rule refuses
+--echo # the UPDATE inside a multi-statement transaction at REPEATABLE READ.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+UPDATE t1 SET c2=@longblob2;
+SELECT LENGTH(c2), c2 = @longblob2 AS same FROM t1;
+ROLLBACK;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT LENGTH(c2), c2 = @longblob AS same FROM t1;
+
+--echo # A write batch limit below the row size fails the UPDATE and keeps the row.
+SET SESSION rocksdb_write_batch_max_bytes = 10485760;
+--error ER_GET_ERRMSG
+UPDATE t1 SET c2=@longblob2;
+SET SESSION rocksdb_write_batch_max_bytes = DEFAULT;
+SELECT LENGTH(c2), c2 = @longblob AS same FROM t1;
+CHECK TABLE t1;
+
+UPDATE t1 SET c2=@longblob2;
+SELECT LENGTH(c2), c2 = @longblob2 AS same FROM t1 FORCE INDEX (k2)
+ WHERE c2 = @longblob2;
+
+DELETE FROM t1;
+SELECT COUNT(*) FROM t1;
+DROP TABLE t1;
