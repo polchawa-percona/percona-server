@@ -1,0 +1,22 @@
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+policy_ok
+1
+CREATE TABLE c (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=ROCKSDB;
+CREATE TABLE h (id INT PRIMARY KEY, k INT NOT NULL, KEY kk (k)) ENGINE=ROCKSDB;
+INSERT INTO c VALUES (1, 0);
+# Open 140 snapshots, each right after a different commit.
+# More live RocksDB snapshots than the 128-entry snapshot cache holds.
+SELECT VALUE > 128 AS more_than_128_snapshots FROM information_schema.rocksdb_dbstats
+WHERE stat_type = 'DB_NUM_SNAPSHOTS';
+more_than_128_snapshots
+1
+# 2000 more commits on the same row and new rows.
+SELECT v FROM c;
+v
+102000
+SELECT COUNT(*) FROM h;
+COUNT(*)
+2140
+# Every snapshot must still see its own moment.
+mismatches: 0
+DROP TABLE c, h;

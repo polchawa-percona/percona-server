@@ -1,0 +1,134 @@
+SELECT @@global.rocksdb_write_policy IN ('write_committed', 'write_prepared') AS policy_ok;
+policy_ok
+1
+CREATE TABLE t1 (
+pk INT PRIMARY KEY,
+a INT NOT NULL,
+b VARCHAR(20) NOT NULL,
+UNIQUE KEY ua (a),
+KEY kb (b)
+) ENGINE=ROCKSDB;
+CREATE TABLE ti (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1,10,'r01'),(2,20,'r02'),(3,30,'r03'),(4,40,'r04'),
+(5,50,'r05'),(6,60,'r06'),(7,70,'r07'),(8,80,'r08'),
+(9,90,'r09'),(10,100,'r10');
+# state before the failing transaction
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+# Mixed transaction: InnoDB first, MyRocks last, so MyRocks prepares first.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO ti VALUES (1);
+INSERT INTO t1 VALUES (11,110,'r11'),(12,120,'r12'),(13,130,'r13');
+UPDATE t1 SET b = CONCAT(b, 'x') WHERE pk <= 3;
+UPDATE t1 SET a = a + 1000 WHERE pk = 3;
+DELETE FROM t1 WHERE pk IN (9, 10);
+SET DEBUG_SYNC = 'rocksdb.prepared SIGNAL rocksdb_prepared';
+SET SESSION debug = '+d,simulate_xa_failure_prepare_in_engine';
+COMMIT;
+ERROR HY000: Got error 149 - 'Lock deadlock; Retry transaction' during COMMIT
+SET SESSION debug = '-d,simulate_xa_failure_prepare_in_engine';
+# MyRocks had prepared before InnoDB's prepare failed.
+SET DEBUG_SYNC = 'now WAIT_FOR rocksdb_prepared';
+SET DEBUG_SYNC = 'RESET';
+# state after the rollback: same as before
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t1;
+COUNT(*)	SUM(pk)	SUM(a)
+10	55	550
+SELECT pk, a, b FROM t1 ORDER BY pk;
+pk	a	b
+1	10	r01
+2	20	r02
+3	30	r03
+4	40	r04
+5	50	r05
+6	60	r06
+7	70	r07
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 FORCE INDEX (kb) ORDER BY b, pk;
+pk	b
+1	r01
+2	r02
+3	r03
+4	r04
+5	r05
+6	r06
+7	r07
+8	r08
+9	r09
+10	r10
+SELECT pk, a FROM t1 FORCE INDEX (ua) WHERE a IN (30, 110);
+pk	a
+3	30
+SELECT pk, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE pk BETWEEN 8 AND 12 ORDER BY pk;
+pk	a	b
+8	80	r08
+9	90	r09
+10	100	r10
+SELECT pk, b FROM t1 WHERE pk = 2;
+pk	b
+2	r02
+SELECT pk, b FROM t1 WHERE pk = 11;
+pk	b
+SELECT COUNT(*) FROM ti;
+COUNT(*)
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Unique keys of rolled-back rows are free; keys of deleted rows are still taken.
+INSERT INTO t1 VALUES (11,110,'again'),(31,1030,'again');
+INSERT INTO t1 VALUES (50,90,'dup_a');
+ERROR 23000: Duplicate entry '90' for key 't1.ua'
+INSERT INTO t1 VALUES (9,999,'dup_pk');
+ERROR 23000: Duplicate entry '9' for key 't1.PRIMARY'
+SELECT pk, a, b FROM t1 WHERE pk IN (3, 9, 11, 31) ORDER BY pk;
+pk	a	b
+3	30	r03
+9	90	r09
+11	110	again
+31	1030	again
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1, ti;
