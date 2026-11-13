@@ -1,0 +1,24 @@
+#
+# PS-11794: when MyRocks hits data corruption it creates the
+# .rocksdb/ROCKSDB_CORRUPTED marker and aborts the server. If the marker
+# cannot be created, rdb_persist_corruption_marker() still calls Close()
+# on the null file handle, so the server dies with SIGSEGV before it logs
+# "aborting because of data corruption" and aborts cleanly.
+# A directory placed at the marker path makes the creation fail.
+#
+# restart:--log-error=MYSQLTEST_VARDIR/tmp/corruption_marker_fail.err
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+SET SESSION debug = "+d,rocksdb_return_status_corrupted";
+SELECT * FROM t1 WHERE pk = 1;
+ERROR HY000: Lost connection to MySQL server during query
+Pattern "data corruption detected" found
+Pattern "Can't create file .*ROCKSDB_CORRUPTED to mark rocksdb as corrupted" found
+Pattern "aborting because of data corruption" found
+Pattern "got signal 6" found
+# restart
+SELECT * FROM t1;
+pk	a
+1	1
+2	2
+DROP TABLE t1;
