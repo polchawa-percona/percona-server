@@ -1,0 +1,145 @@
+#
+# Port of innodb.end_range_check_2 (mysql-test/suite/innodb/t/end_range_check_2.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB written explicitly on every CREATE TABLE
+#   - Bug #26300119: the InnoDB sync points before_insertion_of_blob / allow_insert are
+#     dropped; the reader runs while the other session's large-value inserts are
+#     uncommitted, and the reader's result is now recorded (the original hid it)
+#   - Bug#32291506: the InnoDB debug keyword compare_end_range is dropped; the range
+#     reads and the range DELETE run as before and their results are recorded
+#   - Bug#33384537: runs at REPEATABLE READ in the reading session, as in the
+#     original; the other sessions run at READ COMMITTED (server option) because MyRocks
+#     rejects gap locks at REPEATABLE READ
+#   - no debug features are used, so the test also runs on release builds
+#
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Bug #26300119	ASSERTION IN PREBUILT->TRX->ISOLATION_LEVEL == TRX_ISO_READ_UNCOMMITTED
+--echo #
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+DELIMITER |;
+CREATE PROCEDURE populate_t1(IN BASE INT, IN SIZE INT)
+BEGIN
+        DECLARE i INT DEFAULT BASE;
+        WHILE (i <= SIZE) DO
+                INSERT INTO t1 VALUES  (i, repeat('10101010101010101010',2000));
+                SET i = i + 1;
+        END WHILE;
+END|
+DELIMITER ;|
+
+CREATE TABLE t1 (
+        pk int,
+        col_blob_key blob,
+        primary key (pk)
+) ENGINE=ROCKSDB;
+
+CALL populate_t1(1, 100);
+
+connection con1;
+START TRANSACTION;
+CALL populate_t1(101, 199);
+INSERT INTO t1 VALUES (200, repeat('10101010101010101010',2000));
+
+connection con2;
+SELECT pk, LENGTH(col_blob_key) FROM t1 WHERE pk between 99 and 101;
+SELECT COUNT(*) FROM t1;
+
+connection con1;
+COMMIT;
+
+connection con2;
+SELECT pk, LENGTH(col_blob_key) FROM t1 WHERE pk between 99 and 101;
+SELECT COUNT(*), SUM(LENGTH(col_blob_key)) FROM t1;
+
+connection default;
+disconnect con1;
+disconnect con2;
+
+DROP PROCEDURE populate_t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#32291506 ASSERTION FAILURE: ROW0SEL.CC: MYSQL_COL_LEN == LEN
+--echo #
+
+CREATE TABLE t1 (
+  c0 int,
+  c1 char(200) CHARACTER SET utf32,
+  c2 int GENERATED ALWAYS AS (c1) VIRTUAL,
+  c3 int,
+  PRIMARY KEY (c0, c1),
+  KEY i1 (c2, c1(1))
+) ENGINE=ROCKSDB;
+
+INSERT  INTO t1(c0,c1,c3) VALUES (1,'1',1), (2,'-5',2), (3,'7',3);
+
+SELECT c0, c1, c2 FROM t1 FORCE INDEX (i1) WHERE c2 < 0;
+SELECT c0, c1, c2 FROM t1 FORCE INDEX (i1) WHERE c2 > 0 ORDER BY c2;
+
+START TRANSACTION;
+
+DELETE FROM t1 WHERE c0 = 1;
+
+--echo # No lock Range select with KEY i1 and end range check
+SELECT * FROM t1  WHERE c2 < 0;
+
+--echo # X lock Range select with KEY i1 and end range check
+DELETE FROM t1  WHERE c2 < 0;
+
+SELECT c0, c1, c2 FROM t1 FORCE INDEX (i1) ORDER BY c2;
+
+COMMIT;
+
+SELECT c0, c1, c2 FROM t1 ORDER BY c0;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#33384537 prebuilt->m_end_range should be reset at fetch_cache initializing at row_search_mvcc()
+--echo #
+
+create table t10 (i int) engine=rocksdb;
+insert into t10 values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+
+create table t1000 (i int) engine=rocksdb;
+insert into t1000 select a.i + b.i*10 + c.i*100 from t10 a, t10 b, t10 c;
+
+create table t (i int, j int, k int, primary key(k, j, i), key(i, j, k)) engine=rocksdb;
+
+insert into t select 1, 1, i from t10;
+insert into t select 1, 2, i from t10;
+insert into t select 2, 1, i from t10;
+insert into t select 2, 2, i from t10;
+insert into t select 3, 1, i from t10;
+insert into t select 3, 2, i from t10;
+
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+begin;
+select * from t where i = 4;
+
+connect (con1,localhost,root,,);
+connection con1;
+
+insert into t select 1, 1, i+10 from t1000 limit 400;
+insert into t select 1, 2, i+10 from t1000;
+insert into t select 2, 1, i+10 from t1000;
+insert into t select 2, 2, i+10 from t1000;
+insert into t select 3, 1, i+10 from t1000;
+insert into t select 3, 2, i+10 from t1000;
+
+connection default;
+
+select /*+ SKIP_SCAN(t i) */ * from t where k > 2 and k < 8 order by i, j, k;
+select * from t ignore index (i) where k > 2 and k < 8 order by i, j, k;
+commit;
+select count(*) from t where k > 2 and k < 8;
+select /*+ SKIP_SCAN(t i) */ count(*) from t where k > 2 and k < 8;
+
+drop table t, t10, t1000;
+disconnect con1;

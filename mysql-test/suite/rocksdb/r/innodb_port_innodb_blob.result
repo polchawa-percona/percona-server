@@ -1,0 +1,156 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b TEXT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t3 (a INT PRIMARY KEY, b TEXT, c TEXT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,REPEAT('a',30000)),(2,REPEAT('b',40000));
+BEGIN;
+UPDATE t1 SET a=a+2;
+ROLLBACK;
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL have_latch WAIT_FOR go1';
+BEGIN;
+UPDATE t1 SET b=CONCAT(b,'foo');
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+SELECT a, RIGHT(b,20) FROM t1;
+a	RIGHT(b,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+SET DEBUG_SYNC='now SIGNAL go1';
+SELECT a, RIGHT(b,20) FROM t1;
+a	RIGHT(b,20)
+1	aaaaaaaaaaaaaaaaafoo
+2	bbbbbbbbbbbbbbbbbfoo
+ROLLBACK;
+SELECT a, RIGHT(b,20) FROM t1;
+a	RIGHT(b,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+BEGIN;
+INSERT INTO t1 VALUES (3,REPEAT('c',50000));
+SELECT @@transaction_isolation;
+@@transaction_isolation
+READ-COMMITTED
+SELECT a, RIGHT(b,20) FROM t1;
+a	RIGHT(b,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+SELECT a FROM t1;
+a
+1
+2
+SET DEBUG='+d,crash_commit_before';
+INSERT INTO t2 VALUES (42);
+ERROR HY000: Lost connection to MySQL server during query
+SELECT 1;
+ERROR HY000: Lost connection to MySQL server during query
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT a, RIGHT(b,20) FROM t1;
+a	RIGHT(b,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+SELECT * FROM t2;
+a
+INSERT INTO t3 VALUES
+(1,REPEAT('d',7000),REPEAT('e',100)),
+(2,REPEAT('g',7000),REPEAT('h',100));
+SET DEBUG_SYNC='rocksdb.encode_value_slice SIGNAL go_sel WAIT_FOR go_upd';
+UPDATE t3 SET c=REPEAT('f',3000) WHERE a=1;
+# Connection con1:
+SET DEBUG_SYNC='now WAIT_FOR go_sel';
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+a	RIGHT(b,20)	RIGHT(c,20)
+1	dddddddddddddddddddd	eeeeeeeeeeeeeeeeeeee
+2	gggggggggggggggggggg	hhhhhhhhhhhhhhhhhhhh
+set debug_sync='now SIGNAL go_upd';
+# Connection default:
+# reap UPDATE t3 SET c=REPEAT('f',3000) WHERE a=1;
+# Connection con1:
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+a	RIGHT(b,20)	RIGHT(c,20)
+1	dddddddddddddddddddd	ffffffffffffffffffff
+2	gggggggggggggggggggg	hhhhhhhhhhhhhhhhhhhh
+CHECK TABLE t1,t2,t3;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+BEGIN;
+INSERT INTO t2 VALUES (347);
+SET DEBUG_SYNC='rocksdb.update_write_row_after_unique_check SIGNAL have_latch WAIT_FOR crash';
+UPDATE t3 SET c=REPEAT('i',3000) WHERE a=2;
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+SELECT info FROM information_schema.processlist
+WHERE state = 'debug sync point: rocksdb.update_write_row_after_unique_check';
+info
+UPDATE t3 SET c=REPEAT('i',3000) WHERE a=2
+SET DEBUG='+d,crash_commit_before';
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+ERROR HY000: Lost connection to MySQL server during query
+CHECK TABLE t1,t2,t3;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+a	RIGHT(b,20)	RIGHT(c,20)
+1	dddddddddddddddddddd	ffffffffffffffffffff
+2	gggggggggggggggggggg	hhhhhhhhhhhhhhhhhhhh
+SELECT a FROM t3;
+a
+1
+2
+BEGIN;
+INSERT INTO t2 VALUES (33101);
+SET DEBUG_SYNC='rocksdb.encode_value_slice SIGNAL have_latch WAIT_FOR crash';
+UPDATE t3 SET c=REPEAT('j',3000) WHERE a=2;
+SET DEBUG_SYNC='now WAIT_FOR have_latch';
+SELECT info FROM information_schema.processlist
+WHERE state = 'debug sync point: rocksdb.encode_value_slice';
+info
+UPDATE t3 SET c=REPEAT('j',3000) WHERE a=2
+SET DEBUG='+d,crash_commit_before';
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+ERROR HY000: Lost connection to MySQL server during query
+CHECK TABLE t1,t2,t3;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
+a	RIGHT(b,20)	RIGHT(c,20)
+1	dddddddddddddddddddd	ffffffffffffffffffff
+2	gggggggggggggggggggg	hhhhhhhhhhhhhhhhhhhh
+SELECT a FROM t3;
+a
+1
+2
+SELECT * FROM t2;
+a
+DROP TABLE t1,t2,t3;
+#
+# Bug #29866408	SERVER CRASHES WHEN ADDING LONGTEXT COLUMN
+#
+CREATE TABLE t1 (
+id int(11) COLLATE utf8mb4_unicode_ci NOT NULL,
+data longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+PRIMARY KEY (id),
+UNIQUE KEY unq_id (id)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+Warnings:
+Warning	1681	Integer display width is deprecated and will be removed in a future release.
+INSERT INTO t1 VALUES (1,'');
+SET @old_mode=@@sql_mode;
+SET GLOBAL SQL_MODE="";
+ALTER TABLE t1 ADD COLUMN d3 DATETIME NOT NULL;
+ALTER TABLE t1 ADD COLUMN d2 DATETIME NOT NULL;
+ALTER TABLE t1 ADD COLUMN d1 DATETIME NOT NULL;
+SET GLOBAL SQL_MODE=@old_mode;
+SELECT * FROM t1;
+id	data	d3	d2	d1
+1		0000-00-00 00:00:00	0000-00-00 00:00:00	0000-00-00 00:00:00
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

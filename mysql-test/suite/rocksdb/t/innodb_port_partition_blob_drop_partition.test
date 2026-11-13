@@ -1,0 +1,27 @@
+#
+# Port of the Bug#28491099 part of innodb.partition-blob
+# (mysql-test/suite/innodb/t/partition-blob.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - a LOB row in a surviving partition and a final SELECT are added, so the
+#     test checks which rows DROP PARTITION keeps
+# The expected result is the correct behaviour (the dropped partition's rows are
+# gone, as on InnoDB). MyRocks currently keeps them because, without
+# rocksdb_allow_unsafe_alter, the change is done by copying the table
+# (port-findings #16), so the test is disabled in collections/disabled.def.
+#
+
+--source include/have_rocksdb.inc
+
+SET sql_mode = '';
+CREATE TABLE t1 (a INT, b TEXT NOT NULL) ENGINE=ROCKSDB PARTITION BY RANGE(a)
+  (PARTITION p0 VALUES LESS THAN (6), PARTITION p1 VALUES LESS THAN (9),
+   PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1(a) VALUES (0);
+INSERT INTO t1 VALUES (7, REPEAT('b', 65535));
+ALTER TABLE t1 ADD COLUMN c DATE NOT NULL;
+ALTER TABLE t1 DROP PARTITION p0;
+ALTER TABLE t1 ADD COLUMN d DATE NOT NULL;
+SELECT a, LENGTH(b), c, d FROM t1 ORDER BY a;
+DROP TABLE t1;
+SET sql_mode = DEFAULT;

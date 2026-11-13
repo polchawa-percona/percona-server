@@ -1,0 +1,109 @@
+CREATE TABLE tab82 (col28 JSON) ENGINE=ROCKSDB;
+set @json_doc_1 = concat('["OpenSource", "', repeat('Linux+Ubuntu+', 16000), '"]');
+set @json_doc_2 = concat('["OpenSource", "', repeat('MySQL+Oracle+', 16000), '"]');
+set @data_1 = repeat('Linux+Ubuntu+', 16000);
+set @data_2 = repeat('MySQL+Oracle+', 16000);
+INSERT INTO tab82 VALUES (@json_doc_1);
+# Connection default:
+# Linux+Ubuntu
+start transaction with consistent snapshot;
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+strcmp(col28, @json_doc_1) = 0
+1
+select cast(col28 as char) = @json_doc_1 from tab82;
+cast(col28 as char) = @json_doc_1
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+json_extract(col28, '$[1]') = @data_1
+1
+# Connection con1:
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+set @json_doc_1 = concat('["OpenSource", "', repeat('Linux+Ubuntu+', 16000), '"]');
+set @json_doc_2 = concat('["OpenSource", "', repeat('MySQL+Oracle+', 16000), '"]');
+set @data_1 = repeat('Linux+Ubuntu+', 16000);
+set @data_2 = repeat('MySQL+Oracle+', 16000);
+start transaction;
+UPDATE tab82 SET col28 = JSON_SET(col28, '$[1]', @data_2);
+# MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+strcmp(col28, @json_doc_2) = 0
+1
+select cast(col28 as char) = @json_doc_2 from tab82;
+cast(col28 as char) = @json_doc_2
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+json_extract(col28, '$[1]') = @data_2
+1
+# Connection default:
+# Linux+Ubuntu
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+strcmp(col28, @json_doc_1) = 0
+1
+select cast(col28 as char) = @json_doc_1 from tab82;
+cast(col28 as char) = @json_doc_1
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+json_extract(col28, '$[1]') = @data_1
+1
+# Connection con1:
+# MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+strcmp(col28, @json_doc_2) = 0
+1
+select cast(col28 as char) = @json_doc_2 from tab82;
+cast(col28 as char) = @json_doc_2
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+json_extract(col28, '$[1]') = @data_2
+1
+commit;
+# Connection default:
+# Linux+Ubuntu
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+strcmp(col28, @json_doc_1) = 0
+1
+select cast(col28 as char) = @json_doc_1 from tab82;
+cast(col28 as char) = @json_doc_1
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+json_extract(col28, '$[1]') = @data_1
+1
+commit;
+# MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+strcmp(col28, @json_doc_2) = 0
+1
+select cast(col28 as char) = @json_doc_2 from tab82;
+cast(col28 as char) = @json_doc_2
+1
+select length(col28) from tab82;
+length(col28)
+208018
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+json_extract(col28, '$[1]') = @data_2
+1
+# After a memtable flush and compaction
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+select count(*) from tab82;
+count(*)
+1
+select cast(col28 as char) = @json_doc_2 from tab82;
+cast(col28 as char) = @json_doc_2
+1
+drop table tab82;

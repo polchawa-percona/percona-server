@@ -1,0 +1,161 @@
+#
+# Port of innodb.lob_partial_update (mysql-test/suite/innodb/t/lob_partial_update.test)
+# to MyRocks, merged with innodb.lob_long_partial_update and
+# innodb.json_small_partial_update_04, _05 and _06 (one section each).
+# Partial JSON updates (JSON_SET / JSON_REPLACE / JSON_REMOVE) of large JSON
+# documents: rollback, many updates in one transaction, statement rollback,
+# savepoints, a concurrent snapshot reader.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB-only parts removed: row formats, compression, and the error-log
+#     checks of the InnoDB LOB partial-update debug points. MyRocks writes the
+#     whole document on every update, so only the visible results are checked
+#   - savepoints: MyRocks does not support ROLLBACK TO SAVEPOINT after a write
+#     (error 8007, transaction becomes rollback-only); InnoDB rolls back to it
+#   - runs at READ COMMITTED because MyRocks rejects gap locks at REPEATABLE
+#     READ; the snapshot reader of section 6 switches back to REPEATABLE READ
+#   - added: statement rollback on a duplicate key, and a check that the
+#     PARTIAL_JSON binlog image replays to the same document
+#
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+# Multi-statement transactions with UPDATEs without a unique-key WHERE are
+# rejected at REPEATABLE READ by the MyRocks gap-lock check.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+SET @pad = REPEAT('abcdefghijklmnopqrstuvwxyz1234', 6006);
+SET @doc = CONCAT('["Sven", "', @pad, '", {"k": "v", "n": 1}]');
+
+--echo #
+--echo # 1. Update, then rollback (json_small_partial_update_04)
+--echo #
+CREATE TABLE t (f1 INT, j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, @doc);
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+START TRANSACTION;
+UPDATE t SET f1 = 2, j1 = JSON_SET(j1, '$[0]', 'Knut');
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+ROLLBACK;
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1), CRC32(j1->>'$[1]') = CRC32(@pad) AS pad_ok FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # 2. Ten updates in one transaction, then rollback (json_small_partial_update_05)
+--echo #
+CREATE TABLE t (f1 INT, j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (0, REPLACE(@doc, 'Sven', 'Init00'));
+START TRANSACTION;
+--let $i = 1
+while ($i <= 10)
+{
+  --eval UPDATE t SET f1 = $i, j1 = JSON_SET(j1, '\$[0]', CONCAT('Init', LPAD($i, 2, '0')))
+  --inc $i
+}
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+ROLLBACK;
+SELECT f1, JSON_EXTRACT(j1, '$[0]'), LENGTH(j1), CRC32(j1->>'$[1]') = CRC32(@pad) AS pad_ok FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # 3. JSON_REPLACE / JSON_REMOVE / shrinking and growing values, committed
+--echo #    (lob_long_partial_update)
+--echo #
+CREATE TABLE t (pk INT PRIMARY KEY, j JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, JSON_ARRAY('OpenSource', REPEAT('Linux+Ubuntu+', 2000), JSON_OBJECT('a', 1, 'b', REPEAT('x', 5000))));
+UPDATE t SET j = JSON_SET(j, '$[1]', REPEAT('MySQL+Oracle+', 2000)) WHERE pk = 1;
+SELECT pk, LENGTH(j), LEFT(j->>'$[1]', 13), LENGTH(j->>'$[1]') FROM t;
+UPDATE t SET j = JSON_REPLACE(j, '$[2].b', 'short', '$[0]', 'Closed') WHERE pk = 1;
+SELECT pk, LENGTH(j), j->>'$[0]', j->>'$[2].b', JSON_LENGTH(j) FROM t;
+UPDATE t SET j = JSON_REMOVE(j, '$[1]') WHERE pk = 1;
+SELECT pk, LENGTH(j), JSON_LENGTH(j), j->>'$[1].a' FROM t;
+UPDATE t SET j = JSON_ARRAY_APPEND(j, '$', REPEAT('z', 100000)) WHERE pk = 1;
+SELECT pk, LENGTH(j), JSON_LENGTH(j), LENGTH(j->>'$[2]') FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # 4. Statement rollback: a multi-row JSON update that fails part-way leaves
+--echo #    every document unchanged
+--echo #
+CREATE TABLE t (pk INT PRIMARY KEY, u INT, j JSON, UNIQUE KEY (u)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1, @doc), (2, 2, @doc), (3, 3, @doc);
+--error ER_DUP_ENTRY
+UPDATE t SET j = JSON_SET(j, '$[0]', 'Changed'), u = 3 WHERE pk <= 2 ORDER BY pk;
+SELECT pk, u, JSON_EXTRACT(j, '$[0]'), LENGTH(j) FROM t ORDER BY pk;
+DROP TABLE t;
+
+--echo #
+--echo # 5. Savepoints (lob_partial_update). MyRocks does not support ROLLBACK TO
+--echo #    SAVEPOINT after rows were modified: the statement fails and the whole
+--echo #    transaction must be rolled back. InnoDB rolls back to the savepoint.
+--echo #
+CREATE TABLE t (j1 JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (@doc);
+START TRANSACTION;
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Knut');
+SAVEPOINT a;
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Anna');
+SELECT JSON_EXTRACT(j1, '$[0]') FROM t;
+--error ER_ROLLBACK_TO_SAVEPOINT
+ROLLBACK TO a;
+--error ER_ROLLBACK_ONLY
+COMMIT;
+ROLLBACK;
+SELECT JSON_EXTRACT(j1, '$[0]'), LENGTH(j1) FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # 6. Snapshot reader vs a concurrent partial update (json_small_partial_update_06)
+--echo #
+CREATE TABLE tt2 (ff1 JSON) ENGINE=ROCKSDB;
+INSERT INTO tt2 VALUES (JSON_ARRAY('OpenSource00', REPEAT('Linux+Ubuntu+', 3000)));
+SET SESSION transaction_isolation = DEFAULT;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]') FROM tt2;
+
+connect (con1, localhost, root,,);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+UPDATE tt2 SET ff1 = JSON_SET(ff1, '$[0]', 'OpenSource01', '$[1]', REPEAT('MySQL+Oracle+', 2500));
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+
+connection default;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+
+connection con1;
+COMMIT;
+disconnect con1;
+
+connection default;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+COMMIT;
+SELECT LENGTH(ff1), JSON_EXTRACT(ff1, '$[0]'), LEFT(ff1->>'$[1]', 13) FROM tt2;
+DROP TABLE tt2;
+
+--echo #
+--echo # 7. binlog_row_value_options=PARTIAL_JSON: the binary log carries the
+--echo #    partial JSON diff, and replaying it gives the same document
+--echo #
+SET SESSION binlog_row_value_options = PARTIAL_JSON;
+CREATE TABLE t (pk INT PRIMARY KEY, j JSON) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, @doc);
+RESET BINARY LOGS AND GTIDS;
+UPDATE t SET j = JSON_SET(j, '$[0]', 'Partial') WHERE pk = 1;
+UPDATE t SET j = JSON_REPLACE(j, '$[2].n', 2) WHERE pk = 1;
+FLUSH BINARY LOGS;
+SELECT pk, j->>'$[0]', j->>'$[2].n', CRC32(j) INTO @pk, @v0, @vn, @crc FROM t;
+SELECT @v0, @vn;
+--let $binlog_file = query_get_value(SHOW BINARY LOGS, Log_name, 1)
+--let $datadir = `SELECT @@datadir`
+# Replay the logged changes against the original document in a second table.
+UPDATE t SET j = @doc WHERE pk = 1;
+--exec $MYSQL_BINLOG --verbose $datadir/$binlog_file > $MYSQLTEST_VARDIR/tmp/innodb_port_json_partial.sql
+--exec $MYSQL test < $MYSQLTEST_VARDIR/tmp/innodb_port_json_partial.sql
+--remove_file $MYSQLTEST_VARDIR/tmp/innodb_port_json_partial.sql
+SELECT pk, j->>'$[0]' = @v0 AS v0_ok, j->>'$[2].n' = @vn AS vn_ok, CRC32(j) = @crc AS doc_ok FROM t;
+SET SESSION binlog_row_value_options = DEFAULT;
+DROP TABLE t;
+
+SET SESSION transaction_isolation = DEFAULT;
+--source include/wait_until_count_sessions.inc

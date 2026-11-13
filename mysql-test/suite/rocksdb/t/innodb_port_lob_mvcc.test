@@ -1,0 +1,158 @@
+#
+# Port of innodb.lob_mvcc (mysql-test/suite/innodb/t/lob_mvcc.test) to MyRocks,
+# merged with innodb.lob_vjhi, innodb.lob_partial_update_concurrent and the
+# visibility part of innodb.json-read-uncommitted.
+# A reader with an older snapshot must keep seeing the old LOB versions (also
+# through indexed generated columns and a BLOB prefix index) while another
+# session updates, deletes and inserts LOBs.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - the 30 KB generated JSON row is replaced by JSON_OBJECT()/REPEAT() data;
+#     values are compared with LENGTH() and CRC32() instead of printing rows
+#   - DESC index parts dropped (MyRocks treats them as ASC)
+#   - READ UNCOMMITTED is not supported by MyRocks; the "uncommitted change is
+#     invisible" check of json-read-uncommitted runs at READ COMMITTED
+#   - the writer (con1) runs at READ COMMITTED because MyRocks rejects gap locks
+#     at REPEATABLE READ; the reader keeps REPEATABLE READ, which is what the
+#     test is about
+#   - added: rolled-back writer, and the RR write-conflict error. MyRocks rejects
+#     writes inside START TRANSACTION WITH CONSISTENT SNAPSHOT (error 8005)
+#
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (
+  pk INT PRIMARY KEY,
+  k INT NOT NULL,
+  b LONGBLOB,
+  j JSON,
+  vy INT AS (JSON_UNQUOTE(j->'$.Year')) VIRTUAL,
+  vh VARCHAR(40) AS (JSON_UNQUOTE(j->'$.hash')) VIRTUAL,
+  KEY k_k (k),
+  KEY k_vy (vy),
+  KEY k_vh (vh),
+  KEY k_b (b(16))
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1 (pk, k, b, j) VALUES
+  (1, 10, REPEAT('a', 300000),
+   JSON_OBJECT('Year', 2000, 'hash', 'h1', 'pad', REPEAT('x', 100000))),
+  (2, 20, REPEAT('b', 300000),
+   JSON_OBJECT('Year', 2001, 'hash', 'h2', 'pad', REPEAT('y', 100000))),
+  (3, 30, REPEAT('c', 300000),
+   JSON_OBJECT('Year', 2002, 'hash', 'h3', 'pad', REPEAT('z', 100000)));
+
+let $show_rows = SELECT pk, k, LENGTH(b), LEFT(b, 1), CRC32(b), vy, vh, LENGTH(j->>'\$.pad') AS padlen FROM t1 ORDER BY pk;
+let $show_idx = SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy BETWEEN 1990 AND 2100 ORDER BY vy, pk;
+let $show_bidx = SELECT pk, LEFT(b, 1) FROM t1 FORCE INDEX(k_b) WHERE b LIKE 'b%' OR b LIKE 'n%' ORDER BY pk;
+
+--echo #
+--echo # 1. REPEATABLE READ snapshot vs concurrent LOB and JSON changes
+--echo #
+--echo # [default] take a consistent snapshot
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--eval $show_rows
+--eval $show_idx
+
+--echo # [con1] change LOBs: full BLOB update, partial JSON update, delete, insert
+connect (con1, localhost, root,,);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('n', 400000) WHERE pk = 1;
+UPDATE t1 SET j = JSON_SET(j, '$.Year', 2010) WHERE pk = 2;
+UPDATE t1 SET j = JSON_REPLACE(j, '$.pad', REPEAT('q', 50000), '$.hash', 'h2new') WHERE pk = 2;
+DELETE FROM t1 WHERE pk = 3;
+INSERT INTO t1 (pk, k, b, j) VALUES (4, 40, REPEAT('d', 200000), JSON_OBJECT('Year', 2003, 'hash', 'h4'));
+--echo # [con1] own changes are visible to con1
+--eval $show_rows
+
+--echo # [default] uncommitted changes are invisible
+connection default;
+--eval $show_rows
+
+connection con1;
+COMMIT;
+
+--echo # [default] committed changes are still invisible to the old snapshot,
+--echo #           also through the secondary and generated-column indexes
+connection default;
+--eval $show_rows
+--eval $show_idx
+--eval $show_bidx
+SELECT pk FROM t1 FORCE INDEX(k_vh) WHERE vh IN ('h2', 'h2new') ORDER BY pk;
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COMMIT;
+
+--echo # [default] new snapshot sees the committed state
+--eval $show_rows
+--eval $show_idx
+--eval $show_bidx
+SELECT pk, vh FROM t1 FORCE INDEX(k_vh) WHERE vh IN ('h2', 'h2new') ORDER BY pk;
+
+--echo #
+--echo # 2. READ COMMITTED reader: sees each commit, never uncommitted data
+--echo #
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+START TRANSACTION;
+SELECT pk, LENGTH(b), LEFT(b, 1) FROM t1 WHERE pk = 1;
+
+connection con1;
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('r', 500000), j = JSON_SET(j, '$.Year', 2020) WHERE pk = 1;
+
+connection default;
+SELECT pk, LENGTH(b), LEFT(b, 1), vy FROM t1 WHERE pk = 1;
+
+connection con1;
+COMMIT;
+
+connection default;
+SELECT pk, LENGTH(b), LEFT(b, 1), vy FROM t1 WHERE pk = 1;
+SELECT pk, vy FROM t1 FORCE INDEX(k_vy) WHERE vy = 2020;
+COMMIT;
+SET SESSION transaction_isolation = DEFAULT;
+
+--echo #
+--echo # 3. Snapshot vs a rolled-back LOB update
+--echo #
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+
+connection con1;
+START TRANSACTION;
+UPDATE t1 SET b = REPEAT('s', 700000) WHERE pk = 2;
+ROLLBACK;
+
+connection default;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+COMMIT;
+SELECT pk, LENGTH(b), CRC32(b) FROM t1 WHERE pk = 2;
+
+--echo #
+--echo # 4. Write conflict: a REPEATABLE READ transaction that read an old LOB
+--echo #    version cannot overwrite a newer committed version.
+--echo #    (MyRocks rejects writes inside START TRANSACTION WITH CONSISTENT
+--echo #    SNAPSHOT, so the snapshot is taken by the first read after BEGIN.)
+--echo #
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--error ER_UPDATES_WITH_CONSISTENT_SNAPSHOT
+UPDATE t1 SET b = REPEAT('u', 100) WHERE pk = 4;
+ROLLBACK;
+
+BEGIN;
+SELECT pk, LENGTH(b) FROM t1 WHERE pk = 4;
+
+connection con1;
+UPDATE t1 SET b = REPEAT('t', 100) WHERE pk = 4;
+
+connection default;
+--error ER_LOCK_DEADLOCK
+UPDATE t1 SET b = REPEAT('u', 100) WHERE pk = 4;
+ROLLBACK;
+SELECT pk, LENGTH(b), LEFT(b, 1) FROM t1 WHERE pk = 4;
+
+disconnect con1;
+CHECK TABLE t1;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

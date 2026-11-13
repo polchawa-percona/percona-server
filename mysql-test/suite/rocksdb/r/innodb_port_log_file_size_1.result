@@ -1,0 +1,124 @@
+# Test changing the RocksDB WAL size limit across crash recovery.
+CREATE TABLE t1(id INT PRIMARY KEY,bfield BLOB) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,repeat('a',2000)),(2,repeat('b',2000)),
+(3,repeat('c',2000));
+# ROLLBACK TO SAVEPOINT after modifications is not supported by MyRocks
+START TRANSACTION;
+INSERT INTO t1 VALUES (11,repeat('a',2000)),(12,repeat('b',2000)),
+(13,repeat('c',2000));
+SAVEPOINT A;
+INSERT INTO t1 VALUES (21,repeat('a',2000)),(22,repeat('b',2000)),
+(23,repeat('c',2000));
+SAVEPOINT B;
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+21	aaaaaaaaaaaaaaaaaaaa
+22	bbbbbbbbbbbbbbbbbbbb
+23	cccccccccccccccccccc
+ROLLBACK TO A;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+ROLLBACK;
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+# The same final state without ROLLBACK TO SAVEPOINT
+START TRANSACTION;
+INSERT INTO t1 VALUES (11,repeat('a',2000)),(12,repeat('b',2000)),
+(13,repeat('c',2000));
+COMMIT;
+START TRANSACTION;
+INSERT INTO t1 VALUES (21,repeat('a',2000)),(22,repeat('b',2000)),
+(23,repeat('c',2000));
+ROLLBACK;
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+
+# Kill and restart with a different WAL size limit (20M)
+# Kill and restart: --rocksdb_max_total_wal_size=20971520
+SELECT @@rocksdb_max_total_wal_size;
+@@rocksdb_max_total_wal_size
+20971520
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+INSERT INTO t1 VALUES (1,repeat('a',2000)),(2,repeat('b',2000)),
+(3,repeat('c',2000));
+ERROR 23000: Duplicate entry '1' for key 't1.PRIMARY'
+INSERT INTO t1 VALUES (21,repeat('a',2000)),(22,repeat('b',2000)),
+(23,repeat('c',2000));
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+21	aaaaaaaaaaaaaaaaaaaa
+22	bbbbbbbbbbbbbbbbbbbb
+23	cccccccccccccccccccc
+
+# Kill and restart with a different WAL size limit (8M)
+# Kill and restart: --rocksdb_max_total_wal_size=8388608
+SELECT @@rocksdb_max_total_wal_size;
+@@rocksdb_max_total_wal_size
+8388608
+INSERT INTO t1 VALUES (21,repeat('a',2000));
+ERROR 23000: Duplicate entry '21' for key 't1.PRIMARY'
+INSERT INTO t1 VALUES (24,repeat('a',2000)),(25,repeat('b',2000));
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+21	aaaaaaaaaaaaaaaaaaaa
+22	bbbbbbbbbbbbbbbbbbbb
+23	cccccccccccccccccccc
+24	aaaaaaaaaaaaaaaaaaaa
+25	bbbbbbbbbbbbbbbbbbbb
+
+# Kill and restart with default parameters
+# Kill and restart
+SELECT id,LEFT(bfield,20) FROM t1;
+id	LEFT(bfield,20)
+1	aaaaaaaaaaaaaaaaaaaa
+2	bbbbbbbbbbbbbbbbbbbb
+3	cccccccccccccccccccc
+11	aaaaaaaaaaaaaaaaaaaa
+12	bbbbbbbbbbbbbbbbbbbb
+13	cccccccccccccccccccc
+21	aaaaaaaaaaaaaaaaaaaa
+22	bbbbbbbbbbbbbbbbbbbb
+23	cccccccccccccccccccc
+24	aaaaaaaaaaaaaaaaaaaa
+25	bbbbbbbbbbbbbbbbbbbb
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+
+# Cleanup
+DROP TABLE t1;

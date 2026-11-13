@@ -1,0 +1,56 @@
+CREATE TABLE t(j1 JSON) ENGINE=ROCKSDB;
+SET DEBUG_SYNC = 'alter_opened_table SIGNAL start_dml WAIT_FOR alter_continue';
+ALTER TABLE t row_format = compact;;
+SET DEBUG_SYNC = 'now WAIT_FOR start_dml';
+start transaction;
+# Sven
+select json_extract(j1, '$[0]') from t;
+json_extract(j1, '$[0]')
+"Sven"
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Knut');
+# Knut
+select json_extract(j1, '$[0]') from t;
+json_extract(j1, '$[0]')
+"Knut"
+UPDATE t SET j1 = JSON_SET(j1, '$[0]', 'Anna');
+# Anna
+select json_extract(j1, '$[0]') from t;
+json_extract(j1, '$[0]')
+"Anna"
+rollback;
+SET DEBUG_SYNC = 'now SIGNAL alter_continue';
+# Sven
+select json_extract(j1, '$[0]') from t;
+json_extract(j1, '$[0]')
+"Sven"
+select length(j1) from t;
+length(j1)
+30042
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+drop table t;
+SET DEBUG_SYNC = reset;
+#
+# Bug #28510599 THE MYSQL.IBD FILE SIZE IS CONSTANTLY GROWING.
+#
+CREATE TABLE t1 (f1 INT AUTO_INCREMENT PRIMARY KEY, f2 LONGBLOB)
+ENGINE=ROCKSDB;
+SET @fs_limit = 5 * 1024 * 1024;
+# Execute multiple insert-delete operations.
+Insert/Delete count = 100
+The SST size is not growing.
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+DROP TABLE t1;
+CREATE TABLE t1 (f1 INT AUTO_INCREMENT PRIMARY KEY, f2 LONGBLOB)
+ENGINE=ROCKSDB;
+INSERT INTO t1 (f2) VALUES (repeat('x', 65764));
+# Execute multiple update operations.
+Update count = 100
+The SST size is not growing.
+SELECT f1, LENGTH(f2), LEFT(f2, 3) FROM t1;
+f1	LENGTH(f2)	LEFT(f2, 3)
+1	65764	xxx
+DROP TABLE t1;

@@ -1,0 +1,97 @@
+#
+# Port of innodb.zlob_partial_update_concurrent
+# (mysql-test/suite/innodb/t/zlob_partial_update_concurrent.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB written explicitly; ROW_FORMAT=COMPRESSED and
+#     innodb_compression_level dropped
+#   - MyRocks has no partial LOB update: the zlob_print_partial_update_hit debug
+#     keyword and the search for its message in the error log are dropped. The JSON_SET
+#     update rewrites the whole value; the snapshot checks are kept unchanged
+#   - the updating session runs at READ COMMITTED because MyRocks rejects gap locks at
+#     REPEATABLE READ (the table has no primary key, so the UPDATE scans the hidden key);
+#     the reading session keeps its REPEATABLE READ consistent snapshot
+#   - checks added at the end: the value survives a memtable flush and compaction
+#   - no debug features are used, so the test also runs on release builds
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE tab82 (col28 JSON) ENGINE=ROCKSDB;
+
+set @json_doc_1 = concat('["OpenSource", "', repeat('Linux+Ubuntu+', 16000), '"]');
+set @json_doc_2 = concat('["OpenSource", "', repeat('MySQL+Oracle+', 16000), '"]');
+set @data_1 = repeat('Linux+Ubuntu+', 16000);
+set @data_2 = repeat('MySQL+Oracle+', 16000);
+
+INSERT INTO tab82 VALUES (@json_doc_1);
+
+--echo # Connection default:
+--echo # Linux+Ubuntu
+start transaction with consistent snapshot;
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+select cast(col28 as char) = @json_doc_1 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+
+--echo # Connection con1:
+connect (con1,localhost,root,,);
+connection con1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+set @json_doc_1 = concat('["OpenSource", "', repeat('Linux+Ubuntu+', 16000), '"]');
+set @json_doc_2 = concat('["OpenSource", "', repeat('MySQL+Oracle+', 16000), '"]');
+set @data_1 = repeat('Linux+Ubuntu+', 16000);
+set @data_2 = repeat('MySQL+Oracle+', 16000);
+start transaction;
+UPDATE tab82 SET col28 = JSON_SET(col28, '$[1]', @data_2);
+
+--echo # MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+select cast(col28 as char) = @json_doc_2 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+
+--echo # Connection default:
+connection default;
+
+--echo # Linux+Ubuntu
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+select cast(col28 as char) = @json_doc_1 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+
+--echo # Connection con1:
+connection con1;
+--echo # MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+select cast(col28 as char) = @json_doc_2 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+commit;
+
+--echo # Connection default:
+connection default;
+
+disconnect con1;
+
+--echo # Linux+Ubuntu
+select strcmp(col28, @json_doc_1) = 0 from tab82;
+select cast(col28 as char) = @json_doc_1 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_1 from tab82;
+
+commit;
+
+--echo # MySQL+Oracle
+select strcmp(col28, @json_doc_2) = 0 from tab82;
+select cast(col28 as char) = @json_doc_2 from tab82;
+select length(col28) from tab82;
+select json_extract(col28, '$[1]') = @data_2 from tab82;
+
+--echo # After a memtable flush and compaction
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+select count(*) from tab82;
+select cast(col28 as char) = @json_doc_2 from tab82;
+
+drop table tab82;
+--source include/wait_until_count_sessions.inc
