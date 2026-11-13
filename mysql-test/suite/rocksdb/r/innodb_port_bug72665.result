@@ -1,0 +1,26 @@
+CREATE TABLE t1(c42 tinyblob not null, c45 TEXT, unique(c42 (255)), unique(c45 (255))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES ('x', ''), ('y', NULL);
+ALTER TABLE t1 MODIFY c45 SET('') NOT NULL;
+ERROR 01000: Data truncated for column 'c45' at row 2
+DELETE FROM t1 WHERE c45 IS NULL;
+ALTER TABLE t1 MODIFY c45 SET('') NOT NULL;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c42` tinyblob NOT NULL,
+  `c45` set('') NOT NULL,
+  UNIQUE KEY `c42` (`c42`(255)),
+  UNIQUE KEY `c45` (`c45`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT c42, HEX(c45) FROM t1 FORCE INDEX (c42) WHERE c42 = 'x';
+c42	HEX(c45)
+x	
+SELECT c42, HEX(c45) FROM t1 FORCE INDEX (c45) WHERE c45 = '';
+c42	HEX(c45)
+x	
+INSERT INTO t1 VALUES ('z', '');
+ERROR 23000: Duplicate entry '' for key 't1.c45'
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

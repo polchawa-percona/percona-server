@@ -1,0 +1,66 @@
+#
+# Bug #47453: InnoDB incorrectly changes TIMESTAMP columns when
+#  JOINed during an UPDATE
+#
+CREATE TABLE t1 (d INT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT, b INT,
+c TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+ON UPDATE CURRENT_TIMESTAMP(6)) ENGINE=ROCKSDB;
+# set up our data elements
+INSERT INTO t1 (d) VALUES (1);
+INSERT INTO t2 (a,b) VALUES (1,1);
+SELECT c INTO @bug47453 FROM t2;
+SELECT c!=@bug47453 FROM t1 JOIN t2 ON d=a;
+c!=@bug47453
+0
+UPDATE t1 JOIN t2 ON d=a SET b=1 WHERE a=1;
+SELECT c!=@bug47453 FROM t1 JOIN t2 ON d=a;
+c!=@bug47453
+0
+UPDATE t1 JOIN t2 ON d=a SET b=1;
+# should be 0
+SELECT c!=@bug47453 FROM t1 JOIN t2 ON d=a;
+c!=@bug47453
+0
+UPDATE t1 JOIN t2 ON d=a SET b=2;
+# should not be 0
+SELECT c!=@bug47453 FROM t1 JOIN t2 ON d=a;
+c!=@bug47453
+1
+DROP TABLE t1, t2;
+#
+# MyRocks: the same with a primary key and an index on the TIMESTAMP column
+#
+CREATE TABLE t1 (d INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY, b INT,
+c TIMESTAMP(6) NOT NULL DEFAULT '2000-01-01 00:00:00'
+  ON UPDATE CURRENT_TIMESTAMP(6), KEY kc (c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+INSERT INTO t2 (a, b) VALUES (1, 1), (2, 2), (3, 3);
+UPDATE t1 JOIN t2 ON d=a SET b=b;
+# no row changed: every TIMESTAMP is still the default
+SELECT a, c = '2000-01-01 00:00:00' AS unchanged FROM t2 ORDER BY a;
+a	unchanged
+1	1
+2	1
+3	1
+SELECT COUNT(*) FROM t2 FORCE INDEX (kc) WHERE c = '2000-01-01 00:00:00';
+COUNT(*)
+3
+UPDATE t1 JOIN t2 ON d=a SET b=b+10;
+# rows 1 and 2 changed, row 3 not
+SELECT a, b, c = '2000-01-01 00:00:00' AS unchanged FROM t2 ORDER BY a;
+a	b	unchanged
+1	11	0
+2	12	0
+3	3	1
+SELECT a FROM t2 FORCE INDEX (kc) WHERE c = '2000-01-01 00:00:00';
+a
+3
+SELECT COUNT(*) FROM t2 FORCE INDEX (kc) WHERE c > '2000-01-01 00:00:00';
+COUNT(*)
+2
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;
