@@ -1,0 +1,54 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11849: heap corruption under pstress on non-partitioned MyRocks tables.
+#
+# A locking read through a secondary key at READ COMMITTED reads the row by
+# primary key in ha_rocksdb::secondary_index_read() and then re-packs the
+# secondary key from the row buffer to check that the row still matches.
+# The re-check runs even when get_row_by_rowid() failed, for example with a
+# lock wait timeout. The row buffer then still holds the previous row, with
+# BLOB/TEXT pointers into memory that may have been freed since (ASAN reported
+# a heap-use-after-free READ in Rdb_key_def::pack_record() under a stress
+# load). If the stale key differs, the error is replaced with
+# HA_ERR_KEY_NOT_FOUND and the row is silently skipped: the statement returns
+# no row instead of failing with ER_LOCK_WAIT_TIMEOUT.
+#
+# The test asserts the InnoDB behaviour: the lock wait timeout is returned.
+#
+
+CREATE TABLE t1 (id INT PRIMARY KEY, t TEXT, u INT,
+                 KEY kt (t(10)), KEY ku (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, REPEAT('a', 20), 1), (2, REPEAT('b', 5000), 2);
+
+connect (con1, localhost, root,,);
+BEGIN;
+UPDATE t1 SET u = u + 10 WHERE id = 1;
+
+connection default;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--echo # Leave stale TEXT data of earlier rows in the row buffer.
+SELECT id, LENGTH(t) FROM t1 WHERE id = 1;
+SELECT u FROM t1 WHERE id = 2;
+BEGIN;
+--echo # Row 1 matches and is locked by con1.
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT id, u FROM t1 FORCE INDEX (kt) WHERE t LIKE 'a%' FOR UPDATE;
+ROLLBACK;
+
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 FORCE INDEX (kt) SET u = u + 1 WHERE t LIKE 'a%';
+
+connection con1;
+ROLLBACK;
+disconnect con1;
+
+connection default;
+SET SESSION transaction_isolation = DEFAULT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SELECT id, LENGTH(t), u FROM t1 ORDER BY id;
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc

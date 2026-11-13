@@ -1,0 +1,20 @@
+# ASAN: heap-use-after-free. Other builds: REPLACE usually fails, error 1032.
+CREATE TABLE t1 (
+id INT PRIMARY KEY,
+b BLOB,
+vb BLOB GENERATED ALWAYS AS (b) VIRTUAL,
+UNIQUE KEY uvb (vb(12))
+) ENGINE=ROCKSDB;
+INSERT INTO t1 (id, b) VALUES
+(1, REPEAT('a', 40)), (2, REPEAT('b', 44));
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Conflicts with row 1 on the primary key and with row 2 on uvb.
+REPLACE INTO t1 (id, b) VALUES (1, REPEAT('b', 44));
+SELECT id, LENGTH(b), LEFT(b, 3), LEFT(vb, 3) FROM t1 ORDER BY id;
+id	LENGTH(b)	LEFT(b, 3)	LEFT(vb, 3)
+1	44	bbb	bbb
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SET SESSION transaction_isolation = DEFAULT;
+DROP TABLE t1;
