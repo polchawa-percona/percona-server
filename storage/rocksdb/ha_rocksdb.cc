@@ -16842,6 +16842,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {
