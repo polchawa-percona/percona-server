@@ -1,0 +1,103 @@
+#
+# Port of innodb.xa_prepare_lock_release (mysql-test/suite/innodb/t/xa_prepare_lock_release.test)
+# to MyRocks.
+# Bug#27189701 INNODB: EARLY RELEASE OF GAP LOCKS FOR RC ISOLATION [XA PREPARE]
+# Changes from the original:
+#   - ENGINE=ROCKSDB added
+#   - MyRocks has no gap locks, so the InnoDB debug point that forces gap locks to be
+#     released at XA PREPARE (ib_force_release_gap_lock_prepare) and the lock_wait_will_wait
+#     sync point are dropped. What remains is the MyRocks counterpart of the scenario:
+#     inserts into keys the prepared XA transaction did not touch are never blocked, while
+#     the rows it changed (and, MyRocks-specific, a key it locked through an UPDATE that
+#     found no row, see rocksdb.lock_rows_not_exist) stay locked until XA COMMIT
+#   - runs at READ COMMITTED because MyRocks rejects locking reads that are not on a full
+#     unique key in multi-statement transactions at REPEATABLE READ (gap-lock rule)
+#   - waiting statements use a long rocksdb_lock_wait_timeout and are detected through
+#     the processlist instead of a debug sync point
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (col1 INT PRIMARY KEY, col2 int) ENGINE=ROCKSDB;
+
+--echo Connection: default
+--echo # 1. UPDATE of a missing key inside a prepared XA transaction
+XA START 'lock_trx';
+SELECT * FROM t1;
+UPDATE t1 SET col2 = 100 where col1 = 10;
+
+connect (con1,localhost,root);
+--echo Connection: con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--echo # The key locked by the XA transaction's UPDATE is not insertable
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 values(10, 100);
+--echo # Other keys are not blocked
+INSERT INTO t1 values(20, 200);
+
+connection default;
+--echo Connection: default
+XA END 'lock_trx';
+XA PREPARE 'lock_trx';
+
+connection con1;
+--echo Connection: con1
+--echo # Still locked while the transaction is prepared
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 values(10, 100);
+INSERT INTO t1 values(30, 300);
+SET SESSION rocksdb_lock_wait_timeout = 50;
+--send INSERT INTO t1 values(10, 100)
+
+connection default;
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'INSERT INTO t1 values(10, 100)' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+--echo Connection: default
+XA COMMIT 'lock_trx';
+
+connection con1;
+--echo Connection: con1
+--reap
+SELECT * FROM t1 ORDER BY col1;
+
+--echo # 2. UPDATE of every row inside a prepared XA transaction
+connection default;
+--echo Connection: default
+XA START 'lock_trx_1';
+UPDATE t1 SET col2 = col2 + 1;
+
+connection con1;
+--echo Connection: con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--echo # New keys are never blocked
+INSERT INTO t1 values(5, 50);
+
+connection default;
+--echo Connection: default
+XA END 'lock_trx_1';
+XA PREPARE 'lock_trx_1';
+
+connection con1;
+--echo Connection: con1
+INSERT INTO t1 values(15, 150);
+INSERT INTO t1 values(25, 150);
+--echo # The rows the prepared transaction changed stay locked
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET col2 = 0 WHERE col1 = 20;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 WHERE col1 = 10 FOR SHARE;
+--echo # Consistent reads see the pre-XA values
+SELECT * FROM t1 ORDER BY col1;
+
+disconnect con1;
+
+connection default;
+--echo Connection: default
+XA COMMIT 'lock_trx_1';
+SELECT * FROM t1 ORDER BY col1;
+
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc
