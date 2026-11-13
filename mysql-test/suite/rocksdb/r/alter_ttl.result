@@ -1,0 +1,152 @@
+#
+# Adding, changing and removing TTL on populated MyRocks tables with
+# ALTER TABLE. Rows expire in compaction; read filtering is off so that
+# COUNT(*) shows what compaction kept. rocksdb.alter_table_comment_inplace
+# covers changing ttl_duration in place; this test covers the changes that
+# need a COPY rebuild, and what the rebuild does to row timestamps.
+#
+#
+# 1. Explicit TTL column added to a populated table. Half the rows have an
+#    old timestamp; they expire at the next compaction after the ALTER.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, ts BIGINT UNSIGNED NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+100	100
+ALTER TABLE t1 COMMENT = 'ttl_duration=100;ttl_col=ts;', ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+ALTER TABLE t1 COMMENT = 'ttl_duration=100;ttl_col=ts;', ALGORITHM=COPY;
+SELECT INDEX_NAME, TTL_DURATION, INDEX_FLAGS FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	TTL_DURATION	INDEX_FLAGS
+kb	100	1
+PRIMARY	100	1
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+100	100
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+50	50
+SELECT MIN(a), MAX(a) FROM t1;
+MIN(a)	MAX(a)
+51	100
+# Changing ttl_duration to a longer value keeps rows that would have
+# expired with the shorter one.
+INSERT INTO t1 VALUES (1, 1, UNIX_TIMESTAMP() - 1000);
+ALTER TABLE t1 COMMENT = 'ttl_duration=100000;ttl_col=ts;';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+51	51
+# The TTL column cannot be dropped or made nullable while it is the TTL
+# column; its type cannot change to a non-timestamp type.
+ALTER TABLE t1 DROP COLUMN ts;
+ERROR HY000: TTL column (ts) in MyRocks must be an unsigned non-null 64-bit integer or non-null timestamp, exist inside the table, and have an accompanying ttl duration.
+ALTER TABLE t1 MODIFY ts BIGINT UNSIGNED NULL;
+ERROR HY000: TTL column (ts) in MyRocks must be an unsigned non-null 64-bit integer or non-null timestamp, exist inside the table, and have an accompanying ttl duration.
+ALTER TABLE t1 MODIFY ts VARCHAR(20) NOT NULL;
+ERROR HY000: TTL column (ts) in MyRocks must be an unsigned non-null 64-bit integer or non-null timestamp, exist inside the table, and have an accompanying ttl duration.
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+51	51
+# Switching the TTL column to another column re-evaluates expiry by the
+# new column.
+ALTER TABLE t1 ADD COLUMN ts2 BIGINT UNSIGNED NOT NULL DEFAULT 0;
+UPDATE t1 SET ts2 = IF(a % 2 = 0, UNIX_TIMESTAMP() - 1000000, UNIX_TIMESTAMP() + 100000);
+ALTER TABLE t1 COMMENT = 'ttl_duration=100;ttl_col=ts2;', ALGORITHM=COPY;
+SELECT INDEX_NAME, TTL_DURATION, INDEX_FLAGS FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	TTL_DURATION	INDEX_FLAGS
+kb	100	1
+PRIMARY	100	1
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+26	26
+SELECT COUNT(*) FROM t1 WHERE a % 2 = 0;
+COUNT(*)
+0
+#
+# 2. Removing TTL keeps every row, also expired-looking ones.
+#
+INSERT INTO t1 (a, b, ts, ts2) VALUES (1000, 1000, 0, 0);
+ALTER TABLE t1 COMMENT = '', ALGORITHM=COPY;
+SELECT INDEX_NAME, TTL_DURATION, INDEX_FLAGS FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	TTL_DURATION	INDEX_FLAGS
+kb	0	0
+PRIMARY	0	0
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t1 WHERE a = 1000;
+COUNT(*)
+1
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+27	27
+DROP TABLE t1;
+#
+# 3. Implicit TTL (no ttl_col) added to a populated table. A COPY rebuild
+#    writes new row timestamps, so rows are aged from the ALTER, not from
+#    their original insert time.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -1000;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
+ALTER TABLE t1 COMMENT = 'ttl_duration=100;', ALGORITHM=COPY;
+SELECT INDEX_NAME, TTL_DURATION, INDEX_FLAGS FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	TTL_DURATION	INDEX_FLAGS
+kb	100	1
+PRIMARY	100	1
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+3	3
+# Time travel past the duration: now they expire, primary and secondary.
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 1000;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+0	0
+# Rows written while TTL is on, then TTL removed by COPY: the rebuilt rows
+# carry no TTL, so time travel no longer expires them.
+SET GLOBAL rocksdb_debug_ttl_rec_ts = -1000;
+INSERT INTO t1 VALUES (4, 4), (5, 5);
+SET GLOBAL rocksdb_debug_ttl_rec_ts = 0;
+ALTER TABLE t1 COMMENT = '', ALGORITHM=COPY;
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 3600;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_debug_ttl_snapshot_ts = 0;
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS n_pk, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS n_kb;
+n_pk	n_kb
+2	2
+# Removing implicit TTL in place is not supported.
+ALTER TABLE t1 COMMENT = 'ttl_duration=100;', ALGORITHM=COPY;
+ALTER TABLE t1 COMMENT = '', ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
+# Restart: the TTL definition survives.
+# restart
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2
+SELECT INDEX_NAME, TTL_DURATION, INDEX_FLAGS FROM INFORMATION_SCHEMA.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME	TTL_DURATION	INDEX_FLAGS
+kb	100	1
+PRIMARY	100	1
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ttl_duration=100;'
+DROP TABLE t1;

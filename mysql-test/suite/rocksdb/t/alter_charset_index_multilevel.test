@@ -1,0 +1,60 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Like rocksdb.alter_charset_index, for multi-level collations whose sort
+--echo # keys can be longer than the column (latin2_czech_cs, utf8mb4_0900_as_cs,
+--echo # utf8mb4_0900_as_ci), with a full index, a prefix index and the column in
+--echo # the primary key. The expected result is the InnoDB result.
+--echo #
+--echo # Disabled: keys in these collations cannot be read back through the
+--echo # index (error 505 'Found data corruption'), port-findings #4. With the
+--echo # fix for #4 this test passes. The multi-column prefix index problem on
+--echo # utf8mb4_0900_ai_ci is a separate bug (PS-11661) with its own test.
+--echo #
+
+call mtr.add_suppression("Trying to create an index with a multi-level collation");
+call mtr.add_suppression("Will handle this collation internally as if it had a NO_PAD attribute");
+
+--let $engine = ROCKSDB
+
+--echo # latin2_czech_cs
+eval CREATE TABLE t1 (
+  c VARCHAR(20) CHARACTER SET latin2 COLLATE latin2_general_ci NOT NULL,
+  id INT NOT NULL,
+  PRIMARY KEY (c, id),
+  UNIQUE KEY kid (id),
+  KEY kc (c),
+  KEY kp (c(3))
+) ENGINE=$engine;
+INSERT INTO t1 VALUES ('a', 1), ('A', 2), ('ch', 3), ('CH', 4), ('h', 5),
+  ('č', 6), ('c', 7), ('ř', 8), ('r', 9), ('ž', 10), ('z', 11), ('', 12),
+  ('chchch', 13), ('abc  ', 14), ('abc', 15);
+INSERT INTO t1 VALUES (_latin2 0xff, 16), (_latin2 0x5ff, 17);
+ALTER TABLE t1 MODIFY c VARCHAR(20) CHARACTER SET latin2 COLLATE latin2_czech_cs NOT NULL;
+--source suite/rocksdb/include/alter_charset_index_check.inc
+DROP TABLE t1;
+
+--let $cs_i = 0
+while ($cs_i < 2) {
+  --let $coll = utf8mb4_0900_as_cs
+  if ($cs_i == 1)
+  {
+    --let $coll = utf8mb4_0900_as_ci
+  }
+  --echo # $coll
+  eval CREATE TABLE t1 (
+    c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    id INT NOT NULL,
+    PRIMARY KEY (c, id),
+    UNIQUE KEY kid (id),
+    KEY kc (c),
+    KEY kp (c(2))
+  ) ENGINE=$engine;
+  INSERT INTO t1 VALUES ('ﬁ', 1), ('fi', 2), ('Ǆ', 3), ('DŽ', 4), ('😀', 5),
+    ('ß', 6), ('ss', 7), ('é', 8), ('E', 9), ('e', 10), ('abc', 11), ('ABC', 12);
+  eval ALTER TABLE t1 MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE $coll NOT NULL;
+  --source suite/rocksdb/include/alter_charset_index_check.inc
+  DROP TABLE t1;
+  inc $cs_i;
+}
+

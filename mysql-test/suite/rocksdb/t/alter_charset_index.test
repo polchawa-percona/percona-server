@@ -1,0 +1,133 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # Changing the character set or collation of indexed columns with ALTER
+--echo # TABLE rebuilds the MyRocks keys in the new collation's mem-comparable
+--echo # format. After each ALTER, every row must be found through the full
+--echo # secondary index, the prefix index and the primary key, and the index
+--echo # scans must return the same rows as the table scan. The same steps run on
+--echo # InnoDB for comparison; the results must be identical.
+--echo #
+--echo # Multi-level collations whose sort keys are longer than the column
+--echo # (latin2_czech_cs, utf8mb4_0900_as_cs with prefix keys) are not here:
+--echo # they fail with error 505 today (port-findings #4) and are covered by
+--echo # rocksdb.alter_charset_index_multilevel (disabled). LDML collations are
+--echo # covered by rocksdb.innodb_port_innodb_ctype_ldml.
+--echo #
+
+--let $engine_i = 0
+while ($engine_i < 2) {
+  --let $engine = ROCKSDB
+  if ($engine_i == 1) {
+    --let $engine = InnoDB
+  }
+  --echo
+  --echo ######## Engine: $engine
+  --echo
+
+  --echo # Table with a latin1-representable data set, converted through the
+  --echo # character sets. The primary key is the string column itself.
+  eval CREATE TABLE t1 (
+    c VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL,
+    id INT NOT NULL,
+    PRIMARY KEY (c, id),
+    UNIQUE KEY kid (id),
+    KEY kc (c),
+    KEY kp (c(3))
+  ) ENGINE=$engine;
+  INSERT INTO t1 VALUES ('a', 1), ('A', 2), ('á', 3), ('ab', 4), ('ss', 5),
+    ('ß', 6), ('ae', 7), ('æ', 8), ('abc  ', 9), ('abc', 10), ('', 11),
+    ('Zürich', 12), ('zurich', 13), ('ÿ', 14), ('y', 15), ('ñ', 16),
+    ('n', 17), ('aaaaaaaaaaaaaaaaaaaa', 18), ('AAAAAAAAAAAAAAAAAAAA', 19),
+    ('o\'clock', 20);
+
+  --let $cs_i = 0
+  while ($cs_i < 9) {
+    if ($cs_i == 0)
+    {
+      --let $alter = CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci
+    }
+    if ($cs_i == 1)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL
+    }
+    if ($cs_i == 2)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL
+    }
+    if ($cs_i == 3)
+    {
+      --let $alter = CONVERT TO CHARACTER SET ucs2 COLLATE ucs2_general_ci
+    }
+    if ($cs_i == 4)
+    {
+      --let $alter = CONVERT TO CHARACTER SET utf16 COLLATE utf16_unicode_ci
+    }
+    if ($cs_i == 5)
+    {
+      --let $alter = CONVERT TO CHARACTER SET gb18030 COLLATE gb18030_chinese_ci
+    }
+    if ($cs_i == 6)
+    {
+      --let $alter = CONVERT TO CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci
+    }
+    if ($cs_i == 7)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_german2_ci NOT NULL
+    }
+    if ($cs_i == 8)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL
+    }
+    --echo # ALTER TABLE t1 $alter
+    eval ALTER TABLE t1 $alter;
+    --source suite/rocksdb/include/alter_charset_index_check.inc
+    inc $cs_i;
+  }
+  DROP TABLE t1;
+
+  --echo # Unicode data set, outside latin1: supplementary characters,
+  --echo # ligatures, title-case digraphs and combining marks.
+  eval CREATE TABLE t1 (
+    c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    id INT NOT NULL,
+    PRIMARY KEY (c, id),
+    UNIQUE KEY kid (id),
+    KEY kc (c),
+    KEY kp (c(3))
+  ) ENGINE=$engine;
+  INSERT INTO t1 VALUES ('ﬁ', 1), ('fi', 2), ('Ǆ', 3), ('DŽ', 4), ('😀', 5),
+    ('😀😀', 6), ('é', 7), ('é', 8), ('日本語', 9), ('日本', 10),
+    ('Ωmega', 11), ('ωmega', 12), ('İstanbul', 13), ('istanbul', 14);
+  UPDATE t1 SET c = CONCAT('e', _utf8mb4 0xCC81) WHERE id = 7;
+
+  --let $cs_i = 0
+  while ($cs_i < 5) {
+    if ($cs_i == 0)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL
+    }
+    if ($cs_i == 1)
+    {
+      --let $alter = MODIFY c VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci NOT NULL
+    }
+    if ($cs_i == 2)
+    {
+      --let $alter = CONVERT TO CHARACTER SET utf16 COLLATE utf16_bin
+    }
+    if ($cs_i == 3)
+    {
+      --let $alter = CONVERT TO CHARACTER SET gb18030 COLLATE gb18030_unicode_520_ci
+    }
+    if ($cs_i == 4)
+    {
+      --let $alter = CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+    }
+    --echo # ALTER TABLE t1 $alter
+    eval ALTER TABLE t1 $alter;
+    --source suite/rocksdb/include/alter_charset_index_check.inc
+    inc $cs_i;
+  }
+  DROP TABLE t1;
+  inc $engine_i;
+}
