@@ -1,0 +1,115 @@
+# Ported from innodb.innodb-alter-autoinc (suite/innodb/t/innodb-alter-autoinc.test).
+# Changes for MyRocks:
+# - ENGINE=ROCKSDB.
+# - MyRocks cannot change the primary key in place, so the ALGORITHM=INPLACE rebuilds
+#   use ALGORITHM=COPY, and LOCK=NONE may fail with either "not supported" error.
+# - The original uses AUTO_INCREMENT_OFFSET = 30 with AUTO_INCREMENT_INCREMENT = 5. MySQL
+#   ignores an offset larger than the increment, and MyRocks currently assigns values one
+#   step above InnoDB in that case (see innodb_port_innodb_alter_autoinc_offset). This
+#   port uses OFFSET = 5, which yields the same 5*N series that an ignored offset should,
+#   so the assigned ids match the InnoDB result.
+# - SHOW CREATE TABLE prints AUTO_INCREMENT as "last used value + 1" on MyRocks (66, 71,
+#   76) and as the next value of the 5*N series on InnoDB (70, 75, 80). The next assigned
+#   id is the same on both engines.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(347),(33101),(123),(45),(6);
+# NULL -> NOT NULL only allowed INPLACE if strict sql_mode is on.
+ALTER TABLE t1 ADD PRIMARY KEY(a);
+
+# We cannot assign AUTO_INCREMENT values during online index creation.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON,ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	LOCK=NONE;
+
+--error ER_WRONG_AUTO_KEY
+ALTER TABLE t1 ADD id INT AUTO_INCREMENT;
+
+--error ER_WRONG_AUTO_KEY
+ALTER TABLE t1 ADD id INT AUTO_INCREMENT, ADD INDEX(a, id);
+
+ALTER TABLE t1 ADD id INT NOT NULL, ADD INDEX(id, a);
+
+SELECT * FROM t1;
+
+# Test with a non-default increment and offset
+SET AUTO_INCREMENT_INCREMENT = 5, AUTO_INCREMENT_OFFSET = 5;
+
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	DROP COLUMN id, AUTO_INCREMENT = 42, ALGORITHM=COPY;
+
+SHOW CREATE TABLE t1;
+
+# The autoinc next value should increase. It is not rolled back.
+BEGIN;
+INSERT INTO t1 VALUES(7,0);
+SELECT * FROM t1;
+ROLLBACK;
+
+SHOW CREATE TABLE t1;
+
+# We cannot assign AUTO_INCREMENT values during online index creation.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON,ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	DROP COLUMN id, AUTO_INCREMENT = 42, LOCK=NONE;
+
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	DROP COLUMN id, AUTO_INCREMENT = 42, ALGORITHM=COPY;
+
+SELECT * FROM t1;
+SHOW CREATE TABLE t1;
+
+INSERT INTO t1 SET a=123;
+INSERT INTO t1 VALUES(-123,-45);
+
+ALTER TABLE t1 AUTO_INCREMENT = 75;
+
+INSERT INTO t1 SET a=123;
+SELECT * FROM t1;
+
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+# ALGORITHM=INPLACE should deliver identical results to ALGORITHM=COPY.
+CREATE TABLE t1 (a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(347),(33101),(123),(45),(6);
+ALTER TABLE t1 ADD PRIMARY KEY(a);
+
+ALTER TABLE t1 ADD id INT NOT NULL, ADD INDEX(id, a);
+
+SELECT * FROM t1;
+
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	DROP COLUMN id, AUTO_INCREMENT = 42, ALGORITHM=COPY;
+
+SHOW CREATE TABLE t1;
+
+# The autoinc next value should increase. It is not rolled back.
+BEGIN;
+INSERT INTO t1 VALUES(7,0);
+SELECT * FROM t1;
+ROLLBACK;
+
+SHOW CREATE TABLE t1;
+
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+	DROP COLUMN id, AUTO_INCREMENT = 42, ALGORITHM=COPY;
+
+SELECT * FROM t1;
+
+SHOW CREATE TABLE t1;
+
+INSERT INTO t1 SET a=123;
+INSERT INTO t1 VALUES(-123,-45);
+
+ALTER TABLE t1 AUTO_INCREMENT = 75;
+
+INSERT INTO t1 SET a=123;
+SELECT * FROM t1;
+
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;

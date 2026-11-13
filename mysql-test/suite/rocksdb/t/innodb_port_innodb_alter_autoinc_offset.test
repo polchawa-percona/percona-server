@@ -1,0 +1,36 @@
+# Ported from the AUTO_INCREMENT_OFFSET > AUTO_INCREMENT_INCREMENT part of
+# innodb.innodb-alter-autoinc (suite/innodb/t/innodb-alter-autoinc.test).
+#
+# MySQL ignores auto_increment_offset when it is larger than auto_increment_increment.
+# InnoDB then treats the offset as 0, so with increment 5 the ids are the 5*N series
+# (45, 50, ... after AUTO_INCREMENT=42). The .result file holds those InnoDB values.
+#
+# MyRocks currently replaces the offset with 1 (ha_rocksdb::get_auto_increment), returns
+# 46, and the server rounds that up with the real offset (30) to 50, so every id is one
+# step higher than on InnoDB. This test is disabled in collections/disabled.def until
+# that is fixed.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, a INT) ENGINE=ROCKSDB AUTO_INCREMENT=42;
+SET AUTO_INCREMENT_INCREMENT = 5, AUTO_INCREMENT_OFFSET = 30;
+INSERT INTO t1 (a) VALUES (1), (2);
+SELECT * FROM t1 ORDER BY id;
+DROP TABLE t1;
+
+# Same through a COPY rebuild that adds the AUTO_INCREMENT column, as in the original test.
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (6), (45), (123);
+ALTER TABLE t1 DROP PRIMARY KEY, ADD id INT AUTO_INCREMENT PRIMARY KEY,
+  AUTO_INCREMENT = 42, ALGORITHM=COPY;
+SELECT * FROM t1 ORDER BY id;
+DROP TABLE t1;
+
+# Control: with the offset not larger than the increment, both engines agree.
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, a INT) ENGINE=ROCKSDB AUTO_INCREMENT=42;
+SET AUTO_INCREMENT_INCREMENT = 5, AUTO_INCREMENT_OFFSET = 5;
+INSERT INTO t1 (a) VALUES (1), (2);
+SELECT * FROM t1 ORDER BY id;
+DROP TABLE t1;
+
+SET AUTO_INCREMENT_INCREMENT = 1, AUTO_INCREMENT_OFFSET = 1;
