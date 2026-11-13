@@ -1,0 +1,34 @@
+# Crash during INPLACE ADD/DROP PARTITION allowed by
+# rocksdb_allow_unsafe_alter ("crash unsafe" by its own description).
+#
+# The server is killed while the ALTER is parked
+# before the storage engine commits the change
+# (alter_table_inplace_before_commit). After recovery the ALTER must be
+# rolled back: the table keeps its old partitions and rows, accepts DML,
+# passes CHECK TABLE, and can be dropped and re-created with the same
+# partition names.
+#
+# A kill after the storage engine dropped or created the partitions but
+# before the data dictionary commit (alter_before_close_temp_tables) leaves
+# the table unusable today; rocksdb.crash_unsafe_alter_partition_recovery
+# asserts the correct result for that window and is disabled until
+# PS-11698 is fixed.
+
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+call mtr.add_suppression("Table .* does not exist in RocksDB");
+call mtr.add_suppression("Schema mismatch");
+call mtr.add_suppression("MyRocks");
+--enable_query_log
+
+--let $alter = ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p2
+--let $sync_point = alter_table_inplace_before_commit
+--source suite/rocksdb/include/crash_unsafe_alter_partition_round.inc
+
+--let $alter = ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400))
+--let $sync_point = alter_table_inplace_before_commit
+--source suite/rocksdb/include/crash_unsafe_alter_partition_round.inc
+

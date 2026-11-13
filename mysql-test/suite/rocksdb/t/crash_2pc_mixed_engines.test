@@ -1,0 +1,94 @@
+# Crash recovery of a transaction that writes to both InnoDB and MyRocks
+# with the binary log as the 2PC coordinator.
+#
+# The server is crashed at each point of the commit path. After recovery
+# both engines must agree, the outcome must match whether the
+# transaction reached the binary log, and the binary log must hold
+# exactly the committed transactions.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+call mtr.add_suppression("Found [0-9]+ prepared transactions");
+call mtr.add_suppression("Crash recovery finished");
+--enable_query_log
+
+SELECT @@global.sync_binlog, @@global.innodb_flush_log_at_trx_commit,
+       @@global.rocksdb_flush_log_at_trx_commit;
+
+CREATE TABLE ti (id INT PRIMARY KEY, v VARCHAR(16)) ENGINE=InnoDB;
+CREATE TABLE tr (id INT PRIMARY KEY, v VARCHAR(16)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+
+# Before the transaction reaches the binary log: rolled back everywhere.
+--let $id = 1
+--let $point = crash_commit_before
+--let $expected = 0
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+--let $id = 2
+--let $point = crash_commit_after_prepare
+--let $expected = 0
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+--let $id = 3
+--let $point = crash_commit_before_log
+--let $expected = 0
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+--let $id = 4
+--let $point = crash_after_flush_engine_log
+--let $expected = 0
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+# After the binary log write: committed everywhere by recovery.
+--let $id = 5
+--let $point = crash_after_flush_binlog
+--let $expected = 1
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+--let $id = 6
+--let $point = crash_commit_after_log
+--let $expected = 1
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+--let $id = 7
+--let $point = crash_commit_after
+--let $expected = 1
+--source suite/rocksdb/include/crash_2pc_mixed_round.inc
+
+SELECT * FROM ti ORDER BY id;
+SELECT * FROM tr ORDER BY id;
+
+# The binary log must contain exactly the committed transactions.
+--let BINLOG_INDEX = `SELECT @@log_bin_index`
+--let XID_COUNT_FILE = $MYSQLTEST_VARDIR/tmp/crash_2pc_xids.inc
+--perl
+  use strict;
+  my $index = $ENV{'BINLOG_INDEX'};
+  my $mysqlbinlog = $ENV{'MYSQL_BINLOG'};
+  open(my $ih, '<', $index) or die "open $index: $!";
+  my $dir = $index; $dir =~ s{[^/]+$}{};
+  my $xids = 0;
+  while (my $f = <$ih>) {
+    chomp $f;
+    $f =~ s{^\./}{};
+    $f = $dir . $f unless $f =~ m{^/};
+    my $out = `$mysqlbinlog $f 2>/dev/null`;
+    $xids++ while $out =~ /\bXid = \d+/g;
+  }
+  close $ih;
+  open(my $oh, '>', $ENV{'XID_COUNT_FILE'}) or die;
+  print $oh "--let \$binlog_txns = $xids\n";
+  close $oh;
+EOF
+--source $XID_COUNT_FILE
+--remove_file $XID_COUNT_FILE
+--let $committed = `SELECT COUNT(*) FROM tr`
+--let $binlog_matches = `SELECT $binlog_txns = $committed`
+--echo binlog_matches_committed: $binlog_matches
+
+DROP TABLE ti, tr;

@@ -1,0 +1,40 @@
+# Crash durability matrix with the binary log enabled (2PC).
+#
+# For each rocksdb_flush_log_at_trx_commit value, commit a series of
+# two-table transactions, kill the server with SIGKILL and verify the
+# recovered data, not only status counters.
+#
+# With the binary log enabled, every value except 0 flushes the RocksDB
+# WAL out of the process during binlog group commit, so a process kill
+# must not lose any acknowledged commit. With 0, the WAL is flushed only
+# by the background thread (once per second), so recent commits may be
+# lost; then only the invariants are checked, including that the engine
+# is never ahead of the binary log.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+SELECT @@global.sync_binlog;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, pad VARCHAR(64), KEY k (k))
+  ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--let $rows = 200
+--let $check_binlog = 1
+
+--let $flush_val = 1
+--let $expect_all = 1
+--source suite/rocksdb/include/crash_durability_round.inc
+
+--let $flush_val = 2
+--let $expect_all = 1
+--source suite/rocksdb/include/crash_durability_round.inc
+
+--let $flush_val = 0
+--let $expect_all = 0
+--source suite/rocksdb/include/crash_durability_round.inc
+
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;

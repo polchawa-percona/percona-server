@@ -1,0 +1,77 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, pad VARCHAR(64), KEY k (k))
+ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+# Round: rocksdb_flush_log_at_trx_commit = 1
+TRUNCATE TABLE t1;
+TRUNCATE TABLE t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+# Kill and restart
+SELECT COUNT(*) AS t1_without_t2 FROM t1 LEFT JOIN t2 USING (id)
+WHERE t2.id IS NULL;
+t1_without_t2
+0
+SELECT COUNT(*) AS t2_without_t1 FROM t2 LEFT JOIN t1 USING (id)
+WHERE t1.id IS NULL;
+t2_without_t1
+0
+SELECT COUNT(*) = COALESCE(MAX(id), 0) AS no_holes FROM t1;
+no_holes
+1
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS sk_matches_pk;
+sk_matches_pk
+1
+SELECT COUNT(*) AS k_mismatch FROM t1 WHERE k <> id;
+k_mismatch
+0
+SELECT COUNT(*) = ROWS AS all_acknowledged_commits_survived FROM t1;
+all_acknowledged_commits_survived
+1
+# Round: rocksdb_flush_log_at_trx_commit = 2
+TRUNCATE TABLE t1;
+TRUNCATE TABLE t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+# Kill and restart
+SELECT COUNT(*) AS t1_without_t2 FROM t1 LEFT JOIN t2 USING (id)
+WHERE t2.id IS NULL;
+t1_without_t2
+0
+SELECT COUNT(*) AS t2_without_t1 FROM t2 LEFT JOIN t1 USING (id)
+WHERE t1.id IS NULL;
+t2_without_t1
+0
+SELECT COUNT(*) = COALESCE(MAX(id), 0) AS no_holes FROM t1;
+no_holes
+1
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS sk_matches_pk;
+sk_matches_pk
+1
+SELECT COUNT(*) AS k_mismatch FROM t1 WHERE k <> id;
+k_mismatch
+0
+# Round: rocksdb_flush_log_at_trx_commit = 0
+TRUNCATE TABLE t1;
+TRUNCATE TABLE t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 0;
+# Kill and restart
+SELECT COUNT(*) AS t1_without_t2 FROM t1 LEFT JOIN t2 USING (id)
+WHERE t2.id IS NULL;
+t1_without_t2
+0
+SELECT COUNT(*) AS t2_without_t1 FROM t2 LEFT JOIN t1 USING (id)
+WHERE t1.id IS NULL;
+t2_without_t1
+0
+SELECT COUNT(*) = COALESCE(MAX(id), 0) AS no_holes FROM t1;
+no_holes
+1
+SELECT (SELECT COUNT(*) FROM t1 FORCE INDEX (k) WHERE k > 0) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS sk_matches_pk;
+sk_matches_pk
+1
+SELECT COUNT(*) AS k_mismatch FROM t1 WHERE k <> id;
+k_mismatch
+0
+DROP TABLE t1, t2;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = DEFAULT;
