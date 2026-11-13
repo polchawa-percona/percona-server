@@ -84,6 +84,7 @@ delimiter ;|
 --let $crashpoint_detail_like = dict_commit [rename cp.#sql-%-> cp.t]
 --let $crashpoint_leftover_ok = 4,5,7
 --let $crashpoint_leftover_ticket = PS-11680
+--let $crashpoint_after_window = 1
 --source suite/rocksdb/include/crashpoint_loop.inc
 
 DROP DATABASE IF EXISTS cp;

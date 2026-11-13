@@ -1,0 +1,115 @@
+CALL mtr.add_suppression("Attempting backtrace");
+# Leg A: with a secondary index
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at tx_commit, recovered to the starting state
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at tx_commit, skipped (PS-11696)
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at tx_commit, skipped (PS-11696)
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=4: crashed at tx_prepare, skipped (PS-11696)
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=5: crashed at flush_wal, skipped (PS-11696)
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=6: crashed at bulk_load_ingest, skipped (PS-11696)
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+CALL crashpoint_state('pk');;
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+# restart
+# after the statement: crashed at checkpoint, recovered to the post-statement state
+# bulk load with a secondary index: 7 crash points enumerated, no violations
+# Leg B: without a secondary index
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at tx_prepare, recovered to the starting state
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+ERROR HY000: Lost connection to MySQL server during query
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at flush_wal, recovered to the starting state
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at bulk_load_ingest, recovered to the starting state
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+CALL crashpoint_state('pk');;
+SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION rocksdb_bulk_load_size = 1000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO cp.t SELECT seq, seq % 97, CONCAT('r', seq) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 3000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+# restart
+# after the statement: crashed at checkpoint, recovered to the post-statement state
+# bulk load without a secondary index: 4 crash points enumerated, no violations
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

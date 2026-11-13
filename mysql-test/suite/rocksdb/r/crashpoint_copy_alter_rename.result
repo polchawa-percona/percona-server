@@ -1,5 +1,4 @@
 CALL mtr.add_suppression("Attempting backtrace");
-CALL crashpoint_reset();
 ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
 ERROR HY000: Lost connection to MySQL server during query
 # restart

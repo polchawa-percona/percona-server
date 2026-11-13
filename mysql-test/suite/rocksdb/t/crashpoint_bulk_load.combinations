@@ -1,0 +1,6 @@
+[kill]
+rocksdb_flush_log_at_trx_commit=1
+
+[sync_power]
+rocksdb_flush_log_at_trx_commit=1
+rocksdb_debug_unsynced_data_loss=ON

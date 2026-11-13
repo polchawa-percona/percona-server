@@ -33,6 +33,8 @@
 
 /* C++ standard header files */
 #include <inttypes.h>
+#include <signal.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cassert>
 #include <deque>
@@ -762,6 +764,11 @@ static bool rocksdb_collect_sst_properties = true;
 static bool rocksdb_force_flush_memtable_now_var = true;
 static bool rocksdb_force_flush_memtable_and_lzero_now_var = false;
 static bool rocksdb_compact_lzero_now_var = false;
+static bool rocksdb_debug_unsynced_data_loss = false;
+#ifndef NDEBUG
+/* Set when rocksdb_debug_unsynced_data_loss wrapped the file system. */
+static std::shared_ptr<rocksdb::FaultInjectionTestFS> rdb_unsynced_loss_fs;
+#endif
 static bool rocksdb_cancel_manual_compactions_var = false;
 static bool rocksdb_enable_ttl = true;
 static bool rocksdb_enable_ttl_read_filtering = true;
@@ -2498,6 +2505,16 @@ static MYSQL_THDVAR_UINT(
     "disables the hook. A no-op in non-debug builds.",
     nullptr, nullptr, /* default */ 0, /* min */ 0, /* max */ INT_MAX, 0);
 
+static MYSQL_SYSVAR_BOOL(
+    debug_unsynced_data_loss, rocksdb_debug_unsynced_data_loss,
+    PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+    "For testing, debug builds only: keep writes to RocksDB files in memory "
+    "until they are synced, so that a crash loses them as a power cut "
+    "would. A crash fired by rocksdb_debug_crash_on_nth_durable_write also "
+    "removes the files whose directory entries were not synced. A no-op in "
+    "non-debug builds.",
+    nullptr, nullptr, false);
+
 static MYSQL_THDVAR_BOOL(master_skip_tx_api,
                          PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_HINTUPDATEABLE,
                          "Skipping holding any lock on row access. "
@@ -2949,6 +2966,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(store_row_debug_checksums),
     MYSQL_SYSVAR(verify_row_debug_checksums),
     MYSQL_SYSVAR(debug_crash_on_nth_durable_write),
+    MYSQL_SYSVAR(debug_unsynced_data_loss),
     MYSQL_SYSVAR(master_skip_tx_api),
 
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
@@ -8409,6 +8427,21 @@ static int rocksdb_init_internal(void *const p) {
 
   DBUG_EXECUTE_IF("rocksdb_init_failure_files_corruption",
                   { DBUG_RETURN(HA_EXIT_FAILURE); });
+
+#ifndef NDEBUG
+  if (rocksdb_debug_unsynced_data_loss) {
+    // Power loss simulation for tests: unsynced appends stay in memory.
+    rdb_unsynced_loss_fs = std::make_shared<rocksdb::FaultInjectionTestFS>(
+        rocksdb_db_options->env->GetFileSystem());
+    rdb_unsynced_loss_fs->SetInjectUnsyncedDataLoss(true);
+    static auto unsynced_loss_env =
+        std::make_shared<rocksdb::CompositeEnvWrapper>(rocksdb_db_options->env,
+                                                       rdb_unsynced_loss_fs);
+    rocksdb_db_options->env = unsynced_loss_env.get();
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: unsynced writes are lost on a crash");
+  }
+#endif
 
   // Validate the assumption about the size of ROCKSDB_SIZEOF_HIDDEN_PK_COLUMN.
   static_assert(sizeof(longlong) == 8, "Assuming that longlong is 8 bytes.");
@@ -17774,7 +17807,8 @@ void Rdb_background_thread::run() {
     // whereas background writes to the wal file, but issues the syncs in a
     // background thread.
     if (rdb && (rocksdb_flush_log_at_trx_commit != FLUSH_LOG_SYNC) &&
-        !rocksdb_db_options->allow_mmap_writes) {
+        !rocksdb_db_options->allow_mmap_writes &&
+        !DBUG_EVALUATE_IF("rocksdb_skip_background_wal_sync", true, false)) {
       bool sync = rdb_sync_wal_supported();
       const rocksdb::Status s = rdb->FlushWAL(sync);
       if (!s.ok()) {
@@ -18593,6 +18627,19 @@ bool rdb_crash_point(const char *site) {
                   site, rdb_crash_detail_text.empty() ? "" : " [",
                   rdb_crash_detail_text.c_str(),
                   rdb_crash_detail_text.empty() ? "" : "]");
+  if (rdb_unsynced_loss_fs) {
+    // Power loss: also forget files whose directory entries were not
+    // synced, then die at once. Unsynced appends are lost with the process
+    // memory. SIGKILL rather than abort(): the fatal signal handler runs
+    // long enough for background threads to sync more data meanwhile.
+    const rocksdb::IOStatus s =
+        rdb_unsynced_loss_fs->DeleteFilesCreatedAfterLastDirSync(
+            rocksdb::IOOptions(), nullptr);
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: unsynced data dropped (%s)",
+                    s.ToString().c_str());
+    kill(getpid(), SIGKILL);
+  }
   return true;
 }
 #endif  // !NDEBUG

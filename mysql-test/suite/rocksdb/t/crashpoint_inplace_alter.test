@@ -82,6 +82,7 @@ delimiter ;|
 --let $crashpoint_label = INPLACE ADD INDEX
 --let $crashpoint_skip = 5,6
 --let $crashpoint_skip_ticket = PS-11669
+--let $crashpoint_after_window = 1
 --source suite/rocksdb/include/crashpoint_loop.inc
 
 # The hook must have fired at the durable writes of the DDL: the

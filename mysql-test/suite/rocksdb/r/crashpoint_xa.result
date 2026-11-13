@@ -1,7 +1,6 @@
 CALL mtr.add_suppression("Attempting backtrace");
 CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
 # Leg A: XA PREPARE and XA COMMIT by XID on the same connection
-CALL crashpoint_reset();
 XA START 'c1';;
 INSERT INTO cp.t VALUES (5, 50);
 XA END 'c1';;
@@ -79,7 +78,6 @@ XA COMMIT 'c1';;
 CALL crashpoint_state('pk');;
 # XA PREPARE COMMIT: 8 crash points enumerated, no violations
 # Leg B: XA PREPARE and XA ROLLBACK by XID on the same connection
-CALL crashpoint_reset();
 XA START 'c2';;
 INSERT INTO cp.t VALUES (5, 50);
 XA END 'c2';;
