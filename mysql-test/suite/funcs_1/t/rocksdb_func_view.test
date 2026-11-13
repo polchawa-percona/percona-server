@@ -1,0 +1,18 @@
+###################################################
+#                                                 #
+#  Functions within VIEWs based on InnoDB tables  #
+#                                                 #
+###################################################
+
+#
+# NOTE: PLEASE SEE THE DETAILED DESCRIPTION IN
+#       suite/funcs_1/views/func_view.inc
+#       BEFORE ADDING NEW TEST CASES HERE !!!
+
+# Generated from innodb_func_view.test: runs the same scenario on MyRocks.
+# Extra server options (see -master.opt): --rocksdb_debug_optimizer_n_rows=1000
+--source include/have_rocksdb.inc
+let $type= 'ROCKSDB' ;
+
+--source suite/funcs_1/views/func_view.inc
+

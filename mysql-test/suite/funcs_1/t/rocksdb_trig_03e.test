@@ -1,0 +1,23 @@
+#### suite/funcs_1/t/innodb_trig_03e.test
+
+# InnoDB tables should be used
+#
+# 1. Check if InnoDB is available
+# 2. Set $engine_type
+# Generated from innodb_trig_03e.test: runs the same scenario on MyRocks.
+# Runs at READ COMMITTED (see -master.opt): MyRocks has no gap locks.
+--source include/have_rocksdb.inc
+let $engine_type= rocksdb;
+
+# Create some objects needed in many testcases
+USE test;
+
+--source suite/funcs_1/triggers/triggers_03e_db_level.inc
+--source suite/funcs_1/triggers/triggers_03e_table_level.inc
+--source suite/funcs_1/triggers/triggers_03e_global_db_mix.inc
+--source suite/funcs_1/triggers/triggers_03e_db_table_mix.inc
+--source suite/funcs_1/triggers/triggers_03e_prepare.inc
+--source suite/funcs_1/triggers/triggers_03e_definer.inc
+--source suite/funcs_1/triggers/triggers_03e_transaction.inc
+--source suite/funcs_1/triggers/triggers_03e_columns.inc
+
