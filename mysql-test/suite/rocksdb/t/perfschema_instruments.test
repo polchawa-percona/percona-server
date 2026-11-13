@@ -1,0 +1,36 @@
+--source include/have_rocksdb.inc
+--source include/have_perfschema.inc
+
+#
+# PS-11875: MyRocks registers its performance_schema instruments in
+# rdb_psi.cc, but three of them never reach performance_schema:
+#
+# - all_rocksdb_threads[] registers the index statistics thread with
+#   &rdb_signal_is_psi_mutex_key instead of &rdb_is_psi_thread_key, so
+#   rdb_is_psi_thread_key stays 0 and the thread starts uninstrumented, and
+#   the mutex key is overwritten with a thread class id before the
+#   "signal index stats calculation" mutex is created.
+# - rdb_read_free_regex_handler is a global object whose constructor
+#   initializes the read_free_rpl_tables rwlock when the plugin library is
+#   loaded, before init_rocksdb_psi_keys() assigns the key.
+#
+# The test asserts that every MyRocks background thread, the index
+# statistics mutex and the read_free_rpl_tables rwlock are visible in
+# performance_schema.
+#
+
+--echo # Registered thread classes
+SELECT NAME FROM performance_schema.setup_threads
+  WHERE NAME LIKE 'thread/rocksdb/%' ORDER BY NAME;
+
+--echo # Each MyRocks background thread runs instrumented
+SELECT NAME, TYPE FROM performance_schema.threads
+  WHERE NAME LIKE 'thread/rocksdb/%' ORDER BY NAME;
+
+--echo # The index statistics signal mutex exists
+SELECT NAME FROM performance_schema.mutex_instances
+  WHERE NAME = 'wait/synch/mutex/rocksdb/signal index stats calculation';
+
+--echo # The read_free_rpl_tables rwlock exists
+SELECT NAME FROM performance_schema.rwlock_instances
+  WHERE NAME = 'wait/synch/rwlock/rocksdb/read_free_rpl_tables';
