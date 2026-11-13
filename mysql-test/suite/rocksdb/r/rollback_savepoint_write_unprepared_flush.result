@@ -1,0 +1,18 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, c VARCHAR(100)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'x');
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+BEGIN;
+INSERT INTO t1 VALUES (20, 'a');
+SAVEPOINT s1;
+INSERT INTO t1 VALUES (21, 'b');
+INSERT INTO t1 VALUES (22, 'c'), (1, 'dup');
+ERROR 23000: Duplicate entry '1' for key 't1.PRIMARY'
+ROLLBACK TO SAVEPOINT s1;
+ERROR HY000: MyRocks currently does not support ROLLBACK TO SAVEPOINT if modifying rows.
+COMMIT;
+ERROR HY000: This transaction was rolled back and cannot be committed. Only supported operation is to roll it back, so all pending changes will be discarded. Please restart another transaction.
+SELECT * FROM t1 ORDER BY a;
+a	c
+1	x
+SET SESSION rocksdb_write_batch_flush_threshold = DEFAULT;
+DROP TABLE t1;
