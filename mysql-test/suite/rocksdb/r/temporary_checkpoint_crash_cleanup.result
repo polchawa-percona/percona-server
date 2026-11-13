@@ -1,0 +1,7 @@
+# Control: resetting the variable removes the checkpoint
+SET SESSION rocksdb_create_temporary_checkpoint = 'DATADIR/.ps11844_tmp_checkpoint';
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+# Create a temporary checkpoint and crash the server
+SET SESSION rocksdb_create_temporary_checkpoint = 'DATADIR/.ps11844_tmp_checkpoint';
+# Kill and restart
+# The leftover checkpoint directory must be gone after restart

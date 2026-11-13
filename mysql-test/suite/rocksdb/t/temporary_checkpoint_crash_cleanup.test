@@ -1,0 +1,32 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11844 (originally reported as PS-8026): a temporary checkpoint created
+# with rocksdb_create_temporary_checkpoint is removed when the session ends
+# or resets the variable. It must not survive a server crash either: the
+# session that owned it is gone, so nothing would ever remove it.
+#
+
+--let $datadir = `SELECT @@datadir`
+--let $ckpt = $datadir/.ps11844_tmp_checkpoint
+
+--echo # Control: resetting the variable removes the checkpoint
+--replace_result $datadir DATADIR
+eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt';
+--file_exists $ckpt
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+--error 1
+--file_exists $ckpt
+
+--echo # Create a temporary checkpoint and crash the server
+--connect (con1,localhost,root,,test)
+--replace_result $datadir DATADIR
+eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt';
+--connection default
+--file_exists $ckpt
+--source include/kill_and_restart_mysqld.inc
+--disconnect con1
+
+--echo # The leftover checkpoint directory must be gone after restart
+--error 1
+--file_exists $ckpt
