@@ -1,0 +1,101 @@
+#
+# Port of innodb.innodb-alter-nullable (mysql-test/suite/innodb/t/innodb-alter-nullable.test)
+# to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB instead of ENGINE=InnoDB
+#   - the nullability changes with ALGORITHM=INPLACE are tried as in the
+#     original; MyRocks rejects them, so each is pinned with its error and
+#     then run with the default algorithm (COPY)
+#   - the INFORMATION_SCHEMA.INNODB_TABLES check is replaced by SHOW CREATE TABLE
+#   - runs at READ COMMITTED (-master.opt): at REPEATABLE READ MyRocks rejects
+#     the UPDATE without a WHERE clause inside a multi-statement transaction
+#     (gap-lock rule)
+#   - added: NULL -> NOT NULL with existing NULL values, in strict and
+#     non-strict mode
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 INT) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,2,3),(4,5,6),(7,8,9);
+
+--enable_info
+--error ER_PRIMARY_CANT_HAVE_NULL
+ALTER TABLE t CHANGE c1 c1 INT NULL FIRST, ALGORITHM=INPLACE;
+--disable_info
+
+--enable_info
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t MODIFY c3 INT NOT NULL, ALGORITHM=INPLACE;
+ALTER TABLE t MODIFY c3 INT NOT NULL;
+--disable_info
+
+--enable_info
+--error ER_BAD_FIELD_ERROR
+ALTER TABLE t CHANGE c2 c2 INT, CHANGE c2 c2 INT NOT NULL;
+--error ER_BAD_FIELD_ERROR
+ALTER TABLE t MODIFY c2 INT, MODIFY c2 INT NOT NULL;
+--error ER_BAD_FIELD_ERROR
+ALTER TABLE t MODIFY c2 INT UNSIGNED, MODIFY c2 INT;
+--error ER_BAD_FIELD_ERROR
+ALTER TABLE t MODIFY c2 CHAR(1) NOT NULL, MODIFY c2 INT NOT NULL;
+ALTER TABLE t CHANGE c2 c2 INT NOT NULL;
+ALTER TABLE t MODIFY c2 INT NOT NULL;
+--disable_info
+
+connect (con1,localhost,root,,);
+connection con1;
+--error ER_BAD_NULL_ERROR
+UPDATE t SET c2=NULL;
+SELECT * FROM t;
+
+connection default;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t MODIFY c2 INT, ALGORITHM=INPLACE;
+ALTER TABLE t MODIFY c2 INT;
+
+connection con1;
+BEGIN;
+UPDATE t SET c2=NULL;
+SELECT * FROM t;
+ROLLBACK;
+SELECT * FROM t;
+
+disconnect con1;
+connection default;
+
+ALTER TABLE t MODIFY c2 INT NULL;
+SHOW CREATE TABLE t;
+DROP TABLE t;
+
+CREATE TABLE t1(c1 INT) ENGINE=ROCKSDB;
+ALTER TABLE t1 ADD CONSTRAINT UNIQUE KEY i1(c1);
+ALTER TABLE t1 CHANGE c1 c1 INT SIGNED NOT NULL,ADD KEY(c1);
+SHOW CREATE TABLE t1;
+DROP TABLE t1;
+
+--echo # NULL -> NOT NULL with existing NULL values
+CREATE TABLE t2 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, NULL), (2, 2), (3, NULL);
+--echo # strict mode: the ALTER fails and the table is unchanged
+# MyRocks runs this ALTER as COPY, which reports ER_WARN_DATA_TRUNCATED (1265);
+# InnoDB runs it INPLACE and reports ER_INVALID_USE_OF_NULL (1138).
+--error 1265
+ALTER TABLE t2 MODIFY b INT NOT NULL;
+--sorted_result
+SELECT * FROM t2;
+SHOW CREATE TABLE t2;
+--echo # non-strict mode: NULLs become 0 with a warning
+SET @saved_sql_mode = @@sql_mode;
+SET sql_mode = '';
+--enable_info
+ALTER TABLE t2 MODIFY b INT NOT NULL;
+--disable_info
+SET sql_mode = @saved_sql_mode;
+--sorted_result
+SELECT * FROM t2;
+SELECT a FROM t2 FORCE INDEX (b) WHERE b = 0 ORDER BY a;
+CHECK TABLE t2;
+DROP TABLE t2;
+
+--source include/wait_until_count_sessions.inc
