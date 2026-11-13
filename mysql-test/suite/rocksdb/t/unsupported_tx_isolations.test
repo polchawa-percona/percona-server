@@ -11,6 +11,18 @@ insert into t1 values (2,1);
 select * from t1 where id=1;
 rollback;
 
+--echo # Autocommit statements are rejected as well
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+insert into t1 values (2,1);
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+select * from t1;
+
+--echo # A consistent snapshot is not taken, and reads are still rejected
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+select * from t1;
+rollback;
+
 SET session transaction isolation level serializable;
 begin;
 --error ER_ISOLATION_MODE_NOT_SUPPORTED
@@ -18,5 +30,21 @@ insert into t1 values (2,1);
 --error ER_ISOLATION_MODE_NOT_SUPPORTED
 select * from t1 where id=1;
 rollback;
+
+--echo # Autocommit statements are rejected as well
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+insert into t1 values (2,1);
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+select * from t1;
+
+--echo # A consistent snapshot is not taken, and reads are still rejected
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--error ER_ISOLATION_MODE_NOT_SUPPORTED
+select * from t1;
+rollback;
+
+SET session transaction isolation level repeatable read;
+--echo # Nothing was written at the unsupported levels
+select * from t1;
 
 DROP TABLE t1;
