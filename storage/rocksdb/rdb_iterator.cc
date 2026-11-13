@@ -393,11 +393,15 @@ int Rdb_iterator_base::seek(enum ha_rkey_function find_flag,
 
 // An invalid iterator can mean EOF or a failed read. Preserve errors for SQL.
 int Rdb_iterator_base::convert_iterator_status() const {
-  if (m_scan_it->Valid()) return HA_EXIT_SUCCESS;
+  rocksdb::Status injected;
+  if (m_scan_it->Valid() &&
+      !RDB_INJECTED_ERROR(Rdb_inject_class::ITERATOR, "iterator", &injected)) {
+    return HA_EXIT_SUCCESS;
+  }
 
-  const auto status =
-      DBUG_EVALUATE_IF("rocksdb_return_status_corrupted",
-                       rocksdb::Status::Corruption(), m_scan_it->status());
+  const auto status = DBUG_EVALUATE_IF(
+      "rocksdb_return_status_corrupted", rocksdb::Status::Corruption(),
+      injected.ok() ? m_scan_it->status() : injected);
   if (status.ok() || status.IsNotFound()) return HA_ERR_END_OF_FILE;
 
   // Record the corruption also when rocksdb_io_error_action=IGNORE_ERROR
@@ -731,7 +735,8 @@ int Rdb_iterator_partial::materialize_prefix() {
   // Write the sentinel without a TTL, as MyRocks 9.3.1 and older did
   DBUG_EXECUTE_IF("myrocks_partial_index_sentinel_without_ttl",
                   { val = rocksdb::Slice(); });
-  s = wb->Put(m_kd.get_cf(), cur_prefix_key, val);
+  s = RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "partial_index_put_sentinel",
+                       wb->Put(m_kd.get_cf(), cur_prefix_key, val));
   if (!s.ok()) {
     rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
     rdb_tx_release_lock(tx, m_kd, cur_prefix_key, true /* force */);
@@ -770,10 +775,12 @@ int Rdb_iterator_partial::materialize_prefix() {
         false /* store_row_debug_checksums */, 0 /* hidden_pk_id */, 0, nullptr,
         m_converter.get_ttl_bytes_buffer());
 
-    s = wb->Put(m_kd.get_cf(),
+    s = RDB_INJECT_ERROR(
+        Rdb_inject_class::WRITE, "partial_index_put",
+        wb->Put(m_kd.get_cf(),
                 rocksdb::Slice((const char *)m_sk_packed_tuple, sk_packed_size),
                 rocksdb::Slice((const char *)m_sk_tails.ptr(),
-                               m_sk_tails.get_current_pos()));
+                               m_sk_tails.get_current_pos())));
     if (!s.ok()) {
       rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
       goto exit;
@@ -786,7 +793,9 @@ int Rdb_iterator_partial::materialize_prefix() {
   if (rc != HA_ERR_END_OF_FILE) goto exit;
   rc = HA_EXIT_SUCCESS;
 
-  s = rdb_get_rocksdb_db()->Write(options, optimize, wb.get());
+  s = RDB_INJECT_ERROR(
+      Rdb_inject_class::WRITE, "partial_index_write",
+      rdb_get_rocksdb_db()->Write(options, optimize, wb.get()));
   if (!s.ok()) {
     rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);
     goto exit;

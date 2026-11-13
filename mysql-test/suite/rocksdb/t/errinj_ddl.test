@@ -1,0 +1,40 @@
+#
+# Systematic error injection into the RocksDB calls made by DDL and table
+# maintenance statements (see suite/rocksdb/include/errinj_loop.inc): point
+# reads, SST file writes, ingests and compactions. Every call of a class fails
+# in turn; the statement must then fail and leave the table unchanged, or
+# succeed with the same result as without the failure.
+#
+# Writes and iterator steps are covered by errinj_ddl_write and
+# errinj_ddl_iterator, bulk load by errinj_bulk_load.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+
+--source suite/rocksdb/include/errinj_ddl_setup.inc
+
+--let $errinj_class = READ
+--let $errinj_status = BUSY
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+--let $errinj_class = SST
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+--let $errinj_class = INGEST
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+--let $errinj_class = COMPACT
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+
+--let $errinj_state_proc =
+--let $errinj_bulk_load =
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;

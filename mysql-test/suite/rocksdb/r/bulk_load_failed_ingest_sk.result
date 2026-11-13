@@ -1,0 +1,51 @@
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+CREATE TABLE t1 (
+pk INT PRIMARY KEY,
+a INT NOT NULL,
+b VARCHAR(32) NOT NULL,
+KEY kb (b)
+) ENGINE=ROCKSDB;
+# Overlap with rows in the memtable.
+INSERT INTO t1 VALUES (10, 10, 'x'), (20, 20, 'y'), (30, 30, 'z');
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (15, 15, 'b15');
+INSERT INTO t1 VALUES (25, 25, 'b25');
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: [file] bulk load error: Invalid argument: External file requires flush
+SELECT pk, b FROM t1 FORCE INDEX (PRIMARY) ORDER BY pk;
+pk	b
+10	x
+20	y
+30	z
+SELECT b, pk FROM t1 FORCE INDEX (kb) ORDER BY b;
+b	pk
+x	10
+y	20
+z	30
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# Overlap with rows in an SST file.
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 VALUES (10, 10, 'x'), (20, 20, 'y'), (30, 30, 'z');
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 VALUES (15, 15, 'b15');
+INSERT INTO t2 VALUES (25, 25, 'b25');
+SET SESSION rocksdb_bulk_load = 0;
+ERROR HY000: Rows inserted during bulk load must not overlap existing rows
+SELECT pk, b FROM t2 FORCE INDEX (PRIMARY) ORDER BY pk;
+pk	b
+10	x
+20	y
+30	z
+SELECT b, pk FROM t2 FORCE INDEX (kb) ORDER BY b;
+b	pk
+x	10
+y	20
+z	30
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;

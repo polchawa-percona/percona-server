@@ -1,0 +1,50 @@
+#
+# Systematic error injection into the RocksDB calls of XA transactions
+# (see suite/rocksdb/include/errinj_loop.inc and errinj_xa_run.inc): XA
+# START ... XA PREPARE ... XA COMMIT or XA ROLLBACK on one connection, XA
+# COMMIT ONE PHASE, and XA COMMIT or XA ROLLBACK of a prepared transaction
+# from another connection. An injected failure must end in an error with tx
+# unchanged, in a success with the result of an uninjected run, or, where
+# MyRocks aborts the server, in a recovery to the state from before the
+# transaction or, once XA PREPARE succeeded, to the committed state (a
+# recovered prepared transaction is finished as the workload would have).
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+--source suite/rocksdb/include/errinj_xa_setup.inc
+--let $errinj_crash = 1
+--let $errinj_class = READ
+--let $errinj_status = BUSY
+--source suite/rocksdb/include/errinj_xa_workloads.inc
+--let $errinj_class = WRITE
+--let $errinj_status = BUSY
+--source suite/rocksdb/include/errinj_xa_workloads.inc
+--let $errinj_class = COMMIT
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_xa_workloads.inc
+--let $errinj_status = IOERROR
+--source suite/rocksdb/include/errinj_xa_workloads.inc
+
+--let $errinj_crash = 0
+--let $errinj_source = suite/rocksdb/include/errinj_stmt.inc
+--let $errinj_after_restart = suite/rocksdb/include/errinj_noop.inc
+DROP PROCEDURE errinj_xa_reset;
+DROP TABLE tx;
