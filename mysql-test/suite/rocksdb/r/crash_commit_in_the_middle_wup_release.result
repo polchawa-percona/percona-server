@@ -1,0 +1,42 @@
+SELECT @@rocksdb_write_policy, @@rocksdb_write_batch_flush_threshold;
+@@rocksdb_write_policy	@@rocksdb_write_batch_flush_threshold
+write_unprepared	1
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, KEY k (k)) ENGINE=ROCKSDB;
+RESET BINARY LOGS AND GTIDS;
+# Kill during an INSERT ... SELECT with commit_in_the_middle = ON
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_commit_in_the_middle = ON, SESSION rocksdb_bulk_load_size = 1000;
+INSERT INTO t1 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq;
+# Kill and restart
+# t1 after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+leftover_tmp_sst_files: 0
+SELECT @@rocksdb_write_policy AS policy_after_restart;
+policy_after_restart
+write_unprepared
+# Kill during a bulk load (internal commits also disabled)
+SET SESSION cte_max_recursion_depth = 4000000;
+SET SESSION rocksdb_bulk_load_size = 1000, SESSION rocksdb_bulk_load = 1;
+INSERT INTO t2 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2000000) SELECT n, n FROM seq ORDER BY n;
+# Kill and restart
+# t2 after recovery
+engine_matches_binlog
+1
+sk_matches_pk
+1
+no_sk_entries_without_pk
+1
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+leftover_tmp_sst_files: 0
+DROP TABLE t1, t2;

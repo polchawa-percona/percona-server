@@ -1,0 +1,287 @@
+SELECT @@global.sync_binlog;
+@@global.sync_binlog
+1
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+CREATE TABLE r_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL,
+KEY kbal (bal)) ENGINE=ROCKSDB;
+CREATE TABLE r_log (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE i_acc (id INT PRIMARY KEY, bal INT NOT NULL, moves INT NOT NULL)
+ENGINE=InnoDB;
+CREATE TABLE i_log (id INT PRIMARY KEY) ENGINE=InnoDB;
+# Round 1: rocksdb_flush_log_at_trx_commit = 1
+TRUNCATE TABLE r_acc;
+TRUNCATE TABLE r_log;
+TRUNCATE TABLE i_acc;
+TRUNCATE TABLE i_log;
+RESET BINARY LOGS AND GTIDS;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+# Kill the server
+# restart
+CREATE TABLE chk_ack (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_br (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_bi (id INT PRIMARY KEY) ENGINE=InnoDB;
+SELECT SUM(bal) = 0 AS rocksdb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM r_log) AS rocksdb_moves_match_log
+FROM r_acc;
+rocksdb_zero_sum	rocksdb_moves_match_log
+1	1
+SELECT SUM(bal) = 0 AS innodb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM i_log) AS innodb_moves_match_log
+FROM i_acc;
+innodb_zero_sum	innodb_moves_match_log
+1	1
+SELECT (SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (kbal)
+WHERE bal > -1000000) =
+(SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (PRIMARY))
+AS sk_matches_pk;
+sk_matches_pk
+1
+CHECK TABLE r_acc, r_log;
+Table	Op	Msg_type	Msg_text
+test.r_acc	check	status	OK
+test.r_log	check	status	OK
+SELECT COUNT(*) AS mixed_only_in_rocksdb FROM r_log
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+mixed_only_in_rocksdb
+0
+SELECT COUNT(*) AS mixed_only_in_innodb FROM i_log
+WHERE id NOT IN (SELECT id FROM r_log);
+mixed_only_in_innodb
+0
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost_in_rocksdb FROM chk_ack
+WHERE id NOT IN (SELECT id FROM r_log);
+acked_lost_in_rocksdb
+0
+SELECT COUNT(*) AS acked_lost_in_innodb FROM chk_ack
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+acked_lost_in_innodb
+0
+SELECT COUNT(*) AS rocksdb_not_in_binlog FROM r_log
+WHERE id NOT IN (SELECT id FROM chk_br);
+rocksdb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_rocksdb FROM chk_br
+WHERE id NOT IN (SELECT id FROM r_log);
+binlog_not_in_rocksdb
+0
+SELECT COUNT(*) AS innodb_not_in_binlog FROM i_log
+WHERE id NOT IN (SELECT id FROM chk_bi);
+innodb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_innodb FROM chk_bi
+WHERE id NOT IN (SELECT id FROM i_log);
+binlog_not_in_innodb
+0
+DROP TABLE chk_ack, chk_br, chk_bi;
+# Round 2: rocksdb_flush_log_at_trx_commit = 1
+TRUNCATE TABLE r_acc;
+TRUNCATE TABLE r_log;
+TRUNCATE TABLE i_acc;
+TRUNCATE TABLE i_log;
+RESET BINARY LOGS AND GTIDS;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+# Kill the server
+# restart
+CREATE TABLE chk_ack (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_br (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_bi (id INT PRIMARY KEY) ENGINE=InnoDB;
+SELECT SUM(bal) = 0 AS rocksdb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM r_log) AS rocksdb_moves_match_log
+FROM r_acc;
+rocksdb_zero_sum	rocksdb_moves_match_log
+1	1
+SELECT SUM(bal) = 0 AS innodb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM i_log) AS innodb_moves_match_log
+FROM i_acc;
+innodb_zero_sum	innodb_moves_match_log
+1	1
+SELECT (SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (kbal)
+WHERE bal > -1000000) =
+(SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (PRIMARY))
+AS sk_matches_pk;
+sk_matches_pk
+1
+CHECK TABLE r_acc, r_log;
+Table	Op	Msg_type	Msg_text
+test.r_acc	check	status	OK
+test.r_log	check	status	OK
+SELECT COUNT(*) AS mixed_only_in_rocksdb FROM r_log
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+mixed_only_in_rocksdb
+0
+SELECT COUNT(*) AS mixed_only_in_innodb FROM i_log
+WHERE id NOT IN (SELECT id FROM r_log);
+mixed_only_in_innodb
+0
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost_in_rocksdb FROM chk_ack
+WHERE id NOT IN (SELECT id FROM r_log);
+acked_lost_in_rocksdb
+0
+SELECT COUNT(*) AS acked_lost_in_innodb FROM chk_ack
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+acked_lost_in_innodb
+0
+SELECT COUNT(*) AS rocksdb_not_in_binlog FROM r_log
+WHERE id NOT IN (SELECT id FROM chk_br);
+rocksdb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_rocksdb FROM chk_br
+WHERE id NOT IN (SELECT id FROM r_log);
+binlog_not_in_rocksdb
+0
+SELECT COUNT(*) AS innodb_not_in_binlog FROM i_log
+WHERE id NOT IN (SELECT id FROM chk_bi);
+innodb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_innodb FROM chk_bi
+WHERE id NOT IN (SELECT id FROM i_log);
+binlog_not_in_innodb
+0
+DROP TABLE chk_ack, chk_br, chk_bi;
+# Round 3: rocksdb_flush_log_at_trx_commit = 2
+TRUNCATE TABLE r_acc;
+TRUNCATE TABLE r_log;
+TRUNCATE TABLE i_acc;
+TRUNCATE TABLE i_log;
+RESET BINARY LOGS AND GTIDS;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+# Kill the server
+# restart
+CREATE TABLE chk_ack (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_br (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_bi (id INT PRIMARY KEY) ENGINE=InnoDB;
+SELECT SUM(bal) = 0 AS rocksdb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM r_log) AS rocksdb_moves_match_log
+FROM r_acc;
+rocksdb_zero_sum	rocksdb_moves_match_log
+1	1
+SELECT SUM(bal) = 0 AS innodb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM i_log) AS innodb_moves_match_log
+FROM i_acc;
+innodb_zero_sum	innodb_moves_match_log
+1	1
+SELECT (SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (kbal)
+WHERE bal > -1000000) =
+(SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (PRIMARY))
+AS sk_matches_pk;
+sk_matches_pk
+1
+CHECK TABLE r_acc, r_log;
+Table	Op	Msg_type	Msg_text
+test.r_acc	check	status	OK
+test.r_log	check	status	OK
+SELECT COUNT(*) AS mixed_only_in_rocksdb FROM r_log
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+mixed_only_in_rocksdb
+0
+SELECT COUNT(*) AS mixed_only_in_innodb FROM i_log
+WHERE id NOT IN (SELECT id FROM r_log);
+mixed_only_in_innodb
+0
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost_in_rocksdb FROM chk_ack
+WHERE id NOT IN (SELECT id FROM r_log);
+acked_lost_in_rocksdb
+0
+SELECT COUNT(*) AS acked_lost_in_innodb FROM chk_ack
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+acked_lost_in_innodb
+0
+SELECT COUNT(*) AS rocksdb_not_in_binlog FROM r_log
+WHERE id NOT IN (SELECT id FROM chk_br);
+rocksdb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_rocksdb FROM chk_br
+WHERE id NOT IN (SELECT id FROM r_log);
+binlog_not_in_rocksdb
+0
+SELECT COUNT(*) AS innodb_not_in_binlog FROM i_log
+WHERE id NOT IN (SELECT id FROM chk_bi);
+innodb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_innodb FROM chk_bi
+WHERE id NOT IN (SELECT id FROM i_log);
+binlog_not_in_innodb
+0
+DROP TABLE chk_ack, chk_br, chk_bi;
+# Round 4: rocksdb_flush_log_at_trx_commit = 2
+TRUNCATE TABLE r_acc;
+TRUNCATE TABLE r_log;
+TRUNCATE TABLE i_acc;
+TRUNCATE TABLE i_log;
+RESET BINARY LOGS AND GTIDS;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL innodb_flush_log_at_trx_commit = 1;
+# Kill the server
+# restart
+CREATE TABLE chk_ack (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_br (id INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE chk_bi (id INT PRIMARY KEY) ENGINE=InnoDB;
+SELECT SUM(bal) = 0 AS rocksdb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM r_log) AS rocksdb_moves_match_log
+FROM r_acc;
+rocksdb_zero_sum	rocksdb_moves_match_log
+1	1
+SELECT SUM(bal) = 0 AS innodb_zero_sum,
+SUM(moves) = 2 * (SELECT COUNT(*) FROM i_log) AS innodb_moves_match_log
+FROM i_acc;
+innodb_zero_sum	innodb_moves_match_log
+1	1
+SELECT (SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (kbal)
+WHERE bal > -1000000) =
+(SELECT GROUP_CONCAT(id, ':', bal ORDER BY id) FROM r_acc FORCE INDEX (PRIMARY))
+AS sk_matches_pk;
+sk_matches_pk
+1
+CHECK TABLE r_acc, r_log;
+Table	Op	Msg_type	Msg_text
+test.r_acc	check	status	OK
+test.r_log	check	status	OK
+SELECT COUNT(*) AS mixed_only_in_rocksdb FROM r_log
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+mixed_only_in_rocksdb
+0
+SELECT COUNT(*) AS mixed_only_in_innodb FROM i_log
+WHERE id NOT IN (SELECT id FROM r_log);
+mixed_only_in_innodb
+0
+SELECT COUNT(*) >= 100 AS load_ran FROM chk_ack;
+load_ran
+1
+SELECT COUNT(*) AS acked_lost_in_rocksdb FROM chk_ack
+WHERE id NOT IN (SELECT id FROM r_log);
+acked_lost_in_rocksdb
+0
+SELECT COUNT(*) AS acked_lost_in_innodb FROM chk_ack
+WHERE id % 2 = 0 AND id NOT IN (SELECT id FROM i_log);
+acked_lost_in_innodb
+0
+SELECT COUNT(*) AS rocksdb_not_in_binlog FROM r_log
+WHERE id NOT IN (SELECT id FROM chk_br);
+rocksdb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_rocksdb FROM chk_br
+WHERE id NOT IN (SELECT id FROM r_log);
+binlog_not_in_rocksdb
+0
+SELECT COUNT(*) AS innodb_not_in_binlog FROM i_log
+WHERE id NOT IN (SELECT id FROM chk_bi);
+innodb_not_in_binlog
+0
+SELECT COUNT(*) AS binlog_not_in_innodb FROM chk_bi
+WHERE id NOT IN (SELECT id FROM i_log);
+binlog_not_in_innodb
+0
+DROP TABLE chk_ack, chk_br, chk_bi;
+DROP TABLE r_acc, r_log, i_acc, i_log;

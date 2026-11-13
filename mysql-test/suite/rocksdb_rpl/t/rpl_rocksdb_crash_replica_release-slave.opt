@@ -1,0 +1,1 @@
+--gtid_mode=ON --enforce_gtid_consistency --loose-rocksdb_flush_log_at_trx_commit=1 --skip-replica-start --relay-log-recovery=1 --replica-parallel-workers=4

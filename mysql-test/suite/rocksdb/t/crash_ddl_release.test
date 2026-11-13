@@ -1,0 +1,111 @@
+# Release-variant item R6 (myrocks-notes/release-variants.md): server crash during a long
+# COPY ALTER and during inplace ADD/DROP INDEX, without debug points.
+#
+# Release-capable counterpart of recovery_after_alter_crash and add_index_inplace_crash,
+# which crash at DBUG points and therefore only run on debug builds. Here the server is
+# killed with SIGKILL while the ALTER runs on a table large enough that the ALTER takes
+# seconds; the kill moment is chosen from the ALTER's PROCESSLIST state.
+#
+# MyRocks does not declare atomic DDL (HTON_SUPPORTS_ATOMIC_DDL is not set), so the server
+# cannot roll an interrupted ALTER back on its own. What this test checks is the guarantee
+# that does hold after a crash:
+# - the table definition is either the complete old one or the complete new one,
+# - the data dictionary and the MyRocks dictionary agree, with no leftover #sql table,
+# - dropped and abandoned indexes are cleaned up,
+# - the rows are unchanged, CHECK TABLE is clean and every secondary index matches the
+#   primary key,
+# - an ALTER that reported success survives, and an interrupted ALTER can be retried.
+# Partitioned tables are covered without rocksdb_allow_unsafe_alter; the unsafe inplace
+# partition operations are crash unsafe by design (PS-11698).
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+--source include/big_test.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Table '.*' definition differs between MyRocks .*'");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Reconstruction of the corrupted table .*'");
+--enable_query_log
+
+--let $ddl_killed_old = 0
+--let $ddl_orphans_total = 0
+--let $ddl_rows = 300000
+
+--echo # Non-partitioned table with $ddl_rows rows
+CREATE TABLE t1 (
+  id INT NOT NULL PRIMARY KEY,
+  a INT NOT NULL,
+  b INT NOT NULL,
+  pad VARCHAR(100) NOT NULL,
+  KEY ka (a)
+) ENGINE=ROCKSDB;
+--disable_query_log
+SET SESSION cte_max_recursion_depth = 1000000;
+eval INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < $ddl_rows)
+  SELECT n, n % 1000, (n * 7) % 100003, REPEAT('x', 80) FROM s;
+--enable_query_log
+
+--let $ddl_parts = 1
+--let $ddl_label = COPY ALTER ADD COLUMN, killed while copying rows
+--let $ddl_alter = ADD COLUMN c INT NOT NULL DEFAULT 7, ALGORITHM=COPY
+--let $ddl_kill_state = copy to tmp table
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+--let $ddl_label = COPY ALTER changing a column type, killed while the copy commits
+--let $ddl_alter = MODIFY a BIGINT NOT NULL, ALGORITHM=COPY
+--let $ddl_kill_state = waiting for handler commit
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+--let $ddl_label = inplace ADD INDEX on two columns, killed while building the indexes
+--let $ddl_alter = ADD INDEX kb (b), ADD INDEX kp (pad), ALGORITHM=INPLACE
+--let $ddl_kill_state = altering table
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+--let $ddl_label = inplace ADD UNIQUE INDEX, killed while building the index
+--let $ddl_alter = ADD UNIQUE INDEX ub (b, id), ALGORITHM=INPLACE
+--let $ddl_kill_state = altering table
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+--let $ddl_label = inplace DROP INDEX, killed as soon as it runs
+--let $ddl_alter = DROP INDEX kb, DROP INDEX kp, ALGORITHM=INPLACE
+--let $ddl_kill_state =
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+DROP TABLE t1;
+
+--echo
+--echo # Partitioned table (4 hash partitions) with $ddl_rows rows
+CREATE TABLE t1 (
+  id INT NOT NULL PRIMARY KEY,
+  a INT NOT NULL,
+  b INT NOT NULL,
+  pad VARCHAR(100) NOT NULL,
+  KEY ka (a)
+) ENGINE=ROCKSDB PARTITION BY HASH (id) PARTITIONS 4;
+--disable_query_log
+SET SESSION cte_max_recursion_depth = 1000000;
+eval INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < $ddl_rows)
+  SELECT n, n % 1000, (n * 7) % 100003, REPEAT('x', 80) FROM s;
+--enable_query_log
+
+--let $ddl_parts = 4
+--let $ddl_label = partitioned COPY ALTER ADD COLUMN, killed while copying rows
+--let $ddl_alter = ADD COLUMN c INT NOT NULL DEFAULT 7, ALGORITHM=COPY
+--let $ddl_kill_state = copy to tmp table
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+--let $ddl_label = partitioned inplace ADD INDEX, killed while building the index
+--let $ddl_alter = ADD INDEX kb (b), ALGORITHM=INPLACE
+--let $ddl_kill_state = altering table
+--source suite/rocksdb/include/crash_ddl_release_round.inc
+
+DROP TABLE t1;
+
+--echo
+--let $assert_text = At least one ALTER was interrupted and came back with the old definition
+--let $assert_cond = $ddl_killed_old >= 1
+--source include/assert.inc
+
+--let $assert_text = No MyRocks dictionary entries are left for test tables
+--let $assert_cond = [SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = "test"] = 0
+--source include/assert.inc
