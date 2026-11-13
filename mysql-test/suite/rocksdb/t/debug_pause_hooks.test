@@ -121,8 +121,56 @@ SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
 --source include/wait_condition.inc
 
 --echo #
+--echo # rocksdb_pause_drop_index_delete_range
+--echo #
+--let $debug_pause_hook = rocksdb_pause_drop_index_delete_range
+CREATE TABLE t4 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+  ENGINE=ROCKSDB;
+INSERT INTO t4 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+  SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+--let $t4_index = `SELECT CONCAT('cf_id:', column_family, ',index_id:', index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't4'`
+# Without delete range the drop is reclaimed by a compaction: the hook is
+# not reached (the drop finishes while the keyword is set).
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_delete_range';
+DROP TABLE t4;
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t4_index'
+--let $wait_timeout = 120
+--source include/wait_condition.inc
+--let $assert_text = Without delete range the delete-range hook did not pause
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.debug_pause_hooks
+--let $assert_select = MyRocks: test: paused at rocksdb_pause_drop_index_delete_range
+--let $assert_count = 0
+--source include/assert_grep.inc
+
+# With delete range the thread is held after the range tombstone, and the
+# drop is still queued.
+CREATE TABLE t4 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+  ENGINE=ROCKSDB;
+INSERT INTO t4 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+  SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+--let $t4_index = `SELECT CONCAT('cf_id:', column_family, ',index_id:', index_number) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't4'`
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+--source suite/rocksdb/include/debug_pause_mark.inc
+DROP TABLE t4;
+--source suite/rocksdb/include/debug_pause_wait.inc
+--replace_result $t4_index T4_INDEX
+eval SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t4_index';
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_delete_range';
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = '$t4_index'
+--let $wait_timeout = 120
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = DEFAULT;
+
+--echo #
 --echo # Shutdown ends a pause of the drop-index thread
 --echo #
+--let $debug_pause_hook = rocksdb_pause_drop_index_thread
 CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2')
   ENGINE=ROCKSDB;
 INSERT INTO t3 WITH RECURSIVE s(i) AS

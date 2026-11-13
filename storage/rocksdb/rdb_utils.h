@@ -511,6 +511,11 @@ class Ensure_initialized {
     is installed (OnCompactionCompleted), before its statistics are updated.
   - rocksdb_pause_drop_index_thread: the drop-index thread woke up and has
     not looked at the ongoing drops yet. Shutdown ends the pause.
+  - rocksdb_pause_drop_index_delete_range: with
+    rocksdb_enable_delete_range_for_drop_index on, the drop-index thread has
+    written the range tombstone of an index ("index <id>" in the details)
+    and has not yet checked whether the index is empty, so the drop is still
+    queued. Shutdown ends the pause.
 */
 
 /** Whether the global debug settings include the keyword (exact match). */

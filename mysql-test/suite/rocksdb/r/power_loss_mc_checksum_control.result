@@ -1,0 +1,21 @@
+# Before the compaction every index shows all the rows
+# The compaction removes the expired entries of the secondary indexes only
+SET GLOBAL rocksdb_debug_ttl_ignore_pk = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_mc';
+SET GLOBAL rocksdb_debug_ttl_ignore_pk = DEFAULT;
+# Through the primary key
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c))) FROM tt FORCE INDEX (PRIMARY);
+COUNT(*)	BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c)))
+200	1808214222
+# The old check, a non-covering read through ka (a primary key scan): the same
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c))) FROM tt FORCE INDEX (ka);
+COUNT(*)	BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c)))
+200	1808214222
+# A covering scan of ka sees the loss
+SELECT COUNT(*) FROM tt FORCE INDEX (ka);
+COUNT(*)
+100
+# The checks must report the secondary indexes
+# MISMATCH tt via ka: expected 200:2253042627, got 100:984229340
+# MISMATCH tt via kb: expected 200:2434307394, got 100:867083460
+# MISMATCH tt via kc: expected 200:1808214222, got 100:3566030510

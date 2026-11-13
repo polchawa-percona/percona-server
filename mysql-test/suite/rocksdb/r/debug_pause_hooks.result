@@ -96,6 +96,32 @@ ongoing_drop
 T2_INDEX
 SET GLOBAL debug = '-d,rocksdb_pause_drop_index_thread';
 #
+# rocksdb_pause_drop_index_delete_range
+#
+CREATE TABLE t4 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+ENGINE=ROCKSDB;
+INSERT INTO t4 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL debug = '+d,rocksdb_pause_drop_index_delete_range';
+DROP TABLE t4;
+include/assert_grep.inc [Without delete range the delete-range hook did not pause]
+CREATE TABLE t4 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2', a INT)
+ENGINE=ROCKSDB;
+INSERT INTO t4 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+SELECT i, i FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+DROP TABLE t4;
+SELECT name AS ongoing_drop FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING' AND name = 'T4_INDEX';
+ongoing_drop
+T4_INDEX
+SET GLOBAL debug = '-d,rocksdb_pause_drop_index_delete_range';
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = DEFAULT;
+#
 # Shutdown ends a pause of the drop-index thread
 #
 CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY COMMENT 'cfname=cf_hooks2')

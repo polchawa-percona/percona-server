@@ -14857,6 +14857,14 @@ void Rdb_drop_index_thread::run() {
             rdb_handle_io_error(status, RDB_IO_ERROR_BG_THREAD);
             continue;
           }
+#ifndef NDEBUG
+          if (rocksdb_enable_delete_range_for_drop_index) {
+            rdb_dbug_pause_while_set(
+                "rocksdb_pause_drop_index_delete_range",
+                "index " + std::to_string(d.index_id),
+                [this]() { return m_killed != THD::NOT_KILLED; });
+          }
+#endif
           if (is_myrocks_index_empty(cfh.get(), is_reverse_cf, read_opts,
                                      d.index_id)) {
             finished.insert(d);

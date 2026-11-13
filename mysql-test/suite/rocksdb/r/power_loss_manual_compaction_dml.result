@@ -1,0 +1,178 @@
+CALL mtr.add_suppression("Attempting backtrace");
+# OPTIMIZE TABLE t1, held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_lzero_now = 1, held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1, held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# OPTIMIZE TABLE t1, held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_lzero_now = 1, held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now = 1, held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# OPTIMIZE TABLE t1, held at completed
+# Output when held at completed: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# ALTER TABLE tp OPTIMIZE PARTITION p0, held at completed
+# Output when held at completed: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at completed
+# Output when held at completed: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# SET GLOBAL rocksdb_compact_cf = 'cf_mc', held at completed
+# Output when held at completed: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered DML transactions: as expected
+CHECK TABLE t1, t2, tp;
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+test.t2	#	#	OK
+test.tp	#	#	OK
+# The same compaction again, run to the end
+# reach: the expected crashes were fired by the hook, with the expected unsynced data drops
