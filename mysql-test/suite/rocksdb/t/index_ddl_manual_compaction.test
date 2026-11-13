@@ -1,0 +1,78 @@
+#
+# Index DDL under manual compaction. Each round runs the scenarios below with
+# one kind of manual compaction, at points inside the DDL forced with debug
+# sync points:
+#   1  OPTIMIZE TABLE of other tables in the same column families
+#   2  SET GLOBAL rocksdb_compact_cf
+#   3  SET GLOBAL rocksdb_compact_lzero_now (after a memtable flush)
+#   4  SET GLOBAL rocksdb_force_flush_memtable_and_lzero_now
+# Scenarios:
+#   S1  ADD INDEX + ADD UNIQUE INDEX paused in the primary-key scan, after the
+#       build's snapshot is taken; a snapshot taken before the ALTER, with rows
+#       changed after it, is read through the primary key and an old index after
+#       the ALTER and a compaction
+#   S2  hidden primary key, ADD INDEX paused before the merge
+#   S3  reverse column family, ADD INDEX paused before the ingest
+#   S4  two indexes in one ALTER, paused after the first one is ingested
+#   S5  partial index and a plain index, paused after the dictionary commit
+#   S6  UNIQUE build with duplicate keys next to a good index in one ALTER,
+#       and alone: the ALTER must fail and leave no index behind
+#   S7  DROP INDEX, ADD INDEX on a neighbouring table and DROP + ADD of an index
+#       in one ALTER, while the drop-index thread is held, so the compaction
+#       filter sees the dropped index ids next to live ones
+# A reader at the server's isolation level (see the .combinations file) reads
+# during each pause while other tables of the column family change. After each
+# round every index must hold exactly the primary key's rows, CHECK TABLE must
+# pass and no data of dropped or failed indexes may remain once the drop-index
+# thread and a full compaction ran. The last round's tables are checked again
+# after a restart with rocksdb_validate_tables=1.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--let $mc_iso = `SELECT @@global.transaction_isolation`
+SET SESSION cte_max_recursion_depth = 100000;
+--disable_query_log
+CREATE TABLE mc_seq (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO mc_seq VALUES (0);
+delimiter //;
+CREATE PROCEDURE mc_dml()
+BEGIN
+  DECLARE s INT;
+  UPDATE mc_seq SET id = id + 1;
+  SELECT id * 100 + 100000 INTO s FROM mc_seq;
+  INSERT INTO tn WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 50)
+    SELECT s + n, n % 700, CONCAT('x', s + n) FROM v;
+  UPDATE tn SET a = a + 1 WHERE pk BETWEEN 1 AND 200;
+  DELETE FROM tn WHERE pk BETWEEN s + 41 AND s + 50;
+END//
+delimiter ;//
+--enable_query_log
+--let $mc_between = CALL mc_dml()
+
+connect (con1,localhost,root,,);
+connect (con_r,localhost,root,,);
+connect (con_s,localhost,root,,);
+connection default;
+
+--let $mc_trigger = 1
+while ($mc_trigger <= 4)
+{
+  --echo ## round $mc_trigger
+  --source suite/rocksdb/include/index_ddl_mc_round.inc
+  --inc $mc_trigger
+}
+
+--let $restart_parameters = restart:--rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--source suite/rocksdb/include/index_ddl_mc_check.inc
+CHECK TABLE ta, tn, th, tr, tp;
+
+disconnect con1;
+disconnect con_r;
+disconnect con_s;
+DROP PROCEDURE mc_dml;
+DROP TABLE ta, tn, th, tr, tp, tz, tzr, mc_seq;
+--source include/wait_until_count_sessions.inc
