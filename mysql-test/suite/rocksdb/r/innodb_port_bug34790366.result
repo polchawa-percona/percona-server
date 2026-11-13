@@ -1,0 +1,1378 @@
+# Rejected operations
+create table t1 (c1 int, c2 set('ab', 'cd'), c3 enum('pq', 'rs')) engine=rocksdb charset=ucs2;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+alter table t1 drop column c2, drop column c3, algorithm=instant;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+alter table t1 discard tablespace;
+ERROR HY000: Table storage engine for 't1' doesn't have this option
+drop table t1;
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+# armscii8:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=armscii8;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# ascii:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=ascii;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# big5:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=big5;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# binary:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=binary;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp1250:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp1250;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp1251:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp1251;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp1256:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp1256;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp1257:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp1257;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp850:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp850;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp852:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp852;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp866:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp866;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# cp932:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=cp932;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# dec8:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=dec8;
+Warnings:
+Warning	1287	'dec8' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# eucjpms:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=eucjpms;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# euckr:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=euckr;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# gb18030:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=gb18030;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# gb2312:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=gb2312;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# gbk:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=gbk;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# geostd8:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=geostd8;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# greek:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=greek;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# hebrew:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=hebrew;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# hp8:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=hp8;
+Warnings:
+Warning	1287	'hp8' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# keybcs2:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=keybcs2;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# koi8r:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=koi8r;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# koi8u:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=koi8u;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# latin1:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=latin1;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# latin2:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=latin2;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# latin5:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=latin5;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# latin7:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=latin7;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# macce:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=macce;
+Warnings:
+Warning	1287	'macce' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# macroman:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=macroman;
+Warnings:
+Warning	1287	'macroman' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# sjis:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=sjis;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# swe7:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=swe7;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# tis620:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=tis620;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# ucs2:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=ucs2;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	00780079002C007A0077	
+10	xy,zw		cd	00780079002C007A0077	
+11	zw	mn	cd	007A0077	006D006E
+2	xy,zw		cd	00780079002C007A0077	
+NULL	xy,zw		cd	00780079002C007A0077	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# ujis:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=ujis;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# utf16:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=utf16;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	00780079002C007A0077	
+10	xy,zw		cd	00780079002C007A0077	
+11	zw	mn	cd	007A0077	006D006E
+2	xy,zw		cd	00780079002C007A0077	
+NULL	xy,zw		cd	00780079002C007A0077	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# utf16le:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=utf16le;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	780079002C007A007700	
+10	xy,zw		cd	780079002C007A007700	
+11	zw	mn	cd	7A007700	6D006E00
+2	xy,zw		cd	780079002C007A007700	
+NULL	xy,zw		cd	780079002C007A007700	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# utf32:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=utf32;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	00000078000000790000002C0000007A00000077	
+10	xy,zw		cd	00000078000000790000002C0000007A00000077	
+11	zw	mn	cd	0000007A00000077	0000006D0000006E
+2	xy,zw		cd	00000078000000790000002C0000007A00000077	
+NULL	xy,zw		cd	00000078000000790000002C0000007A00000077	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# utf8mb3:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=utf8mb3;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+# utf8mb4:
+create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=utf8mb4;
+insert into t1 values (1, 'ab', 'pq');
+insert into t1 values (2, '', '');
+insert into t1 values (NULL, NULL, NULL);
+alter table t1 drop column c2, drop column c3, algorithm=copy;
+insert into t1 values (10);
+alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+insert into t1 values (11, 'zw', 'mn');
+alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+c1	c4	c5	c6	hex(c4)	hex(c5)
+1	xy,zw		cd	78792C7A77	
+10	xy,zw		cd	78792C7A77	
+11	zw	mn	cd	7A77	6D6E
+2	xy,zw		cd	78792C7A77	
+NULL	xy,zw		cd	78792C7A77	
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The same rows after a rebuild
+alter table t1 force, algorithm=copy;
+select c1, c4, c5, c6 from t1;
+c1	c4	c5	c6
+1	xy,zw		cd
+10	xy,zw		cd
+11	zw	mn	cd
+2	xy,zw		cd
+NULL	xy,zw		cd
+check table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+drop table t1;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;
+# END

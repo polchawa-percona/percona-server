@@ -1,0 +1,65 @@
+#
+# Port of innodb.bug34790366 (mysql-test/suite/innodb/t/bug34790366.test and
+# suite/innodb/include/bug34790366.inc) to MyRocks.
+# The original drops SET/ENUM columns with ALGORITHM=INSTANT in multi-byte
+# character sets (ucs2, utf16, utf32 failed an assertion on zero-length
+# elements) and moves the table with DISCARD/IMPORT TABLESPACE, also from
+# 8.0.33 .ibd/.cfg files.
+# Changes from the original:
+#   - ENGINE=ROCKSDB; have_innodb_16k.inc and have_lowercase0.inc dropped (no
+#     tablespace files are copied).
+#   - MyRocks has no instant DROP COLUMN and no transportable tablespaces; both
+#     are pinned as rejected, and the upgrade part (8.0.33 .ibd/.cfg files) is
+#     dropped.
+#   - The columns are dropped with ALGORITHM=COPY in every character set,
+#     including ucs2, utf16, utf16le and utf32.
+#   - The MyRocks counterpart of the instant metadata path is instant ADD
+#     COLUMN (rocksdb_enable_instant_ddl_for_append_column): SET and ENUM
+#     columns with defaults, including empty elements, are added instantly in
+#     every character set, and old rows must read the defaults.
+#
+--source include/have_rocksdb.inc
+
+--echo # Rejected operations
+create table t1 (c1 int, c2 set('ab', 'cd'), c3 enum('pq', 'rs')) engine=rocksdb charset=ucs2;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+alter table t1 drop column c2, drop column c3, algorithm=instant;
+--error ER_ILLEGAL_HA
+alter table t1 discard tablespace;
+drop table t1;
+
+SET @saved_append_column = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+
+--let $i = 1
+--let $n = `SELECT COUNT(*) FROM information_schema.character_sets`
+while ($i <= $n) {
+  --let $charset = query_get_value(SHOW CHARSET, Charset, $i)
+  --echo # $charset:
+  --eval create table t1 (c1 int, c2 set('ab', 'cd', ''), c3 enum('pq', 'rs', '')) engine=rocksdb charset=$charset
+  insert into t1 values (1, 'ab', 'pq');
+  insert into t1 values (2, '', '');
+  insert into t1 values (NULL, NULL, NULL);
+
+  alter table t1 drop column c2, drop column c3, algorithm=copy;
+  insert into t1 values (10);
+
+  alter table t1 add column c4 set('', 'xy', 'zw') not null default 'xy,zw', add column c5 enum('', 'mn') not null default '', algorithm=instant;
+  insert into t1 values (11, 'zw', 'mn');
+  alter table t1 add column c6 enum('ab', 'cd') not null default 'cd', algorithm=instant;
+
+  --sorted_result
+  select c1, c4, c5, c6, hex(c4), hex(c5) from t1;
+  check table t1;
+
+  --echo # The same rows after a rebuild
+  alter table t1 force, algorithm=copy;
+  --sorted_result
+  select c1, c4, c5, c6 from t1;
+  check table t1;
+  drop table t1;
+  inc $i;
+}
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append_column;
+--echo # END
