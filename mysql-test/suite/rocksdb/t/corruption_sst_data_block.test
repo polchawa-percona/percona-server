@@ -1,0 +1,189 @@
+#
+# Real on-disk corruption of a MyRocks SST data block (release item R8 in
+# myrocks-notes/release-variants.md).
+#
+# Release-capable: no debug build is needed. Instead of the debug points used
+# by corrupted_data_reads_debug, error_abort_warning_on_corrupt_data and
+# allow_to_start_after_corruption, the test flips bytes in the middle of the
+# first data block of the primary key's SST file, as bit rot or a torn write
+# would. Release builds compile out asserts, so this checks what a customer
+# actually gets: an error or a deliberate abort.
+#
+# 1. Default rocksdb_io_error_action=ABORT_SERVER: reading a row in the
+#    damaged block aborts the server and leaves the ROCKSDB_CORRUPTED marker.
+# 2. The marker stops the next start.
+# 3. rocksdb_allow_to_start_after_corruption=1 with
+#    rocksdb_io_error_action=IGNORE_ERROR: point reads, secondary-index
+#    lookups and writes that need the damaged block fail with an error;
+#    reads that don't need it return correct rows, including a covering
+#    secondary-index read. SKIP LOCKED and NOWAIT report the error too.
+#    Range and full scans that cross the damaged block are covered by
+#    corruption_sst_scan_ignore_error (finding #25).
+# 4. Restoring the SST file and removing the marker repairs the table.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+--let $sst_dir = `SELECT CONCAT(@@datadir, @@rocksdb_datadir)`
+--let $error_log = $MYSQLTEST_VARDIR/log/mysqld.1.err
+
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE t1 (
+  pk INT NOT NULL,
+  a INT NOT NULL,
+  b VARCHAR(200),
+  PRIMARY KEY (pk) COMMENT 'cfname=cf_corrupt_pk',
+  KEY ka (a) COMMENT 'cfname=cf_corrupt_sk'
+) ENGINE=ROCKSDB;
+
+INSERT INTO t1
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000)
+  SELECT n, n, REPEAT('x', 100) FROM s;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_corrupt_sk';
+
+--let $assert_text = The primary key is in exactly one SST file
+--let $assert_cond = [SELECT COUNT(*) FROM information_schema.rocksdb_index_file_map f JOIN information_schema.rocksdb_ddl d ON f.COLUMN_FAMILY = d.COLUMN_FAMILY AND f.INDEX_NUMBER = d.INDEX_NUMBER WHERE d.TABLE_NAME = "t1" AND d.INDEX_NAME = "PRIMARY"] = 1
+--source include/assert.inc
+
+--let $pk_sst = `SELECT f.SST_NAME FROM information_schema.rocksdb_index_file_map f JOIN information_schema.rocksdb_ddl d ON f.COLUMN_FAMILY = d.COLUMN_FAMILY AND f.INDEX_NUMBER = d.INDEX_NUMBER WHERE d.TABLE_NAME = 't1' AND d.INDEX_NAME = 'PRIMARY'`
+--let $sst = $sst_dir/$pk_sst
+
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+
+--source include/shutdown_mysqld.inc
+--copy_file $sst $MYSQLTEST_VARDIR/tmp/corruption_sst_data_block.bak
+--let $corrupt_sst = $sst
+--let $corrupt_where = data_first
+--source suite/rocksdb/include/corrupt_sst_block.inc
+--source include/start_mysqld.inc
+
+--echo #
+--echo # 1. Default io_error_action: a read of the damaged block aborts the
+--echo #    server and leaves the corruption marker.
+--echo #
+SELECT @@global.rocksdb_io_error_action;
+--echo # A row in the last, undamaged data block reads fine.
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+--source include/wait_until_disconnected.inc
+
+--let SEARCH_FILE=$error_log
+--let SEARCH_PATTERN=data corruption detected
+--source include/search_pattern.inc
+--file_exists $sst_dir/ROCKSDB_CORRUPTED
+
+--echo #
+--echo # 2. The marker stops the next start: mysqld exits without serving.
+--echo #
+--let $exit_log = $MYSQLTEST_VARDIR/tmp/corruption_sst_data_block_exit.err
+--error 0
+--exec $MYSQLD_CMD --log-error=$exit_log $ROCKSDB_OPT '$ROCKSDB_LOAD'
+--let SEARCH_FILE=$exit_log
+--let SEARCH_PATTERN=The server will exit normally and stop restart attempts
+--source include/search_pattern.inc
+--remove_file $exit_log
+
+--echo #
+--echo # 3. allow_to_start_after_corruption=1, io_error_action=IGNORE_ERROR:
+--echo #    damaged rows give errors, undamaged rows are correct.
+--echo #
+--let $restart_parameters = restart:--rocksdb_allow_to_start_after_corruption=1 --rocksdb_io_error_action=IGNORE_ERROR
+--source include/start_mysqld.inc
+
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("data corruption detected");
+call mtr.add_suppression("aborting because of data corruption");
+call mtr.add_suppression("block checksum mismatch");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Status: Corruption");
+call mtr.add_suppression("There was corruption detected in the RocksDB data files");
+call mtr.add_suppression("to mark rocksdb as corrupted");
+call mtr.add_suppression("Got error .* from storage engine");
+call mtr.add_suppression("Got error 511 when reading table");
+call mtr.add_suppression("CHECKTABLE t1: .* failed to fetch row by rowid");
+
+SELECT @@global.rocksdb_io_error_action, @@global.rocksdb_allow_to_start_after_corruption;
+
+--echo # Reads that don't need the damaged block.
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 5000;
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1 WHERE pk BETWEEN 4900 AND 5000;
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1 WHERE pk > 1000;
+
+--echo # The secondary index is in another SST file: a covering read is exact.
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (ka);
+SELECT pk, a, LENGTH(b) FROM t1 FORCE INDEX (ka) WHERE a = 5000;
+
+--echo # A point read of a row in the damaged block.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk = 1;
+
+--echo # Secondary-index lookups that need a damaged primary-key row.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk, a, LENGTH(b) FROM t1 FORCE INDEX (ka) WHERE a = 1;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 10 AND LENGTH(b) > 0;
+
+--echo # Writes and locking reads of damaged rows.
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+UPDATE t1 SET b = 'y' WHERE pk = 1;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+DELETE FROM t1 WHERE pk = 2;
+BEGIN;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 WHERE pk = 3 FOR UPDATE;
+ROLLBACK;
+
+--echo # SKIP LOCKED and NOWAIT must not turn a read error into a skipped row
+--echo # (finding #24 is about this code path; with corruption the error is
+--echo # reported).
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 WHERE pk = 1 FOR UPDATE SKIP LOCKED;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 WHERE pk IN (1, 2, 5000) FOR UPDATE SKIP LOCKED;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 FORCE INDEX (ka) WHERE a IN (1, 5000) FOR UPDATE SKIP LOCKED;
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+--error ER_GET_ERRMSG
+SELECT pk FROM t1 FORCE INDEX (ka) WHERE a IN (1, 5000) FOR UPDATE NOWAIT;
+
+--echo # The undamaged rows are still writable.
+UPDATE t1 SET b = 'y' WHERE pk = 5000;
+SELECT pk, b FROM t1 WHERE pk = 5000;
+
+--replace_regex /stored.*computed = [0-9]*/stored ... computed .../ /, ty' from/' from/
+CHECK TABLE t1;
+
+--echo #
+--echo # 4. Repair: restore the SST file and remove the marker.
+--echo #
+--let $restart_parameters =
+--source include/shutdown_mysqld.inc
+--remove_file $sst
+--move_file $MYSQLTEST_VARDIR/tmp/corruption_sst_data_block.bak $sst
+--error 0,1
+--remove_file $sst_dir/ROCKSDB_CORRUPTED
+--source include/start_mysqld.inc
+
+--echo # The update of pk 5000 is in the WAL and survives the restart;
+--echo # everything else is back to the original values.
+SELECT COUNT(*), SUM(a), SUM(LENGTH(b)) FROM t1 FORCE INDEX (PRIMARY);
+SELECT pk, a, LENGTH(b) FROM t1 WHERE pk IN (1, 5000);
+CHECK TABLE t1;
+
+DROP TABLE t1;

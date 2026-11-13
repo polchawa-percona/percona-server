@@ -1,0 +1,2 @@
+--rocksdb_default_cf_options=block_based_table_factory={filter_policy=bloomfilter:10:false;whole_key_filtering=1;}
+--rocksdb_override_cf_options=cf_corrupt_pk={disable_auto_compactions=true};cf_corrupt_sk={disable_auto_compactions=true}

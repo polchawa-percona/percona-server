@@ -1,0 +1,38 @@
+# Group v11: MYROCKS_LEGACY_VARBINARY_FORMAT
+# Group v12: MYROCKS_NO_COVERED_BITMAP_FORMAT
+# Group v13: MYROCKS_NO_LEAD_BYTE_VARCHAR_SPACE_PADDED
+# The indexes must carry the forced legacy format versions.
+SELECT table_name, index_name, kv_format_version
+FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'fmt'
+  ORDER BY table_name, index_name;
+table_name	index_name	kv_format_version
+v11_mixed	k_d	11
+v11_mixed	k_t	11
+v11_mixed	k_vb	11
+v11_mixed	k_vc	11
+v11_mixed	PRIMARY	11
+v11_vb	k_n	11
+v11_vb	PRIMARY	11
+v11_vb_sk	k_vb	11
+v11_vb_sk	PRIMARY	11
+v11_vc_bin	PRIMARY	11
+v12_cov	bf	12
+v12_cov	fid	12
+v12_cov	PRIMARY	15
+v13_ci	k_vc	13
+v13_ci	PRIMARY	13
+v13_ci	uk_c	13
+v13_pk_composite	PRIMARY	13
+v13_pk_latin1_bin	PRIMARY	13
+v13_pk_utf8mb4_bin	PRIMARY	13
+v13_sk	k_vc	13
+v13_sk	PRIMARY	13
+v13_ttl	k_vc	13
+v13_ttl	PRIMARY	13
+# Move the rows from the memtable to SST files.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Copy the datadir and zip it.
+# Fixture written to MYROCKS_FORMAT_FIXTURE_GEN/data84_rocks_legacy_formats.zip
+# restart
+DROP DATABASE fmt;
