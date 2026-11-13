@@ -1,0 +1,125 @@
+SET @old_innodb_lock_wait_timeout = @@global.innodb_lock_wait_timeout;
+SET @old_rocksdb_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET @old_rocksdb_rollback_on_timeout = @@global.rocksdb_rollback_on_timeout;
+SET GLOBAL innodb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_lock_wait_timeout = 30;
+SET SESSION innodb_lock_wait_timeout = 30;
+SET SESSION rocksdb_lock_wait_timeout = 30;
+SET GLOBAL rocksdb_rollback_on_timeout = ON;
+# Engine: InnoDB
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY (k)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id	k
+2	2
+# Point lookup on the primary key
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Shared lock request
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE id = 2 FOR SHARE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Lookup through the secondary key
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE k = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Full scan reaching the locked row
+SET @start = SYSDATE(6);
+SELECT * FROM t1 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Rows that are not locked are returned
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE NOWAIT;
+id	k
+3	3
+# Only the failing statement is rolled back
+BEGIN;
+INSERT INTO t1 VALUES (10, 10);
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT * FROM t1 WHERE id = 10;
+id	k
+10	10
+COMMIT;
+SELECT * FROM t1 WHERE id = 10;
+id	k
+10	10
+COMMIT;
+DROP TABLE t1;
+SELECT VARIABLE_VALUE INTO @timeouts_before FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_row_lock_wait_timeouts';
+# Engine: ROCKSDB
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5);
+BEGIN;
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+id	k
+2	2
+# Point lookup on the primary key
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Shared lock request
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE id = 2 FOR SHARE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Lookup through the secondary key
+SET @start = SYSDATE(6);
+SELECT * FROM t1 WHERE k = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Full scan reaching the locked row
+SET @start = SYSDATE(6);
+SELECT * FROM t1 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT TIMESTAMPDIFF(MICROSECOND, @start, SYSDATE(6)) < 2000000 AS did_not_wait;
+did_not_wait
+1
+# Rows that are not locked are returned
+SELECT * FROM t1 WHERE id = 3 FOR UPDATE NOWAIT;
+id	k
+3	3
+# Only the failing statement is rolled back
+BEGIN;
+INSERT INTO t1 VALUES (10, 10);
+SELECT * FROM t1 WHERE id = 2 FOR UPDATE NOWAIT;
+ERROR HY000: Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.
+SELECT * FROM t1 WHERE id = 10;
+id	k
+10	10
+COMMIT;
+SELECT * FROM t1 WHERE id = 10;
+id	k
+10	10
+COMMIT;
+DROP TABLE t1;
+# NOWAIT failures are not lock wait timeouts
+SELECT VARIABLE_VALUE - @timeouts_before AS new_lock_wait_timeouts
+FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rocksdb_row_lock_wait_timeouts';
+new_lock_wait_timeouts
+0
+SET GLOBAL innodb_lock_wait_timeout = @old_innodb_lock_wait_timeout;
+SET GLOBAL rocksdb_lock_wait_timeout = @old_rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_rollback_on_timeout = @old_rocksdb_rollback_on_timeout;
