@@ -1,0 +1,70 @@
+# PS-11829: with rocksdb_flush_log_at_trx_commit=2, a committed
+# transaction must survive a kill of the server process (only an OS
+# crash may lose it, as with innodb_flush_log_at_trx_commit=2).
+#
+# MyRocks opens RocksDB with manual_wal_flush=true, so a commit only
+# appends to the WAL buffer inside the server process. With the binary
+# log on, binlog group commit calls handlerton::flush_logs, which writes
+# the WAL to the OS. With the binary log off nothing writes it at commit,
+# only the background thread about once a second, and a kill right after
+# the commit loses the transaction.
+
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+SELECT @@global.rocksdb_flush_log_at_trx_commit;
+SELECT @@global.log_bin;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0, 'before');
+# Make sure the table and the first row are on disk before the
+# kills below, so that only the rows committed right before a kill are
+# at stake.
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--echo #
+--echo # Binary log off, autocommit INSERT
+--echo #
+INSERT INTO t1 VALUES (1, 'autocommit');
+--source include/kill_and_restart_mysqld.inc
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Binary log off, multi-statement transaction
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (2, 'trx');
+INSERT INTO t1 VALUES (3, 'trx');
+UPDATE t1 SET val = 'trx updated' WHERE id = 0;
+COMMIT;
+--source include/kill_and_restart_mysqld.inc
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Control: binary log on, autocommit INSERT and multi-statement
+--echo # transaction
+--echo #
+--let $restart_parameters = restart: --log-bin
+--source include/restart_mysqld.inc
+SELECT @@global.rocksdb_flush_log_at_trx_commit;
+SELECT @@global.log_bin;
+# Bring the table to a known state whatever the cases above left.
+DELETE FROM t1;
+INSERT INTO t1 VALUES (0, 'before'), (1, 'autocommit'), (2, 'trx'),
+                      (3, 'trx');
+UPDATE t1 SET val = 'trx updated' WHERE id = 0;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (4, 'binlog autocommit');
+BEGIN;
+INSERT INTO t1 VALUES (5, 'binlog trx');
+UPDATE t1 SET val = 'binlog trx updated' WHERE id = 1;
+COMMIT;
+--let $restart_parameters = restart: --log-bin
+--source include/kill_and_restart_mysqld.inc
+SELECT @@global.log_bin;
+SELECT * FROM t1 ORDER BY id;
+
+# Cleanup
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+DROP TABLE t1;
