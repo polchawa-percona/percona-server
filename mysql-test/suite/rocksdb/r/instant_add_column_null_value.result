@@ -1,0 +1,44 @@
+SET @saved_append = @@global.rocksdb_enable_instant_ddl_for_append_column;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+ALTER TABLE t1 ADD COLUMN x1 INT DEFAULT 7, ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES (2, 2, NULL), (3, 3, 3), (4, NULL, NULL);
+UPDATE t1 SET x1 = NULL WHERE a = 3;
+SELECT * FROM t1 ORDER BY a;
+a	b	x1
+1	1	7
+2	2	NULL
+3	3	NULL
+4	NULL	NULL
+SELECT a FROM t1 WHERE x1 IS NULL ORDER BY a;
+a
+2
+3
+4
+ALTER TABLE t1 ADD COLUMN x2 VARCHAR(10) DEFAULT 'd',
+ADD COLUMN x3 INT DEFAULT 9, ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES (5, 5, 5, NULL, NULL), (6, 6, NULL, 'v', NULL);
+SELECT * FROM t1 ORDER BY a;
+a	b	x1	x2	x3
+1	1	7	d	9
+2	2	NULL	d	9
+3	3	NULL	d	9
+4	NULL	NULL	d	9
+5	5	5	NULL	NULL
+6	6	NULL	v	NULL
+# An UPDATE of another column keeps the NULLs.
+UPDATE t1 SET b = b + 10;
+SELECT * FROM t1 ORDER BY a;
+a	b	x1	x2	x3
+1	11	7	d	9
+2	12	NULL	d	9
+3	13	NULL	d	9
+4	NULL	NULL	d	9
+5	15	5	NULL	NULL
+6	16	NULL	v	NULL
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = @saved_append;
