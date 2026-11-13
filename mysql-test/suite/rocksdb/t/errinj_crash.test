@@ -1,0 +1,48 @@
+#
+# Systematic error injection of I/O errors into the commits, point reads and
+# iterator steps of DML statements and transactions (see
+# suite/rocksdb/include/errinj_loop.inc). MyRocks aborts the server on an I/O
+# error, so every injected failure is a crash at a known RocksDB call. After
+# the restart the table must be in the state from before the statement or in
+# the state an uninjected run leaves, never in between. I/O errors at writes
+# are covered by errinj_dml_write.
+#
+# The binary log is on, so a crash after the transaction is in the binary log
+# must recover it as committed.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+
+--source suite/rocksdb/include/errinj_dml_setup.inc
+--let $errinj_crash = 1
+
+--let $errinj_class = COMMIT
+--let $errinj_status = IOERROR
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+
+--let $errinj_class = READ
+--let $errinj_status = IOERROR
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+
+--let $errinj_class = ITERATOR
+--let $errinj_status = IOERROR
+--source suite/rocksdb/include/errinj_crash_workloads.inc
+
+--let $errinj_crash = 0
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

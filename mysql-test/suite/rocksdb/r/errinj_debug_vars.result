@@ -1,0 +1,86 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+# The default is off.
+SELECT @@session.rocksdb_debug_inject_error_class,
+@@session.rocksdb_debug_inject_error_status,
+@@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_class	@@session.rocksdb_debug_inject_error_status	@@session.rocksdb_debug_inject_error_nth
+ANY	IOERROR	0
+# Calls of other classes are not counted.
+SET SESSION rocksdb_debug_inject_error_class = 'COMPACT';
+SET SESSION rocksdb_debug_inject_error_status = 'ABORTED';
+SET SESSION rocksdb_debug_inject_error_nth = 5;
+INSERT INTO t1 VALUES (4, 4);
+SELECT * FROM t1 WHERE pk = 2;
+pk	a
+2	2
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+5
+# OPTIMIZE TABLE compacts each of the two indexes: two calls.
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	status	OK
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+3
+# The call that brings the counter to 0 fails.
+SET SESSION rocksdb_debug_inject_error_nth = 2;
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	Error	Got error 10 'Operation aborted: injected error' from ROCKSDB
+test.t1	optimize	error	Unknown - internal error 520 during operation
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+0
+# Another session is not affected.
+SET SESSION rocksdb_debug_inject_error_class = 'READ';
+SET SESSION rocksdb_debug_inject_error_status = 'BUSY';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+SELECT * FROM t1 WHERE pk = 1;
+pk	a
+1	1
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+0
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+1
+# The status is the chosen one.
+SELECT * FROM t1 WHERE pk = 1;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+SET SESSION rocksdb_debug_inject_error_status = 'TIMEDOUT';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+SELECT * FROM t1 WHERE pk = 1 FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION rocksdb_debug_inject_error_status = 'TRYAGAIN';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+SELECT * FROM t1 WHERE pk = 1;
+ERROR HY000: Got error 13 'Operation failed. Try again.: injected error' from ROCKSDB
+SELECT @@session.rocksdb_debug_inject_error_nth;
+@@session.rocksdb_debug_inject_error_nth
+0
+# ANY counts calls of every class.
+SET SESSION rocksdb_debug_inject_error_class = 'ANY';
+SET SESSION rocksdb_debug_inject_error_nth = 1000;
+INSERT INTO t1 VALUES (5, 5);
+SELECT @@session.rocksdb_debug_inject_error_nth < 1000 AS counted;
+counted
+1
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+# Nothing failed except the injected calls.
+SELECT * FROM t1;
+pk	a
+1	1
+2	2
+3	3
+4	4
+5	5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SET SESSION rocksdb_debug_inject_error_class = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_status = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_nth = DEFAULT;
+DROP TABLE t1;

@@ -1,0 +1,37 @@
+#
+# PS-11775: the drop-index thread decides that a dropped index is gone when an iterator
+# positioned at the index finds no key of it, without checking the iterator
+# status. A failed iterator therefore ends the drop while rows of the index
+# are still in SST files: the index leaves the drop queue, the compaction
+# filter stops removing its rows, and they are never reclaimed.
+#
+# The drop-index thread no longer runs the emptiness check after a failed
+# CompactRange, so the rows are left by the compaction filter instead: its
+# dictionary read fails, it keeps the rows of the dropped index, and the
+# CompactRange of the drop-index thread succeeds. The following emptiness
+# check then finds the rows (the injection below is only reached when the
+# iterator is positioned at a key) and fails. Correct behaviour: the index
+# stays in the drop queue until its rows are gone.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Failed to read/write in RocksDB");
+
+--let $errinj_bg_table = t1
+--let $errinj_bg_keys =
+--source suite/rocksdb/include/errinj_bg_setup.inc
+SET GLOBAL rocksdb_debug_inject_bg_error =
+  'COMPACTION_FILTER DICT_READ IOERROR 1, DROP_INDEX ITERATOR INCOMPLETE 1';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+--let $errinj_bg_site = dict_get
+--source suite/rocksdb/include/errinj_bg_wait.inc
+--let $errinj_bg_site = drop_index_empty_check
+--source suite/rocksdb/include/errinj_bg_wait.inc
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+--source suite/rocksdb/include/errinj_bg_check.inc
+
+--echo # After a restart the rows are still not reclaimed.
+--source include/restart_mysqld.inc
+--source suite/rocksdb/include/errinj_bg_check.inc

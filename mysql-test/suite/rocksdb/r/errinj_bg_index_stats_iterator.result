@@ -1,0 +1,11 @@
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 10;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 0;
+SET GLOBAL rocksdb_debug_inject_bg_error = 'INDEX_STATS ITERATOR INCOMPLETE 1';
+UPDATE t2 SET b = 'x' WHERE pk <= 50;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# calculations counted as successful: 0, as failed: 1
+SET GLOBAL rocksdb_table_stats_use_table_scan = DEFAULT;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = DEFAULT;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = DEFAULT;
+DROP TABLE t2;
