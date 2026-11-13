@@ -1,0 +1,107 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection master]
+CREATE TABLE seq_200 (seq INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO seq_200 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 200) SELECT n FROM s;
+CREATE TABLE tp  (a INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+CREATE TABLE tps (a INT PRIMARY KEY, b INT, c INT, KEY(b)) ENGINE=ROCKSDB;
+CREATE TABLE tpu (a INT PRIMARY KEY, b INT, c INT, UNIQUE KEY(b)) ENGINE=ROCKSDB;
+CREATE TABLE ts  (b INT, c INT, KEY(b)) ENGINE=ROCKSDB;
+INSERT INTO tp  SELECT seq, seq FROM seq_200;
+INSERT INTO tps SELECT seq, seq, seq FROM seq_200;
+INSERT INTO tpu SELECT seq, seq, seq FROM seq_200;
+INSERT INTO ts  SELECT seq, seq FROM seq_200;
+include/rpl/sync_to_replica.inc
+include/rpl/stop_replica.inc
+include/rpl/restart_server.inc [server_number=2]
+[connection slave]
+include/assert.inc [Replica runs with write policy write_committed]
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:tp, slave:tp]
+include/diff_tables.inc [master:tps, slave:tps]
+include/diff_tables.inc [master:tpu, slave:tpu]
+include/diff_tables.inc [master:ts, slave:ts]
+[connection slave]
+include/assert.inc [Replica tps: secondary index matches primary key]
+include/assert.inc [Replica tpu: unique index matches primary key]
+include/assert.inc [No applier error on the replica]
+CHECK TABLE tp, tps, tpu, ts;
+Table	Op	Msg_type	Msg_text
+test.tp	check	status	OK
+test.tps	check	status	OK
+test.tpu	check	status	OK
+test.ts	check	status	OK
+include/rpl/stop_replica.inc
+include/rpl/restart_server.inc [server_number=2]
+[connection slave]
+include/assert.inc [Replica runs with write policy write_prepared]
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:tp, slave:tp]
+include/diff_tables.inc [master:tps, slave:tps]
+include/diff_tables.inc [master:tpu, slave:tpu]
+include/diff_tables.inc [master:ts, slave:ts]
+[connection slave]
+include/assert.inc [Replica tps: secondary index matches primary key]
+include/assert.inc [Replica tpu: unique index matches primary key]
+include/assert.inc [No applier error on the replica]
+CHECK TABLE tp, tps, tpu, ts;
+Table	Op	Msg_type	Msg_text
+test.tp	check	status	OK
+test.tps	check	status	OK
+test.tpu	check	status	OK
+test.ts	check	status	OK
+include/rpl/stop_replica.inc
+include/rpl/restart_server.inc [server_number=2]
+[connection slave]
+include/assert.inc [Replica runs with write policy write_unprepared]
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:tp, slave:tp]
+include/diff_tables.inc [master:tps, slave:tps]
+include/diff_tables.inc [master:tpu, slave:tpu]
+include/diff_tables.inc [master:ts, slave:ts]
+[connection slave]
+include/assert.inc [Replica tps: secondary index matches primary key]
+include/assert.inc [Replica tpu: unique index matches primary key]
+include/assert.inc [No applier error on the replica]
+CHECK TABLE tp, tps, tpu, ts;
+Table	Op	Msg_type	Msg_text
+test.tp	check	status	OK
+test.tps	check	status	OK
+test.tpu	check	status	OK
+test.ts	check	status	OK
+include/rpl/stop_replica.inc
+include/rpl/restart_server.inc [server_number=2]
+[connection slave]
+include/assert.inc [Replica runs with write policy write_unprepared]
+include/rpl/start_replica.inc
+[connection master]
+include/rpl/sync_to_replica.inc
+include/diff_tables.inc [master:tp, slave:tp]
+include/diff_tables.inc [master:tps, slave:tps]
+include/diff_tables.inc [master:tpu, slave:tpu]
+include/diff_tables.inc [master:ts, slave:ts]
+[connection slave]
+include/assert.inc [Replica tps: secondary index matches primary key]
+include/assert.inc [Replica tpu: unique index matches primary key]
+include/assert.inc [No applier error on the replica]
+CHECK TABLE tp, tps, tpu, ts;
+Table	Op	Msg_type	Msg_text
+test.tp	check	status	OK
+test.tps	check	status	OK
+test.tpu	check	status	OK
+test.ts	check	status	OK
+include/rpl/stop_replica.inc
+include/rpl/restart_server.inc [server_number=2]
+include/rpl/start_replica.inc
+[connection master]
+DROP TABLE seq_200, tp, tps, tpu, ts;
+include/rpl/deinit.inc

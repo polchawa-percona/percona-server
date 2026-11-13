@@ -1,0 +1,2 @@
+--binlog_format=row
+--transaction-isolation=READ-COMMITTED
