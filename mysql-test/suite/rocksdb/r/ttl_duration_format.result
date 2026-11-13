@@ -1,0 +1,76 @@
+# Leading zeros are decimal
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=010;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+TTL_DURATION
+10
+ALTER TABLE t1 COMMENT = 'ttl_duration=0100;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+TTL_DURATION
+100
+DROP TABLE t1;
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=08;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+TTL_DURATION
+8
+DROP TABLE t1;
+# Everything else that is not a plain decimal number is rejected,
+# by CREATE TABLE and by ALTER TABLE, which keeps the old duration
+CREATE TABLE t3 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=3600;';
+# ttl_duration=0x10
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=0x10;';
+ERROR HY000: TTL duration (0x10) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=0x10;';
+ERROR HY000: TTL duration (0x10) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+# ttl_duration=3600abc
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=3600abc;';
+ERROR HY000: TTL duration (3600abc) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=3600abc;';
+ERROR HY000: TTL duration (3600abc) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+# ttl_duration=1e3
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=1e3;';
+ERROR HY000: TTL duration (1e3) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=1e3;';
+ERROR HY000: TTL duration (1e3) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+# ttl_duration=-5
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=-5;';
+ERROR HY000: TTL duration (-5) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=-5;';
+ERROR HY000: TTL duration (-5) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+# ttl_duration=99999999999999999999
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=99999999999999999999;';
+ERROR HY000: TTL duration (99999999999999999999) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=99999999999999999999;';
+ERROR HY000: TTL duration (99999999999999999999) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+# ttl_duration=18446744073709551616
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=18446744073709551616;';
+ERROR HY000: TTL duration (18446744073709551616) in MyRocks must be an unsigned non-null 64-bit integer.
+ALTER TABLE t3 COMMENT = 'ttl_duration=18446744073709551616;';
+ERROR HY000: TTL duration (18446744073709551616) in MyRocks must be an unsigned non-null 64-bit integer.
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+TTL_DURATION
+3600
+DROP TABLE t3;

@@ -1,0 +1,40 @@
+# PS-11906: ttl_duration in the table comment is parsed with strtoull and
+# base 0, and only the result 0 is rejected. Octal and hexadecimal forms
+# give other values, trailing text is ignored, and negative or out-of-range
+# numbers are accepted.
+#
+# A fixed server accepts only a plain decimal number of seconds and fails
+# CREATE TABLE and ALTER TABLE with ER_RDB_TTL_DURATION_FORMAT otherwise.
+
+--source include/have_rocksdb.inc
+
+--echo # Leading zeros are decimal
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=010;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+ALTER TABLE t1 COMMENT = 'ttl_duration=0100;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+DROP TABLE t1;
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=08;';
+SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't1';
+DROP TABLE t1;
+
+--echo # Everything else that is not a plain decimal number is rejected,
+--echo # by CREATE TABLE and by ALTER TABLE, which keeps the old duration
+CREATE TABLE t3 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=3600;';
+--let $i = 1
+while ($i <= 6)
+{
+  --let $value = `SELECT ELT($i, '0x10', '3600abc', '1e3', '-5', '99999999999999999999', '18446744073709551616')`
+  --echo # ttl_duration=$value
+  --error ER_RDB_TTL_DURATION_FORMAT
+  --eval CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB COMMENT 'ttl_duration=$value;'
+  --error ER_RDB_TTL_DURATION_FORMAT
+  --eval ALTER TABLE t3 COMMENT = 'ttl_duration=$value;'
+  SELECT TTL_DURATION FROM information_schema.ROCKSDB_DDL
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't3';
+  --inc $i
+}
+DROP TABLE t3;
