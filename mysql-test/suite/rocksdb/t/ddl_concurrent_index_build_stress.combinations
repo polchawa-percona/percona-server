@@ -1,0 +1,15 @@
+[default]
+
+[small_merge]
+rocksdb-merge-buf-size=4096
+rocksdb-merge-combine-read-size=1048576
+rocksdb-merge-tmp-file-removal-delay-ms=1
+
+[delete_range]
+rocksdb-enable-delete-range-for-drop-index=ON
+
+[ingest_settings]
+rocksdb-tmpdir=$MYSQLTEST_VARDIR/tmp
+rocksdb-bulk-load-compression-parallel-threads=4
+rocksdb-merge-combine-read-size=65536
+rocksdb-merge-tmp-file-removal-delay-ms=100

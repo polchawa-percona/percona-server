@@ -1,0 +1,228 @@
+#
+# Port of the online index build parts of innodb.innodb-table-online
+# (mysql-test/suite/innodb/t/innodb-table-online.test) to MyRocks, with the
+# ALTER paused in the middle of the index build. rocksdb.innodb_port_innodb_table_online
+# pauses before the build starts; this test pauses inside it.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB keeps DML running during an online index build and replays it from a
+#     modification log. MyRocks has no such log: an INPLACE ADD INDEX holds a
+#     shared metadata lock, so readers proceed and writers wait until the ALTER
+#     ends. The DML of the original is therefore queued behind the paused ALTER,
+#     and the test checks that it reaches the new index afterwards.
+#   - InnoDB's row_log_* and ddl_* points are replaced by the MyRocks points
+#     rocksdb.inplace_populate_sk_scan_row (in the primary key scan, after the
+#     first row), rocksdb.inplace_populate_sk_before_merge and
+#     rocksdb.bulk_load_before_ingest.
+#   - KILL QUERY in the middle of the scan accepts ER_QUERY_INTERRUPTED and
+#     ER_SK_POPULATE_DURING_ALTER: the wrong error is port-findings.md #30, pinned
+#     by rocksdb.innodb_port_ddl_kill. Here the test checks that the table is left
+#     consistent.
+#   - Partitioned table case added: the scan runs once per partition.
+#   - INNODB_METRICS, OOM injection and innodb_online_alter_log_max_size parts
+#     removed (InnoDB-only).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT NOT NULL, c3 VARCHAR(20) NOT NULL)
+ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n % 100, CONCAT('row', n) FROM v;
+
+call mtr.add_suppression("Error retrieving index entry from primary key");
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+--echo #
+--echo # 1. Paused in the primary key scan: readers proceed, writers wait, and the
+--echo #    queued writes are in the new index afterwards.
+--echo #
+connection con1;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+--send ALTER TABLE t1 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*), SUM(c2) FROM t1;
+SELECT * FROM t1 WHERE c1 = 500;
+
+connection con2;
+--send INSERT INTO t1 VALUES (1001, 7, 'new'), (1002, 7, 'new')
+connection default;
+let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'INSERT INTO t1%';
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+
+connection con1;
+reap;
+connection con2;
+reap;
+UPDATE t1 SET c2 = c2 + 1000 WHERE c1 BETWEEN 10 AND 19;
+DELETE FROM t1 WHERE c1 BETWEEN 20 AND 29;
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1;
+SELECT
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_c2)) =
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_c2))
+  AS k_c2_matches_table;
+SELECT COUNT(*) FROM t1 FORCE INDEX (k_c2) WHERE c2 = 7;
+ALTER TABLE t1 DROP INDEX k_c2;
+
+--echo #
+--echo # 2. The same, paused after the scan (before the merge sort) and after the
+--echo #    SST files are written (before they are ingested).
+--echo #
+--let $i= 1
+while ($i <= 2)
+{
+  if ($i == 1)
+  {
+    --let $point= rocksdb.inplace_populate_sk_before_merge
+  }
+  if ($i == 2)
+  {
+    --let $point= rocksdb.bulk_load_before_ingest
+  }
+  connection con1;
+  eval SET DEBUG_SYNC = '$point SIGNAL paused WAIT_FOR go_on';
+  --send ALTER TABLE t1 ADD INDEX k_c3(c3), ALGORITHM = INPLACE, LOCK = SHARED
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR paused';
+  SELECT COUNT(*) FROM t1;
+  connection con2;
+  --send DELETE FROM t1 WHERE c3 = 'new'
+  connection default;
+  let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist
+    WHERE state = 'Waiting for table metadata lock' AND info LIKE 'DELETE FROM t1%';
+  --source include/wait_condition.inc
+  SET DEBUG_SYNC = 'now SIGNAL go_on';
+
+  connection con1;
+  reap;
+  connection con2;
+  reap;
+  INSERT INTO t1 VALUES (1001, 7, 'new'), (1002, 7, 'new');
+
+  connection default;
+  SET DEBUG_SYNC = 'RESET';
+  CHECK TABLE t1;
+  SELECT
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 FORCE INDEX (k_c3)) =
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c3))) FROM t1 IGNORE INDEX (k_c3))
+    AS k_c3_matches_table;
+  ALTER TABLE t1 DROP INDEX k_c3;
+  --inc $i
+}
+
+--echo #
+--echo # 3. ADD UNIQUE INDEX on a column with duplicates, paused in the scan: the
+--echo #    duplicate is found later, in the merge, and nothing is left behind.
+--echo #
+connection con1;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+--send ALTER TABLE t1 ADD UNIQUE INDEX u_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*) FROM t1;
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+
+connection con1;
+--replace_regex /#sql-[0-9a-f_]*/#sql-temporary/
+--error ER_DUP_ENTRY
+reap;
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'u_c2';
+CHECK TABLE t1;
+
+--echo #
+--echo # 4. KILL QUERY in the middle of the scan: the index is not created and the
+--echo #    table is unchanged. The error code is port-findings.md #30.
+--echo #
+SELECT COUNT(*), SUM(c2) FROM t1;
+# A separate connection: a killed index build leaves state behind in its
+# connection (port-findings.md #41, rocksdb.inplace_sk_build_after_kill).
+connect (con3,localhost,root,,);
+let $ID= `SELECT CONNECTION_ID()`;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR killed';
+--send ALTER TABLE t1 ADD INDEX k_kill(c2), ALGORITHM = INPLACE, LOCK = SHARED
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+--replace_result $ID ID
+eval KILL QUERY $ID;
+SET DEBUG_SYNC = 'now SIGNAL killed';
+
+connection con3;
+--error ER_QUERY_INTERRUPTED, ER_SK_POPULATE_DURING_ALTER
+reap;
+SET DEBUG_SYNC = 'RESET';
+disconnect con3;
+
+connection default;
+SELECT COUNT(*) FROM information_schema.statistics
+  WHERE table_schema = 'test' AND table_name = 't1' AND index_name = 'k_kill';
+SELECT COUNT(*), SUM(c2) FROM t1;
+CHECK TABLE t1;
+ALTER TABLE t1 ADD INDEX k_kill(c2), ALGORITHM = INPLACE;
+SELECT
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 FORCE INDEX (k_kill)) =
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t1 IGNORE INDEX (k_kill))
+  AS k_kill_matches_table;
+DROP TABLE t1;
+
+--echo #
+--echo # 5. Partitioned table: the scan runs once per partition. Pause in the first
+--echo #    partition's scan, queue writes to every partition.
+--echo #
+CREATE TABLE t2 (c1 INT PRIMARY KEY, c2 INT NOT NULL) ENGINE = ROCKSDB
+PARTITION BY RANGE (c1) (PARTITION p0 VALUES LESS THAN (500),
+                         PARTITION p1 VALUES LESS THAN (1000),
+                         PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1500)
+SELECT n, n % 50 FROM v;
+
+connection con1;
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL scanning WAIT_FOR go_on';
+--send ALTER TABLE t2 ADD INDEX k_c2(c2), ALGORITHM = INPLACE, LOCK = SHARED
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR scanning';
+SELECT COUNT(*) FROM t2;
+connection con2;
+--send UPDATE t2 SET c2 = 99 WHERE c1 IN (1, 600, 1200)
+connection default;
+let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE state = 'Waiting for table metadata lock' AND info LIKE 'UPDATE t2%';
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL go_on';
+
+connection con1;
+reap;
+connection con2;
+reap;
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t2;
+SELECT
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t2 FORCE INDEX (k_c2)) =
+  (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c2))) FROM t2 IGNORE INDEX (k_c2))
+  AS k_c2_matches_table;
+SELECT c1 FROM t2 FORCE INDEX (k_c2) WHERE c2 = 99 ORDER BY c1;
+DROP TABLE t2;
+
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc
