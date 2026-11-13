@@ -4144,6 +4144,17 @@ class Rdb_transaction {
       return rc;
     }
 
+    // The SST files are finished but not ingested yet. DEBUG_SYNC cannot
+    // wait here when the bulk load is finished by a disconnect (the session is
+    // already killed), so tests hold it with the global debug keyword.
+    DEBUG_SYNC(m_thd, "rocksdb.bulk_load_finished_before_ingest");
+    DBUG_EXECUTE_IF("rocksdb_bulk_load_pause_before_ingest", {
+      while (DBUG_EVALUATE_IF("rocksdb_bulk_load_pause_before_ingest", true,
+                              false)) {
+        my_sleep(10000);
+      }
+    });
+
     // MERGING Phase: Flush the index_merge sort buffers into SST files in
     // Rdb_sst_info and collect all Rdb_sst_commit_info containing
     // (SST files, cf)
@@ -16831,6 +16842,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {

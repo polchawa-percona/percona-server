@@ -1,0 +1,51 @@
+#
+# Rows loaded with rocksdb_bulk_load=1 are written to SST files and ingested
+# only when the session sets rocksdb_bulk_load=0 (or switches tables or
+# disconnects); the INSERT and a COMMIT return success before that. A COPY
+# ALTER of the table from another session in this window used to rebuild the
+# table under new index ids, and the later ingest silently lost the rows: SET
+# rocksdb_bulk_load=0 succeeded, but the table did not contain them (PS-11684).
+#
+# Fixed upstream by efa997f0974 (MyRocks 9.7.4, PS-9766): an ALTER or DROP of
+# a table with an unfinished bulk load is refused with
+# ER_LOCK_REFUSED_BY_ENGINE, so the rows are kept.
+#
+--source include/have_rocksdb.inc
+
+connect (bulk,localhost,root,,);
+connect (ddl,localhost,root,,);
+
+--echo # 1. Autocommit INSERTs with bulk load, COPY ALTER, then the ingest.
+connection default;
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+connection bulk;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11),(12,12);
+connection ddl;
+--error ER_LOCK_REFUSED_BY_ENGINE
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+connection bulk;
+SET SESSION rocksdb_bulk_load = 0;
+connection default;
+SELECT * FROM tb ORDER BY id;
+DROP TABLE tb;
+
+--echo # 2. The same with an explicit transaction around the bulk load.
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+connection bulk;
+SET SESSION rocksdb_bulk_load = 1;
+BEGIN;
+INSERT INTO tb VALUES (10,10),(11,11);
+COMMIT;
+connection ddl;
+--error ER_LOCK_REFUSED_BY_ENGINE
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+connection bulk;
+SET SESSION rocksdb_bulk_load = 0;
+connection default;
+SELECT * FROM tb ORDER BY id;
+DROP TABLE tb;
+
+disconnect bulk;
+disconnect ddl;
