@@ -1,0 +1,100 @@
+# This test detects the bug only in an ASAN build; a debug build passes.
+SET SESSION cte_max_recursion_depth = 1000;
+# Engine: ROCKSDB
+CREATE TABLE t1 (
+ip_col INT, b1 BLOB, i2 INT NOT NULL, f3 FLOAT,
+g4 BLOB GENERATED ALWAYS AS (CONCAT(SUBSTR(ip_col,1,5), REPEAT('x', 40))) VIRTUAL,
+KEY k_b1 (b1(12)), KEY k_i2_g4 (i2, g4(22))
+) ENGINE=ROCKSDB PARTITION BY KEY (ip_col) PARTITIONS 23;
+INSERT INTO t1 (ip_col, b1, i2, f3)
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 500)
+SELECT n, REPEAT('b', 30), n % 10, n / 3 FROM s;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('u', 200) WHERE i2 BETWEEN 2 AND 7;
+affected rows: 300
+info: Rows matched: 300  Changed: 300  Warnings: 0
+SELECT COUNT(*) FROM t1 WHERE b1 = REPEAT('u', 200);
+COUNT(*)
+300
+EXPLAIN UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('v', 200)
+WHERE i2 BETWEEN 2 AND 7 ORDER BY i2, g4 LIMIT 7;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	UPDATE	t1	p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12,p13,p14,p15,p16,p17,p18,p19,p20,p21,p22	range	k_i2_g4	k_i2_g4	4	const	#	100.00	Using where; Using filesort
+Warnings:
+Note	1003	update `test`.`t1` FORCE INDEX (`k_i2_g4`) set `test`.`t1`.`b1` = repeat('v',200) where (`test`.`t1`.`i2` between 2 and 7) order by `test`.`t1`.`i2`,`test`.`t1`.`g4` limit 7
+UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('v', 200)
+WHERE i2 BETWEEN 2 AND 7 ORDER BY i2, g4 LIMIT 7;
+affected rows: 7
+info: Rows matched: 7  Changed: 7  Warnings: 0
+SELECT ip_col, i2, g4 FROM t1 WHERE b1 = REPEAT('v', 200) ORDER BY i2, g4;
+ip_col	i2	g4
+102	2	102xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+112	2	112xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+122	2	122xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+12	2	12xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+132	2	132xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+142	2	142xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+152	2	152xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+include/assert.inc [UPDATE ... ORDER BY ... LIMIT 7 changed the first 7 rows]
+include/assert.inc [Index scan and table scan return the same rows]
+SELECT i2, g4 FROM t1 FORCE INDEX (k_i2_g4)
+WHERE i2 BETWEEN 2 AND 3 ORDER BY i2, g4 LIMIT 3;
+i2	g4
+2	102xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+2	112xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+2	122xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Engine: InnoDB
+CREATE TABLE t1 (
+ip_col INT, b1 BLOB, i2 INT NOT NULL, f3 FLOAT,
+g4 BLOB GENERATED ALWAYS AS (CONCAT(SUBSTR(ip_col,1,5), REPEAT('x', 40))) VIRTUAL,
+KEY k_b1 (b1(12)), KEY k_i2_g4 (i2, g4(22))
+) ENGINE=InnoDB PARTITION BY KEY (ip_col) PARTITIONS 23;
+INSERT INTO t1 (ip_col, b1, i2, f3)
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 500)
+SELECT n, REPEAT('b', 30), n % 10, n / 3 FROM s;
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('u', 200) WHERE i2 BETWEEN 2 AND 7;
+affected rows: 300
+info: Rows matched: 300  Changed: 300  Warnings: 0
+SELECT COUNT(*) FROM t1 WHERE b1 = REPEAT('u', 200);
+COUNT(*)
+300
+EXPLAIN UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('v', 200)
+WHERE i2 BETWEEN 2 AND 7 ORDER BY i2, g4 LIMIT 7;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	UPDATE	t1	p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12,p13,p14,p15,p16,p17,p18,p19,p20,p21,p22	range	k_i2_g4	k_i2_g4	4	const	#	100.00	Using where; Using filesort
+Warnings:
+Note	1003	update `test`.`t1` FORCE INDEX (`k_i2_g4`) set `test`.`t1`.`b1` = repeat('v',200) where (`test`.`t1`.`i2` between 2 and 7) order by `test`.`t1`.`i2`,`test`.`t1`.`g4` limit 7
+UPDATE t1 FORCE INDEX (k_i2_g4) SET b1 = REPEAT('v', 200)
+WHERE i2 BETWEEN 2 AND 7 ORDER BY i2, g4 LIMIT 7;
+affected rows: 7
+info: Rows matched: 7  Changed: 7  Warnings: 0
+SELECT ip_col, i2, g4 FROM t1 WHERE b1 = REPEAT('v', 200) ORDER BY i2, g4;
+ip_col	i2	g4
+102	2	102xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+112	2	112xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+122	2	122xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+12	2	12xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+132	2	132xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+142	2	142xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+152	2	152xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+include/assert.inc [UPDATE ... ORDER BY ... LIMIT 7 changed the first 7 rows]
+include/assert.inc [Index scan and table scan return the same rows]
+SELECT i2, g4 FROM t1 FORCE INDEX (k_i2_g4)
+WHERE i2 BETWEEN 2 AND 3 ORDER BY i2, g4 LIMIT 3;
+i2	g4
+2	102xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+2	112xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+2	122xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
