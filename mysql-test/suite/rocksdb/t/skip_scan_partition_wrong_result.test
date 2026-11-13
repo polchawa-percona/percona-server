@@ -1,0 +1,24 @@
+--source include/have_rocksdb.inc
+
+--echo #
+--echo # PS-11793: skip scan on a partitioned MyRocks table returns wrong rows: in
+--echo # each partition only the rows of the first distinct prefix group are read,
+--echo # the following groups are skipped. A non-partitioned MyRocks table and a
+--echo # partitioned InnoDB table return all matching rows. Found while writing
+--echo # rocksdb.skip_scan_rec_per_key_race (PS-11840).
+--echo # Expected: the same rows with and without skip scan.
+--echo #
+
+CREATE TABLE t (ip_col INT, ipkey INT, PRIMARY KEY (ipkey, ip_col))
+  ENGINE=ROCKSDB
+  PARTITION BY RANGE (ip_col) (PARTITION p1 VALUES LESS THAN (1000));
+INSERT INTO t VALUES (150,1),(160,2),(170,3),(150,4),(160,5),(170,6);
+
+--replace_column 10 #
+EXPLAIN SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 160;
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 150;
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col = 160;
+SELECT /*+ SKIP_SCAN(t PRIMARY) */ * FROM t WHERE ip_col > 155;
+SELECT /*+ NO_SKIP_SCAN(t) */ * FROM t WHERE ip_col > 155;
+
+DROP TABLE t;
