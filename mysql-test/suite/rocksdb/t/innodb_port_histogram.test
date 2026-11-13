@@ -1,0 +1,65 @@
+#
+# Port of innodb.histogram (mysql-test/suite/innodb/t/histogram.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB
+#   - The InnoDB sampling counters (INFORMATION_SCHEMA.INNODB_METRICS,
+#     module_sampling) are removed. Instead the test checks that the
+#     histogram was built from a sample (sampling-rate < 1, because
+#     histogram_generation_max_mem_size is small), and that the optimizer
+#     uses it: the filter estimate for a range on the non-indexed column is
+#     close to the real selectivity (10%) instead of the 33.33% default.
+#     The sampling rate itself depends on the table's row estimate, so only
+#     its range is checked.
+#   - The 30000 inserts run in one transaction: as 30000 autocommit
+#     transactions with a WAL sync each they take minutes on disk.
+#
+--source include/have_rocksdb.inc
+--source include/big_test.inc
+
+DELIMITER |;
+CREATE PROCEDURE prepare_data(IN val INT)
+BEGIN
+  DECLARE i INT DEFAULT 1;
+
+  WHILE i < val DO
+    INSERT INTO t1 (b) VALUES (i);
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+
+
+CREATE TABLE t1 (a INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b INT) ENGINE=ROCKSDB;
+
+BEGIN;
+CALL prepare_data(30000);
+COMMIT;
+
+--echo # Without a histogram the optimizer guesses the filter of a range on b
+--let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE b < 3000, filtered, 1)
+--echo filtered: $f
+
+ANALYZE TABLE t1 UPDATE HISTOGRAM ON b WITH 50 BUCKETS;
+SELECT SCHEMA_NAME, TABLE_NAME, COLUMN_NAME FROM information_schema.column_statistics WHERE COLUMN_NAME = 'b';
+SELECT JSON_EXTRACT(histogram, '$."histogram-type"') AS type,
+       JSON_LENGTH(histogram, '$.buckets') AS buckets,
+       JSON_EXTRACT(histogram, '$."sampling-rate"') < 1 AS sampled,
+       JSON_EXTRACT(histogram, '$."sampling-rate"') > 0 AS rate_positive
+  FROM information_schema.column_statistics WHERE COLUMN_NAME = 'b';
+
+--echo # With the histogram the filter estimate is close to the real 10%
+--let $f = query_get_value(EXPLAIN SELECT * FROM t1 WHERE b < 3000, filtered, 1)
+--let $ok = `SELECT $f BETWEEN 8 AND 12`
+--echo filtered between 8 and 12: $ok
+if (!$ok)
+{
+  --echo filtered: $f
+}
+DROP TABLE t1;
+
+
+--echo #
+--echo # Cleanup
+--echo #
+
+DROP PROCEDURE prepare_data;
