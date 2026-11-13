@@ -194,6 +194,7 @@ std::shared_ptr<rocksdb::ColumnFamilyHandle> Rdb_cf_manager::get_or_create_cf(
                       opts.target_file_size_base);
 
       rocksdb::ColumnFamilyHandle *new_cf_handle = nullptr;
+      RDB_CRASH_POINT("cf_create");
       rocksdb::Status s =
           m_db->CreateColumnFamily(opts, cf_name, &new_cf_handle);
       DBUG_EXECUTE_IF("rocksdb_create_cf_persist_options_failure", {

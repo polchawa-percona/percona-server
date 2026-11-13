@@ -786,6 +786,7 @@ int Rdb_iterator_partial::materialize_prefix() {
   if (rc != HA_ERR_END_OF_FILE) goto exit;
   rc = HA_EXIT_SUCCESS;
 
+  RDB_CRASH_POINT("partial_index_write");
   s = rdb_get_rocksdb_db()->Write(options, optimize, wb.get());
   if (!s.ok()) {
     rc = rdb_tx_set_status_error(*tx, s, m_kd, m_tbl_def);

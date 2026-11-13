@@ -334,6 +334,7 @@ static int rocksdb_create_checkpoint(const char *checkpoint_dir_raw) {
   rocksdb::Checkpoint *checkpoint;
   auto status = rocksdb::Checkpoint::Create(rdb, &checkpoint);
   if (status.ok()) {
+    RDB_CRASH_POINT("checkpoint");
     status = checkpoint->CreateCheckpoint(checkpoint_dir.c_str());
     delete checkpoint;
     if (status.ok()) {
@@ -2472,6 +2473,31 @@ static MYSQL_THDVAR_BOOL(verify_row_debug_checksums,
                          "Verify checksums when reading index/table records",
                          nullptr, nullptr, false /* default value */);
 
+/*
+  Crash-point enumeration hook (see rdb_crash_point()). It models a process
+  crash (abort), not a power loss: data already handed to the OS survives.
+  Caveats for test writers:
+  - The counter is a session variable, so SET GLOBAL arms every session
+    created afterwards, including replication applier and event threads,
+    not only the test connection. Use SET SESSION.
+  - A WAL flush ("flush_wal") that belongs to a binlog group commit runs on
+    the group-commit leader and is counted in the leader's counter, so with
+    concurrent sessions it is not necessarily counted in the session that
+    issued the statement.
+  - Only threads with a THD are counted. Background threads (compaction,
+    drop index, periodic WAL sync) are never affected.
+  - In release builds the variable exists but has no effect.
+*/
+static MYSQL_THDVAR_UINT(
+    debug_crash_on_nth_durable_write, PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: the N-th durable write made by this "
+    "session's thread (dictionary commit, transaction prepare/commit, "
+    "write batch commit, bulk load ingest, WAL flush, checkpoint or XA "
+    "marker write) aborts the server before it is executed, after logging "
+    "which point fired. Every counted write decrements the value; 0 "
+    "disables the hook. A no-op in non-debug builds.",
+    nullptr, nullptr, /* default */ 0, /* min */ 0, /* max */ INT_MAX, 0);
+
 static MYSQL_THDVAR_BOOL(master_skip_tx_api,
                          PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_HINTUPDATEABLE,
                          "Skipping holding any lock on row access. "
@@ -2922,6 +2948,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(checksums_pct),
     MYSQL_SYSVAR(store_row_debug_checksums),
     MYSQL_SYSVAR(verify_row_debug_checksums),
+    MYSQL_SYSVAR(debug_crash_on_nth_durable_write),
     MYSQL_SYSVAR(master_skip_tx_api),
 
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
@@ -3277,6 +3304,7 @@ static void rdb_xa_marker_delete(const std::string &name) {
        thd_get_durability_property(thd) == HA_IGNORE_DURABILITY)) {
     return false;
   }
+  RDB_CRASH_POINT("xa_flush_completion");
   const rocksdb::Status s = rdb->FlushWAL(false);
   if (!s.ok()) {
     rdb_log_status_error(s);
@@ -3995,6 +4023,7 @@ class Rdb_transaction {
 
     auto ctx = get_bulk_load_ctx();
     auto &bulk_load_index_registry = ctx->bulk_load_index_registry();
+    RDB_CRASH_POINT("bulk_load_ingest");
     rocksdb::Status s = rdb->IngestExternalFiles(args);
     if (!s.ok() &&
         bulk_load_index_registry.index_registered_in_sst_partitioner()) {
@@ -4014,6 +4043,7 @@ class Rdb_transaction {
         return s;
       }
       // try again after compaction
+      RDB_CRASH_POINT("bulk_load_ingest_retry");
       s = rdb->IngestExternalFiles(args);
     }
     return s;
@@ -5072,6 +5102,7 @@ class Rdb_transaction_impl : public Rdb_transaction {
       return false;
     }
 
+    RDB_CRASH_POINT("tx_prepare");
     s = m_rocksdb_tx->Prepare();
     if (!s.ok()) {
       std::string msg = "RocksDB error on COMMIT (Prepare): " + s.ToString();
@@ -5105,6 +5136,7 @@ class Rdb_transaction_impl : public Rdb_transaction {
     }
 
     release_snapshot();
+    RDB_CRASH_POINT("tx_commit");
     s = m_rocksdb_tx->Commit();
 #ifndef NDEBUG
     DBUG_EXECUTE_IF("myrocks_commit_io_error",
@@ -5627,6 +5659,7 @@ class Rdb_writebatch_impl : public Rdb_transaction {
 
     release_snapshot();
 
+    RDB_CRASH_POINT("wb_commit");
     s = rdb->Write(write_opts, optimize, m_batch.GetWriteBatch());
     if (!s.ok()) {
       rdb_handle_io_error(s, RDB_IO_ERROR_TX_COMMIT);
@@ -6407,6 +6440,7 @@ static bool rocksdb_flush_wal(handlerton *const hton MY_ATTRIBUTE((__unused__)),
     bool sync = rdb_sync_wal_supported() &&
                 (!binlog_group_flush ||
                  rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC);
+    RDB_CRASH_POINT("flush_wal");
     const rocksdb::Status s = rdb->FlushWAL(sync);
 
     if (!s.ok()) {
@@ -6839,6 +6873,7 @@ static xa_status_code rocksdb_commit_by_xid(handlerton *const hton,
     DBUG_RETURN(XAER_NOTA);
   }
 
+  RDB_CRASH_POINT("xa_commit_by_xid");
   const rocksdb::Status s = trx->Commit();
 
   if (!s.ok()) {
@@ -6881,6 +6916,7 @@ static xa_status_code rocksdb_rollback_by_xid(
     DBUG_RETURN(XAER_NOTA);
   }
 
+  RDB_CRASH_POINT("xa_rollback_by_xid");
   const rocksdb::Status s = trx->Rollback();
 
   if (!s.ok()) {
@@ -6977,6 +7013,7 @@ static int rocksdb_set_prepared_in_tc(handlerton *const hton [[maybe_unused]],
   if (rc == HA_EXIT_SUCCESS && !sync &&
       rocksdb_flush_log_at_trx_commit != FLUSH_LOG_NEVER) {
     // manual_wal_flush keeps the write in a RocksDB buffer until FlushWAL.
+    RDB_CRASH_POINT("xa_prepared_flush");
     const rocksdb::Status s = rdb->FlushWAL(false);
     if (!s.ok()) {
       rdb_log_status_error(s);
@@ -15014,6 +15051,8 @@ int ha_rocksdb::rename_table(
   auto local_dict_manager =
       dict_manager.get_dict_manager_selector_non_const(is_tmp_table(from_str));
 
+  RDB_CRASH_DETAIL("rename " + from_str + " -> " + to_str);
+
   auto batch = Rdb_dict_manager::begin();
 
   // rename table is under dict_manager lock, and the cfs used
@@ -18522,6 +18561,41 @@ void rdb_handle_io_error(const rocksdb::Status status,
     }
   }
 }
+
+#ifndef NDEBUG
+/*
+  Test infrastructure for crash-point enumeration: decide whether the
+  durable write at site is the one that the session asked to be the last
+  one. Only calls made by a thread with a THD are counted, so background
+  threads are never affected and a test drives the counter
+  deterministically from its own session. The call that brings the
+  counter to zero logs a deterministic line; RDB_CRASH_POINT then aborts
+  the server before the write is executed.
+*/
+static thread_local std::string rdb_crash_detail_text;
+
+Rdb_crash_detail::Rdb_crash_detail(const std::string &detail) {
+  rdb_crash_detail_text = detail;
+}
+
+Rdb_crash_detail::~Rdb_crash_detail() { rdb_crash_detail_text.clear(); }
+
+bool rdb_crash_point(const char *site) {
+  THD *const thd = current_thd;
+  if (thd == nullptr) return false;
+  auto &nth = THDVAR(thd, debug_crash_on_nth_durable_write);
+  if (nth == 0) return false;
+  if (--nth != 0) return false;
+
+  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                  "MyRocks: crash-point hook fired at %s%s%s%s (nth durable "
+                  "write counter reached 0)",
+                  site, rdb_crash_detail_text.empty() ? "" : " [",
+                  rdb_crash_detail_text.c_str(),
+                  rdb_crash_detail_text.empty() ? "" : "]");
+  return true;
+}
+#endif  // !NDEBUG
 
 Rdb_dict_manager_selector *rdb_get_dict_manager(void) { return &dict_manager; }
 
