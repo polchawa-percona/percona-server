@@ -1,0 +1,102 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--source include/not_valgrind.inc
+
+#
+# Ports of innodb.hp_deadlock_shutdown and innodb.fast_shutdown to MyRocks:
+# shutting the server down while transactions wait for row locks, and right
+# after a crash recovery.
+#
+# Changes from the InnoDB originals:
+#   - ENGINE=ROCKSDB. MyRocks has no high-priority transactions, so the three
+#     transactions of hp_deadlock_shutdown are ordinary ones that form a
+#     deadlock cycle with rocksdb_deadlock_detect=OFF and a long lock wait
+#     timeout: without the shutdown they would wait for 300 seconds.
+#   - The DELETE statements use the primary key; a whole-table DELETE inside
+#     a transaction would be refused by the gap-lock rule at REPEATABLE READ.
+#   - InnoDB's "lock_wait_will_wait" debug sync point does not exist in
+#     MyRocks; a session is known to wait when ROCKSDB_TRX shows a WAITING_KEY.
+#   - fast_shutdown checks an InnoDB-internal assertion (background rollback
+#     of recovered transactions during a fast shutdown). MyRocks has no
+#     background rollback: an uncommitted transaction is simply not
+#     recovered. The port keeps the sequence: kill with an open transaction,
+#     restart, shut down at once, restart, and checks the data.
+#
+
+# The restarts below reset these global settings.
+SET GLOBAL rocksdb_deadlock_detect = OFF;
+SET GLOBAL rocksdb_lock_wait_timeout = 300;
+
+CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (0);
+CREATE TABLE t2 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (0);
+CREATE TABLE t3 (c1 INT NOT NULL PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (0);
+
+--connect(con1,localhost,root,,test)
+--let $con1 = `SELECT CONNECTION_ID()`
+--connect(con2,localhost,root,,test)
+--let $con2 = `SELECT CONNECTION_ID()`
+--connect(con3,localhost,root,,test)
+--let $con3 = `SELECT CONNECTION_ID()`
+
+--connection con1
+  BEGIN;
+  DELETE FROM t1 WHERE c1 = 0;
+
+--connection con2
+  BEGIN;
+  DELETE FROM t2 WHERE c1 = 0;
+
+--connection con3
+  BEGIN;
+  DELETE FROM t3 WHERE c1 = 0;
+
+--connection con3
+    --send DELETE FROM t2 WHERE c1 = 0; COMMIT
+
+--connection con2
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con3 AND waiting_key != ''
+    --source include/wait_condition.inc
+    --send DELETE FROM t1 WHERE c1 = 0; COMMIT
+
+--connection con1
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con2 AND waiting_key != ''
+    --source include/wait_condition.inc
+    --send DELETE FROM t3 WHERE c1 = 0; COMMIT
+
+--connection default
+    --let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $con1 AND waiting_key != ''
+    --source include/wait_condition.inc
+    --echo # Three transactions wait for each other; shut the server down.
+
+--source include/shutdown_mysqld.inc
+--source include/start_mysqld.inc
+
+--disconnect con1
+--disconnect con2
+--disconnect con3
+--echo # None of the deletes was committed.
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+
+--echo #
+--echo # Kill the server with an open transaction, restart, shut down at once.
+--echo #
+INSERT INTO t1 VALUES (1);
+BEGIN;
+INSERT INTO t1 VALUES (2);
+DELETE FROM t2 WHERE c1 = 0;
+--source include/kill_mysqld.inc
+--source include/start_mysqld.inc
+--source include/shutdown_mysqld.inc
+--source include/start_mysqld.inc
+SELECT * FROM t1;
+SELECT * FROM t2;
+
+DROP TABLE t1;
+DROP TABLE t2;
+DROP TABLE t3;
+--source include/wait_until_count_sessions.inc
