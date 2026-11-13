@@ -1,0 +1,48 @@
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1), (2, 2);
+CREATE TABLE s (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+# rocksdb_commit_in_the_middle replaces the snapshot.
+SET SESSION rocksdb_commit_in_the_middle = 1;
+SET SESSION rocksdb_bulk_load_size = 10;
+BEGIN;
+SELECT * FROM t ORDER BY id;
+id	v
+1	1
+2	2
+UPDATE t SET v = 100 WHERE id = 1;
+SELECT * FROM t ORDER BY id;
+id	v
+1	100
+2	2
+UPDATE t SET v = v + 1 WHERE id = 1;
+ROLLBACK;
+SELECT COUNT(*) FROM s;
+COUNT(*)
+20
+SELECT * FROM t ORDER BY id;
+id	v
+1	100
+2	2
+SET SESSION rocksdb_commit_in_the_middle = 0;
+SET SESSION rocksdb_bulk_load_size = DEFAULT;
+
+# Without it, the same sequence keeps the snapshot.
+BEGIN;
+SELECT * FROM t ORDER BY id;
+id	v
+1	100
+2	2
+UPDATE t SET v = 200 WHERE id = 1;
+SELECT * FROM t ORDER BY id;
+id	v
+1	100
+2	2
+UPDATE t SET v = v + 1 WHERE id = 1;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT COUNT(*) FROM s;
+COUNT(*)
+20
+DROP TABLE t, s;

@@ -1,0 +1,77 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# A MyRocks feature that changes what a REPEATABLE READ snapshot sees. The
+# behaviour below is deliberate and differs from a strict snapshot; the
+# test pins it so that a change is noticed.
+#
+#   - rocksdb_commit_in_the_middle: a transaction that writes more than
+#     rocksdb_bulk_load_size rows commits them in batches. Each internal
+#     commit also replaces the transaction's snapshot, so later reads see
+#     changes other transactions committed in the meantime, a later write
+#     to such a row does not conflict, and ROLLBACK keeps the batches that
+#     were already committed.
+#
+
+--connect (con1,localhost,root,,)
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+--connect (con2,localhost,root,,)
+
+--connection default
+CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1), (2, 2);
+CREATE TABLE s (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--echo
+--echo # rocksdb_commit_in_the_middle replaces the snapshot.
+--connection con1
+SET SESSION rocksdb_commit_in_the_middle = 1;
+SET SESSION rocksdb_bulk_load_size = 10;
+BEGIN;
+SELECT * FROM t ORDER BY id;
+--connection con2
+UPDATE t SET v = 100 WHERE id = 1;
+--connection con1
+--disable_query_log
+--let $n = 1
+while ($n <= 25)
+{
+  --eval INSERT INTO s VALUES ($n, $n)
+  --inc $n
+}
+--enable_query_log
+SELECT * FROM t ORDER BY id;
+UPDATE t SET v = v + 1 WHERE id = 1;
+ROLLBACK;
+SELECT COUNT(*) FROM s;
+SELECT * FROM t ORDER BY id;
+SET SESSION rocksdb_commit_in_the_middle = 0;
+SET SESSION rocksdb_bulk_load_size = DEFAULT;
+
+--echo
+--echo # Without it, the same sequence keeps the snapshot.
+BEGIN;
+SELECT * FROM t ORDER BY id;
+--connection con2
+UPDATE t SET v = 200 WHERE id = 1;
+--connection con1
+--disable_query_log
+--let $n = 101
+while ($n <= 125)
+{
+  --eval INSERT INTO s VALUES ($n, $n)
+  --inc $n
+}
+--enable_query_log
+SELECT * FROM t ORDER BY id;
+--error ER_LOCK_DEADLOCK
+UPDATE t SET v = v + 1 WHERE id = 1;
+ROLLBACK;
+SELECT COUNT(*) FROM s;
+
+--connection default
+--disconnect con1
+--disconnect con2
+DROP TABLE t, s;
+--source include/wait_until_count_sessions.inc

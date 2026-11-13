@@ -1,0 +1,469 @@
+
+########################################################################
+# Engine: ROCKSDB
+########################################################################
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT,
+KEY kk (k), KEY kr (k, v) COMMENT 'cfname=rev:cf_rr_rev') ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,10,1),(2,20,2),(3,30,3),(4,40,4),(5,50,5);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+
+# BEGIN takes no snapshot; the first read does.
+BEGIN;
+UPDATE t SET v = 100 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+100
+UPDATE t SET v = 101 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+100
+COMMIT;
+# WITH CONSISTENT SNAPSHOT takes it immediately.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET v = 102 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+101
+COMMIT;
+# The first statement is a locking read: no conflict with changes
+# committed after BEGIN, and later reads see them.
+BEGIN;
+UPDATE t SET v = 200 WHERE id = 2;
+UPDATE t SET v = 300 WHERE id = 3;
+SELECT v FROM t WHERE id = 2 FOR UPDATE;
+v
+200
+UPDATE t SET v = v + 1 WHERE id = 2;
+SELECT v FROM t WHERE id = 3;
+v
+300
+UPDATE t SET v = 301 WHERE id = 3;
+SELECT v FROM t WHERE id = 3;
+v
+300
+COMMIT;
+SELECT id, v FROM t WHERE id IN (2, 3) ORDER BY id;
+id	v
+2	201
+3	301
+
+# Secondary key and primary key reads of one snapshot agree.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET k = 11 WHERE id = 1;
+INSERT INTO t VALUES (6, 12, 6);
+DELETE FROM t WHERE id = 2;
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	10
+2	20
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k DESC;
+id	k
+2	20
+1	10
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	10
+2	20
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k BETWEEN 10 AND 25 ORDER BY k DESC;
+id	k
+2	20
+1	10
+SELECT id, k FROM t FORCE INDEX (PRIMARY) WHERE k BETWEEN 10 AND 25 ORDER BY id;
+id	k
+1	10
+2	20
+SELECT COUNT(*) FROM t FORCE INDEX (kk);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+COMMIT;
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	11
+6	12
+
+# The transaction's own uncommitted writes.
+BEGIN;
+INSERT INTO t VALUES (7, 25, 7);
+UPDATE t SET k = 5 WHERE id = 3;
+DELETE FROM t WHERE id = 4;
+SELECT id, k FROM t FORCE INDEX (kk) ORDER BY k;
+id	k
+3	5
+1	11
+6	12
+7	25
+5	50
+SELECT id, k FROM t FORCE INDEX (kk) ORDER BY k DESC;
+id	k
+5	50
+7	25
+6	12
+1	11
+3	5
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k > 4 AND k < 30 ORDER BY k DESC;
+id	k
+7	25
+6	12
+1	11
+3	5
+SELECT id, k FROM t FORCE INDEX (PRIMARY) WHERE id BETWEEN 3 AND 7 ORDER BY id DESC;
+id	k
+7	25
+6	12
+5	50
+3	5
+SELECT k FROM t WHERE id = 3;
+k
+5
+SELECT id FROM t FORCE INDEX (kk) WHERE k = 5;
+id
+3
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+ROLLBACK;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+
+# Old row versions under an open snapshot (percona_innodb.bug5450,
+# innodb.innodb_bug84958): another session rewrites one row through
+# INSERT ... ON DUPLICATE KEY UPDATE many times; primary key and
+# secondary key reads of the snapshot still agree on the old version.
+CREATE TABLE t2 (a INT, b INT, c INT, PRIMARY KEY (a, b), KEY (b, c))
+ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 2, 3) ON DUPLICATE KEY UPDATE c = c + 1;
+BEGIN;
+SELECT * FROM t2;
+a	b	c
+1	2	3
+INSERT INTO t2 VALUES (1, 2, 3) ON DUPLICATE KEY UPDATE c = NULL;
+SELECT * FROM t2 FORCE INDEX (PRIMARY);
+a	b	c
+1	2	3
+SELECT * FROM t2 FORCE INDEX (b);
+a	b	c
+1	2	3
+SELECT * FROM t2 FORCE INDEX (b) WHERE b = 2 AND c = 3;
+a	b	c
+1	2	3
+COMMIT;
+SELECT * FROM t2 FORCE INDEX (PRIMARY);
+a	b	c
+1	2	NULL
+SELECT * FROM t2 FORCE INDEX (b);
+a	b	c
+1	2	NULL
+DROP TABLE t2;
+
+# Large values under an open snapshot (the reader side of
+# innodb.lob_partial_update_concurrent and json_small_partial_update_*,
+# which the RC ports do not cover): updates by primary key, allowed at
+# REPEATABLE READ, replace a LONGBLOB and partially update a JSON value;
+# the snapshot still reads the old values.
+CREATE TABLE t4 (id INT PRIMARY KEY, b LONGBLOB, j JSON) ENGINE=ROCKSDB;
+INSERT INTO t4 VALUES (1, REPEAT('a', 1000000), '{"k": "v", "n": [1, 2, 3]}');
+BEGIN;
+SELECT id, MD5(b), j FROM t4;
+id	MD5(b)	j
+1	7707d6ae4e027c70eea2a935c2296f21	{"k": "v", "n": [1, 2, 3]}
+BEGIN;
+UPDATE t4 SET b = REPEAT('b', 2000000) WHERE id = 1;
+UPDATE t4 SET j = JSON_SET(j, '$.k', 'w', '$.n[1]', 20) WHERE id = 1;
+UPDATE t4 SET b = CONCAT(b, 'c') WHERE id = 1;
+COMMIT;
+SELECT id, MD5(b), LENGTH(b), j FROM t4;
+id	MD5(b)	LENGTH(b)	j
+1	7707d6ae4e027c70eea2a935c2296f21	1000000	{"k": "v", "n": [1, 2, 3]}
+COMMIT;
+SELECT id, MD5(b), LENGTH(b), j FROM t4;
+id	MD5(b)	LENGTH(b)	j
+1	cc90c8661fecaa4ace3c110c3d453e5c	2000001	{"k": "w", "n": [1, 20, 3]}
+DROP TABLE t4;
+
+# A snapshot keeps deleted rows through flush and compaction.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+DELETE FROM t WHERE id > 3;
+UPDATE t SET k = k + 100;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET GLOBAL rocksdb_compact_cf = 'rev:cf_rr_rev';
+SELECT id, k FROM t FORCE INDEX (PRIMARY) ORDER BY id;
+id	k
+1	111
+3	130
+SELECT id, k FROM t FORCE INDEX (kk) ORDER BY k;
+id	k
+1	111
+3	130
+SELECT id, k FROM t FORCE INDEX (kr) ORDER BY k DESC;
+id	k
+3	130
+1	111
+COMMIT;
+SELECT id, k FROM t ORDER BY id;
+id	k
+1	111
+3	130
+
+# Reading an InnoDB table does not start the MyRocks snapshot.
+CREATE TABLE o (id INT PRIMARY KEY, w INT) ENGINE=InnoDB;
+INSERT INTO o VALUES (1, 1);
+BEGIN;
+SELECT w FROM o;
+w
+1
+UPDATE t SET v = 500 WHERE id = 1;
+UPDATE o SET w = 2;
+SELECT v FROM t WHERE id = 1;
+v
+500
+SELECT w FROM o;
+w
+1
+COMMIT;
+# WITH CONSISTENT SNAPSHOT starts both.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET v = 501 WHERE id = 1;
+UPDATE o SET w = 3;
+SELECT v FROM t WHERE id = 1;
+v
+500
+SELECT w FROM o;
+w
+2
+COMMIT;
+DROP TABLE o;
+
+# Read-only transaction with a consistent snapshot.
+START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT;
+UPDATE t SET v = 600 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+501
+UPDATE t SET v = 1 WHERE id = 1;
+ERROR 25006: Cannot execute statement in a READ ONLY transaction.
+SELECT v FROM t WHERE id = 1 FOR UPDATE;
+ERROR 25006: Cannot execute statement in a READ ONLY transaction.
+SELECT v FROM t WHERE id = 1;
+v
+501
+COMMIT;
+SELECT v FROM t WHERE id = 1;
+v
+600
+DROP TABLE t;
+
+########################################################################
+# Engine: InnoDB
+########################################################################
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT,
+KEY kk (k), KEY kr (k, v) COMMENT 'cfname=rev:cf_rr_rev') ENGINE=InnoDB;
+INSERT INTO t VALUES (1,10,1),(2,20,2),(3,30,3),(4,40,4),(5,50,5);
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET SESSION rocksdb_lock_wait_timeout = 10;
+SET SESSION innodb_lock_wait_timeout = 10;
+
+# BEGIN takes no snapshot; the first read does.
+BEGIN;
+UPDATE t SET v = 100 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+100
+UPDATE t SET v = 101 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+100
+COMMIT;
+# WITH CONSISTENT SNAPSHOT takes it immediately.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET v = 102 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+101
+COMMIT;
+# The first statement is a locking read: no conflict with changes
+# committed after BEGIN, and later reads see them.
+BEGIN;
+UPDATE t SET v = 200 WHERE id = 2;
+UPDATE t SET v = 300 WHERE id = 3;
+SELECT v FROM t WHERE id = 2 FOR UPDATE;
+v
+200
+UPDATE t SET v = v + 1 WHERE id = 2;
+SELECT v FROM t WHERE id = 3;
+v
+300
+UPDATE t SET v = 301 WHERE id = 3;
+SELECT v FROM t WHERE id = 3;
+v
+300
+COMMIT;
+SELECT id, v FROM t WHERE id IN (2, 3) ORDER BY id;
+id	v
+2	201
+3	301
+
+# Secondary key and primary key reads of one snapshot agree.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET k = 11 WHERE id = 1;
+INSERT INTO t VALUES (6, 12, 6);
+DELETE FROM t WHERE id = 2;
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	10
+2	20
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k DESC;
+id	k
+2	20
+1	10
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	10
+2	20
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k BETWEEN 10 AND 25 ORDER BY k DESC;
+id	k
+2	20
+1	10
+SELECT id, k FROM t FORCE INDEX (PRIMARY) WHERE k BETWEEN 10 AND 25 ORDER BY id;
+id	k
+1	10
+2	20
+SELECT COUNT(*) FROM t FORCE INDEX (kk);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+COMMIT;
+SELECT id, k FROM t FORCE INDEX (kk) WHERE k BETWEEN 10 AND 25 ORDER BY k;
+id	k
+1	11
+6	12
+
+# The transaction's own uncommitted writes.
+BEGIN;
+INSERT INTO t VALUES (7, 25, 7);
+UPDATE t SET k = 5 WHERE id = 3;
+DELETE FROM t WHERE id = 4;
+SELECT id, k FROM t FORCE INDEX (kk) ORDER BY k;
+id	k
+3	5
+1	11
+6	12
+7	25
+5	50
+SELECT id, k FROM t FORCE INDEX (kk) ORDER BY k DESC;
+id	k
+5	50
+7	25
+6	12
+1	11
+3	5
+SELECT id, k FROM t FORCE INDEX (kr) WHERE k > 4 AND k < 30 ORDER BY k DESC;
+id	k
+7	25
+6	12
+1	11
+3	5
+SELECT id, k FROM t FORCE INDEX (PRIMARY) WHERE id BETWEEN 3 AND 7 ORDER BY id DESC;
+id	k
+7	25
+6	12
+5	50
+3	5
+SELECT k FROM t WHERE id = 3;
+k
+5
+SELECT id FROM t FORCE INDEX (kk) WHERE k = 5;
+id
+3
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+ROLLBACK;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+
+# Old row versions under an open snapshot (percona_innodb.bug5450,
+# innodb.innodb_bug84958): another session rewrites one row through
+# INSERT ... ON DUPLICATE KEY UPDATE many times; primary key and
+# secondary key reads of the snapshot still agree on the old version.
+CREATE TABLE t2 (a INT, b INT, c INT, PRIMARY KEY (a, b), KEY (b, c))
+ENGINE=InnoDB;
+INSERT INTO t2 VALUES (1, 2, 3) ON DUPLICATE KEY UPDATE c = c + 1;
+BEGIN;
+SELECT * FROM t2;
+a	b	c
+1	2	3
+INSERT INTO t2 VALUES (1, 2, 3) ON DUPLICATE KEY UPDATE c = NULL;
+SELECT * FROM t2 FORCE INDEX (PRIMARY);
+a	b	c
+1	2	3
+SELECT * FROM t2 FORCE INDEX (b);
+a	b	c
+1	2	3
+SELECT * FROM t2 FORCE INDEX (b) WHERE b = 2 AND c = 3;
+a	b	c
+1	2	3
+COMMIT;
+SELECT * FROM t2 FORCE INDEX (PRIMARY);
+a	b	c
+1	2	NULL
+SELECT * FROM t2 FORCE INDEX (b);
+a	b	c
+1	2	NULL
+DROP TABLE t2;
+
+# Large values under an open snapshot (the reader side of
+# innodb.lob_partial_update_concurrent and json_small_partial_update_*,
+# which the RC ports do not cover): updates by primary key, allowed at
+# REPEATABLE READ, replace a LONGBLOB and partially update a JSON value;
+# the snapshot still reads the old values.
+CREATE TABLE t4 (id INT PRIMARY KEY, b LONGBLOB, j JSON) ENGINE=InnoDB;
+INSERT INTO t4 VALUES (1, REPEAT('a', 1000000), '{"k": "v", "n": [1, 2, 3]}');
+BEGIN;
+SELECT id, MD5(b), j FROM t4;
+id	MD5(b)	j
+1	7707d6ae4e027c70eea2a935c2296f21	{"k": "v", "n": [1, 2, 3]}
+BEGIN;
+UPDATE t4 SET b = REPEAT('b', 2000000) WHERE id = 1;
+UPDATE t4 SET j = JSON_SET(j, '$.k', 'w', '$.n[1]', 20) WHERE id = 1;
+UPDATE t4 SET b = CONCAT(b, 'c') WHERE id = 1;
+COMMIT;
+SELECT id, MD5(b), LENGTH(b), j FROM t4;
+id	MD5(b)	LENGTH(b)	j
+1	7707d6ae4e027c70eea2a935c2296f21	1000000	{"k": "v", "n": [1, 2, 3]}
+COMMIT;
+SELECT id, MD5(b), LENGTH(b), j FROM t4;
+id	MD5(b)	LENGTH(b)	j
+1	cc90c8661fecaa4ace3c110c3d453e5c	2000001	{"k": "w", "n": [1, 20, 3]}
+DROP TABLE t4;
+
+# Read-only transaction with a consistent snapshot.
+START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT;
+UPDATE t SET v = 600 WHERE id = 1;
+SELECT v FROM t WHERE id = 1;
+v
+102
+UPDATE t SET v = 1 WHERE id = 1;
+ERROR 25006: Cannot execute statement in a READ ONLY transaction.
+SELECT v FROM t WHERE id = 1 FOR UPDATE;
+ERROR 25006: Cannot execute statement in a READ ONLY transaction.
+SELECT v FROM t WHERE id = 1;
+v
+102
+COMMIT;
+SELECT v FROM t WHERE id = 1;
+v
+600
+DROP TABLE t;

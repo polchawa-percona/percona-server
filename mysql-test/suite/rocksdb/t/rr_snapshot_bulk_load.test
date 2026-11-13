@@ -1,0 +1,46 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11685: rows loaded with rocksdb_bulk_load after a REPEATABLE READ
+# snapshot was taken must not be visible to that snapshot, as for rows
+# inserted normally. Today MyRocks ingests the bulk-load SST files with
+# snapshot_consistency=false, so the older snapshot sees them; this test
+# asserts the snapshot-consistent result and is disabled until fixed.
+#
+
+--connect (con1,localhost,root,,)
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+--connect (con2,localhost,root,,)
+
+--connection default
+CREATE TABLE s (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO s VALUES (1, 1), (2, 2);
+
+--echo # Rows bulk-loaded after a snapshot are not visible to it.
+--connection con1
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+SELECT COUNT(*) FROM s;
+--connection con2
+SET SESSION rocksdb_bulk_load = 1;
+--disable_query_log
+--let $n = 1000
+while ($n < 1050)
+{
+  --eval INSERT INTO s VALUES ($n, $n)
+  --inc $n
+}
+--enable_query_log
+SET SESSION rocksdb_bulk_load = 0;
+--connection con1
+SELECT COUNT(*) FROM s;
+SELECT COUNT(*) FROM s WHERE id >= 1000;
+COMMIT;
+--echo # A new snapshot sees them.
+SELECT COUNT(*) FROM s;
+
+--connection default
+--disconnect con1
+--disconnect con2
+DROP TABLE s;
+--source include/wait_until_count_sessions.inc
