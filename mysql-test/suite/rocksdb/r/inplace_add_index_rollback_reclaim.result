@@ -1,0 +1,47 @@
+CREATE TABLE t (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Case 1: INPLACE ADD UNIQUE INDEX fails on duplicate values.
+ALTER TABLE t ADD UNIQUE INDEX ub(b), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '0' for key '#sql-X.ub'
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+ongoing_drops
+0
+# Case 2: the index is built and ingested, then the commit MDL upgrade
+# times out because a reader started a transaction during the build.
+SET SESSION lock_wait_timeout = 3;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL built WAIT_FOR go';
+ALTER TABLE t ADD INDEX kb(b), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5000
+SET DEBUG_SYNC = 'now SIGNAL go';
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET SESSION lock_wait_timeout = DEFAULT;
+SET DEBUG_SYNC = 'RESET';
+COMMIT;
+# The rolled-back index is dropped and its data deleted without a
+# manual compaction.
+SELECT COUNT(*) AS ongoing_drops FROM information_schema.rocksdb_global_info
+WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+ongoing_drops
+0
+SELECT (SELECT COUNT(*) FROM information_schema.rocksdb_index_file_map m
+LEFT JOIN information_schema.rocksdb_ddl d
+ON d.INDEX_NUMBER = m.INDEX_NUMBER AND d.COLUMN_FAMILY = m.COLUMN_FAMILY
+WHERE d.INDEX_NUMBER IS NULL AND m.COLUMN_FAMILY = 0) AS orphan_sst_entries;
+orphan_sst_entries
+0
+SHOW CREATE TABLE t;
+Table	Create Table
+t	CREATE TABLE `t` (
+  `a` int NOT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5000
+DROP TABLE t;
