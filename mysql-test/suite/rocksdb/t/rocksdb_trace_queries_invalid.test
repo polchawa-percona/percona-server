@@ -1,0 +1,64 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11846 (originally reported as PS-7853): rocksdb_trace_queries and
+# rocksdb_trace_block_cache_access take
+# 'sampling_frequency:max_trace_file_size:trace_file_name', where both
+# numbers are non-negative integers. Negative and non-integer numbers must be
+# rejected, and no trace file may be created for them. std::stoull() wraps
+# "-1" to ULLONG_MAX and stops parsing at the first non-digit, so such values
+# used to be accepted.
+#
+
+--let $datadir = `SELECT @@datadir`
+--let $query_traces = $datadir/.rocksdb/queries_traces
+--let $block_cache_traces = $datadir/.rocksdb/block_cache_traces
+
+--echo # Control: a valid value starts tracing
+SET GLOBAL rocksdb_trace_queries = '1:1024:ps11846_trace_ok';
+SELECT @@global.rocksdb_trace_queries;
+--file_exists $query_traces/ps11846_trace_ok
+SET GLOBAL rocksdb_trace_queries = '';
+--remove_file $query_traces/ps11846_trace_ok
+
+--echo # Negative sampling_frequency
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_queries = '-1:1024:ps11846_trace_1';
+--error 1
+--file_exists $query_traces/ps11846_trace_1
+
+--echo # Negative max_trace_file_size
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_queries = '1:-1024:ps11846_trace_2';
+--error 1
+--file_exists $query_traces/ps11846_trace_2
+
+--echo # Non-integer sampling_frequency
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_queries = '1.1:1024:ps11846_trace_3';
+--error 1
+--file_exists $query_traces/ps11846_trace_3
+
+--echo # Non-integer max_trace_file_size
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_queries = '1:10.24:ps11846_trace_4';
+--error 1
+--file_exists $query_traces/ps11846_trace_4
+
+--echo # Trailing garbage after the number
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_queries = '1abc:1024:ps11846_trace_5';
+--error 1
+--file_exists $query_traces/ps11846_trace_5
+
+--echo # rocksdb_trace_block_cache_access uses the same parser
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_block_cache_access = '-1:1024:ps11846_bc_1';
+--error 1
+--file_exists $block_cache_traces/ps11846_bc_1
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rocksdb_trace_block_cache_access = '1:1.5:ps11846_bc_2';
+--error 1
+--file_exists $block_cache_traces/ps11846_bc_2
+
+SELECT @@global.rocksdb_trace_queries, @@global.rocksdb_trace_block_cache_access;
