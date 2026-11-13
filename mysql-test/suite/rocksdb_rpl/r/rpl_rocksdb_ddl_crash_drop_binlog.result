@@ -1,0 +1,38 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1),(2),(3);
+include/rpl/sync_to_replica.inc
+[connection master]
+# Crash at rocksdb_crash_after_delete_table during: DROP TABLE t1
+DROP TABLE t1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+include/rpl/reconnect.inc
+[connection master]
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) = (SELECT COUNT(DISTINCT TABLE_NAME) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME IN ('t1')) AS dictionaries_agree;
+dictionaries_agree
+1
+# Startup finished the DROP on the source.
+SELECT COUNT(*) AS t1_on_source FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_on_source
+0
+include/rpl/sync_to_replica.inc
+# The replica must not keep the table.
+SELECT COUNT(*) AS t1_on_replica FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+t1_on_replica
+0
+[connection master]
+DROP TABLE IF EXISTS t1;
+Warnings:
+Note	1051	Unknown table 'test.t1'
+include/rpl/deinit.inc
