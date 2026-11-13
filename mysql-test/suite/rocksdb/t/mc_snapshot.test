@@ -1,0 +1,106 @@
+#
+# A long transaction keeps its view across committed DML and manual
+# compactions, at READ COMMITTED and REPEATABLE READ. Other connections
+# commit rounds of DML that overwrite, delete, reinsert and SingleDelete
+# (secondary key changes) rows, each round followed by a compaction. At
+# REPEATABLE READ the transaction must keep seeing its snapshot, through
+# every index; at READ COMMITTED every statement must see the latest
+# committed state. The 'none' trigger is the baseline without compaction.
+#
+# Then the long transaction writes rows that were changed after its
+# snapshot. At REPEATABLE READ that is a snapshot conflict (ER_LOCK_DEADLOCK),
+# whether or not a compaction removed the old versions in between; at READ
+# COMMITTED the writes succeed. A row inserted after the snapshot is also a
+# conflict at REPEATABLE READ, not a duplicate key.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+
+connect (con1,localhost,root,,);
+connect (con_s,localhost,root,,);
+--let $mc_round = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  connection con_s;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  # Not START TRANSACTION WITH CONSISTENT SNAPSHOT: MyRocks refuses writes in
+  # such a transaction (error 8005). The first read takes the snapshot.
+  --let $mc_start = BEGIN
+  --let $mc_triggers = none optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --echo # $mc_level, $mc_trigger
+    connection con_s;
+    eval $mc_start;
+    --source suite/rocksdb/include/mc_digest.inc
+    --let $mc_s_before = $mc_digest
+
+    # Two committed rounds, each followed by the compaction.
+    --let $mc_n = 2
+    while ($mc_n) {
+      --dec $mc_n
+      --inc $mc_round
+      connection con1;
+      --source suite/rocksdb/include/mc_dml.inc
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+    }
+    connection default;
+    --source suite/rocksdb/include/mc_digest.inc
+    --let $mc_now = $mc_digest
+    connection con_s;
+    --source suite/rocksdb/include/mc_digest.inc
+    --let $mc_ok = `SELECT '$mc_digest' = '$mc_s_before'`
+    --echo sees its snapshot: $mc_ok
+    --let $mc_ok = `SELECT '$mc_digest' = '$mc_now'`
+    --echo sees the latest committed state: $mc_ok
+
+    # Writes of rows changed by the last round (mc_dml.inc, @r = $mc_round).
+    --disable_query_log
+    eval SET @r = $mc_round;
+    --enable_query_log
+    --let $mc_what = update of a row whose secondary key changed
+    --error 0, ER_LOCK_DEADLOCK
+    UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+    --source suite/rocksdb/include/mc_outcome.inc
+    --let $mc_what = update of a deleted and reinserted row
+    --error 0, ER_LOCK_DEADLOCK
+    UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+    --source suite/rocksdb/include/mc_outcome.inc
+    --let $mc_what = update of a deleted row
+    --error 0, ER_LOCK_DEADLOCK
+    UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+    --source suite/rocksdb/include/mc_outcome.inc
+    --let $mc_what = delete of a row whose primary key moved
+    --error 0, ER_LOCK_DEADLOCK
+    DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+    --source suite/rocksdb/include/mc_outcome.inc
+    --let $mc_what = insert of a row inserted after the snapshot
+    --error 0, ER_LOCK_DEADLOCK, ER_DUP_ENTRY
+    INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+    --source suite/rocksdb/include/mc_outcome.inc
+    --let $mc_what = update of an unchanged row
+    --error 0, ER_LOCK_DEADLOCK
+    UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+    --source suite/rocksdb/include/mc_outcome.inc
+    ROLLBACK;
+
+    connection default;
+    --let $mc_check_label = $mc_level, $mc_trigger
+    --source suite/rocksdb/include/mc_check.inc
+  }
+}
+disconnect con1;
+disconnect con_s;
+connection default;
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc_check_label = after restart
+--source suite/rocksdb/include/mc_check.inc
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

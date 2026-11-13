@@ -1,0 +1,126 @@
+#
+# Unique checks and row locks across manual compactions, at READ COMMITTED
+# and REPEATABLE READ (the level of both connections).
+#
+# 1. con1 deletes a row (uncommitted); con2's insert of the same primary key
+#    waits for con1's row lock; a compaction runs; con1 commits. con2's insert then succeeds at READ COMMITTED. At REPEATABLE
+#    READ its snapshot was taken before con1 committed, so the insert is a
+#    snapshot conflict (ER_LOCK_DEADLOCK).
+# 2. con2's insert stops right after its unique check (sync point
+#    rocksdb.after_unique_sk_check), holding the key's lock; a compaction
+#    runs; con1's insert of the same value times out on the lock; con2
+#    commits; con1's retry is a duplicate key.
+# 3. A locking read on the full unique key holds the row across a
+#    compaction; the other connection's update times out; after the holder
+#    commits its update, the other's update succeeds.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+--let $mc_k = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  connection con1;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  connection con2;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_triggers = none optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --inc $mc_k
+    --echo # $mc_level, $mc_trigger
+    --disable_query_log
+    connection con1;
+    eval SET @k = $mc_k;
+    connection con2;
+    eval SET @k = $mc_k;
+    connection default;
+    eval SET @k = $mc_k;
+    --enable_query_log
+
+    --echo # 1. insert waits for a deleted primary key, compaction in between
+    connection con1;
+    BEGIN;
+    DELETE FROM mc.t_multi WHERE id = @k;
+    connection con2;
+    SET SESSION rocksdb_lock_wait_timeout = 100;
+    BEGIN;
+    # A read first, so that at REPEATABLE READ the snapshot predates con1's
+    # commit (a snapshot first taken by the insert itself is retaken after a
+    # conflict).
+    SELECT COUNT(*) FROM mc.t_multi WHERE id = @k;
+    --send INSERT INTO mc.t_multi VALUES (@k, 8000000 + @k, 'taken', 'over')
+    connection default;
+    let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx
+      WHERE waiting_key <> '';
+    --source include/wait_condition.inc
+    --source suite/rocksdb/include/mc_compact.inc
+    connection con1;
+    COMMIT;
+    connection con2;
+    --let $mc_what = insert after the deleting transaction committed
+    --error 0, ER_LOCK_DEADLOCK
+    --reap
+    --source suite/rocksdb/include/mc_outcome.inc
+    COMMIT;
+    SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+
+    --echo # 2. compaction between a unique check and the write
+    connection con2;
+    BEGIN;
+    SET DEBUG_SYNC = 'rocksdb.after_unique_sk_check SIGNAL checked WAIT_FOR go';
+    --send INSERT INTO mc.t_multi VALUES (6000 + @k, 7000000 + @k, 'first', 'f')
+    connection default;
+    SET DEBUG_SYNC = 'now WAIT_FOR checked';
+    --source suite/rocksdb/include/mc_compact.inc
+    connection con1;
+    --error ER_LOCK_WAIT_TIMEOUT
+    INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+    connection default;
+    SET DEBUG_SYNC = 'now SIGNAL go';
+    connection con2;
+    --reap
+    COMMIT;
+    SET DEBUG_SYNC = 'RESET';
+    connection con1;
+    --error ER_DUP_ENTRY
+    INSERT INTO mc.t_multi VALUES (7000 + @k, 7000000 + @k, 'second', 's');
+
+    --echo # 3. locking read on the full unique key across a compaction
+    connection con1;
+    BEGIN;
+    SELECT id FROM mc.t_multi WHERE u = (@k + 100) * 10 FOR UPDATE;
+    connection default;
+    --source suite/rocksdb/include/mc_compact.inc
+    connection con2;
+    --error ER_LOCK_WAIT_TIMEOUT
+    UPDATE mc.t_multi SET c = 'con2' WHERE id = @k + 100;
+    connection con1;
+    UPDATE mc.t_multi SET c = 'con1' WHERE id = @k + 100;
+    COMMIT;
+    connection con2;
+    UPDATE mc.t_multi SET c = CONCAT(c, '+con2') WHERE id = @k + 100;
+    SELECT c FROM mc.t_multi WHERE id = @k + 100;
+
+    connection default;
+    --let $mc_check_label = $mc_level, $mc_trigger
+    --source suite/rocksdb/include/mc_check.inc
+  }
+}
+disconnect con1;
+disconnect con2;
+connection default;
+SET DEBUG_SYNC = 'RESET';
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc_check_label = after restart
+--source suite/rocksdb/include/mc_check.inc
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

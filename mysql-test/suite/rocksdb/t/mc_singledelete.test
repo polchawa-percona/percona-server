@@ -1,0 +1,189 @@
+#
+# Secondary-key changes are written as SingleDelete of the old entry and Put
+# of the new one, and deletes of a primary key that covers all columns are
+# SingleDeletes too. A SingleDelete removes only the newest Put of a key, so
+# a key written twice without a delete in between would resurface after a
+# compaction. This test changes the same keys back and forth, with a flush
+# and a manual compaction after every step, while snapshot connections opened
+# between the steps pin the older versions (so the compaction cannot just
+# drop them). At REPEATABLE READ each snapshot must keep seeing its version,
+# at READ COMMITTED the latest; every index must agree with the primary key.
+#
+# Steps on the same rows:
+#   - secondary key value churn a -> b -> a -> b
+#   - letter-case-only change (same key, different unpack info) and back
+#   - delete and reinsert of the same row (same primary and secondary keys)
+#   - covering primary key: insert, delete, insert, REPLACE, no-op
+#     INSERT ... ON DUPLICATE KEY UPDATE, key change
+#   - one transaction that inserts, deletes and reinserts the same key and
+#     changes a secondary key twice
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+CREATE TABLE mc.snaps (n INT PRIMARY KEY, d TEXT) ENGINE=InnoDB;
+
+--let $mc_nsnap = 5
+--let $mc_i = 1
+while ($mc_i <= $mc_nsnap) {
+  connect (con_s$mc_i,localhost,root,,);
+  --inc $mc_i
+}
+connect (con1,localhost,root,,);
+# The writer's statements (CREATE ... SELECT) need READ COMMITTED; the level
+# under test is the snapshot connections'.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--let $mc_ver = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  --let $mc_triggers = optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --echo # $mc_level, $mc_trigger
+    --disable_query_log
+    DELETE FROM mc.snaps;
+    --enable_query_log
+    --let $mc_step = 1
+    while ($mc_step <= $mc_nsnap) {
+      # Open snapshot connection N before step N.
+      connection con_s$mc_step;
+      eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_start = `SELECT IF('$mc_level' = 'REPEATABLE-READ', 'START TRANSACTION WITH CONSISTENT SNAPSHOT', 'BEGIN')`
+      eval $mc_start;
+      --source suite/rocksdb/include/mc_digest.inc
+      connection default;
+      --disable_query_log
+      eval INSERT INTO mc.snaps VALUES ($mc_step, '$mc_digest');
+      --enable_query_log
+
+      connection con1;
+      --disable_query_log
+      if ($mc_step == 1) {
+        # a -> b -> a -> b on the same rows, compaction in between.
+        UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        UPDATE mc.t_multi SET v = 'sd-a' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_cf SET b = 'sd-a' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_multi SET v = 'sd-b' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_cf SET b = 'sd-b' WHERE id BETWEEN 1 AND 10;
+        UPDATE mc.t_part SET v = v + 1 WHERE g = 3;
+        UPDATE mc.t_part SET v = v - 1 WHERE g = 3;
+      }
+      if ($mc_step == 2) {
+        # Same key, different unpack info, and back.
+        UPDATE mc.t_multi SET v = UPPER(v) WHERE id BETWEEN 11 AND 20;
+        UPDATE mc.t_hpk SET b = UPPER(b) WHERE a BETWEEN 1 AND 5;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        UPDATE mc.t_multi SET v = LOWER(v) WHERE id BETWEEN 11 AND 20;
+        UPDATE mc.t_hpk SET b = LOWER(b) WHERE a BETWEEN 1 AND 5;
+      }
+      if ($mc_step == 3) {
+        # Delete and reinsert the same rows.
+        CREATE TEMPORARY TABLE tmp_m ENGINE=InnoDB
+          SELECT * FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+        CREATE TEMPORARY TABLE tmp_c ENGINE=InnoDB
+          SELECT * FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+        DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+        DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+        INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+        DELETE FROM mc.t_multi WHERE id BETWEEN 21 AND 30;
+        DELETE FROM mc.t_cf WHERE id BETWEEN 21 AND 30;
+        INSERT INTO mc.t_multi SELECT * FROM tmp_m;
+        INSERT INTO mc.t_cf SELECT * FROM tmp_c;
+        DROP TEMPORARY TABLE tmp_m, tmp_c;
+      }
+      if ($mc_step == 4) {
+        # Covering primary key: every delete is a SingleDelete.
+        DELETE FROM mc.t_pk WHERE id BETWEEN 100 AND 110;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        INSERT INTO mc.t_pk
+          WITH RECURSIVE s(n) AS (SELECT 100 UNION ALL SELECT n + 1 FROM s WHERE n < 110)
+          SELECT n FROM s;
+        REPLACE INTO mc.t_pk VALUES (100), (101), (102);
+        INSERT INTO mc.t_pk VALUES (103), (104) ON DUPLICATE KEY UPDATE id = id;
+        connection default;
+        --source suite/rocksdb/include/mc_compact.inc
+        connection con1;
+        UPDATE mc.t_pk SET id = id + 10000 WHERE id BETWEEN 105 AND 107;
+        UPDATE mc.t_pk SET id = id - 10000 WHERE id BETWEEN 10105 AND 10107;
+        DELETE FROM mc.t_pk WHERE id = 108;
+        INSERT INTO mc.t_pk VALUES (108);
+      }
+      if ($mc_step == 5) {
+        # One transaction with several writes of the same keys.
+        eval SET SESSION transaction_isolation = '$mc_level';
+        BEGIN;
+        INSERT INTO mc.t_multi VALUES (900, 9000, 'one-trx', 'x');
+        DELETE FROM mc.t_multi WHERE id = 900;
+        INSERT INTO mc.t_multi VALUES (900, 9000, 'one-trx', 'y');
+        UPDATE mc.t_multi SET v = 'one-trx-2' WHERE id = 900;
+        UPDATE mc.t_multi SET v = 'one-trx' WHERE id = 900;
+        INSERT INTO mc.t_pk VALUES (900);
+        DELETE FROM mc.t_pk WHERE id = 900;
+        INSERT INTO mc.t_pk VALUES (900);
+        UPDATE mc.t_cf SET b = 'x1' WHERE id = 31;
+        UPDATE mc.t_cf SET b = 'x2' WHERE id = 31;
+        UPDATE mc.t_cf SET b = 'x1' WHERE id = 31;
+        COMMIT;
+        DELETE FROM mc.t_multi WHERE id = 900;
+        DELETE FROM mc.t_pk WHERE id = 900;
+        SET SESSION transaction_isolation = 'READ-COMMITTED';
+      }
+      # Most steps end where they started; this makes every step leave a
+      # different state, so each snapshot has its own version to keep.
+      --inc $mc_ver
+      eval UPDATE mc.t_cf SET b = 'version$mc_ver' WHERE id = 200;
+      --enable_query_log
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      --inc $mc_step
+    }
+    --source suite/rocksdb/include/mc_view_check.inc
+    # Release the snapshots oldest first, compacting after each release, so
+    # every compaction may drop one more layer of versions.
+    --let $mc_i = 1
+    while ($mc_i <= $mc_nsnap) {
+      connection con_s$mc_i;
+      COMMIT;
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      --inc $mc_i
+    }
+    --let $mc_check_label = $mc_level, $mc_trigger
+    --source suite/rocksdb/include/mc_check.inc
+  }
+}
+--let $mc_i = 1
+while ($mc_i <= $mc_nsnap) {
+  disconnect con_s$mc_i;
+  --inc $mc_i
+}
+disconnect con1;
+connection default;
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=1
+--source include/restart_mysqld.inc
+--let $mc_check_label = after restart
+--source suite/rocksdb/include/mc_check.inc
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,108 @@
+#
+# A statement's scan is paused mid-range (after its first row) while other
+# connections delete and change most of the rows it has yet to read, flush
+# and compact them away. The scan must return the rows of the snapshot it
+# started with: the iterator pins the old versions. Checked for a forward
+# scan of a secondary key with unpack info, a backward scan of a key in a
+# reverse column family, and a primary-key scan, at READ COMMITTED and
+# REPEATABLE READ. After the scan, a new statement sees the new rows at READ
+# COMMITTED and the old ones at REPEATABLE READ.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+--source suite/rocksdb/include/mc_setup.inc
+# Copies of the initial rows, to restore the tables before every scan
+# (READ COMMITTED: the gap-lock rule refuses the locking read at REPEATABLE
+# READ).
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+CREATE TABLE mc.multi_orig ENGINE=InnoDB AS SELECT * FROM mc.t_multi;
+CREATE TABLE mc.cf_orig ENGINE=InnoDB AS SELECT * FROM mc.t_cf;
+SET SESSION transaction_isolation = DEFAULT;
+
+connect (con1,localhost,root,,);
+# The writer's statements (INSERT ... SELECT of the same table) need READ
+# COMMITTED; the level under test is the scanning connection's.
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+connect (con_s,localhost,root,,);
+--let $mc_round = 0
+--let $mc_levels = READ-COMMITTED REPEATABLE-READ
+while ($mc_levels) {
+  --let $mc_level = `SELECT SUBSTRING_INDEX('$mc_levels', ' ', 1)`
+  --let $mc_levels = `SELECT TRIM(SUBSTR('$mc_levels', LENGTH('$mc_level') + 1))`
+  connection con_s;
+  eval SET SESSION transaction_isolation = '$mc_level';
+  --let $mc_triggers = optimize compact_cf lzero flush_lzero
+  while ($mc_triggers) {
+    --let $mc_trigger = `SELECT SUBSTRING_INDEX('$mc_triggers', ' ', 1)`
+    --let $mc_triggers = `SELECT TRIM(SUBSTR('$mc_triggers', LENGTH('$mc_trigger') + 1))`
+    --let $mc_scans = 3
+    while ($mc_scans) {
+      --inc $mc_round
+      if ($mc_scans == 3) {
+        --let $mc_scan = SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (kv) WHERE v >= ''
+        --let $mc_scan_name = forward scan of t_multi.kv
+      }
+      if ($mc_scans == 2) {
+        --let $mc_scan = SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a, b)))) FROM (SELECT id, a, b FROM mc.t_cf FORCE INDEX (kb) WHERE b >= '' ORDER BY b DESC LIMIT 100000) d
+        --let $mc_scan_name = backward scan of t_cf.kb (reverse column family)
+      }
+      if ($mc_scans == 1) {
+        --let $mc_scan = SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, u, CAST(v AS BINARY), c)))) FROM mc.t_multi FORCE INDEX (PRIMARY) WHERE id > -2147483648
+        --let $mc_scan_name = primary key scan of t_multi
+      }
+      --dec $mc_scans
+      --echo # $mc_level, $mc_trigger, $mc_scan_name
+      connection con1;
+      --disable_query_log
+      DELETE FROM mc.t_multi;
+      INSERT INTO mc.t_multi SELECT * FROM mc.multi_orig;
+      DELETE FROM mc.t_cf;
+      INSERT INTO mc.t_cf SELECT * FROM mc.cf_orig;
+      --enable_query_log
+      connection con_s;
+      BEGIN;
+      --let $mc_before = `$mc_scan`
+      SET DEBUG_SYNC = 'rocksdb.check_flags_nwd SIGNAL in_scan WAIT_FOR go EXECUTE 1';
+      --send_eval $mc_scan INTO @mc_scan_result
+      connection default;
+      SET DEBUG_SYNC = 'now WAIT_FOR in_scan';
+      connection con1;
+      --disable_query_log
+      eval SET @r = $mc_round;
+      DELETE FROM mc.t_multi WHERE id % 3 = 0;
+      UPDATE mc.t_multi SET v = CONCAT('scan', @r, v), c = CONCAT(c, '+') WHERE id % 3 = 1;
+      INSERT INTO mc.t_multi
+        SELECT id + 1, u + 1, v, c FROM mc.t_multi WHERE id % 3 = 2 AND id < 1000;
+      DELETE FROM mc.t_cf WHERE id % 2 = 0;
+      UPDATE mc.t_cf SET b = CONCAT('z', @r, b) WHERE id % 2 = 1;
+      --enable_query_log
+      connection default;
+      --source suite/rocksdb/include/mc_compact.inc
+      SET DEBUG_SYNC = 'now SIGNAL go';
+      connection con_s;
+      --reap
+      --let $mc_ok = `SELECT @mc_scan_result = '$mc_before'`
+      --echo paused scan returned the rows of its snapshot: $mc_ok
+      --let $mc_after_stmt = `$mc_scan`
+      --let $mc_ok = `SELECT '$mc_after_stmt' = '$mc_before'`
+      --echo next statement sees the old rows: $mc_ok
+      connection default;
+      --let $mc_now = `$mc_scan`
+      connection con_s;
+      --let $mc_ok = `SELECT '$mc_after_stmt' = '$mc_now'`
+      --echo next statement sees the new rows: $mc_ok
+      COMMIT;
+      SET DEBUG_SYNC = 'RESET';
+      connection default;
+      --let $mc_check_label = $mc_level, $mc_trigger
+      --source suite/rocksdb/include/mc_check.inc
+    }
+  }
+}
+disconnect con1;
+disconnect con_s;
+connection default;
+SET DEBUG_SYNC = 'RESET';
+DROP DATABASE mc;
+--source include/wait_until_count_sessions.inc

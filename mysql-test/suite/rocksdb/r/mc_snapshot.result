@@ -1,0 +1,392 @@
+CREATE DATABASE mc;
+CREATE TABLE mc.t_pk (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_hpk (
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_multi (
+id INT PRIMARY KEY,
+u INT NOT NULL,
+v VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+c TEXT NOT NULL,
+UNIQUE KEY ku (u), KEY kv (v), KEY kc (c(8)), KEY kcov (u, v)) ENGINE=ROCKSDB;
+CREATE TABLE mc.t_cf (
+id INT NOT NULL,
+a INT NOT NULL,
+b VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+UNIQUE KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+CREATE TABLE mc.t_part (
+g INT NOT NULL, id INT NOT NULL, v INT NOT NULL,
+PRIMARY KEY (g, id),
+KEY kp (g, v) COMMENT 'partial_group_keyparts=1;partial_group_threshold=3')
+ENGINE=ROCKSDB;
+CREATE TABLE mc.side_def (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE mc.side_cf (
+id INT NOT NULL, a INT NOT NULL, b INT NOT NULL,
+PRIMARY KEY (id) COMMENT 'cfname=mc_pk',
+KEY ka (a) COMMENT 'cfname=mc_sk',
+KEY kb (b) COMMENT 'cfname=rev:mc_rev') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# READ-COMMITTED, none
+BEGIN;
+sees its snapshot: 0
+sees the latest committed state: 1
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 0
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 0
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 0
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1062
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: READ-COMMITTED, none
+tbl	n	sum
+t_pk	300	1712085468
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	204	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	202	2807020962	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	198	3818802362	1	1
+tbl	n	sum	kp_ok
+t_part	202	4131250258	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, optimize
+BEGIN;
+sees its snapshot: 0
+sees the latest committed state: 1
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 0
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 0
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 0
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1062
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: READ-COMMITTED, optimize
+tbl	n	sum
+t_pk	300	3072940728
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	208	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	204	41784200	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	196	613078450	1	1
+tbl	n	sum	kp_ok
+t_part	204	4032670268	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, compact_cf
+BEGIN;
+sees its snapshot: 0
+sees the latest committed state: 1
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 0
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 0
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 0
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1062
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: READ-COMMITTED, compact_cf
+tbl	n	sum
+t_pk	300	84760769
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	212	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	206	80752236	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	194	1368733534	1	1
+tbl	n	sum	kp_ok
+t_part	206	1239779723	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, lzero
+BEGIN;
+sees its snapshot: 0
+sees the latest committed state: 1
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 0
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 0
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 0
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1062
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: READ-COMMITTED, lzero
+tbl	n	sum
+t_pk	300	304765343
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	216	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	208	1609678099	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	192	2122583521	1	1
+tbl	n	sum	kp_ok
+t_part	208	4134661939	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# READ-COMMITTED, flush_lzero
+BEGIN;
+sees its snapshot: 0
+sees the latest committed state: 1
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 0
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 0
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 0
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1062
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: READ-COMMITTED, flush_lzero
+tbl	n	sum
+t_pk	300	941502329
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	220	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	210	2984331887	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	190	1002436936	1	1
+tbl	n	sum	kp_ok
+t_part	210	1213723090	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE-READ, none
+BEGIN;
+sees its snapshot: 1
+sees the latest committed state: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 1213
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 1213
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 1213
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: REPEATABLE-READ, none
+tbl	n	sum
+t_pk	300	2319068416
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	224	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	212	990575207	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	188	3106099719	1	1
+tbl	n	sum	kp_ok
+t_part	212	2523378505	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, optimize
+BEGIN;
+sees its snapshot: 1
+sees the latest committed state: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 1213
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 1213
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 1213
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: REPEATABLE-READ, optimize
+tbl	n	sum
+t_pk	300	1528770148
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	228	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	214	3041389746	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	186	3757254780	1	1
+tbl	n	sum	kp_ok
+t_part	214	2783085622	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, compact_cf
+BEGIN;
+sees its snapshot: 1
+sees the latest committed state: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 1213
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 1213
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 1213
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: REPEATABLE-READ, compact_cf
+tbl	n	sum
+t_pk	300	3912969245
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	232	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	216	2894862143	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	184	1887596027	1	1
+tbl	n	sum	kp_ok
+t_part	216	2675908284	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, lzero
+BEGIN;
+sees its snapshot: 1
+sees the latest committed state: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 1213
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 1213
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 1213
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: REPEATABLE-READ, lzero
+tbl	n	sum
+t_pk	300	4263259459
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	236	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	218	3933297105	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	182	3923170585	1	1
+tbl	n	sum	kp_ok
+t_part	218	2762147104	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# REPEATABLE-READ, flush_lzero
+BEGIN;
+sees its snapshot: 1
+sees the latest committed state: 0
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 20;
+update of a row whose secondary key changed: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = @r + 60;
+update of a deleted and reinserted row: 1213
+UPDATE mc.t_cf SET b = 'mine' WHERE id = @r + 120;
+update of a deleted row: 1213
+DELETE FROM mc.t_pk WHERE id = 10 * @r + 2;
+delete of a row whose primary key moved: 1213
+INSERT INTO mc.t_multi VALUES (1000 + @r, 4000000 + @r, 'mine', 'mine');
+insert of a row inserted after the snapshot: 1213
+UPDATE mc.t_multi SET c = 'mine' WHERE id = 199;
+update of an unchanged row: 0
+ROLLBACK;
+# check: REPEATABLE-READ, flush_lzero
+tbl	n	sum
+t_pk	300	2137637684
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	240	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	220	3271135989	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	180	2940337316	1	1
+tbl	n	sum	kp_ok
+t_part	220	3444659418	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+# restart: --rocksdb_validate_tables=1
+# check: after restart
+tbl	n	sum
+t_pk	300	2137637684
+tbl	n	sum	ka_ok	kb_ok
+t_hpk	240	2105130943	1	1
+tbl	n	sum	ku_ok	kv_ok	kc_ok	kcov_ok
+t_multi	220	3271135989	1	1	1	1
+tbl	n	sum	ka_ok	kb_ok
+t_cf	180	2940337316	1	1
+tbl	n	sum	kp_ok
+t_part	220	3444659418	1
+Table	Op	Msg_type	Msg_text
+mc.t_pk	check	status	OK
+mc.t_hpk	check	status	OK
+mc.t_multi	check	status	OK
+mc.t_cf	check	status	OK
+mc.t_part	check	status	OK
+DROP DATABASE mc;
