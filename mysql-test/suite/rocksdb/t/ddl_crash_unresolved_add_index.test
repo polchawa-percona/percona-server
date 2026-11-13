@@ -1,0 +1,20 @@
+#
+# PS-11669: an interrupted INPLACE ADD INDEX leaves a pending ALTER TABLE
+# record that the next open of the table resolves. Statements that reach the
+# table before that open (RENAME TABLE, DROP TABLE, TRUNCATE TABLE, LOCK
+# TABLES), a failed resolution at open and a failed reopen after the data
+# dictionary commit must leave the table consistent with the data dictionary,
+# usable, without left-over index data and without a stale record.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/big_test.inc
+
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $orphan_base = `SELECT INDEX_NUMBER - 1 FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'orphan_probe'`
+DROP TABLE orphan_probe;
+
+--let $ddl_cols = (id INT PRIMARY KEY, a INT, b INT, KEY ka(a))
+--let $ddl_alter = ADD INDEX kb(b)
+--source suite/rocksdb/include/ddl_crash_unresolved.inc

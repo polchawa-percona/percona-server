@@ -1,0 +1,76 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+CREATE TABLE t2 (a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,10),(2,20),(3,30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Restart: the hidden key value of t2 is not loaded yet
+# restart
+SET SESSION rocksdb_perf_context_level = 2;
+# Open error at rocksdb_open_fail_find_tbl_def
+FLUSH TABLES;
+SET SESSION debug = "+d,rocksdb_open_fail_find_tbl_def";
+SELECT * FROM t1 ORDER BY a;
+ERROR HY000: Internal error: Attempt to open a table that is not present in RocksDB-SE data dictionary
+SET SESSION debug = "-d,rocksdb_open_fail_find_tbl_def";
+# The table handler was released (expect 0)
+SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+0
+SELECT * FROM t1 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+SELECT COUNT(*) > 0 AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+1
+# Open error at rocksdb_open_fail_alloc_key_buffers
+FLUSH TABLES;
+SET SESSION debug = "+d,rocksdb_open_fail_alloc_key_buffers";
+SELECT * FROM t1 ORDER BY a;
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+SET SESSION debug = "-d,rocksdb_open_fail_alloc_key_buffers";
+# The table handler was released (expect 0)
+SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+0
+SELECT * FROM t1 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+SELECT COUNT(*) > 0 AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+open_handlers
+1
+# Open error at rocksdb_open_fail_load_hidden_pk
+FLUSH TABLES;
+SET SESSION debug = "+d,rocksdb_open_fail_load_hidden_pk";
+SELECT * FROM t2 ORDER BY a;
+ERROR HY000: Got error 122 - 'Internal (unspecified) error in handler' from storage engine
+SET SESSION debug = "-d,rocksdb_open_fail_load_hidden_pk";
+# The table handler was released (expect 0)
+SELECT COUNT(*) AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2';
+open_handlers
+0
+SELECT * FROM t2 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+SELECT COUNT(*) > 0 AS open_handlers FROM information_schema.ROCKSDB_PERF_CONTEXT WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2';
+open_handlers
+1
+# The hidden key value was loaded by the successful open
+INSERT INTO t2 VALUES (4,40);
+SELECT * FROM t2 ORDER BY a;
+a	b
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+SET SESSION rocksdb_perf_context_level = DEFAULT;
+DROP TABLE t1, t2;

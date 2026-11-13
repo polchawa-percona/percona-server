@@ -949,8 +949,14 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
   /* The new table definition */
   Rdb_tbl_def *const m_new_tdef;
 
+  /* Stores the original key definitions */
+  std::shared_ptr<Rdb_key_def> *const m_old_key_descr;
+
   /* Stores the new key definitions */
   std::shared_ptr<Rdb_key_def> *m_new_key_descr;
+
+  /* Stores the old number of key definitions */
+  const uint m_old_n_keys;
 
   /* Stores the added key glids */
   const std::unordered_set<std::shared_ptr<Rdb_key_def>> m_added_indexes;
@@ -962,13 +968,16 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
   const ulonglong m_max_auto_incr;
 
   Rdb_inplace_alter_ctx(
-      Rdb_tbl_def *new_tdef, std::shared_ptr<Rdb_key_def> *new_key_descr,
+      Rdb_tbl_def *new_tdef, std::shared_ptr<Rdb_key_def> *old_key_descr,
+      std::shared_ptr<Rdb_key_def> *new_key_descr, uint old_n_keys,
       std::unordered_set<std::shared_ptr<Rdb_key_def>> added_indexes,
       std::unordered_set<GL_INDEX_ID> dropped_index_ids,
       ulonglong max_auto_incr)
       : my_core::inplace_alter_handler_ctx(),
         m_new_tdef(new_tdef),
+        m_old_key_descr(old_key_descr),
         m_new_key_descr(new_key_descr),
+        m_old_n_keys(old_n_keys),
         m_added_indexes(added_indexes),
         m_dropped_index_ids(dropped_index_ids),
         m_max_auto_incr(max_auto_incr) {}

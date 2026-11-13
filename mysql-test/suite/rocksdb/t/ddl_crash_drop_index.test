@@ -1,0 +1,158 @@
+#
+# PS-11670 (finding 50 in port-findings.md): a crash inside INPLACE or INSTANT
+# DROP INDEX after the MyRocks dictionary commit and before the server's data
+# dictionary commit left MyRocks with one index less than the server, and the
+# dropped index was already queued for removal. Every open of the table then
+# crashed the server (SIGSEGV in Rdb_key_def::setup), with
+# rocksdb_validate_tables 1 or 2.
+#
+# Expected: the table matches the server's data dictionary and is usable
+# through every index, with all rows: before its data dictionary commit the
+# ALTER TABLE is rolled back and the dropped index keeps its data; after it the
+# index is gone and its data is reclaimed. Covers INPLACE and INSTANT DROP
+# INDEX, DROP and ADD in one statement, a partitioned table,
+# rocksdb_enable_delete_range_for_drop_index=ON (rollback and commit) and
+# rocksdb_validate_tables=2.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+--enable_query_log
+
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $orphan_base = `SELECT INDEX_NUMBER - 1 FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'orphan_probe'`
+DROP TABLE orphan_probe;
+
+--let $save_instant = `SELECT @@global.rocksdb_enable_instant_ddl_for_drop_index_changes`
+--let $save_delete_range = `SELECT @@global.rocksdb_enable_delete_range_for_drop_index`
+
+--let $i = 0
+while ($i < 8)
+{
+  --let $partitioned =
+  --let $crash_point = crash_commit_after_prepare
+  --let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+  if ($i == 1)
+  {
+    SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = ON;
+    --let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INSTANT
+  }
+  if ($i == 2)
+  {
+    --let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ADD INDEX kc(b, a), ALGORITHM=INPLACE
+  }
+  if ($i == 3)
+  {
+    --let $partitioned = PARTITION BY HASH(id) PARTITIONS 2
+  }
+  if ($i == 4)
+  {
+    SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+    --let $restart_parameters = restart: --rocksdb_enable_delete_range_for_drop_index=ON
+  }
+  if ($i == 5)
+  {
+    --let $crash_point = crash_after_index_create
+  }
+  if ($i == 6)
+  {
+    --let $restart_parameters = restart: --rocksdb_validate_tables=2
+  }
+  if ($i == 7)
+  {
+    --let $crash_point = crash_after_index_create
+    SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+    --let $restart_parameters = restart: --rocksdb_enable_delete_range_for_drop_index=ON
+  }
+  --eval CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB $partitioned
+  INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --source suite/rocksdb/include/ddl_crash.inc
+  SHOW CREATE TABLE t1;
+  SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+    WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'
+    ORDER BY PARTITION_NAME, INDEX_NAME;
+  SELECT * FROM t1 ORDER BY id;
+  --error 0,ER_KEY_DOES_NOT_EXITS
+  SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+  SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+  INSERT INTO t1 VALUES (4,40,40);
+  UPDATE t1 SET a = a + 100 WHERE id = 1;
+  --error 0,ER_KEY_DOES_NOT_EXITS
+  SELECT id, a FROM t1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+  CHECK TABLE t1;
+  --error 0,ER_CANT_DROP_FIELD_OR_KEY
+  ALTER TABLE t1 DROP INDEX ka;
+  SELECT COUNT(*) FROM t1 FORCE INDEX(kb);
+  CHECK TABLE t1;
+  --echo # The data of the indexes that the table no longer uses is reclaimed
+  --source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+  DROP TABLE t1;
+  --disable_query_log
+  --eval SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = $save_instant
+  --eval SET GLOBAL rocksdb_enable_delete_range_for_drop_index = $save_delete_range
+  --enable_query_log
+  --inc $i
+}
+
+--echo # The data of the dropped indexes is reclaimed
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+
+--echo # Restart with the default rocksdb_validate_tables
+--source include/restart_mysqld.inc
+
+--echo # The cleanup after a committed ALTER TABLE fails (debug point): the
+--echo # table stays usable with the new index list, and the next ALTER TABLE
+--echo # first finishes the cleanup, or fails without changing anything.
+--disable_query_log
+CALL mtr.add_suppression("failed to finish an interrupted ALTER TABLE");
+--enable_query_log
+--let $save_append = `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION debug = "+d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+--error ER_INTERNAL_ERROR
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INSTANT;
+SET SESSION debug = "-d,rocksdb_fail_pending_alter_cleanup";
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INSTANT;
+SHOW CREATE TABLE t1;
+INSERT INTO t1 VALUES (4,40,40,4);
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+CHECK TABLE t1;
+--source include/restart_mysqld.inc
+SELECT * FROM t1 ORDER BY id;
+SELECT id, b FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+CHECK TABLE t1;
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+DROP TABLE t1;
+--disable_query_log
+--eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $save_append
+--enable_query_log
+
+--echo # A server version without pending ALTER TABLE records left the index
+--echo # list of MyRocks behind the data dictionary: the table cannot be opened,
+--echo # but the server does not crash, also with rocksdb_validate_tables=2.
+--disable_query_log
+CALL mtr.add_suppression("Table '.*' definition differs between MyRocks");
+--enable_query_log
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,10,30),(2,20,20),(3,30,10);
+--let $crash_point = rocksdb_skip_pending_alter,crash_commit_after_prepare
+--let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+--error ER_INTERNAL_ERROR
+SELECT * FROM t1;
+--let $restart_parameters = restart: --rocksdb_validate_tables=2
+--source include/restart_mysqld.inc
+--error ER_INTERNAL_ERROR
+SELECT * FROM t1;
+DROP TABLE t1;
+--let $restart_parameters =
+--source include/restart_mysqld.inc
