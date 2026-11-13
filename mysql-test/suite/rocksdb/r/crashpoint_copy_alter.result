@@ -1,0 +1,45 @@
+CALL mtr.add_suppression("Attempting backtrace");
+CALL crashpoint_reset();
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at dict_commit, recovered to the starting state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at dict_commit, recovered to the starting state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at dict_commit, recovered to the starting state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=4: #sql leftover in the MyRocks dictionary (PS-11680)
+# n=4: crashed at tx_commit, recovered to the starting state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=5: #sql leftover in the MyRocks dictionary (PS-11680)
+# n=5: crashed at dict_commit, recovered to the starting state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=6: crashed at dict_commit, skipped (PS-11681)
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=7: #sql leftover in the MyRocks dictionary (PS-11680)
+# n=7: crashed at dict_commit, recovered to the post-statement state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=8: crashed at flush_wal, recovered to the post-statement state
+ALTER TABLE cp.t ADD COLUMN c INT NOT NULL DEFAULT 0, ALGORITHM=COPY;
+CALL crashpoint_state('pk');;
+# COPY ALTER ADD COLUMN: 8 crash points enumerated, no violations
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

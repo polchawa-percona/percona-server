@@ -1,0 +1,163 @@
+CALL mtr.add_suppression("Attempting backtrace");
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# Leg A: XA PREPARE and XA COMMIT by XID on the same connection
+CALL crashpoint_reset();
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at dict_commit, recovered to the starting state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at tx_prepare, recovered to the starting state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at flush_wal, recovered to the starting state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=4: crashed at dict_commit, recovered to the post-statement state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=5: crashed at xa_prepared_flush, recovered to the post-statement state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=6: crashed at flush_wal, recovered to the post-statement state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=7: crashed at xa_commit_by_xid, recovered to the post-statement state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+XA COMMIT 'c1';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=8: crashed at dict_commit, recovered to the post-statement state
+XA START 'c1';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c1';;
+XA PREPARE 'c1';;
+XA COMMIT 'c1';;
+CALL crashpoint_state('pk');;
+# XA PREPARE COMMIT: 8 crash points enumerated, no violations
+# Leg B: XA PREPARE and XA ROLLBACK by XID on the same connection
+CALL crashpoint_reset();
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at dict_commit, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at tx_prepare, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at flush_wal, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=4: crashed at dict_commit, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=5: crashed at xa_prepared_flush, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=6: crashed at flush_wal, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=7: crashed at xa_rollback_by_xid, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+XA ROLLBACK 'c2';;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=8: crashed at dict_commit, recovered to the post-statement state
+XA START 'c2';;
+INSERT INTO cp.t VALUES (5, 50);
+XA END 'c2';;
+XA PREPARE 'c2';;
+XA ROLLBACK 'c2';;
+CALL crashpoint_state('pk');;
+# XA PREPARE ROLLBACK: 8 crash points enumerated, no violations
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;
