@@ -1,0 +1,36 @@
+#
+# Port of innodb.bug32554667 (mysql-test/suite/innodb/t/bug32554667.test) to
+# MyRocks.
+# Changes from the original:
+#   - ENGINE=ROCKSDB on the table
+#   - the lock list comes from INFORMATION_SCHEMA.ROCKSDB_LOCKS (via
+#     innodb_port_show_row_locks.inc) instead of performance_schema.data_locks,
+#     which is empty for MyRocks tables
+#   - the EXPLAIN output is MyRocks' own
+#
+# The original checks that a locking range read on a secondary index with
+# index condition pushdown locks only the rows that match the pushed
+# condition, with ICP on and off.
+#
+--source include/have_rocksdb.inc
+
+create table ts(a int primary key, b int, c int, d int, index(b,c)) engine=rocksdb;
+insert into ts
+values(1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4),(5,5,5,5),(6,6,6,6),(7,7,7,7),(8
+,8,8,8),(9,9,9,9);
+ANALYZE TABLE ts;
+
+--let $i=0
+while($i<2){
+  SELECT @@optimizer_switch LIKE '%index_condition_pushdown=on%';
+  explain select b,c,d from ts where b>=5 and b<8 and c=7 for update;
+  SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+  begin;
+  select b,c,d from ts where b>=5 and b<8 and c=7 for update;
+  --source suite/rocksdb/include/innodb_port_show_row_locks.inc
+  commit;
+  SET @@optimizer_switch='index_condition_pushdown=off';
+  --inc $i
+}
+SET @@optimizer_switch=default;
+DROP TABLE ts;

@@ -1,0 +1,81 @@
+#
+# Port of innodb.innodb_bug42419
+# (mysql-test/suite/innodb/t/innodb_bug42419.test) to MyRocks.
+# Bug#42419 Server crash with "Pure virtual method called" on two concurrent
+# connections: a deadlock victim's transaction, which also wrote to temporary
+# tables, is rolled back, and the other connection then continues.
+# Changes from the original:
+#   - t1 is ENGINE=ROCKSDB. The temporary tables keep the default temporary
+#     engine (InnoDB): MyRocks temporary tables are out of scope.
+#   - The reads of t1 in INSERT ... SELECT end with FOR SHARE. InnoDB takes
+#     shared locks on the rows read by INSERT ... SELECT at REPEATABLE READ,
+#     MyRocks reads them without locks, so without FOR SHARE there would be
+#     no lock wait and no deadlock.
+#   - rocksdb_deadlock_detect is enabled (it is OFF by default) and
+#     rocksdb_lock_wait_timeout replaces innodb_lock_wait_timeout. Both are
+#     copied into a session at connect, so they are set globally first.
+#   - The wait for the second session uses INFORMATION_SCHEMA.ROCKSDB_TRX
+#     (a non-empty WAITING_KEY) instead of the processlist state 'Updating'.
+#
+--source include/have_rocksdb.inc
+
+SET @saved_deadlock_detect = @@global.rocksdb_deadlock_detect;
+SET @saved_lock_wait_timeout = @@global.rocksdb_lock_wait_timeout;
+SET GLOBAL rocksdb_deadlock_detect = ON;
+SET GLOBAL rocksdb_lock_wait_timeout = 50;
+
+# Save the initial number of concurrent sessions
+--source include/count_sessions.inc
+
+--connect (con_default,localhost,root,,)
+CREATE TABLE t1 (a INT AUTO_INCREMENT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+COMMIT;
+SET AUTOCOMMIT = 0;
+CREATE TEMPORARY TABLE t1_tmp ( b INT );
+INSERT INTO t1_tmp (b) SELECT b FROM t1 WHERE a = 3 FOR SHARE;
+INSERT INTO t1_tmp (b) SELECT b FROM t1 WHERE a = 2 FOR SHARE;
+
+# Second session
+--connect (user2,localhost,root,,)
+--let $user2_id = `SELECT CONNECTION_ID()`
+SET AUTOCOMMIT = 0;
+
+CREATE TEMPORARY TABLE t2_tmp ( a int, new_a int );
+INSERT INTO t2_tmp VALUES (1,51),(2,52),(3,53);
+
+UPDATE t1 SET a = (SELECT new_a FROM t2_tmp WHERE t2_tmp.a = t1.a) WHERE a = 1;
+send
+UPDATE t1 SET a = (SELECT new_a FROM t2_tmp WHERE t2_tmp.a = t1.a) WHERE a = 2;
+
+# The last update will wait for a lock held by the first session
+
+# First session
+--connection con_default
+
+# Poll till the UPDATE of the second session waits for lock
+--let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE thread_id = $user2_id AND waiting_key != ''
+--source include/wait_condition.inc
+
+--error ER_LOCK_DEADLOCK
+INSERT INTO t1_tmp (b) SELECT b FROM t1 WHERE a = 1 FOR SHARE;
+
+# Second session
+--connection user2
+--echo Reap the server message for connection user2 UPDATE t1 ...
+reap;
+
+# The server crashed when executing this UPDATE or the succeeding SQL command.
+UPDATE t1 SET a = (SELECT new_a FROM t2_tmp WHERE t2_tmp.a = t1.a) WHERE a = 3;
+COMMIT;
+SELECT * FROM t1 ORDER BY a;
+
+--connection default
+--disconnect con_default
+--disconnect user2
+DROP TABLE t1;
+SET GLOBAL rocksdb_deadlock_detect = @saved_deadlock_detect;
+SET GLOBAL rocksdb_lock_wait_timeout = @saved_lock_wait_timeout;
+
+# Wait till all disconnects are completed
+--source include/wait_until_count_sessions.inc
