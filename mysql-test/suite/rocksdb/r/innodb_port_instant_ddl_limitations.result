@@ -1,0 +1,265 @@
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+#
+# Scenario 6:
+# INSTANT ADD/DROP column with key
+#
+CREATE TABLE t1 (c1 INT, c2 INT) ENGINE=ROCKSDB;
+ALTER TABLE t1 ADD COLUMN c3 INT KEY, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+DROP TABLE t1;
+CREATE TABLE t1 (c1 INT KEY, c2 INT) ENGINE=ROCKSDB;
+ALTER TABLE t1 DROP COLUMN c1, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t1 DROP COLUMN c1, ADD PRIMARY KEY (c2), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+DROP TABLE t1;
+CREATE TABLE t1 (c1 INT KEY, c2 INT) ENGINE=ROCKSDB;
+ALTER TABLE t1 ADD COLUMN c3 INT UNIQUE KEY, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t1 ADD COLUMN c3 INT, ADD INDEX idx (c3), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+DROP TABLE t1;
+CREATE TABLE t1 (c1 INT KEY, c2 INT, INDEX idx(c2)) ENGINE=ROCKSDB;
+ALTER TABLE t1 DROP COLUMN c2, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+DROP TABLE t1;
+#
+# Scenario 7:
+# Many instant ADD COLUMNs, and the null bitmap limit of MyRocks
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, c1 INT, k INT NOT NULL DEFAULT 0, KEY (k)) ENGINE=ROCKSDB;
+INSERT INTO t1 (id, c1) VALUES (1, 1);
+# 64 instant ADD COLUMNs of NOT NULL columns, one row written per version
+# DD metadata of table t1
+NAME	SE_PRIVATE_DATA
+t1	instant_col=3;
+# DD metadata of the columns of t1
+NAME	ORDINAL_POSITION	HIDDEN	SE_PRIVATE_DATA
+id	1	Visible	NULL
+c1	2	Visible	NULL
+k	3	Visible	NULL
+c2	4	Visible	default=02000000;
+c3	5	Visible	default=03000000;
+c4	6	Visible	default=04000000;
+c5	7	Visible	default=05000000;
+c6	8	Visible	default=06000000;
+c7	9	Visible	default=07000000;
+c8	10	Visible	default=08000000;
+c9	11	Visible	default=09000000;
+c10	12	Visible	default=0a000000;
+c11	13	Visible	default=0b000000;
+c12	14	Visible	default=0c000000;
+c13	15	Visible	default=0d000000;
+c14	16	Visible	default=0e000000;
+c15	17	Visible	default=0f000000;
+c16	18	Visible	default=10000000;
+c17	19	Visible	default=11000000;
+c18	20	Visible	default=12000000;
+c19	21	Visible	default=13000000;
+c20	22	Visible	default=14000000;
+c21	23	Visible	default=15000000;
+c22	24	Visible	default=16000000;
+c23	25	Visible	default=17000000;
+c24	26	Visible	default=18000000;
+c25	27	Visible	default=19000000;
+c26	28	Visible	default=1a000000;
+c27	29	Visible	default=1b000000;
+c28	30	Visible	default=1c000000;
+c29	31	Visible	default=1d000000;
+c30	32	Visible	default=1e000000;
+c31	33	Visible	default=1f000000;
+c32	34	Visible	default=20000000;
+c33	35	Visible	default=21000000;
+c34	36	Visible	default=22000000;
+c35	37	Visible	default=23000000;
+c36	38	Visible	default=24000000;
+c37	39	Visible	default=25000000;
+c38	40	Visible	default=26000000;
+c39	41	Visible	default=27000000;
+c40	42	Visible	default=28000000;
+c41	43	Visible	default=29000000;
+c42	44	Visible	default=2a000000;
+c43	45	Visible	default=2b000000;
+c44	46	Visible	default=2c000000;
+c45	47	Visible	default=2d000000;
+c46	48	Visible	default=2e000000;
+c47	49	Visible	default=2f000000;
+c48	50	Visible	default=30000000;
+c49	51	Visible	default=31000000;
+c50	52	Visible	default=32000000;
+c51	53	Visible	default=33000000;
+c52	54	Visible	default=34000000;
+c53	55	Visible	default=35000000;
+c54	56	Visible	default=36000000;
+c55	57	Visible	default=37000000;
+c56	58	Visible	default=38000000;
+c57	59	Visible	default=39000000;
+c58	60	Visible	default=3a000000;
+c59	61	Visible	default=3b000000;
+c60	62	Visible	default=3c000000;
+c61	63	Visible	default=3d000000;
+c62	64	Visible	default=3e000000;
+c63	65	Visible	default=3f000000;
+c64	66	Visible	default=40000000;
+c65	67	Visible	default=41000000;
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65) FROM t1;
+COUNT(*)	SUM(c2)	SUM(c33)	SUM(c65)
+65	126	2079	4095
+SELECT id, c1, c2, c3, c64, c65 FROM t1 WHERE id IN (1, 2, 3, 64, 65) ORDER BY id;
+id	c1	c2	c3	c64	c65
+1	1	2	3	64	65
+2	2	-2	3	64	65
+3	3	2	-3	64	65
+64	64	2	3	-64	65
+65	65	2	3	64	-65
+# Update and delete rows written before different ADD COLUMNs
+UPDATE t1 SET c65 = 0, k = id WHERE id IN (1, 33);
+UPDATE t1 SET c2 = 0 WHERE id = 64;
+DELETE FROM t1 WHERE id IN (2, 40);
+SELECT id, c1, c2, c33, c65, k FROM t1 WHERE id IN (1, 33, 64) ORDER BY id;
+id	c1	c2	c33	c65	k
+1	1	2	33	0	1
+33	33	2	-33	0	33
+64	64	0	33	65	0
+SELECT id, k FROM t1 FORCE INDEX (k) WHERE k > 0 ORDER BY k;
+id	k
+1	1
+33	33
+# The table has one nullable column (c1). Nullable columns can be added
+# instantly while the row's null bitmap stays one byte (8 columns)
+# The 9th nullable column needs a second null-bit byte: not instant
+ALTER TABLE t1 ADD COLUMN n8 INT, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+# Without ALGORITHM the ADD COLUMN rebuilds the table
+ALTER TABLE t1 ADD COLUMN n8 INT;
+# The rebuild cleared the instant metadata
+# DD metadata of table t1
+NAME	SE_PRIVATE_DATA
+t1	NULL
+# DD metadata of the columns of t1
+NAME	ORDINAL_POSITION	HIDDEN	SE_PRIVATE_DATA
+id	1	Visible	NULL
+c1	2	Visible	NULL
+k	3	Visible	NULL
+c2	4	Visible	NULL
+c3	5	Visible	NULL
+c4	6	Visible	NULL
+c5	7	Visible	NULL
+c6	8	Visible	NULL
+c7	9	Visible	NULL
+c8	10	Visible	NULL
+c9	11	Visible	NULL
+c10	12	Visible	NULL
+c11	13	Visible	NULL
+c12	14	Visible	NULL
+c13	15	Visible	NULL
+c14	16	Visible	NULL
+c15	17	Visible	NULL
+c16	18	Visible	NULL
+c17	19	Visible	NULL
+c18	20	Visible	NULL
+c19	21	Visible	NULL
+c20	22	Visible	NULL
+c21	23	Visible	NULL
+c22	24	Visible	NULL
+c23	25	Visible	NULL
+c24	26	Visible	NULL
+c25	27	Visible	NULL
+c26	28	Visible	NULL
+c27	29	Visible	NULL
+c28	30	Visible	NULL
+c29	31	Visible	NULL
+c30	32	Visible	NULL
+c31	33	Visible	NULL
+c32	34	Visible	NULL
+c33	35	Visible	NULL
+c34	36	Visible	NULL
+c35	37	Visible	NULL
+c36	38	Visible	NULL
+c37	39	Visible	NULL
+c38	40	Visible	NULL
+c39	41	Visible	NULL
+c40	42	Visible	NULL
+c41	43	Visible	NULL
+c42	44	Visible	NULL
+c43	45	Visible	NULL
+c44	46	Visible	NULL
+c45	47	Visible	NULL
+c46	48	Visible	NULL
+c47	49	Visible	NULL
+c48	50	Visible	NULL
+c49	51	Visible	NULL
+c50	52	Visible	NULL
+c51	53	Visible	NULL
+c52	54	Visible	NULL
+c53	55	Visible	NULL
+c54	56	Visible	NULL
+c55	57	Visible	NULL
+c56	58	Visible	NULL
+c57	59	Visible	NULL
+c58	60	Visible	NULL
+c59	61	Visible	NULL
+c60	62	Visible	NULL
+c61	63	Visible	NULL
+c62	64	Visible	NULL
+c63	65	Visible	NULL
+c64	66	Visible	NULL
+c65	67	Visible	NULL
+n1	68	Visible	NULL
+n2	69	Visible	NULL
+n3	70	Visible	NULL
+n4	71	Visible	NULL
+n5	72	Visible	NULL
+n6	73	Visible	NULL
+n7	74	Visible	NULL
+n8	75	Visible	NULL
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65), SUM(n1), SUM(n7), COUNT(n8) FROM t1;
+COUNT(*)	SUM(c2)	SUM(c33)	SUM(c65)	SUM(n1)	SUM(n7)	COUNT(n8)
+63	124	2013	3835	63	441	0
+# Instant columns again after the rebuild, then restart and compaction
+ALTER TABLE t1 ADD COLUMN c66 INT NOT NULL DEFAULT 66, ALGORITHM=INSTANT;
+INSERT INTO t1 (id, c1, c66) VALUES (100, 100, 6600);
+# restart
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*), SUM(c2), SUM(c33), SUM(c65), SUM(n1), SUM(n7), COUNT(n8), SUM(c66) FROM t1;
+COUNT(*)	SUM(c2)	SUM(c33)	SUM(c65)	SUM(n1)	SUM(n7)	COUNT(n8)	SUM(c66)
+64	126	2046	3900	64	448	0	10758
+SELECT id, c1, c2, c65, n1, n8, c66 FROM t1 WHERE id IN (1, 64, 65, 100) ORDER BY id;
+id	c1	c2	c65	n1	n8	c66
+1	1	2	0	1	NULL	66
+64	64	0	65	1	NULL	66
+65	65	2	-65	1	NULL	66
+100	100	2	65	1	NULL	6600
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+#
+# Scenario 8 (from instant_max_column_crash):
+# Instant ADD COLUMN up to the server limit of 4096 columns
+#
+# Create table with 4094 columns
+call create_table("tb1", 4094);
+INSERT INTO tb1 (col_1, col_4094) VALUES (1, 1);
+ALTER TABLE tb1 ADD COLUMN col_4095 INT NOT NULL DEFAULT 4095, ALGORITHM=INSTANT;
+INSERT INTO tb1 (col_1, col_4094, col_4095) VALUES (2, 2, 2);
+ALTER TABLE tb1 ADD COLUMN col_4096 INT NOT NULL DEFAULT 4096, ALGORITHM=INSTANT;
+INSERT INTO tb1 (col_1, col_4094, col_4095, col_4096) VALUES (3, 3, 3, 3);
+# The 4097th column exceeds the server limit
+ALTER TABLE tb1 ADD COLUMN col_4097 INT, ALGORITHM=INSTANT;
+ERROR HY000: Too many columns
+SELECT col_1, col_4094, col_4095, col_4096 FROM tb1 ORDER BY col_1;
+col_1	col_4094	col_4095	col_4096
+1	1	4095	4096
+2	2	2	4096
+3	3	3	3
+# restart
+SELECT col_1, col_4094, col_4095, col_4096 FROM tb1 ORDER BY col_1;
+col_1	col_4094	col_4095	col_4096
+1	1	4095	4096
+2	2	2	4096
+3	3	3	3
+DROP TABLE tb1;
+DROP PROCEDURE create_table;
