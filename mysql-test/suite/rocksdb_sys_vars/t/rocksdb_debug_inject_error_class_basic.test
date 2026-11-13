@@ -1,0 +1,59 @@
+--source include/have_rocksdb.inc
+
+# The values include reserved words (WRITE, READ), so they are set quoted
+# here instead of through rocksdb_sys_var.inc.
+
+SET @start_global_value = @@global.rocksdb_debug_inject_error_class;
+SELECT @start_global_value;
+SET @start_session_value = @@session.rocksdb_debug_inject_error_class;
+SELECT @start_session_value;
+
+SET @@global.rocksdb_debug_inject_error_class = 'ANY';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'ANY';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'WRITE';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'WRITE';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'READ';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'READ';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'ITERATOR';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'ITERATOR';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'COMMIT';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'COMMIT';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'DICT';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'DICT';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'SST';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'SST';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'INGEST';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'INGEST';
+SELECT @@session.rocksdb_debug_inject_error_class;
+SET @@global.rocksdb_debug_inject_error_class = 'COMPACT';
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = 'COMPACT';
+SELECT @@session.rocksdb_debug_inject_error_class;
+
+SET @@global.rocksdb_debug_inject_error_class = 1;
+SELECT @@global.rocksdb_debug_inject_error_class;
+
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@global.rocksdb_debug_inject_error_class = 'aaa';
+--error ER_WRONG_VALUE_FOR_VAR
+SET @@session.rocksdb_debug_inject_error_class = 100;
+
+SET @@global.rocksdb_debug_inject_error_class = DEFAULT;
+SELECT @@global.rocksdb_debug_inject_error_class;
+SET @@session.rocksdb_debug_inject_error_class = DEFAULT;
+SELECT @@session.rocksdb_debug_inject_error_class;
