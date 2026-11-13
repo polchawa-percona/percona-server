@@ -1,0 +1,151 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# Partition DDL matrix: every partition operation (ADD, DROP, REORGANIZE,
+# COALESCE, TRUNCATE, REBUILD, ANALYZE, CHECK, OPTIMIZE, REPAIR, REMOVE
+# PARTITIONING, re-partitioning, EXCHANGE) on RANGE, LIST, HASH, KEY and
+# subpartitioned tables, run on InnoDB and on MyRocks with and without
+# rocksdb_allow_unsafe_alter. After each step the rows, the per-partition
+# distribution and the consistency of the secondary index with the primary
+# key are recorded; at the end every MyRocks step is compared with the same
+# step on InnoDB.
+#
+# Without rocksdb_allow_unsafe_alter MyRocks performs partition DDL by a COPY
+# rebuild, and every ADD, REORGANIZE, COALESCE and DROP PARTITION raises
+# Warning 138 "Inplace partition altering is not supported"; InnoDB raises
+# none. The warnings are pinned in this result.
+#
+# DROP PARTITION of a partition whose rows another partition would accept
+# keeps those rows on MyRocks without rocksdb_allow_unsafe_alter (PS-11634);
+# that case runs here only with rocksdb_allow_unsafe_alter=ON. The disabled
+# tests innodb_port_partition_autoinc_drop and
+# innodb_port_partition_blob_drop_partition cover it until it is fixed.
+#
+# The second part pins how per-partition column families (<part>_cfname) and
+# TTL durations (<part>_ttl_duration) follow ADD and REORGANIZE PARTITION.
+#
+
+CREATE TABLE test.mlog (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  run VARCHAR(20), ptype VARCHAR(20), step VARCHAR(40),
+  cnt INT, crc BIGINT, pk_ab BIGINT, sk_ab BIGINT, sk_cnt INT, parts TEXT
+) ENGINE=InnoDB;
+
+delimiter |;
+CREATE PROCEDURE test.ddl3_parts(IN t VARCHAR(64), OUT res TEXT)
+BEGIN
+  DECLARE done INT DEFAULT 0;
+  DECLARE pn VARCHAR(64);
+  DECLARE cur CURSOR FOR
+    SELECT COALESCE(SUBPARTITION_NAME, PARTITION_NAME)
+      FROM information_schema.PARTITIONS
+     WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = t AND PARTITION_NAME IS NOT NULL
+     ORDER BY PARTITION_ORDINAL_POSITION, SUBPARTITION_ORDINAL_POSITION;
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+  SET res = '';
+  OPEN cur;
+  l: LOOP
+    FETCH cur INTO pn;
+    IF done THEN LEAVE l; END IF;
+    SET @q = CONCAT('SELECT COUNT(*) INTO @n FROM test.', t, ' PARTITION (', pn, ')');
+    PREPARE s FROM @q;
+    EXECUTE s;
+    DEALLOCATE PREPARE s;
+    SET res = CONCAT(res, pn, ':', @n, ' ');
+  END LOOP;
+  CLOSE cur;
+  IF res = '' THEN SET res = '(not partitioned)'; END IF;
+END|
+delimiter ;|
+
+--echo #
+--echo # Part 1: operation matrix
+--echo #
+
+--echo # Server started without rocksdb_allow_unsafe_alter.
+SELECT @@rocksdb_allow_unsafe_alter;
+--let $mode = 0
+--let $engine = InnoDB
+--source suite/rocksdb/include/partition_ddl_matrix.inc
+--let $engine = ROCKSDB
+--source suite/rocksdb/include/partition_ddl_matrix.inc
+
+--let $mode = 1
+--let $engine = InnoDB
+--source suite/rocksdb/include/partition_ddl_matrix.inc
+
+--let $restart_parameters = restart: --rocksdb_allow_unsafe_alter=1
+--source include/restart_mysqld.inc
+SELECT @@rocksdb_allow_unsafe_alter;
+--let $engine = ROCKSDB
+--source suite/rocksdb/include/partition_ddl_matrix.inc
+
+--echo
+--echo # Every MyRocks step must match the same step on InnoDB: row count,
+--echo # checksum of all columns and per-partition distribution. Empty result
+--echo # expected.
+SELECT r.run, r.ptype, r.step, i.cnt AS innodb_rows, r.cnt AS rocksdb_rows,
+       i.parts AS innodb_parts, r.parts AS rocksdb_parts
+  FROM test.mlog r
+  JOIN test.mlog i
+    ON i.run = CONCAT('InnoDB/', SUBSTRING_INDEX(r.run, '/', -1))
+   AND i.ptype = r.ptype AND i.step = r.step
+ WHERE r.run LIKE 'ROCKSDB/%'
+   AND (i.cnt <> r.cnt OR NOT (i.crc <=> r.crc) OR i.parts <> r.parts);
+--echo # Number of compared steps per run (all MyRocks steps have an InnoDB pair).
+SELECT r.run, COUNT(*) AS steps, COUNT(i.id) AS compared
+  FROM test.mlog r
+  LEFT JOIN test.mlog i
+    ON i.run = CONCAT('InnoDB/', SUBSTRING_INDEX(r.run, '/', -1))
+   AND i.ptype = r.ptype AND i.step = r.step
+ WHERE r.run LIKE 'ROCKSDB/%'
+ GROUP BY r.run ORDER BY r.run;
+--echo # Secondary index inconsistent with the primary key. Empty result expected.
+SELECT run, ptype, step FROM test.mlog WHERE NOT (sk_cnt = cnt AND sk_ab <=> pk_ab);
+
+--echo #
+--echo # Part 2: per-partition column families and TTL across ADD and
+--echo # REORGANIZE PARTITION
+--echo #
+--let $cf_ttl_run = 0
+while ($cf_ttl_run < 2)
+{
+  if ($cf_ttl_run == 1)
+  {
+    --let $restart_parameters = restart
+    --source include/restart_mysqld.inc
+  }
+  --echo
+  SELECT @@rocksdb_allow_unsafe_alter;
+  CREATE TABLE tc (a INT NOT NULL, b INT, c VARCHAR(20),
+    PRIMARY KEY (a) COMMENT 'p0_cfname=ddl3_cf_p0;p1_cfname=ddl3_cf_p1;p4_cfname=rev:ddl3_cf_p4',
+    KEY kb (b))
+    ENGINE=ROCKSDB COMMENT 'p0_ttl_duration=100;p1_ttl_duration=200;p4_ttl_duration=400'
+    PARTITION BY RANGE (a)
+    (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+     PARTITION p2 VALUES LESS THAN (30));
+  INSERT INTO tc WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 29)
+    SELECT n, n MOD 7, CONCAT('v', n) FROM s;
+  --let $cf_query = SELECT PARTITION_NAME, INDEX_NAME, CF, TTL_DURATION FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tc' ORDER BY PARTITION_NAME, INDEX_NAME
+  --echo # After CREATE: p0, p1 in their own column families with TTL; p2 default.
+  eval $cf_query;
+  --echo # ADD PARTITION p4 (named in the comments) and p5 (not named).
+  ALTER TABLE tc ADD PARTITION (PARTITION p4 VALUES LESS THAN (40), PARTITION p5 VALUES LESS THAN (50));
+  eval $cf_query;
+  --echo # REORGANIZE p0, p1 INTO p01: the new name has no qualifier.
+  ALTER TABLE tc REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (20));
+  eval $cf_query;
+  --echo # REORGANIZE p01 back INTO p0, p1: the qualifiers apply again.
+  ALTER TABLE tc REORGANIZE PARTITION p01 INTO
+    (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+  eval $cf_query;
+  SELECT COUNT(*), SUM(a) FROM tc;
+  SELECT COUNT(*), SUM(a) FROM tc FORCE INDEX (kb);
+  DROP TABLE tc;
+  --inc $cf_ttl_run
+}
+
+DROP PROCEDURE test.ddl3_parts;
+DROP TABLE test.mlog;
+--source include/wait_until_count_sessions.inc
