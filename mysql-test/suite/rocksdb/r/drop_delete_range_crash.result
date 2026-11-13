@@ -1,0 +1,50 @@
+CREATE TABLE t1 (pk INT, a INT,
+PRIMARY KEY (pk) COMMENT 'cfname=cf_t1_pk',
+KEY k(a) COMMENT 'cfname=cf_t1_k') ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE seq (n) AS
+(SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+SELECT n, n FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'cf_t1_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_t1_k';
+# Crash in DROP INDEX before the dictionary commit.
+SET SESSION debug = '+d,rocksdb_crash_before_drop_dict_commit';
+ALTER TABLE t1 DROP INDEX k, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `pk` int NOT NULL,
+  `a` int DEFAULT NULL,
+  PRIMARY KEY (`pk`) COMMENT 'cfname=cf_t1_pk',
+  KEY `k` (`a`) COMMENT 'cfname=cf_t1_k'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)
+100	5050
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (k);
+COUNT(*)	SUM(a)
+100	5050
+DROP TABLE t1;
+CREATE TABLE t2 (pk INT, a INT,
+PRIMARY KEY (pk) COMMENT 'cfname=cf_t2_pk',
+KEY k(a) COMMENT 'cfname=cf_t2_k') ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE seq (n) AS
+(SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+SELECT n, n FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'cf_t2_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_t2_k';
+# Crash in DROP TABLE before the dictionary commit.
+SET SESSION debug = '+d,rocksdb_crash_before_drop_dict_commit';
+DROP TABLE t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(a)
+100	5050
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (k);
+COUNT(*)	SUM(a)
+100	5050
+DROP TABLE t2;
