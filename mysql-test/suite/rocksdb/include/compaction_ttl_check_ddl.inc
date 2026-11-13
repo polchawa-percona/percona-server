@@ -1,0 +1,31 @@
+# Check every index of the tables used by compaction_ttl_ddl.
+--let $ct_table = t_col
+--let $ct_expect = $exp_col
+--let $ct_index = PRIMARY
+--source compaction_ttl_check.inc
+--let $ct_index = ub
+--source compaction_ttl_check.inc
+--let $ct_index = kd
+--source compaction_ttl_check.inc
+--let $ct_table = t_hid
+--let $ct_expect = $exp_hid
+--let $ct_index = PRIMARY
+--source compaction_ttl_check.inc
+--let $ct_index = kb
+--source compaction_ttl_check.inc
+--let $ct_table = t_part
+--let $ct_expect = $exp_part
+--let $ct_index = PRIMARY
+--source compaction_ttl_check.inc
+--let $ct_index = kb
+--source compaction_ttl_check.inc
+--let $ct_table = t_plain
+--let $ct_expect = $exp_plain
+--let $ct_index = PRIMARY
+--source compaction_ttl_check.inc
+--let $ct_index = kb
+--source compaction_ttl_check.inc
+--let $ct_table = t_live
+--let $ct_expect = 5
+--let $ct_index = PRIMARY
+--source compaction_ttl_check.inc
