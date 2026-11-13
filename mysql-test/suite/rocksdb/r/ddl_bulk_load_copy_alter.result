@@ -1,0 +1,29 @@
+# 1. Autocommit INSERTs with bulk load, COPY ALTER, then the ingest.
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO tb VALUES (1,1);
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO tb VALUES (10,10),(11,11),(12,12);
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lock acquisition refused by storage engine.
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM tb ORDER BY id;
+id	v
+1	1
+10	10
+11	11
+12	12
+DROP TABLE tb;
+# 2. The same with an explicit transaction around the bulk load.
+CREATE TABLE tb (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+BEGIN;
+INSERT INTO tb VALUES (10,10),(11,11);
+COMMIT;
+ALTER TABLE tb ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lock acquisition refused by storage engine.
+SET SESSION rocksdb_bulk_load = 0;
+SELECT * FROM tb ORDER BY id;
+id	v
+10	10
+11	11
+DROP TABLE tb;
