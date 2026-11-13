@@ -1,0 +1,35 @@
+call mtr.add_suppression("Table .* not found");
+call mtr.add_suppression("RocksDB: .*");
+call mtr.add_suppression("Plugin rocksdb reported");
+call mtr.add_suppression("table .* does not exist");
+call mtr.add_suppression("Schema mismatch");
+call mtr.add_suppression("Can't open table");
+# restart
+# Kill the server
+# restart
+# Round 1: problems after the restart (none expected)
+# Kill the server
+# restart
+# Round 2: problems after the restart (none expected)
+# Kill the server
+# restart
+# Round 3: problems after the restart (none expected)
+# Kill the server
+# restart
+# Round 4: problems after the restart (none expected)
+# Dropped indexes are reclaimed
+SELECT COUNT(*) AS drop_index_ongoing FROM information_schema.rocksdb_global_info
+WHERE type = 'DDL_DROP_INDEX_ONGOING';
+drop_index_ongoing
+0
+SELECT COUNT(*) AS orphan_index_entries
+FROM information_schema.rocksdb_index_file_map m
+WHERE m.column_family = 0 AND m.num_rows > 0
+AND m.index_number > 255
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = m.column_family
+AND d.index_number = m.index_number);
+orphan_index_entries
+0
+# Kill the server
+# restart
