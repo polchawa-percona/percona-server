@@ -1,0 +1,82 @@
+#
+# Port of innodb.innodb_stats_rename_table and
+# innodb.innodb_stats_rename_table_if_exists
+# (mysql-test/suite/innodb/t/innodb_stats_rename_table*.test) to MyRocks.
+#
+# The originals check that RENAME TABLE moves the persistent statistics to
+# the new name, and that statistics already stored under the new name (left
+# over from another table) are replaced by those of the renamed table.
+#
+# Changes from the original:
+#   - ENGINE=ROCKSDB. MyRocks stores index statistics by index id in its data
+#     dictionary, not by table name in mysql.innodb_*_stats, so the leftover
+#     rows of the _if_exists test cannot be inserted by hand. Instead, a
+#     table with different statistics is created and dropped under the new
+#     name first.
+#   - The statistics are checked through INFORMATION_SCHEMA.STATISTICS
+#     cardinality and INFORMATION_SCHEMA.TABLES row count, after RENAME TABLE
+#     within a schema, RENAME TABLE to another schema, and a server restart
+#     (the statistics are persisted).
+#   - Both MyRocks statistics methods are run: SST properties
+#     (rocksdb_table_stats_use_table_scan=OFF) and a full table scan (ON).
+#
+--source include/have_rocksdb.inc
+
+--let $save_use_table_scan = `SELECT @@global.rocksdb_table_stats_use_table_scan`
+--let $save_sampling_pct = `SELECT @@global.rocksdb_table_stats_sampling_pct`
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+
+CREATE DATABASE stats_db2;
+
+--let $check_new = SELECT table_schema, table_name, index_name, column_name, cardinality FROM information_schema.statistics WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name, index_name, seq_in_index
+--let $check_rows = SELECT table_schema, table_name, table_rows FROM information_schema.tables WHERE table_name IN ('stats_rename_old', 'stats_rename_new') ORDER BY table_schema, table_name
+
+--let $mode = 0
+while ($mode < 2)
+{
+  eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode;
+
+  --echo # A different table leaves statistics behind under the new name.
+  CREATE TABLE stats_rename_new (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+    ENGINE=ROCKSDB;
+  INSERT INTO stats_rename_new VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5),
+    (6, 6), (7, 7), (8, 8);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  ANALYZE TABLE stats_rename_new;
+  --eval $check_new
+  DROP TABLE stats_rename_new;
+
+  CREATE TABLE stats_rename_old (a INT, b INT, PRIMARY KEY (a), KEY kb (b))
+    ENGINE=ROCKSDB;
+  INSERT INTO stats_rename_old VALUES (1, 1), (2, 1), (3, 2), (4, 2);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  ANALYZE TABLE stats_rename_old;
+  --eval $check_new
+  --eval $check_rows
+
+  RENAME TABLE stats_rename_old TO stats_rename_new;
+  --echo # The renamed table keeps its own statistics.
+  --eval $check_new
+  --eval $check_rows
+
+  RENAME TABLE stats_rename_new TO stats_db2.stats_rename_new;
+  --echo # Also after a rename to another schema.
+  --eval $check_new
+  --eval $check_rows
+
+  --echo # And after a restart.
+  --source include/restart_mysqld.inc
+  eval SET GLOBAL rocksdb_table_stats_use_table_scan = $mode;
+  SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+  --eval $check_new
+  --eval $check_rows
+
+  DROP TABLE stats_db2.stats_rename_new;
+  --inc $mode
+}
+
+DROP DATABASE stats_db2;
+--disable_query_log
+--eval SET GLOBAL rocksdb_table_stats_use_table_scan = $save_use_table_scan
+--eval SET GLOBAL rocksdb_table_stats_sampling_pct = $save_sampling_pct
+--enable_query_log

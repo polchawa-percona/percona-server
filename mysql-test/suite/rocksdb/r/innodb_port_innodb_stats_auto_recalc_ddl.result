@@ -1,0 +1,37 @@
+SET @save_use_table_scan = @@global.rocksdb_table_stats_use_table_scan;
+SET @save_sampling_pct = @@global.rocksdb_table_stats_sampling_pct;
+SET GLOBAL rocksdb_table_stats_use_table_scan = ON;
+SET GLOBAL rocksdb_table_stats_sampling_pct = 100;
+SET @save_threshold_count = @@global.rocksdb_table_stats_recalc_threshold_count;
+SET @save_threshold_pct = @@global.rocksdb_table_stats_recalc_threshold_pct;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = 0;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = 10;
+CREATE TABLE arddl (a INT, b INT, PRIMARY KEY (a)) ENGINE=ROCKSDB;
+ANALYZE TABLE arddl;
+Table	Op	Msg_type	Msg_text
+test.arddl	analyze	status	OK
+INSERT INTO arddl VALUES (1, 10);
+INSERT INTO arddl VALUES (2, 10);
+ALTER TABLE arddl ADD INDEX (b);
+# Wait for the background recalculation after ADD INDEX.
+SELECT index_name, column_name, cardinality FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'arddl' ORDER BY index_name, seq_in_index;
+INDEX_NAME	COLUMN_NAME	CARDINALITY
+b	b	1
+PRIMARY	a	2
+DROP TABLE arddl;
+CREATE TABLE arddl (a INT, b INT, PRIMARY KEY (a), KEY (b)) ENGINE=ROCKSDB;
+ANALYZE TABLE arddl;
+Table	Op	Msg_type	Msg_text
+test.arddl	analyze	status	OK
+INSERT INTO arddl VALUES (3, 10);
+INSERT INTO arddl VALUES (4, 10);
+ALTER TABLE arddl DROP INDEX b;
+# Wait for the background recalculation after DROP INDEX.
+SELECT index_name, column_name, cardinality FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'arddl' ORDER BY index_name, seq_in_index;
+INDEX_NAME	COLUMN_NAME	CARDINALITY
+PRIMARY	a	2
+DROP TABLE arddl;
+SET GLOBAL rocksdb_table_stats_use_table_scan = @save_use_table_scan;
+SET GLOBAL rocksdb_table_stats_sampling_pct = @save_sampling_pct;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_count = @save_threshold_count;
+SET GLOBAL rocksdb_table_stats_recalc_threshold_pct = @save_threshold_pct;
