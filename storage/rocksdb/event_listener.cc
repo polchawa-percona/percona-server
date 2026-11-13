@@ -29,6 +29,7 @@
 #include "./ha_rocksdb_proto.h"
 #include "./properties_collector.h"
 #include "./rdb_datadic.h"
+#include "./rdb_utils.h"
 
 namespace myrocks {
 
@@ -81,6 +82,13 @@ void Rdb_event_listener::OnCompactionCompleted(
     rocksdb::DB *db, const rocksdb::CompactionJobInfo &ci) {
   assert(db != nullptr);
   assert(m_ddl_manager != nullptr);
+
+#ifndef NDEBUG
+  if (ci.stats.is_manual_compaction) {
+    rdb_dbug_pause_while_set("rocksdb_pause_manual_compaction_completed",
+                             "cf id " + std::to_string(ci.cf_id));
+  }
+#endif
 
   if (rdb_is_table_scan_index_stats_calculation_enabled()) {
     return;
