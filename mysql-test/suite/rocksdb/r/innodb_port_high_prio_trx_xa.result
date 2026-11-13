@@ -1,0 +1,67 @@
+#
+# Bug #25032066: PREPARED TRANSACTION SHOULD NOT BE ROLLED BACK
+#
+CREATE TABLE t1(col1 int PRIMARY KEY, col2 int) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1, 10);
+XA START 'xid1';
+UPDATE t1 SET col2 = 20;
+XA END 'xid1';
+XA PREPARE 'xid1';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+UPDATE t1 SET col2 = 30 WHERE col2 = 10;
+XA COMMIT 'xid1';
+COMMIT;
+SELECT * FROM t1;
+col1	col2
+1	20
+# A waiter that times out does not affect the prepared transaction
+XA START 'xid2';
+UPDATE t1 SET col2 = 40;
+XA END 'xid2';
+XA PREPARE 'xid2';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+SET SESSION rocksdb_lock_wait_timeout = 1;
+START TRANSACTION;
+UPDATE t1 SET col2 = 50 WHERE col1 = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+ROLLBACK;
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	4	0	xid2
+XA COMMIT 'xid2';
+SELECT * FROM t1;
+col1	col2
+1	40
+# With deadlock detection on, a cycle that involves a transaction blocked by
+# a prepared XA transaction is resolved without touching the XA transaction
+INSERT INTO t1 VALUES (2, 2), (3, 3);
+XA START 'xid3';
+UPDATE t1 SET col2 = 60 WHERE col1 = 1;
+XA END 'xid3';
+XA PREPARE 'xid3';
+Warnings:
+Warning	1031	Table storage engine for 'ROCKSDB' doesn't have this option
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+UPDATE t1 SET col2 = 70 WHERE col1 = 2;
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+UPDATE t1 SET col2 = 80 WHERE col1 = 3;
+UPDATE t1 SET col2 = 81 WHERE col1 = 2;
+UPDATE t1 SET col2 = 71 WHERE col1 = 3;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+COMMIT;
+XA COMMIT 'xid3';
+SELECT * FROM t1 ORDER BY col1;
+col1	col2
+1	60
+2	81
+3	80
+DROP TABLE t1;

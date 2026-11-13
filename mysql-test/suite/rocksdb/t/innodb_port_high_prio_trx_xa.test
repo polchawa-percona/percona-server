@@ -1,0 +1,116 @@
+#
+# Port of the XA scenarios of innodb.high_prio_trx_debug and innodb.high_prio_trx_7
+# (mysql-test/suite/innodb/t/high_prio_trx_debug.test, high_prio_trx_7.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - MyRocks has no high-priority transactions (start_transaction_high_prio.inc,
+#     dbug_set_high_prio_trx), so the port keeps what those tests protect for XA:
+#     Bug #25032066 "PREPARED TRANSACTION SHOULD NOT BE ROLLED BACK". A transaction
+#     that conflicts with a prepared XA transaction waits, times out or is chosen as a
+#     deadlock victim; the prepared transaction is never rolled back by it and commits
+#     with its changes intact
+#   - the --sleep is replaced by a processlist wait
+#   - runs at READ COMMITTED: the conflicting UPDATE scans by a non-key column inside
+#     a transaction, which the gap-lock rule rejects at REPEATABLE READ
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # Bug #25032066: PREPARED TRANSACTION SHOULD NOT BE ROLLED BACK
+--echo #
+
+CREATE TABLE t1(col1 int PRIMARY KEY, col2 int) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES(1, 10);
+
+--connect(con1,localhost,root,,test)
+
+--connection default
+XA START 'xid1';
+UPDATE t1 SET col2 = 20;
+XA END 'xid1';
+XA PREPARE 'xid1';
+
+--connection con1
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+--send UPDATE t1 SET col2 = 30 WHERE col2 = 10
+
+--connection default
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'UPDATE t1 SET col2 = 30 WHERE col2 = 10' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+XA COMMIT 'xid1';
+
+--connection con1
+--reap
+COMMIT;
+
+--connection default
+SELECT * FROM t1;
+
+--echo # A waiter that times out does not affect the prepared transaction
+XA START 'xid2';
+UPDATE t1 SET col2 = 40;
+XA END 'xid2';
+XA PREPARE 'xid2';
+
+--connection con1
+SET SESSION rocksdb_lock_wait_timeout = 1;
+START TRANSACTION;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET col2 = 50 WHERE col1 = 1;
+ROLLBACK;
+
+--connection default
+XA RECOVER;
+XA COMMIT 'xid2';
+SELECT * FROM t1;
+
+--echo # With deadlock detection on, a cycle that involves a transaction blocked by
+--echo # a prepared XA transaction is resolved without touching the XA transaction
+INSERT INTO t1 VALUES (2, 2), (3, 3);
+XA START 'xid3';
+UPDATE t1 SET col2 = 60 WHERE col1 = 1;
+XA END 'xid3';
+XA PREPARE 'xid3';
+
+--connect(con2,localhost,root,,test)
+--connection con1
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+UPDATE t1 SET col2 = 70 WHERE col1 = 2;
+
+--connection con2
+SET SESSION rocksdb_deadlock_detect = ON;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+START TRANSACTION;
+UPDATE t1 SET col2 = 80 WHERE col1 = 3;
+--send UPDATE t1 SET col2 = 81 WHERE col1 = 2
+
+--connection default
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'UPDATE t1 SET col2 = 81 WHERE col1 = 2' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+
+--connection con1
+--error ER_LOCK_DEADLOCK
+UPDATE t1 SET col2 = 71 WHERE col1 = 3;
+ROLLBACK;
+
+--connection con2
+--reap
+COMMIT;
+
+--connection default
+XA COMMIT 'xid3';
+SELECT * FROM t1 ORDER BY col1;
+
+--disconnect con1
+--disconnect con2
+DROP TABLE t1;
+
+--source include/wait_until_count_sessions.inc
