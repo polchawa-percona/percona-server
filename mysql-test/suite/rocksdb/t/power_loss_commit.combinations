@@ -1,0 +1,16 @@
+[default]
+
+[no_manual_wal_flush]
+rocksdb_manual_wal_flush=OFF
+
+[wal_recovery_mode_2]
+rocksdb_wal_recovery_mode=2
+
+[wal_recovery_mode_3]
+rocksdb_wal_recovery_mode=3
+
+[write_prepared]
+rocksdb_write_policy=write_prepared
+
+[write_unprepared]
+rocksdb_write_policy=write_unprepared

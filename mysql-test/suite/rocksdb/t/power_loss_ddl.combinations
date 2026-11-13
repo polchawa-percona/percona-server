@@ -1,0 +1,11 @@
+[sync_power]
+rocksdb_flush_log_at_trx_commit=1
+rocksdb_debug_unsynced_data_loss=ON
+
+[lazy_power]
+rocksdb_flush_log_at_trx_commit=2
+rocksdb_debug_unsynced_data_loss=ON
+debug=+d,rocksdb_skip_background_wal_sync
+
+[sync_kill]
+rocksdb_flush_log_at_trx_commit=1

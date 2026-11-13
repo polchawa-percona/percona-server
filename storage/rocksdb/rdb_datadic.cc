@@ -23,6 +23,7 @@
 #endif
 
 /* This C++ file's header file */
+#include "./ha_rocksdb_proto.h"
 #include "./rdb_datadic.h"
 
 /* C++ standard header files */
@@ -5668,6 +5669,7 @@ int Rdb_dict_manager::commit(rocksdb::WriteBatch &batch, bool sync) const {
   options.sync = (sync && rdb_sync_wal_supported());
   rocksdb::TransactionDBWriteOptimizations optimize;
   optimize.skip_concurrency_control = true;
+  RDB_CRASH_POINT("dict_commit");
   const auto s = DBUG_EVALUATE_IF(
       "rocksdb_dict_commit_failure",
       rocksdb::Status::IOError("injected dictionary write error"),

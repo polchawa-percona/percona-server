@@ -1,0 +1,80 @@
+#
+# A bulk load must keep the primary key and the secondary keys of a table
+# consistent across a power cut also with rocksdb_flush_log_at_trx_commit=2.
+# With rocksdb_bulk_load_allow_sk=OFF the primary key rows go to SST files
+# that are ingested and synced, while the secondary key entries go through
+# the WAL with the lazy setting. A power cut after the load then keeps every
+# row in the primary key but loses its secondary key entries (PS-12042).
+# This is not the mid-load crash of PS-11696: here the load has finished and
+# the secondary key entries are lost only because the WAL was not synced.
+#
+# The background WAL sync is held back to make the window deterministic. See
+# power_loss_commit.test for the power cut simulation (the crash is fired by
+# the crash-point hook through include/power_loss_now.inc).
+#
+# Disabled until PS-12042 is fixed (mysql-test/collections/disabled.def).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+
+# The scenario runs with the lazy setting (2) and then as a control with
+# rocksdb_flush_log_at_trx_commit=1, where the WAL is synced at commit and
+# both keys must be complete after the power cut. The control shows that the
+# loss in the lazy case depends on the unsynced WAL.
+--let $bl_mode = 2
+while ($bl_mode >= 1)
+{
+SET SESSION cte_max_recursion_depth = 10000;
+--eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $bl_mode
+CREATE TABLE t_sorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_unsorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sorted SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_unsorted SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+
+--echo # rocksdb_flush_log_at_trx_commit = $bl_mode
+--echo # Before the power cut both loads are complete, in the primary key and the secondary key.
+SELECT (SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)) AS sorted_pk,
+       (SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0) AS sorted_sk,
+       (SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)) AS unsorted_pk,
+       (SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0) AS unsorted_sk;
+
+--source suite/rocksdb/include/power_loss_now.inc
+
+# Each table must be consistent: all 5000 loaded rows in both the primary key
+# and the secondary key, or (lazy mode only) none of them. A failure prints the row counts.
+--let $bl_rows = 5000
+--let $bl_strict = `SELECT $bl_mode = 1`
+--let $bl_pk = `SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)`
+--let $bl_sk = `SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0`
+--let $bl_ok = `SELECT $bl_pk = $bl_sk AND ($bl_pk = $bl_rows OR (NOT $bl_strict AND $bl_pk = 0))`
+if (!$bl_ok) {
+  --echo # t_sorted: $bl_pk primary key rows, $bl_sk secondary key entries
+}
+--echo t_sorted consistent: $bl_ok
+--let $bl_pk = `SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)`
+--let $bl_sk = `SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0`
+--let $bl_ok = `SELECT $bl_pk = $bl_sk AND ($bl_pk = $bl_rows OR (NOT $bl_strict AND $bl_pk = 0))`
+if (!$bl_ok) {
+  --echo # t_unsorted: $bl_pk primary key rows, $bl_sk secondary key entries
+}
+--echo t_unsorted consistent: $bl_ok
+
+DROP TABLE t_sorted, t_unsorted;
+--dec $bl_mode
+}
+
+--let $pl_want_fired = 2
+--let $pl_want_dropped = 2
+--source suite/rocksdb/include/power_loss_reach.inc
