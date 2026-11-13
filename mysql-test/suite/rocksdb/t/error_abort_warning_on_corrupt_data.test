@@ -3,7 +3,6 @@
 --source include/not_asan.inc
 --source include/not_parallel.inc
 --source include/have_rocksdb.inc
---source suite/rocksdb/include/have_write_committed.inc
 
 let DATADIR_LOCATION=$MYSQLTEST_VARDIR/mysqld.1/data;
 

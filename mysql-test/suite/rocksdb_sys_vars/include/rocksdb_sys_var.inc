@@ -7,10 +7,20 @@
 ##
 
 --eval SET @start_global_value = @@global.$sys_var
+# $start_value_varies: the startup value depends on how the server was started
+# (for example a write-policy combination or CI leg), so do not print it.
+if ($start_value_varies)
+{
+  --replace_column 1 #
+}
 SELECT @start_global_value;
 if ($session)
 {
   --eval SET @start_session_value = @@session.$sys_var
+  if ($start_value_varies)
+  {
+    --replace_column 1 #
+  }
   SELECT @start_session_value;
 }
 
@@ -110,10 +120,18 @@ if ($read_only)
 if (!$read_only)
 {
   --eval SET @@global.$sys_var = @start_global_value
+  if ($start_value_varies)
+  {
+    --replace_column 1 #
+  }
   --eval SELECT @@global.$sys_var
   if ($session)
   {
     --eval SET @@session.$sys_var = @start_session_value
+    if ($start_value_varies)
+    {
+      --replace_column 1 #
+    }
     --eval SELECT @@session.$sys_var
   }
 }

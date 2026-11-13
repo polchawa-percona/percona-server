@@ -10,6 +10,8 @@ INSERT INTO invalid_values VALUES('\'aaa\'');
 INSERT INTO invalid_values VALUES('\'2000001\'');
 
 --let $sys_var=ROCKSDB_WRITE_BATCH_FLUSH_THRESHOLD
+# The write_unprepared CI legs start the server with a non-default threshold.
+--let $start_value_varies=1
 --let $read_only=0
 --let $session=1
 --source ../include/rocksdb_sys_var.inc

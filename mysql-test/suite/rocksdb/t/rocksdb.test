@@ -1,5 +1,4 @@
 --source include/have_rocksdb.inc
---source ../include/have_write_committed.inc
 --source ../include/have_compact_range_for_drop_table.inc
 --source include/count_sessions.inc
 
@@ -793,12 +792,16 @@ drop table t45;
 --echo #
 # We exclude rocksdb_max_open_files here because it value is dependent on
 # the value of the servers open_file_limit and is expected to be different
-# across distros and installs
+# across distros and installs.
+# rocksdb_write_policy and rocksdb_write_batch_flush_threshold are excluded:
+# the write-policy CI legs set them at startup. Their _basic tests in
+# rocksdb_sys_vars cover them.
 show variables where
   variable_name like 'rocksdb%' and
   variable_name not like 'rocksdb_max_open_files' and
   variable_name not like 'rocksdb_wsenv_%' and
-  variable_name not like 'rocksdb_table_stats_background_thread_nice_value';
+  variable_name not like 'rocksdb_table_stats_background_thread_nice_value' and
+  variable_name not in ('rocksdb_write_policy', 'rocksdb_write_batch_flush_threshold');
 create table t47 (pk int primary key, col1 varchar(12)) ENGINE=RocksDB CHARSET=latin1;
 insert into t47 values (1, 'row1');
 insert into t47 values (2, 'row2');
@@ -1705,6 +1708,17 @@ drop table t1,t2;
 --echo #
 create table t1 (id int primary key) engine=rocksdb;
 insert into t1 values (1), (2), (3);
+# Under write_unprepared, flush every write before commit so the statement
+# rollback below writes rollback batches whatever the server-wide threshold is.
+let $wup_flushed = `SELECT @@global.rocksdb_write_policy = 'write_unprepared'`;
+if ($wup_flushed)
+{
+  --disable_query_log
+  SET SESSION rocksdb_write_batch_flush_threshold = 1;
+  # The snapshot conflict below is also logged as "Got error 522".
+  call mtr.add_suppression("Got error 522 when reading table");
+  --enable_query_log
+}
 begin;
 insert into t1 values (4), (5), (6);
 --error ER_DUP_ENTRY
@@ -1717,6 +1731,21 @@ begin;
 --error ER_LOCK_WAIT_TIMEOUT
 select * from t1 where id=4 for update;
 
+# Under write_unprepared with batches flushed before commit, the statement
+# rollback above writes compensating rows to the DB. RocksDB snapshot
+# validation then sees a write newer than con1's snapshot and reports a
+# conflict (a RocksDB library behaviour, see rocksdb_deadlock_detect.inc).
+if ($wup_flushed)
+{
+  --disable_query_log
+  --disable_result_log
+  --error ER_LOCK_DEADLOCK
+  select * from t1 where id=7 for update;
+  rollback;
+  begin;
+  --enable_result_log
+  --enable_query_log
+}
 select * from t1 where id=7 for update;
 
 select * from t1 where id=9 for update;
@@ -1724,6 +1753,12 @@ select * from t1 where id=9 for update;
 --connection default
 -- disconnect con1
 drop table t1;
+if ($wup_flushed)
+{
+  --disable_query_log
+  SET SESSION rocksdb_write_batch_flush_threshold = DEFAULT;
+  --enable_query_log
+}
 
 --echo # Index on blob column
 create table t1 (a int, b text, c varchar(255), Primary Key(a), Key(c, b(255))) engine=rocksdb;
@@ -1832,33 +1867,10 @@ REPLACE INTO t1 VALUES(4, 4);
 --error ER_ON_DUPLICATE_DISABLED
 INSERT INTO t1 VALUES(5, 5) ON DUPLICATE KEY UPDATE value=value+1;
 TRUNCATE TABLE t1;
-SET @save_rocksdb_bulk_load_size= @@rocksdb_bulk_load_size;
 SET unique_checks=1;
-SET rocksdb_commit_in_the_middle=1;
-SET rocksdb_bulk_load_size=10;
-BEGIN;
-INSERT INTO t1 (id) VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
-  (11),(12),(13),(14),(15),(16),(17),(18),(19);
-ROLLBACK;
-SELECT * FROM t1;
-INSERT INTO t1 (id) VALUES (11),(12),(13),(14),(15);
-# MyRocks does not support gap locks in REPEATABLE-READ mode, this part of the
-# test does not require RR ISO to complete, so lets temporarily alter the ISO
-# to RC
-set @orig_tx_iso=@@session.transaction_isolation;
-set session transaction_isolation='READ-COMMITTED';
-BEGIN;
-
-UPDATE t1 SET value=100;
-ROLLBACK;
-SELECT * FROM t1;
-BEGIN;
-DELETE FROM t1;
-ROLLBACK;
-SELECT * FROM t1;
-set session transaction_isolation=@orig_tx_iso;
-SET rocksdb_commit_in_the_middle=0;
-SET rocksdb_bulk_load_size= @save_rocksdb_bulk_load_size;
+# The rocksdb_commit_in_the_middle part of this issue is in
+# rocksdb.commit_in_the_middle_rollback: its results differ under
+# write_unprepared, where commit-in-the-middle is disabled.
 DROP TABLE t1;
 
 --echo #

@@ -146,9 +146,10 @@ Warnings:
 Note	1003	/* select#1 */ select `test`.`t2`.`i` AS `i`,`test`.`t2`.`c` AS `c` from `test`.`t2` where (`test`.`t2`.`c` = 50)
 explain select * from t2 where c = 777;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t2	NULL	ref	kc	kc	4	const	299	100.00	Using index
+1	SIMPLE	t2	NULL	ref	kc	kc	4	const	#	100.00	Using index
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t2`.`i` AS `i`,`test`.`t2`.`c` AS `c` from `test`.`t2` where (`test`.`t2`.`c` = 777)
+include/assert.inc [SST-only estimate for the 3-row group balloons to the block count]
 #
 # rocksdb_skip_fill_cache is honored by the dive's own iterator too.
 # Needs a fresh table/CF: t2 is already cached by now.

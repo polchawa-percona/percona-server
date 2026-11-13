@@ -1,4 +1,6 @@
 --source include/have_rocksdb.inc
+# write_prepared and write_unprepared do not support the vector memtable this
+# test configures, so the test only applies to write_committed.
 --source ../include/have_write_committed.inc
 
 # reload with load optimized config

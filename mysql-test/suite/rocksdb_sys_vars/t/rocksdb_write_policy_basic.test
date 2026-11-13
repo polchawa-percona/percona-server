@@ -13,6 +13,8 @@ CREATE TABLE invalid_values (value varchar(255)) ENGINE=myisam;
 INSERT INTO invalid_values VALUES('\'aaa\'');
 
 --let $sys_var=ROCKSDB_WRITE_POLICY
+# The policy is chosen at startup (write-policy combinations and CI legs).
+--let $start_value_varies=1
 --let $read_only=1
 --let $session=0
 --source ../include/rocksdb_sys_var.inc
