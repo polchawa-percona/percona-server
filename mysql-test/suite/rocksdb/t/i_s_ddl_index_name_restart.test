@@ -1,0 +1,24 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-11882: after a restart, information_schema.ROCKSDB_DDL reports an
+# empty INDEX_NAME for every index of a table that has not been opened
+# since the restart. Rdb_key_def::m_name is filled only by
+# Rdb_key_def::setup() when the table is opened; Rdb_ddl_manager::init()
+# builds the key definitions from the MyRocks dictionary without names.
+#
+# The test creates a table with a primary and a secondary key, restarts the
+# server and reads ROCKSDB_DDL before anything opens the table.
+#
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+
+--source include/restart_mysqld.inc
+
+--echo # Names must be reported before the table is opened
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+
+DROP TABLE t1;
