@@ -1,0 +1,199 @@
+#
+# Crash recovery of MyRocks DDL statements: the crash windows that recover to a
+# consistent table today. MyRocks has no atomic DDL: the server's data
+# dictionary and the MyRocks dictionary (__system__ column family) are
+# committed separately. In each window below, after the restart both
+# dictionaries must agree, the rows must be intact, no MyRocks index may be
+# left behind and the table must accept DML and DDL.
+#
+# Windows where recovery is wrong today are in the disabled tests
+# ddl_crash_create_drop_mismatch, ddl_crash_rename_mismatch, ddl_crash_truncate,
+# ddl_crash_add_index and ddl_crash_drop_index. COPY ALTER windows are in
+# alter_copy_crash_leftover_warning and alter_copy_crash_rename.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--let $check_tables = 't1','t2'
+
+--disable_query_log
+CALL mtr.add_suppression("Removing truncated leftover table test.#truncate_tmp#t1");
+--enable_query_log
+
+--echo #
+--echo # 1. CREATE TABLE: crash after the MyRocks dictionary commit.
+--echo #    The server DD is committed before the engine creates the table, so
+--echo #    both dictionaries have the table: it exists, empty and usable.
+--echo #
+--let $crash_point = rocksdb_crash_after_create_table
+--let $crash_stmt = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+SELECT id FROM t1 FORCE INDEX(ka) WHERE a > 1 ORDER BY id;
+ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE;
+DROP TABLE t1;
+
+--echo #
+--echo # 2. TRUNCATE TABLE: crash after the new table is committed, before the
+--echo #    old one (renamed to #truncate_tmp#t1) is dropped. Startup removes
+--echo #    the leftover, so t1 is empty and nothing else is left in MyRocks.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+--let $crash_point = rocksdb_crash_after_create_table
+--let $crash_stmt = TRUNCATE TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+--let $assert_text = Startup removed the truncate leftover
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Removing truncated leftover table test.#truncate_tmp#t1'
+--let $assert_count = 1
+--source include/assert_grep.inc
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # 3. TRUNCATE TABLE: crash after the old table is dropped from the
+--echo #    MyRocks dictionary. t1 is empty and consistent.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+--let $crash_point = rocksdb_crash_after_delete_table
+--let $crash_stmt = TRUNCATE TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # 4. DROP TABLE: kill the server while the dropped indexes are still
+--echo #    being removed in the background. After the restart the drop resumes
+--echo #    and the data of the table goes away.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 10000)
+  SELECT n, n, n FROM s;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $idx = `SELECT GROUP_CONCAT(INDEX_NUMBER) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`
+--replace_result $idx INDEX_NUMBERS
+--eval SELECT SUM(NUM_ROWS) > 0 AS has_keys FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN ($idx)
+# Keep the drop-index thread from finishing before the kill.
+SET GLOBAL rocksdb_pause_background_work = 1;
+DROP TABLE t1;
+--source include/kill_mysqld.inc
+--source include/start_mysqld.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# With drops pending, the drop-index thread checks them once a minute.
+--let $wait_timeout = 180
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+--let $wait_timeout =
+--replace_result $idx INDEX_NUMBERS
+--eval SELECT COALESCE(SUM(NUM_ROWS), 0) AS keys_left FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER IN ($idx)
+
+--echo #
+--echo # 5. INSTANT ADD COLUMN: crash before the server DD commit. The ALTER is
+--echo #    rolled back: old definition, old rows.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+--let $crash_point = crash_commit_after_prepare
+--let $crash_stmt = ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+SHOW CREATE TABLE t1;
+INSERT INTO t1 VALUES (4,4,4);
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # 6. INSTANT ADD COLUMN: crash after the server DD commit. The new column
+--echo #    is there and old rows read its default.
+--echo #
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = ON;
+--let $crash_point = crash_after_index_create
+--let $crash_stmt = ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+SHOW CREATE TABLE t1;
+INSERT INTO t1 VALUES (5,5,5,5);
+SELECT * FROM t1 ORDER BY id;
+SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = DEFAULT;
+DROP TABLE t1;
+
+--echo #
+--echo # 7. INPLACE ADD INDEX: crash after the server DD commit. The index is in
+--echo #    both dictionaries and returns all rows.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1),(2,2,2),(3,3,3);
+--let $crash_point = crash_after_index_create
+--let $crash_stmt = ALTER TABLE t1 ADD INDEX kb(b), ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+SHOW CREATE TABLE t1;
+INSERT INTO t1 VALUES (4,4,4);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+
+--echo #
+--echo # 8. INPLACE DROP INDEX: crash after the server DD commit. The index is
+--echo #    gone from both dictionaries and the table is usable.
+--echo #
+--let $idx = `SELECT INDEX_NUMBER FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' AND INDEX_NAME = 'ka'`
+--let $crash_point = crash_after_index_create
+--let $crash_stmt = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+SHOW CREATE TABLE t1;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INSERT INTO t1 VALUES (5,5,5);
+SELECT id FROM t1 FORCE INDEX(kb) WHERE b > 0 ORDER BY id;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# With drops pending, the drop-index thread checks them once a minute.
+--let $wait_timeout = 180
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO
+  WHERE TYPE = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+--let $wait_timeout =
+--replace_result $idx INDEX_NUMBERS
+--eval SELECT COALESCE(SUM(NUM_ROWS), 0) AS dropped_index_keys_left FROM information_schema.ROCKSDB_INDEX_FILE_MAP WHERE INDEX_NUMBER = $idx
+DROP TABLE t1;
+
+--echo #
+--echo # 9. CREATE TABLE ... SELECT: kill after the first rows are written,
+--echo #    before the statement commits. MyRocks has no atomic DDL, so (as for
+--echo #    every engine without it) the new table stays, empty, in both
+--echo #    dictionaries; InnoDB would have no table. Only consistency is checked.
+--echo #
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1,1),(2,2),(3,3);
+connect (con1,localhost,root,,);
+# At REPEATABLE READ the gap-lock rule rejects CREATE TABLE ... SELECT.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET DEBUG_SYNC = 'create_select_after_write_rows_event SIGNAL written WAIT_FOR never';
+--send CREATE TABLE t1 ENGINE=ROCKSDB SELECT * FROM t2
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR written';
+--source include/kill_mysqld.inc
+connection con1;
+--error CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+--reap
+disconnect con1;
+connection default;
+--source include/start_mysqld.inc
+--source suite/rocksdb/include/ddl_crash_check.inc
+DROP TABLE t1, t2;
+
+--echo # Nothing is left in the MyRocks dictionary.
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test';

@@ -1,0 +1,57 @@
+# A crash between the renames of ALTER TABLE ... ALGORITHM=COPY must not make
+# the table unavailable. MyRocks has no atomic DDL: the renames are committed
+# to the MyRocks dictionary and to the data dictionary separately, so a crash
+# between them leaves the two dictionaries disagreeing on the table's name.
+# MyRocks then refuses to start with the default rocksdb_validate_tables=1,
+# and with rocksdb_validate_tables=2 the table cannot be opened (window C1) or
+# is gone from the data dictionary (window C2).
+#
+# Window C1: the original table has been renamed to "#sql2-..." in MyRocks.
+# Window C2: the intermediate table has also been renamed to the original name
+# in MyRocks.
+#
+# The test asserts the correct behaviour: after the crash the server starts
+# with the default settings and the table has its data.
+
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("is a leftover of an interrupted ALTER TABLE");
+call mtr.add_suppression("Schema mismatch");
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(100), KEY ka(a))
+  ENGINE=ROCKSDB;
+--disable_query_log
+let $i= 1;
+while ($i <= 1000) {
+  eval INSERT INTO t1 VALUES ($i, $i MOD 10, REPEAT('x', 80));
+  inc $i;
+}
+--enable_query_log
+
+--echo #
+--echo # Window C1: crash after the original is renamed to "#sql2-...".
+--echo #
+SET SESSION debug='+d,rocksdb_crash_after_rename';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+--source include/start_mysqld.inc
+SELECT COUNT(*), SUM(id), SUM(a), SUM(LENGTH(b)) FROM t1;
+CHECK TABLE t1;
+
+--echo #
+--echo # Window C2: crash after the intermediate table gets the original name.
+--echo #
+SET SESSION debug='+d,rocksdb_crash_after_rename_from_tmp';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+--source include/start_mysqld.inc
+SELECT COUNT(*), SUM(id), SUM(a), SUM(LENGTH(b)) FROM t1;
+CHECK TABLE t1;
+
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+DROP TABLE t1;

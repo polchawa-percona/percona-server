@@ -1,0 +1,109 @@
+--source include/have_rocksdb.inc
+
+#
+# Which ALTER TABLE operations MyRocks performs as INSTANT, INPLACE or COPY,
+# and which LOCK clauses it accepts, compared with InnoDB.
+#
+# Each operation is run on a fresh two-row table with every ALGORITHM and
+# LOCK clause, once on InnoDB and three times on MyRocks:
+#   MyRocks             - default settings: rocksdb_enable_instant_ddl=ON,
+#                         all rocksdb_enable_instant_ddl_for_* OFF
+#   MyRocks instant on  - all rocksdb_enable_instant_ddl_for_* ON
+#   MyRocks instant off - rocksdb_enable_instant_ddl=OFF, all _for_* ON
+# Each column shows OK (the ALTER succeeded and both rows are still there)
+# or the error name. A change in this matrix after a merge or a refactoring
+# means MyRocks now chooses a different algorithm for an operation.
+#
+
+--let $save_instant = `SELECT @@global.rocksdb_enable_instant_ddl`
+--let $save_append = `SELECT @@global.rocksdb_enable_instant_ddl_for_append_column`
+--let $save_default = `SELECT @@global.rocksdb_enable_instant_ddl_for_column_default_changes`
+--let $save_comment = `SELECT @@global.rocksdb_enable_instant_ddl_for_table_comment_changes`
+--let $save_drop_index = `SELECT @@global.rocksdb_enable_instant_ddl_for_drop_index_changes`
+
+--echo # Columns
+--let $op = ADD COLUMN e INT
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD COLUMN e INT FIRST
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD COLUMN e INT AFTER b
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = DROP COLUMN d
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = RENAME COLUMN c TO c2
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ALTER COLUMN b SET DEFAULT 7
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ALTER COLUMN b DROP DEFAULT
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = MODIFY c VARCHAR(20)
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = MODIFY b BIGINT
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = MODIFY c VARCHAR(10) NOT NULL
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = MODIFY c VARCHAR(10) COLLATE utf8mb4_bin
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD COLUMN g INT AS (a + 1) VIRTUAL
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD COLUMN g INT AS (a + 1) STORED
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+
+--echo
+--echo # Indexes
+--let $op = ADD INDEX kc(c)
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD UNIQUE INDEX uc(c)
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = DROP INDEX kb
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = RENAME INDEX kb TO kb2
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ALTER INDEX kb INVISIBLE
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD INDEX kf((a + b))
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = DROP PRIMARY KEY, ADD PRIMARY KEY (a, b)
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ADD COLUMN e INT, ADD INDEX ke(e)
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+
+--echo
+--echo # Table options
+# The "instant off" leg is skipped for COMMENT: rocksdb_enable_instant_ddl=OFF
+# does not stop an instant COMMENT change (finding #53, tested in
+# rocksdb.instant_ddl_master_switch_comment).
+--let $op = COMMENT='x'
+--let $skip_instant_off = 1
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $skip_instant_off =
+--let $op = AUTO_INCREMENT=100
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = ROW_FORMAT=DYNAMIC
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = CONVERT TO CHARACTER SET latin1
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = FORCE
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+--let $op = RENAME TO ins2
+--let $tbl = ins2
+--source suite/rocksdb/include/alter_algorithm_matrix_row.inc
+
+--echo
+--echo # With the default settings, ALGORITHM=INSTANT for ADD COLUMN fails with
+--echo # a hint to try INPLACE, but MyRocks rejects INPLACE for it too.
+CREATE TABLE ins (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE ins ADD COLUMN e INT, ALGORITHM=INSTANT;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE ins ADD COLUMN e INT, ALGORITHM=INPLACE;
+ALTER TABLE ins ADD COLUMN e INT, ALGORITHM=COPY;
+DROP TABLE ins;
+
+--disable_query_log
+eval SET GLOBAL rocksdb_enable_instant_ddl = $save_instant;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_append_column = $save_append;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_column_default_changes = $save_default;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_table_comment_changes = $save_comment;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_drop_index_changes = $save_drop_index;
+--enable_query_log

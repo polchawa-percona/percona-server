@@ -1,0 +1,35 @@
+call mtr.add_suppression("is a leftover of an interrupted ALTER TABLE");
+call mtr.add_suppression("Schema mismatch");
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(100), KEY ka(a))
+ENGINE=ROCKSDB;
+#
+# Window C1: crash after the original is renamed to "#sql2-...".
+#
+SET SESSION debug='+d,rocksdb_crash_after_rename';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*), SUM(id), SUM(a), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(id)	SUM(a)	SUM(LENGTH(b))
+1000	500500	4500	80000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# Window C2: crash after the intermediate table gets the original name.
+#
+SET SESSION debug='+d,rocksdb_crash_after_rename_from_tmp';
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*), SUM(id), SUM(a), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(id)	SUM(a)	SUM(LENGTH(b))
+1000	500500	4500	80000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#sql%';
+COUNT(*)
+0
+DROP TABLE t1;

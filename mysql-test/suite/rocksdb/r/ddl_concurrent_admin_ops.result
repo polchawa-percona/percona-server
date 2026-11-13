@@ -1,0 +1,40 @@
+SET @save_cte_max_recursion_depth = @@session.cte_max_recursion_depth;
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(64), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=cf_a', KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB;
+CREATE TABLE t3 (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=rev:cf_b', KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB;
+INSERT INTO t1 SELECT n, n % 101, REPEAT(CHAR(97 + n % 26), 40) FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000) SELECT n FROM seq) s;
+INSERT INTO t2 SELECT n, n % 101, REPEAT(CHAR(97 + n % 26), 40) FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000) SELECT n FROM seq) s;
+INSERT INTO t3 SELECT n, n % 101, REPEAT(CHAR(97 + n % 26), 40) FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000) SELECT n FROM seq) s;
+# A table that is never altered, in a column family shared with t2 and t3.
+CREATE TABLE ts (a INT, b INT, c VARCHAR(64), PRIMARY KEY (a) COMMENT 'cfname=cf_a', KEY kb (b) COMMENT 'rev:cf_b') ENGINE=ROCKSDB;
+INSERT INTO ts SELECT n, n % 101, REPEAT(CHAR(97 + n % 26), 40) FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000) SELECT n FROM seq) s;
+# A table only written by DML.
+CREATE TABLE td (a INT AUTO_INCREMENT PRIMARY KEY, b INT, KEY kb (b) COMMENT 'cfname=cf_a') ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION cte_max_recursion_depth = 100000;
+# All rounds done; every table kept its rows through every index.
+# The drop-index thread removes everything that was dropped.
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+# No column family is left marked as dropped.
+# MyRocks knows exactly the tables and indexes of the server.
+SELECT COUNT(*) AS indexes_only_in_myrocks FROM information_schema.ROCKSDB_DDL r
+WHERE r.TABLE_SCHEMA = 'test' AND NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS s
+WHERE s.TABLE_SCHEMA = r.TABLE_SCHEMA AND s.TABLE_NAME = r.TABLE_NAME AND s.INDEX_NAME = r.INDEX_NAME);
+indexes_only_in_myrocks
+0
+SELECT COUNT(*) AS indexes_only_in_server FROM (SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test') s
+WHERE NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL r
+WHERE r.TABLE_SCHEMA = 'test' AND r.TABLE_NAME = s.TABLE_NAME AND r.INDEX_NAME = s.INDEX_NAME);
+indexes_only_in_server
+0
+SELECT COUNT(*) AS leftover_tables FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME NOT IN ('t1', 't2', 't3', 'ts', 'td');
+leftover_tables
+0
+# Restart with table validation.
+# restart: --rocksdb_validate_tables=1
+td_rows_ok
+1
+DROP TABLE t1, t2, t3, ts, td;

@@ -1,0 +1,44 @@
+--source include/have_rocksdb.inc
+
+#
+# rocksdb_enable_instant_ddl=OFF must turn off every instant ALTER, as its
+# help text says ("If false, no DDL can be executed as instant"). A table
+# COMMENT change is decided outside rocksdb_support_instant(), the only place
+# that checks the variable, so it stays instant when
+# rocksdb_enable_instant_ddl_for_table_comment_changes is ON.
+# Disabled until finding #53 is fixed.
+#
+
+--let $save_instant = `SELECT @@global.rocksdb_enable_instant_ddl`
+--let $save_comment = `SELECT @@global.rocksdb_enable_instant_ddl_for_table_comment_changes`
+--let $save_default = `SELECT @@global.rocksdb_enable_instant_ddl_for_column_default_changes`
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT DEFAULT 1) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 1);
+
+SET GLOBAL rocksdb_enable_instant_ddl_for_table_comment_changes = ON;
+SET GLOBAL rocksdb_enable_instant_ddl_for_column_default_changes = ON;
+
+--echo # With the master switch ON, both changes are instant.
+SET GLOBAL rocksdb_enable_instant_ddl = ON;
+ALTER TABLE t COMMENT='c1', ALGORITHM=INSTANT;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT 2, ALGORITHM=INSTANT;
+
+--echo # With the master switch OFF, neither may be instant.
+SET GLOBAL rocksdb_enable_instant_ddl = OFF;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t ALTER COLUMN b SET DEFAULT 3, ALGORITHM=INSTANT;
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t COMMENT='c2', ALGORITHM=INSTANT;
+
+--echo # Other algorithms still work.
+ALTER TABLE t COMMENT='c3', ALGORITHM=COPY;
+SHOW CREATE TABLE t;
+SELECT * FROM t;
+
+DROP TABLE t;
+--disable_query_log
+eval SET GLOBAL rocksdb_enable_instant_ddl = $save_instant;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_table_comment_changes = $save_comment;
+eval SET GLOBAL rocksdb_enable_instant_ddl_for_column_default_changes = $save_default;
+--enable_query_log

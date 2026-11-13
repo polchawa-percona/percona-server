@@ -1,0 +1,4 @@
+#
+# rocksdb.ddl_metadata_after_restart with rocksdb_create_missing_column_families=ON.
+#
+--source suite/rocksdb/t/ddl_metadata_after_restart.test

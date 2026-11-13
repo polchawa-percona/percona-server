@@ -1,0 +1,8 @@
+[validate_tables_1]
+rocksdb-validate-tables=1
+
+[validate_tables_0]
+rocksdb-validate-tables=0
+
+[validate_tables_2]
+rocksdb-validate-tables=2
