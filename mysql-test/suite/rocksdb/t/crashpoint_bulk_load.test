@@ -1,0 +1,113 @@
+#
+# Crash-point enumeration over the durable writes of a bulk load (3000
+# sorted rows into a table with a secondary index, ingested as SST files
+# when the bulk load mode is switched off): every crash window must leave
+# either the empty starting table or the whole loaded table, with the
+# secondary index in step with the primary key, and the table must be
+# usable afterwards. The loop also crashes once after the completed load
+# (a power cut right after it).
+#
+# Two legs: a table with a secondary index and a table without one.
+#
+# With a secondary index the load is not atomic (PS-11696): the secondary
+# index entries are written through normal transactions, one commit per
+# rocksdb_bulk_load_size rows, while the primary key rows go to SST files
+# that are ingested only when the bulk load mode is switched off. A crash in
+# between (windows 2 to 6 of leg A: the secondary index has entries, the
+# primary key has none) leaves a corrupt table: CHECK TABLE reports
+# "Corrupt". Those windows are skipped; the original crash reproducer of
+# PS-11696 is on its own branch. Without a secondary index (leg B) every
+# window must leave the empty table or the whole loaded table.
+#
+# The combinations are a plain abort and a simulated power cut with
+# rocksdb_flush_log_at_trx_commit=1. There is no lazy combination: with
+# rocksdb_flush_log_at_trx_commit=2 a finished bulk load loses the secondary
+# key entries on a power cut while keeping the primary key rows (PS-12042,
+# see the disabled test power_loss_bulk_load_flush_log_lazy), which this
+# loop would report as a mixed state.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_state.inc
+
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE crashpoint_reset()
+BEGIN
+  DROP DATABASE IF EXISTS cp;
+  CREATE DATABASE cp;
+  CREATE TABLE cp.t (
+    pk INT PRIMARY KEY,
+    a INT NOT NULL,
+    b VARCHAR(32) NOT NULL,
+    KEY ka (a)
+  ) ENGINE=ROCKSDB;
+END|
+CREATE PROCEDURE crashpoint_probe()
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    GET DIAGNOSTICS CONDITION 1 @crashpoint_probe_res = MESSAGE_TEXT;
+  END;
+  SET @crashpoint_probe_res = 'ok';
+  INSERT INTO cp.t (pk, a, b) VALUES (100000, 9999, 'probe');
+  SELECT COUNT(*) INTO @crashpoint_pi FROM information_schema.statistics
+    WHERE table_schema = 'cp' AND table_name = 't' AND index_name = 'ka';
+  IF @crashpoint_pi > 0 THEN
+    SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t FORCE INDEX (ka)
+      WHERE a = 9999;
+    IF @crashpoint_pc <> 1 THEN
+      SET @crashpoint_probe_res = 'the new row is not found through ka';
+    END IF;
+  END IF;
+  DELETE FROM cp.t WHERE pk = 100000;
+  SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t WHERE pk = 100000;
+  IF @crashpoint_pc <> 0 THEN
+    SET @crashpoint_probe_res = 'the deleted row is still there';
+  END IF;
+END|
+delimiter ;|
+--enable_query_log
+
+--let $crashpoint_reset = CALL crashpoint_reset()
+--let $crashpoint_probe = CALL crashpoint_probe()
+--let $crashpoint_stmt_file = suite/rocksdb/include/crashpoint_body_bulk.inc
+--let $crashpoint_pkcol = pk
+--let $crashpoint_tables = cp.t
+--echo # Leg A: with a secondary index
+--let $crashpoint_label = bulk load with a secondary index
+--let $crashpoint_after_window = 1
+--let $crashpoint_skip = 2,3,4,5,6
+--let $crashpoint_skip_ticket = PS-11696
+--source suite/rocksdb/include/crashpoint_loop.inc
+
+--echo # Leg B: without a secondary index
+--disable_query_log
+DROP PROCEDURE crashpoint_reset;
+delimiter |;
+CREATE PROCEDURE crashpoint_reset()
+BEGIN
+  DROP DATABASE IF EXISTS cp;
+  CREATE DATABASE cp;
+  CREATE TABLE cp.t (
+    pk INT PRIMARY KEY,
+    a INT NOT NULL,
+    b VARCHAR(32) NOT NULL
+  ) ENGINE=ROCKSDB;
+END|
+delimiter ;|
+--enable_query_log
+--let $crashpoint_label = bulk load without a secondary index
+--let $crashpoint_stmt_file = suite/rocksdb/include/crashpoint_body_bulk.inc
+--let $crashpoint_after_window = 1
+--source suite/rocksdb/include/crashpoint_loop.inc
+
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

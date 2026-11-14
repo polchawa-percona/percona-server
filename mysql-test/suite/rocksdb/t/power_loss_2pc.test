@@ -1,0 +1,97 @@
+#
+# Two-phase commit with the binary log must survive a power cut with the
+# durable settings (rocksdb_flush_log_at_trx_commit=1, sync_binlog=1): every
+# acknowledged transaction is in the engine after recovery, and the engine and
+# the binary log agree. XA PREPARE + restart is left to PS-11632.
+#
+# See power_loss_commit.test for how the power cut is simulated. The binary
+# log is not on the simulated file system: it keeps what was written to the
+# OS. With sync_binlog=1 that is what a power cut would keep as well.
+#
+# Sections 1 and 3 are power cuts fired by the crash-point hook (checkpoint
+# site, see include/power_loss_now.inc): unsynced RocksDB data is lost and
+# the files whose directory entries were never synced are removed. Section 2
+# crashes at server-layer DBUG points (DBUG_SUICIDE, a SIGKILL): there the
+# unsynced appends are lost too (they live in the process), but the
+# directory entries are not dropped, because the hook is not involved. That
+# gap is accepted; the 2PC path creates no new RocksDB files.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+--source include/have_binlog_format_row.inc
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+SELECT @@global.rocksdb_flush_log_at_trx_commit, @@global.sync_binlog;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+--echo #
+--echo # 1. Acknowledged commits are all in the engine and in the binary log.
+--echo #
+FLUSH BINARY LOGS;
+--let $binlog_file = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--disable_query_log
+--let $i = 1
+while ($i <= 100) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+--enable_query_log
+--source suite/rocksdb/include/power_loss_now.inc
+SELECT COUNT(*), MAX(id) FROM t1;
+--let $datadir = `SELECT @@datadir`
+--echo # Transactions in the binary log:
+--exec $MYSQL_BINLOG $datadir/$binlog_file | grep -c "Xid = "
+
+--echo #
+--echo # 2. Crash points around the binary log write, with power loss
+--echo #    semantics. A transaction is kept exactly when it reached the
+--echo #    binary log.
+--echo #
+--let $point_list = crash_commit_before_log crash_commit_after_prepare half_binlogged_transaction crash_commit_after_log crash_commit_before crash_commit_after
+--let $n = 1000
+while ($point_list) {
+  --let $point = `SELECT SUBSTRING_INDEX('$point_list', ' ', 1)`
+  --let $point_list = `SELECT TRIM(SUBSTRING('$point_list', LENGTH('$point') + 1))`
+  --echo # $point
+  FLUSH BINARY LOGS;
+  --let $binlog_file = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+  --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+  eval SET SESSION debug = 'd,$point';
+  --error 0,CR_SERVER_LOST
+  eval INSERT INTO t1 VALUES ($n, 1), ($n + 1, 2);
+  --source include/wait_until_connected_again.inc
+  eval SELECT COUNT(*) AS rows_in_engine FROM t1 WHERE id IN ($n, $n + 1);
+  --echo # Transactions in the binary log:
+  --error 0,1
+  --exec $MYSQL_BINLOG $datadir/$binlog_file | grep -c "Xid = "
+  --let $n = `SELECT $n + 1000`
+}
+
+--echo #
+--echo # 3. Commits followed by FLUSH BINARY LOGS: the rotation syncs the
+--echo #    engine, so nothing is lost even though the binary log that held
+--echo #    the commits is no longer the last one.
+--echo #
+--disable_query_log
+--let $i = 1
+while ($i <= 50) {
+  eval INSERT INTO t1 VALUES (10000 + $i, $i);
+  --inc $i
+}
+--enable_query_log
+FLUSH BINARY LOGS;
+--source suite/rocksdb/include/power_loss_now.inc
+SELECT COUNT(*) FROM t1 WHERE id > 10000;
+
+--echo #
+--echo # Reach: sections 1 and 3 are two crashes fired by the hook, each with
+--echo # the unsynced data dropped; section 2 does not go through the hook.
+--echo #
+--let $pl_want_fired = 2
+--let $pl_want_dropped = 2
+--source suite/rocksdb/include/power_loss_reach.inc
+
+DROP TABLE t1;

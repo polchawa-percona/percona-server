@@ -1,0 +1,143 @@
+#
+# PS-11778: A crash while a manual compaction is removing expired TTL rows
+# must not bring expired rows back or remove rows that have not expired.
+#
+# The table has expired and unexpired rows in overlapping L0 files. A manual
+# compaction is held when it starts, or after it has written part of its
+# output (checked: the first rows of the table are unexpired, so the first
+# 1000 rows the filter sees are kept and written); a transaction deletes and
+# updates unexpired rows meanwhile; then the server crashes. The combinations
+# crash with a simulated power cut under rocksdb_flush_log_at_trx_commit=1
+# and 2, and with a plain kill. After recovery the visible rows must be
+# exactly the unexpired ones plus the transaction (which must be there with
+# rocksdb_flush_log_at_trx_commit=1 and is lost with 2, the background sync
+# being held back), through the primary key and through the secondary index,
+# and after a full compaction the same rows must remain with read filtering
+# turned off, so no expired row is left or resurrected.
+#
+# The result does not depend on how fast the test runs or on the clock: the
+# TTL column holds the year 2001 for the expired rows and the year 2096 for
+# the rest, the marker row of the transaction included.
+#
+# Not covered: a hold after the compaction is installed, and a plain kill
+# with rocksdb_flush_log_at_trx_commit=2.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+
+--let $_mc_points = start middle
+while ($_mc_points) {
+  --let $mc_point = `SELECT SUBSTRING_INDEX('$_mc_points', ' ', 1)`
+  --let $_mc_points = `SELECT IF(LOCATE(' ', '$_mc_points'), SUBSTRING('$_mc_points', LOCATE(' ', '$_mc_points') + 1), '')`
+
+  --disable_query_log
+  --let $_mc_mode = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
+  SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  CREATE TABLE tt (id INT, a INT, c VARCHAR(1200), ts BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (id) COMMENT 'cfname=cf_mc', KEY ka (a) COMMENT 'cfname=cf_mc')
+    ENGINE=ROCKSDB COMMENT = 'ttl_duration=1000;ttl_col=ts;';
+  CREATE TABLE ttref (id INT PRIMARY KEY, a INT, c VARCHAR(1200)) ENGINE=InnoDB;
+  CREATE TABLE mc_state (k VARCHAR(64) PRIMARY KEY, v VARCHAR(64)) ENGINE=InnoDB;
+  # The TTL column holds the expiry reference explicitly: batches 1 and 3 have
+  # 1000000000 (year 2001) and are expired, batches 0 and 2 have 4000000000
+  # (year 2096) and do not expire. The first rows of the table are unexpired.
+  --let $_mc_batch = 0
+  while ($_mc_batch < 4) {
+    eval INSERT INTO tt SELECT seq, seq % 97, REPEAT(CHAR(97 + seq % 26), 1000), IF($_mc_batch % 2, 1000000000, 4000000000)
+      FROM (WITH RECURSIVE s(seq) AS (SELECT $_mc_batch * 1000 + 1 UNION ALL
+            SELECT seq + 1 FROM s WHERE seq < ($_mc_batch + 1) * 1000)
+            SELECT seq FROM s) AS x;
+    if (`SELECT $_mc_batch % 2 = 0`) {
+      eval INSERT INTO ttref SELECT id, a, c FROM tt WHERE id > $_mc_batch * 1000;
+    }
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    --inc $_mc_batch
+  }
+  eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $_mc_mode;
+  --enable_query_log
+
+  --echo # TTL compaction held at $mc_point
+  connect (con_mc, localhost, root,,);
+  --disable_query_log
+  --let $debug_pause_hook = rocksdb_pause_manual_compaction_$mc_point
+  --source suite/rocksdb/include/debug_pause_mark.inc
+  --let $mc_output_mode = mark
+  --source suite/rocksdb/include/mc_output.inc
+  eval SET GLOBAL debug = '+d,rocksdb_pause_manual_compaction_$mc_point';
+  --send SET GLOBAL rocksdb_compact_cf = 'cf_mc'
+  connection default;
+  --let $debug_pause_hook = rocksdb_pause_manual_compaction_$mc_point
+  --let $debug_pause_timeout = 300
+  --source suite/rocksdb/include/debug_pause_wait.inc
+  --let $mc_output_mode = check
+  --source suite/rocksdb/include/mc_output.inc
+  START TRANSACTION;
+  DELETE FROM tt WHERE id BETWEEN 1 AND 10;
+  UPDATE tt SET a = a + 1000 WHERE id BETWEEN 2001 AND 2010;
+  INSERT INTO tt VALUES (9999, 1, 'marker', 4000000000);
+  COMMIT;
+  --source suite/rocksdb/include/power_loss_now.inc
+  --disable_query_log
+  disconnect con_mc;
+
+  # Apply the transaction to the reference table if it was recovered.
+  --let $_mc_trx = `SELECT COUNT(*) FROM tt WHERE id = 9999`
+  --let $_mc_ok = `SELECT IF(@@global.rocksdb_flush_log_at_trx_commit = 1, $_mc_trx = 1, $_mc_trx = 0)`
+  if ($_mc_trx) {
+    DELETE FROM ttref WHERE id BETWEEN 1 AND 10;
+    UPDATE ttref SET a = a + 1000 WHERE id BETWEEN 2001 AND 2010;
+    INSERT INTO ttref VALUES (9999, 1, 'marker');
+  }
+  # The expected rows as each index must show them.
+  --let $mc_compare =
+  --let $mc_store_keep =
+  --let $mc_no_b = 1
+  --let $mc_table = ttref
+  --let $mc_key = tt
+  --let $mc_indexes = PRIMARY ka
+  --source suite/rocksdb/include/mc_checksum.inc
+  --enable_query_log
+  if ($_mc_ok) {
+    --echo # Recovered transaction: as expected
+  }
+  if (!$_mc_ok) {
+    --echo # Recovered transaction: NOT as expected (recovered: $_mc_trx)
+  }
+
+  --disable_query_log
+  --let $_mc_round = 0
+  while ($_mc_round < 2) {
+    if ($_mc_round) {
+      # A full compaction, then read without TTL filtering: only the
+      # unexpired rows may be stored.
+      SET GLOBAL rocksdb_compact_cf = 'cf_mc';
+      SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+    }
+    --let $mc_compare = 1
+    --let $mc_table = tt
+    --source suite/rocksdb/include/mc_checksum.inc
+    --inc $_mc_round
+  }
+  SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+  --enable_query_log
+  --replace_column 2 # 3 #
+  CHECK TABLE tt;
+  --disable_query_log
+  DROP TABLE tt, ttref, mc_state;
+  --let $mc_no_b =
+  --let $mc_compare =
+  --enable_query_log
+  --source suite/rocksdb/include/mc_drain_drops.inc
+}
+
+--let $pl_want_fired = 2
+--let $pl_want_dropped = `SELECT 2 * @@global.rocksdb_debug_unsynced_data_loss`
+--source suite/rocksdb/include/power_loss_reach.inc

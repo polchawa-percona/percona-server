@@ -1,0 +1,618 @@
+CALL mtr.add_suppression("Attempting backtrace");
+# ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE, compaction held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at start
+# Output when held at start: none
+# 1 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at start
+# Output when held at start: none
+# 1 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at start
+# Output when held at start: none
+# 1 dropped indexes pending, drop-index thread held
+# The drop-index thread is held after it wrote the range tombstone of the first dropped index
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# DROP TABLE t2, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+# The drop-index thread is held after it wrote the range tombstone of the first dropped index
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# TRUNCATE TABLE t2, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 FORCE, ALGORITHM=COPY, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp TRUNCATE PARTITION p1, compaction held at start
+# Output when held at start: none
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp DROP PARTITION p1, compaction held at start
+# Output when held at start: none
+# 6 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE), compaction held at start
+# Output when held at start: none
+# 6 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE, compaction held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at middle
+# Output when held at middle: written
+# 1 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at middle
+# Output when held at middle: written
+# 1 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE, compaction held at middle
+# Output when held at middle: written
+# 1 dropped indexes pending, drop-index thread held
+# The drop-index thread is held after it wrote the range tombstone of the first dropped index
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# DROP TABLE t2, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# DROP TABLE t2, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+# The drop-index thread is held after it wrote the range tombstone of the first dropped index
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_enable_delete_range_for_drop_index=1 --debug=+d,rocksdb_pause_drop_index_delete_range
+# Recovered with rocksdb_enable_delete_range_for_drop_index=1: the drop-index thread wrote a range tombstone
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+Warnings:
+Note	1051	Unknown table 'test.t2'
+# TRUNCATE TABLE t2, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE t2 FORCE, ALGORITHM=COPY, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp TRUNCATE PARTITION p1, compaction held at middle
+# Output when held at middle: written
+# 3 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp DROP PARTITION p1, compaction held at middle
+# Output when held at middle: written
+# 6 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE), compaction held at middle
+# Output when held at middle: written
+# 6 dropped indexes pending, drop-index thread held
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'test' AND table_name IN ('t1', 't2', 'tp')
+ORDER BY table_name;
+TABLE_NAME
+t1
+t2
+tp
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# After the drops and the full compaction every remaining index has its rows
+Table	Op	Msg_type	Msg_text
+test.t1	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.t2	#	#	OK
+Table	Op	Msg_type	Msg_text
+test.tp	#	#	OK
+# No data of dropped indexes left in cf_mc
+# reach: the expected crashes were fired by the hook, with the expected unsynced data drops

@@ -1,0 +1,18 @@
+CALL mtr.add_suppression("Attempting backtrace");
+# TTL compaction held at start
+# Output when held at start: none
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered transaction: as expected
+CHECK TABLE tt;
+Table	Op	Msg_type	Msg_text
+test.tt	#	#	OK
+# TTL compaction held at middle
+# Output when held at middle: written
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Recovered transaction: as expected
+CHECK TABLE tt;
+Table	Op	Msg_type	Msg_text
+test.tt	#	#	OK
+# reach: the expected crashes were fired by the hook, with the expected unsynced data drops
