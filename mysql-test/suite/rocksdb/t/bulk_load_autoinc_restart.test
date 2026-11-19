@@ -1,0 +1,62 @@
+#
+# PS-12171: a bulk load into a table whose rows all go to SST files
+# (here: an AUTO_INCREMENT primary key and no secondary key) does not
+# persist the AUTO_INCREMENT counter. The loaded keys do not count as
+# writes of the transaction, so the statement commit finds no writes,
+# rolls the transaction back and drops the counter it was carrying. The
+# MyRocks dictionary keeps the counter of the last ordinary INSERT, and
+# after a clean restart the table's AUTO_INCREMENT goes back below the
+# loaded rows: the next INSERT reuses an id and fails with a duplicate
+# key error (a debug server aborts on dd_val >= last_val when it opens
+# the table). The expected result is the one of the InnoDB twin i1.
+#
+--source include/have_rocksdb.inc
+
+SET SESSION information_schema_stats_expiry = 0;
+
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+CREATE TABLE i1 (id INT AUTO_INCREMENT PRIMARY KEY, a INT) ENGINE=InnoDB;
+
+--echo # An ordinary INSERT stores a counter in the MyRocks dictionary
+INSERT INTO t1 (a) VALUES (0);
+INSERT INTO i1 (a) VALUES (0);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+--echo # The ordinary row is in an SST file after the flush
+SELECT SUM(m.NUM_ROWS) AS sst_rows
+  FROM information_schema.rocksdb_index_file_map m
+  JOIN information_schema.rocksdb_ddl d
+    ON m.COLUMN_FAMILY = d.COLUMN_FAMILY AND m.INDEX_NUMBER = d.INDEX_NUMBER
+ WHERE d.TABLE_SCHEMA = 'test' AND d.TABLE_NAME = 't1';
+
+--echo # Bulk load of five more rows, ingested as an SST file
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 (a) VALUES (1), (2), (3), (4), (5);
+SET SESSION rocksdb_bulk_load = 0;
+INSERT INTO i1 (a) VALUES (1), (2), (3), (4), (5);
+
+--echo # The bulk-loaded rows are in an ingested SST file: 1 + 5 rows
+SELECT SUM(m.NUM_ROWS) AS sst_rows
+  FROM information_schema.rocksdb_index_file_map m
+  JOIN information_schema.rocksdb_ddl d
+    ON m.COLUMN_FAMILY = d.COLUMN_FAMILY AND m.INDEX_NUMBER = d.INDEX_NUMBER
+ WHERE d.TABLE_SCHEMA = 'test' AND d.TABLE_NAME = 't1';
+
+SELECT TABLE_NAME, AUTO_INCREMENT FROM information_schema.tables
+ WHERE TABLE_SCHEMA = 'test' ORDER BY TABLE_NAME;
+
+--source include/restart_mysqld.inc
+
+SET SESSION information_schema_stats_expiry = 0;
+
+--echo # After a clean restart the counter must still be above the rows
+SELECT COUNT(*), MAX(id) FROM t1;
+SELECT AUTO_INCREMENT FROM information_schema.tables
+ WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1';
+
+--echo # The next INSERT gets id 7
+INSERT INTO t1 (a) VALUES (6);
+INSERT INTO i1 (a) VALUES (6);
+SELECT * FROM t1 ORDER BY id;
+SELECT * FROM i1 ORDER BY id;
+
+DROP TABLE t1, i1;
