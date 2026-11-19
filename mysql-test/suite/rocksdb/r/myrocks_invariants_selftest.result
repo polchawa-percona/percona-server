@@ -1,0 +1,132 @@
+call mtr.add_suppression("CHECKTABLE t_cf");
+CREATE DATABASE inv;
+USE inv;
+#
+# Healthy tables of several shapes: no output.
+#
+CREATE TABLE t_pk (pk INT PRIMARY KEY, a INT, b VARCHAR(20), c BLOB,
+KEY ka (a), UNIQUE KEY kb (b), KEY kab (a, b), KEY kc (c(10)))
+ENGINE=ROCKSDB;
+CREATE TABLE t_hidden (a INT, b VARCHAR(20), KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_cf (pk INT, a INT, b VARCHAR(20) COLLATE utf8mb4_general_ci,
+PRIMARY KEY (pk) COMMENT 'cfname=inv_cf',
+KEY ka (a) COMMENT 'rev:inv_rev_cf',
+KEY kb (b) COMMENT 'cfname=inv_cf') ENGINE=ROCKSDB;
+CREATE TABLE t_part (pk INT, a INT, PRIMARY KEY (pk), KEY ka (a))
+ENGINE=ROCKSDB PARTITION BY HASH (pk) PARTITIONS 3;
+CREATE TABLE t_subpart (pk INT, a INT, PRIMARY KEY (pk, a), KEY ka (a))
+ENGINE=ROCKSDB
+PARTITION BY RANGE (pk) SUBPARTITION BY HASH (a) SUBPARTITIONS 2
+(PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN MAXVALUE);
+CREATE TABLE t_ttl (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB
+COMMENT 'ttl_duration=3600;';
+CREATE TABLE t_inv (pk INT PRIMARY KEY, a INT, KEY ka (a) INVISIBLE) ENGINE=ROCKSDB;
+CREATE TABLE t_innodb (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=InnoDB;
+CREATE TABLE `t,"odd``` (`p,k` INT PRIMARY KEY, `a"b` INT, `c``d` VARCHAR(10),
+KEY `k,"1``` (`a"b`, `c``d`)) ENGINE=ROCKSDB;
+INSERT INTO t_pk VALUES (1, 10, 'x', 'blob1'), (2, NULL, 'y', NULL),
+(3, 10, NULL, REPEAT('z', 100)), (4, 40, 'w', '');
+INSERT INTO t_hidden VALUES (1, 'a'), (1, 'a'), (NULL, NULL);
+INSERT INTO t_cf VALUES (1, 1, 'A'), (2, 2, 'a'), (3, 3, 'b');
+INSERT INTO t_part VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, NULL);
+INSERT INTO t_subpart VALUES (1, 1), (2, 2), (150, 3), (151, 4);
+INSERT INTO t_ttl VALUES (1, 1), (2, 2);
+INSERT INTO t_inv VALUES (1, 1);
+INSERT INTO `t,"odd``` VALUES (1, 1, 'x'), (2, NULL, 'y');
+INSERT INTO t_innodb VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, NULL);
+ALTER TABLE t_pk DROP INDEX kab;
+ALTER TABLE t_cf ADD INDEX kab (a, b), ALGORITHM=INPLACE;
+CREATE TABLE t_dropped (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t_dropped VALUES (1, 1), (2, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_dropped;
+# A dropped table with rocksdb_enable_delete_range_for_drop_index=ON.
+SET @saved_delete_range = @@GLOBAL.rocksdb_enable_delete_range_for_drop_index;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = ON;
+CREATE TABLE t_dropped_dr (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t_dropped_dr VALUES (1, 1), (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+DROP TABLE t_dropped_dr;
+SET GLOBAL rocksdb_enable_delete_range_for_drop_index = @saved_delete_range;
+violations: 0, CHECK TABLE skipped: 1, dictionary check skipped: 1
+# The secondary-index side really scans the index.
+EXPLAIN SELECT a, pk FROM t_pk FORCE INDEX (ka) ORDER BY a LIMIT 18446744073709551615;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_pk	NULL	index	NULL	ka	5	NULL	#	#	Using index
+Warnings:
+Note	1003	/* select#1 */ select `inv`.`t_pk`.`a` AS `a`,`inv`.`t_pk`.`pk` AS `pk` from `inv`.`t_pk` FORCE INDEX (`ka`) order by `inv`.`t_pk`.`a` limit 18446744073709551615
+#
+# Invariant 1: a lost secondary index write is reported.
+#
+SET SESSION debug = '+d,myrocks_inv_skip_sk_write';
+INSERT INTO t_pk VALUES (5, 50, 'v', 'blob5');
+UPDATE t_cf SET a = 30 WHERE pk = 3;
+SET SESSION debug = '-d,myrocks_inv_skip_sk_write';
+v	tn	idx	pk_rows	sk_rows	pk_sum	sk_sum
+INVARIANT VIOLATION 1: secondary index differs from primary key	t_cf	ka	3	3	10013168766	9249398591
+INVARIANT VIOLATION 1: secondary index differs from primary key	t_cf	kab	3	3	5968646228	6556379114
+INVARIANT VIOLATION 1: secondary index differs from primary key	t_pk	ka	5	4	10947448732	7220181418
+INVARIANT VIOLATION 1: secondary index differs from primary key	t_pk	kb	5	4	8467610551	5905911387
+INVARIANT VIOLATION 1: CHECK TABLE inv.t_cf: Corrupt
+violations: 2
+DELETE FROM t_pk WHERE pk = 5;
+DROP TABLE t_cf;
+#
+# Invariant 2: InnoDB mirror compare.
+#
+CREATE TABLE m_rdb (pk INT PRIMARY KEY, a INT, b TEXT) ENGINE=ROCKSDB;
+CREATE TABLE m_inn (pk INT PRIMARY KEY, a INT, b TEXT) ENGINE=InnoDB;
+INSERT INTO m_rdb VALUES (1, 1, 'a'), (2, NULL, NULL);
+INSERT INTO m_inn VALUES (1, 1, 'a'), (2, NULL, NULL);
+violations: 0
+UPDATE m_rdb SET b = 'b' WHERE pk = 2;
+INVARIANT VIOLATION 2: m_rdb (2:6322056046) differs from mirror m_inn (2:3172395927)
+violations: 1
+#
+# Invariant 5: a snapshot is stable across a compaction.
+#
+DELETE FROM m_rdb WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+violations: 0
+# Without a snapshot the change is seen, and reported.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+INSERT INTO m_rdb VALUES (7, 7, 'g');
+INVARIANT VIOLATION 5: snapshot of m_rdb changed from 1:3409937537 to 2:3448450495
+violations: 1
+#
+# Invariant 6: commit log is a prefix.
+#
+CREATE TABLE commit_log (seq INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO commit_log VALUES (1), (2), (3);
+violations: 0 survived: 3
+INVARIANT VIOLATION 6: durable settings lost commits: 3 of 4 acknowledged commits survived
+violations: 1 survived: 3
+DELETE FROM commit_log WHERE seq = 2;
+INVARIANT VIOLATION 6: commit_log is not a prefix 1..k (rows:min:max:distinct = 2:1:3:2)
+violations: 2 survived: 3
+#
+# Invariant 7: errors are truthful.
+#
+INSERT INTO m_rdb VALUES (10, 10, 'x'), (2, 2, 'dup');
+ERROR 23000: Duplicate entry '2' for key 'm_rdb.PRIMARY'
+violations: 0 errno: 1062
+# A non-transactional table keeps the rows before the error: reported.
+CREATE TABLE m_myisam (pk INT PRIMARY KEY) ENGINE=MyISAM;
+INSERT INTO m_myisam VALUES (2);
+INSERT INTO m_myisam VALUES (1), (2);
+ERROR 23000: Duplicate entry '2' for key 'm_myisam.PRIMARY'
+INVARIANT VIOLATION 7: statement failed with error 1062 but changed m_myisam (1:2103780943 to 2:5936094788)
+violations: 1 errno: 1062
+#
+# After a restart, tables not opened yet show empty index names in
+# ROCKSDB_DDL (PS-11882); the include opens them first: no output.
+#
+# restart
+USE inv;
+violations: 0
+# Cleanup
+USE test;
+DROP DATABASE inv;
