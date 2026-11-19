@@ -1,0 +1,100 @@
+#
+# PS-11778: DDL that runs while a manual compaction is running must survive a
+# crash, and so must the reclaim of the indexes it drops.
+#
+# Each scenario holds a manual compaction of the column family of the tables
+# at a known point (when it starts, or after it has written part of its
+# output, which is checked), runs one DDL statement on a table in that column
+# family, and crashes. When the DDL drops indexes, the drop-index thread is
+# held too, so they are queued and not reclaimed at the crash; with delete
+# range for drops, it is held either before it looks at the drops or after it
+# has written the range tombstone of the first dropped index. The recovered
+# server runs with delete range on in those scenarios, and the test waits for
+# its drop-index thread to write the tombstone. The combinations crash with a simulated power cut under
+# rocksdb_flush_log_at_trx_commit=1 and 2, and with a plain kill. After
+# recovery (with rocksdb_validate_tables=1, so a mismatch between the data
+# dictionary and MyRocks stops the server) the schema must be the one the DDL
+# produced (given by the test, not read back), every index must have the
+# expected rows, the drop queue must drain, and a full compaction must leave
+# no data of dropped indexes, and every remaining index must again have the
+# expected rows after that compaction.
+#
+# Not covered: a hold after the compaction is installed, and a plain kill
+# with rocksdb_flush_log_at_trx_commit=2 (see power_loss_mc_ddl.inc).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/big_test.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+
+--let $_mc_points = start middle
+while ($_mc_points) {
+  --let $mc_point = `SELECT SUBSTRING_INDEX('$_mc_points', ' ', 1)`
+  --let $_mc_points = `SELECT IF(LOCATE(' ', '$_mc_points'), SUBSTRING('$_mc_points', LOCATE(' ', '$_mc_points') + 1), '')`
+
+  --let $mc_ddl = ALTER TABLE t2 ADD INDEX kc (c(20)), ALGORITHM=INPLACE
+  --let $mc_t2_def = PRIMARY:id:,ka:a:,kb:b:,kc:c:20
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+  --let $mc_t2_def = PRIMARY:id:,kb:b:
+  --let $mc_expect_dropped = 1
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+  --let $mc_t2_def = PRIMARY:id:,kb:b:
+  --let $mc_expect_dropped = 1
+  --let $mc_delete_range = 1
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 DROP INDEX ka, ALGORITHM=INPLACE
+  --let $mc_t2_def = PRIMARY:id:,kb:b:
+  --let $mc_expect_dropped = 1
+  --let $mc_delete_range = 1
+  --let $mc_drop_hold = after
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = DROP TABLE t2
+  --let $mc_t2_def = GONE
+  --let $mc_expect_dropped = 3
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = DROP TABLE t2
+  --let $mc_t2_def = GONE
+  --let $mc_expect_dropped = 3
+  --let $mc_delete_range = 1
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = DROP TABLE t2
+  --let $mc_t2_def = GONE
+  --let $mc_expect_dropped = 3
+  --let $mc_delete_range = 1
+  --let $mc_drop_hold = after
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = TRUNCATE TABLE t2
+  --let $mc_t2_keep = FALSE
+  --let $mc_expect_dropped = 3
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE t2 FORCE, ALGORITHM=COPY
+  --let $mc_expect_dropped = 3
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE tp TRUNCATE PARTITION p1
+  --let $mc_tp_keep = id < 1001
+  --let $mc_expect_dropped = 3
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  # MyRocks does not drop or reorganize a partition in place (it copies), so
+  # all the indexes of tp (two partitions, three indexes) are replaced.
+  --let $mc_ddl = ALTER TABLE tp DROP PARTITION p1
+  --let $mc_tp_keep = id < 1001
+  --let $mc_tp_parts = p0:1001
+  --let $mc_expect_dropped = 6
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+  --let $mc_ddl = ALTER TABLE tp REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (1501), PARTITION p2 VALUES LESS THAN MAXVALUE)
+  --let $mc_tp_parts = p0:1001,p1:1501,p2:MAXVALUE
+  --let $mc_expect_dropped = 6
+  --source suite/rocksdb/include/power_loss_mc_ddl.inc
+}
+
+--let $pl_want_fired = 24
+--let $pl_want_dropped = `SELECT 24 * @@global.rocksdb_debug_unsynced_data_loss`
+--source suite/rocksdb/include/power_loss_reach.inc

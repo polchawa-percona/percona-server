@@ -1,0 +1,106 @@
+#
+# DDL that completed before the crash (or that was waiting at a sync point
+# of its execution) must survive a power cut. After the crash and recovery (with rocksdb_validate_tables=1, so a mismatch between
+# the data dictionary and MyRocks stops the server) each table must have
+# either its old or its new definition, all its rows, and consistent
+# indexes.
+#
+# The combinations run every scenario with a simulated power cut under
+# rocksdb_flush_log_at_trx_commit=1 and 2 (with the background WAL sync held
+# back), and with a plain abort. All three must give the same result: a
+# difference means the DDL relies on writes that are not synced.
+#
+# The crash is fired by the crash-point hook after the statement
+# (include/power_loss_now.inc); in the power combinations it also drops the
+# unsynced writes and the files whose directory entries were never synced.
+#
+# Crashes at DEBUG_SYNC points while a DDL statement runs are part of this
+# test too (the last two cases). The crash-point enumeration of
+# crashpoint_copy_alter and crashpoint_inplace_alter (same three
+# combinations: kill / sync_power / lazy_power; it crashes before every
+# durable write of the statement, plus once after it) covers three of the
+# five DEBUG_SYNC cases of the earlier version of this test. For each, the
+# number of durable writes the DDL session had made when it waited at the
+# sync point was measured with the hook counter (armed at 1000 in the DDL
+# session, read from performance_schema.variables_by_thread while it
+# waited):
+#   ADD INDEX, INPLACE @ alter_table_inplace_after_lock_downgrade: 1 write
+#     -> crashpoint_inplace_alter window 2 (the crash before the 2nd write)
+#   ADD INDEX, INPLACE @ alter_table_inplace_before_commit: 3 writes
+#     -> crashpoint_inplace_alter window 4
+#   FORCE, COPY @ alter_after_copy_table: 4 writes
+#     -> crashpoint_copy_alter window 5
+# The server-side (data dictionary, binary log) state at these sync points
+# was not measured; the equivalence rests on the MyRocks durable state being
+# the same and on the same oracle being applied (the old and the new result
+# of the statement, all rows, CHECK TABLE).
+# The two alter_table_before_main_binlog cases (6 writes of the 7 of the
+# inplace ALTER, 7 of the 8 of the COPY ALTER) are kept here: the sync point
+# is after the engine commit and before the binary log write, and the
+# server-side state at it is not that of a hook window (the next MyRocks
+# write, the WAL flush, is made inside the binary log group commit), so the
+# enumeration cannot be shown to reach it.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+
+--echo #
+--echo # DDL that completed before the crash
+--echo #
+--let $pl_ddl = ALTER TABLE t1 ADD INDEX kb (b), ALGORITHM=INPLACE
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 DROP INDEX ka, ALGORITHM=INPLACE
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 FORCE, ALGORITHM=COPY
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=COPY
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 MODIFY b VARCHAR(64), ADD INDEX kab (a, b)
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = TRUNCATE TABLE t1
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = RENAME TABLE t1 TO t2
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = DROP TABLE t1
+--source suite/rocksdb/include/power_loss_ddl.inc
+# CREATE TABLE ... SELECT is in power_loss_ctas_flush_log_lazy.test: with
+# rocksdb_flush_log_at_trx_commit=2 it is not atomic across a power cut.
+--let $pl_ddl = CREATE TABLE t2 ENGINE=ROCKSDB SELECT * FROM t1
+--let $pl_mode_override = 1
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_create = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(32), KEY ka (a)) ENGINE=ROCKSDB PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (250), PARTITION p1 VALUES LESS THAN (1000))
+--let $pl_ddl = ALTER TABLE t1 REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (400), PARTITION p2 VALUES LESS THAN (1000))
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_create = CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b VARCHAR(32), KEY ka (a)) ENGINE=ROCKSDB PARTITION BY HASH (id) PARTITIONS 4
+--let $pl_ddl = ALTER TABLE t1 TRUNCATE PARTITION p1
+--source suite/rocksdb/include/power_loss_ddl.inc
+
+--echo #
+--echo # Crash while the DDL is running
+--echo #
+--let $pl_ddl = ALTER TABLE t1 ADD INDEX kb (b), ALGORITHM=INPLACE
+--let $pl_sync = alter_table_before_main_binlog
+--source suite/rocksdb/include/power_loss_ddl.inc
+--let $pl_ddl = ALTER TABLE t1 FORCE, ALGORITHM=COPY
+--let $pl_sync = alter_table_before_main_binlog
+--source suite/rocksdb/include/power_loss_ddl.inc
+
+DROP TABLE IF EXISTS t1, t2;
+
+--echo #
+--echo # Reach: one crash per statement (14), fired by the hook at the
+--echo # checkpoint site, with the unsynced data dropped in the power
+--echo # combinations and not in the plain abort one.
+--echo #
+--let $pl_want_fired = 14
+--let $pl_want_dropped = `SELECT 14 * @@global.rocksdb_debug_unsynced_data_loss`
+--source suite/rocksdb/include/power_loss_reach.inc

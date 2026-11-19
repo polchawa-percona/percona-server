@@ -1,0 +1,1 @@
+--rocksdb_debug_unsynced_data_loss=ON

@@ -1,0 +1,121 @@
+#
+# Crash-point enumeration over the durable writes of INPLACE ADD INDEX:
+# every crash window between two durable writes (dictionary commits, the
+# bulk-load ingest, the DDL transaction prepare, the WAL flush) must leave
+# either the starting state or the post-DDL state after recovery, never a
+# partially applied index, and the table must be usable (INSERT/DELETE
+# through every index) after a restart with the default options.
+#
+# Windows 5 and 6 are skipped: PS-11669 (a crash around the commit of an
+# INPLACE ADD INDEX leaves MyRocks with one index more than the server
+# data dictionary; the first INSERT then crashes the server, in a debug
+# build on the assertion in Rdb_key_def::pack_record). The existing
+# disabled test rocksdb.ddl_crash_add_index (PS-11671 branch) covers that
+# bug; remove the skip when PS-11669 is fixed.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+# The enumeration intentionally crashes the server (abort) after each
+# counted durable write.
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_state.inc
+
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE crashpoint_reset()
+BEGIN
+  DROP DATABASE IF EXISTS cp;
+  CREATE DATABASE cp;
+  CREATE TABLE cp.t (
+    pk INT PRIMARY KEY,
+    a INT NOT NULL,
+    b VARCHAR(32) NOT NULL,
+    d INT NULL
+  ) ENGINE=ROCKSDB;
+  INSERT INTO cp.t VALUES
+    (1, 107, 'one', NULL), (2, 214, 'two', 2), (3, 321, 'three', NULL),
+    (4, 428, 'four', 4), (5, 535, 'five', NULL), (6, 642, 'six', 6),
+    (7, 749, 'seven', NULL), (8, 856, 'eight', 8), (9, 963, 'nine', NULL),
+    (10, 70, 'ten', 10);
+END|
+# The probe: the table must accept a row and give it up again, through the
+# primary key and through the index kb if it exists in the definition that
+# survived.
+CREATE PROCEDURE crashpoint_probe()
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    GET DIAGNOSTICS CONDITION 1 @crashpoint_probe_res = MESSAGE_TEXT;
+  END;
+  SET @crashpoint_probe_res = 'ok';
+  INSERT INTO cp.t (pk, a, b) VALUES (1000, 9999, 'probe');
+  SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t WHERE pk = 1000;
+  IF @crashpoint_pc <> 1 THEN
+    SET @crashpoint_probe_res = 'the new row is not found';
+  END IF;
+  SELECT COUNT(*) INTO @crashpoint_pi FROM information_schema.statistics
+    WHERE table_schema = 'cp' AND table_name = 't' AND index_name = 'kb';
+  IF @crashpoint_pi > 0 THEN
+    SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t FORCE INDEX (kb)
+      WHERE b = 'probe';
+    IF @crashpoint_pc <> 1 THEN
+      SET @crashpoint_probe_res = 'the new row is not found through kb';
+    END IF;
+  END IF;
+  DELETE FROM cp.t WHERE pk = 1000;
+  SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t WHERE pk = 1000;
+  IF @crashpoint_pc <> 0 THEN
+    SET @crashpoint_probe_res = 'the deleted row is still there';
+  END IF;
+END|
+delimiter ;|
+--enable_query_log
+
+--let $crashpoint_reset = CALL crashpoint_reset()
+--let $crashpoint_probe = CALL crashpoint_probe()
+--let $crashpoint_stmt = ALTER TABLE cp.t ADD INDEX kb (b), ALGORITHM=INPLACE
+--let $crashpoint_pkcol = pk
+--let $crashpoint_tables = cp.t
+--let $crashpoint_label = INPLACE ADD INDEX
+--let $crashpoint_skip = 5,6
+--let $crashpoint_skip_ticket = PS-11669
+--let $crashpoint_after_window = 1
+--source suite/rocksdb/include/crashpoint_loop.inc
+
+# The hook must have fired at the durable writes of the DDL: the
+# dictionary commits of the new index, the bulk-load ingest and the
+# prepare of the DDL transaction, which in this engine is the durable
+# point of the DDL (its row-write batch is empty, so the final commit
+# is a no-op after the WAL flush).
+--let $assert_text = the hook fired at a dictionary commit
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = MyRocks: crash-point hook fired at dict_commit \(nth durable write counter reached 0\)
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--let $assert_text = the hook fired at the bulk-load ingest
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = MyRocks: crash-point hook fired at bulk_load_ingest \(nth durable write counter reached 0\)
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--let $assert_text = the hook fired at the DDL transaction prepare
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = MyRocks: crash-point hook fired at tx_prepare \(nth durable write counter reached 0\)
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--let $assert_text = the hook fired at the DDL group-commit WAL flush
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = MyRocks: crash-point hook fired at flush_wal \(nth durable write counter reached 0\)
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

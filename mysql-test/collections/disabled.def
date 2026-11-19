@@ -135,6 +135,9 @@ rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
+rocksdb.crashpoint_copy_alter_rename : BUG#0 PS-11681 table lost after crash
+rocksdb.power_loss_ctas_flush_log_lazy : BUG#0 PS-11763 CTAS not atomic
+rocksdb.power_loss_bulk_load_flush_log_lazy : BUG#0 PS-12042 SK entries lost
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP

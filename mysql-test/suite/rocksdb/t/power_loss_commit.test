@@ -1,0 +1,199 @@
+#
+# Commits must survive a power cut as promised by
+# rocksdb_flush_log_at_trx_commit, and what is lost with the lazy settings
+# must be a prefix of the most recent commits, never part of a transaction.
+#
+# The server runs with rocksdb_debug_unsynced_data_loss=ON: writes to
+# RocksDB files stay in memory until they are synced, so a crash fired by
+# rocksdb_debug_crash_on_nth_durable_write loses them as a power cut
+# would (see include/power_loss_now.inc). A plain abort does not lose
+# anything that reached the OS, which is why the other crash tests cannot
+# tell a synced commit from an unsynced one.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+
+--source suite/rocksdb/include/crashpoint_site.inc
+--let $pl_base_fired = $cp_fired
+--let $pl_base_dropped = $cp_dropped
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, KEY k_v (v)) ENGINE=ROCKSDB;
+
+--let $check_rows = SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id, (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS cnt_sk FROM t1
+
+--echo #
+--echo # 0. The crash fires before the counted write: an autocommit INSERT
+--echo #    aborted at its first durable write (the prepare of the two-phase
+--echo #    commit with the binary log) is not recovered.
+--echo #
+INSERT INTO t1 VALUES (1, 1);
+--source include/expect_crash.inc
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 1;
+--error CR_SERVER_LOST
+INSERT INTO t1 VALUES (2, 2);
+--source include/wait_until_disconnected.inc
+--source include/start_mysqld.inc
+SELECT * FROM t1;
+--source suite/rocksdb/include/crashpoint_site.inc
+--echo # The crash fired at $cp_site
+
+--echo # Without the binary log there is no prepare: with
+--echo # rocksdb_flush_log_at_trx_commit=1 the first commit is synced and
+--echo # kept, the second one is aborted at its tx_commit site, before the
+--echo # write, so it is not recovered although it would have been synced.
+SET SESSION sql_log_bin = 0;
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 2;
+INSERT INTO t1 VALUES (3, 3);
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+INSERT INTO t1 VALUES (4, 4);
+--source include/wait_until_disconnected.inc
+--source include/start_mysqld.inc
+SELECT * FROM t1;
+--source suite/rocksdb/include/crashpoint_site.inc
+--echo # The second crash fired at $cp_site
+DELETE FROM t1;
+
+--echo #
+--echo # 1. rocksdb_flush_log_at_trx_commit=1: every commit is synced and
+--echo #    survives.
+--echo #
+--disable_query_log
+--let $i = 1
+while ($i <= 100) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+BEGIN;
+while ($i <= 150) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+COMMIT;
+--enable_query_log
+--source suite/rocksdb/include/power_loss_now.inc
+eval $check_rows;
+
+--echo #
+--echo # 2. For comparison, a plain abort without the unsynced data loss
+--echo #    loses nothing with rocksdb_flush_log_at_trx_commit=2, even with
+--echo #    no background sync: the writes already reached the OS.
+--echo #
+--let $restart_parameters = restart: --rocksdb_debug_unsynced_data_loss=OFF
+--source include/restart_mysqld.inc
+SELECT @@global.rocksdb_debug_unsynced_data_loss;
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+--disable_query_log
+while ($i <= 200) {
+  eval INSERT INTO t1 VALUES ($i, $i);
+  --inc $i
+}
+--enable_query_log
+--let $restart_parameters = restart
+--source suite/rocksdb/include/power_loss_now.inc
+SELECT @@global.rocksdb_debug_unsynced_data_loss;
+eval $check_rows;
+
+--echo #
+--echo # 3. rocksdb_flush_log_at_trx_commit=2 and 0 with the background sync
+--echo #    held back: the unsynced commits are lost on power loss, the synced
+--echo #    ones are kept.
+--echo #
+--let $mode = 2
+while ($mode >= 0) {
+  --echo # rocksdb_flush_log_at_trx_commit = $mode
+  SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+  eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $mode;
+  --disable_query_log
+  --let $j = 1
+  while ($j <= 50) {
+    eval INSERT INTO t1 VALUES (1000 * ($mode + 1) + $j, $j);
+    --inc $j
+  }
+  --enable_query_log
+  --source suite/rocksdb/include/power_loss_now.inc
+  eval $check_rows;
+  --dec $mode
+  --dec $mode
+}
+
+--echo #
+--echo # 4. rocksdb_write_disable_wal=ON: rows that were only in the memtable
+--echo #    are lost, rows flushed to an SST file are kept. The binary log is
+--echo #    off for the session: with it every commit is a two-phase commit
+--echo #    and its prepare is always written to the WAL (RocksDB's
+--echo #    WriteCommittedTxn::PrepareInternal clears disableWAL), so the
+--echo #    rows would be kept or lost with the unsynced WAL, not with the
+--echo #    memtable.
+--echo #
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION sql_log_bin = 0;
+SET SESSION rocksdb_write_disable_wal = ON;
+INSERT INTO t1 VALUES (5001, 1), (5002, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (5003, 3), (5004, 4);
+SET SESSION rocksdb_write_disable_wal = OFF;
+SET SESSION sql_log_bin = 1;
+--source suite/rocksdb/include/power_loss_now.inc
+SELECT id FROM t1 WHERE id > 5000 ORDER BY id;
+
+--echo #
+--echo # 5. A clean restart keeps commits made with
+--echo #    rocksdb_flush_log_at_trx_commit=2 although they were never synced
+--echo #    while the server ran.
+--echo #
+SET GLOBAL debug = '+d,rocksdb_skip_background_wal_sync';
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+INSERT INTO t1 VALUES (6001, 1), (6002, 2);
+--source include/restart_mysqld.inc
+SELECT id FROM t1 WHERE id > 6000 ORDER BY id;
+
+--echo #
+--echo # 6. rocksdb_flush_log_at_trx_commit=2 with the background sync running:
+--echo #    whatever is lost must be the most recent commits, and a
+--echo #    multi-statement transaction is kept whole or lost whole. The
+--echo #    server must also start with rocksdb_wal_recovery_mode=1 (absolute
+--echo #    consistency).
+--echo #
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+--disable_query_log
+--let $j = 1
+while ($j <= 300) {
+  eval INSERT INTO t1 VALUES (10000 + $j, $j);
+  if ($j == 150) {
+    BEGIN;
+    INSERT INTO t1 SELECT 20000 + seq, seq FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 40) SELECT seq FROM s) AS x;
+    COMMIT;
+  }
+  --inc $j
+}
+--enable_query_log
+--let $restart_parameters = restart: --rocksdb_wal_recovery_mode=1
+--source suite/rocksdb/include/power_loss_now.inc
+--let $restart_parameters =
+SELECT COUNT(*) = IFNULL(MAX(id) - 10000, 0) AS prefix_kept
+  FROM t1 WHERE id BETWEEN 10001 AND 19999;
+--disable_query_log
+SELECT IFNULL(MAX(id), 10000) - 10000 INTO @last FROM t1
+  WHERE id BETWEEN 10001 AND 19999;
+SELECT COUNT(*) INTO @trx FROM t1 WHERE id > 20000;
+--enable_query_log
+SELECT @trx IN (0, 40) AS trx_whole,
+       (@last < 151 OR @trx = 40) AND (@trx = 0 OR @last >= 150) AS trx_in_order;
+SELECT (SELECT COUNT(*) FROM t1) = (SELECT COUNT(*) FROM t1 FORCE INDEX (k_v) WHERE v >= 0) AS sk_matches_pk;
+CHECK TABLE t1;
+
+--echo #
+--echo # Reach: every crash was fired by the hook (8 crashes: sections 0 (2),
+--echo # 1, 2, 3 (2), 4 and 6) and the unsynced data was dropped in all of
+--echo # them except the plain abort of section 2.
+--echo #
+--let $pl_want_fired = 8
+--let $pl_want_dropped = 7
+--source suite/rocksdb/include/power_loss_reach.inc
+
+DROP TABLE t1;

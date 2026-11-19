@@ -1,0 +1,105 @@
+#
+# Crash-point enumeration over the durable writes of XA 2PC:
+#   - leg A: XA START/INSERT/END/PREPARE/COMMIT on one connection
+#     (XA marker write, prepare, commit by XID, marker delete,
+#     completion flush);
+#   - leg B: the same, finished by XA ROLLBACK by XID (covers the
+#     xa_rollback_by_xid path).
+# The statement makes 8 durable writes. XA PREPARE returns to the client
+# after the 5th (measured with the counter: a counter of 1000 reads 995
+# after XA PREPARE); XA COMMIT/ROLLBACK is the 6th to 8th write.
+# Crash points 1 to 5 are inside XA PREPARE, before it was acknowledged:
+# the transaction may be lost (starting state) or be prepared.
+# Crash point 6 is after the acknowledged PREPARE, in the engine's WAL
+# flush in the flush stage of the binary log group commit of the finish
+# (the hook's stack trace: ordered_commit -> process_flush_stage_queue ->
+# fetch_and_process_flush_stage_queue), before the engine commit/rollback
+# by XID: the prepared transaction must still be there after the restart
+# (a lost prepared transaction is the PS-11632 class), and finishing it by
+# XID from a fresh session must give the final state.
+# Crash point 7 is the engine commit/rollback by XID, which the server
+# calls from the commit stage of the binary log group commit (the hook's
+# stack trace: ordered_commit -> process_commit_stage_queue ->
+# commit_detached_by_xid), i.e. after the flush stage wrote the
+# XA COMMIT/ROLLBACK event to the binary log: the server's crash recovery
+# from the binary log finishes it, so the transaction is either still
+# prepared or already finished, and the final state is required in both
+# cases.
+# Crash point 8 is after the finish.
+# The server is restarted with the default options after every crash and
+# the table must be usable (INSERT/DELETE) after the recovery.
+#
+--source include/big_test.inc
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+# The enumeration intentionally crashes the server (abort) after each
+# counted durable write.
+CALL mtr.add_suppression("Attempting backtrace");
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+--source suite/rocksdb/include/crashpoint_state.inc
+
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE crashpoint_reset()
+BEGIN
+  DROP DATABASE IF EXISTS cp;
+  CREATE DATABASE cp;
+  CREATE TABLE cp.t (
+    pk INT PRIMARY KEY,
+    v INT NOT NULL
+  ) ENGINE=ROCKSDB;
+  INSERT INTO cp.t VALUES (1, 11), (2, 22), (3, 33), (4, 44);
+END|
+CREATE PROCEDURE crashpoint_probe()
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    GET DIAGNOSTICS CONDITION 1 @crashpoint_probe_res = MESSAGE_TEXT;
+  END;
+  SET @crashpoint_probe_res = 'ok';
+  INSERT INTO cp.t (pk, v) VALUES (1000, 9999);
+  SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t WHERE pk = 1000;
+  IF @crashpoint_pc <> 1 THEN
+    SET @crashpoint_probe_res = 'the new row is not found';
+  END IF;
+  DELETE FROM cp.t WHERE pk = 1000;
+  SELECT COUNT(*) INTO @crashpoint_pc FROM cp.t WHERE pk = 1000;
+  IF @crashpoint_pc <> 0 THEN
+    SET @crashpoint_probe_res = 'the deleted row is still there';
+  END IF;
+END|
+delimiter ;|
+--enable_query_log
+
+--let $crashpoint_reset = CALL crashpoint_reset()
+--let $crashpoint_probe = CALL crashpoint_probe()
+--let $crashpoint_pkcol = pk
+--let $crashpoint_tables = cp.t
+
+--echo # Leg A: XA PREPARE and XA COMMIT by XID on the same connection
+--let $crashpoint_body = suite/rocksdb/include/crashpoint_body_xa.inc
+--let $crashpoint_xa_xid = c1
+--let $crashpoint_xa_finish = XA COMMIT 'c1'
+--let $crashpoint_finish = XA COMMIT 'c1'
+--let $crashpoint_label = XA PREPARE COMMIT
+--let $crashpoint_final_from = 6
+--let $crashpoint_prepared_windows = 6
+--source suite/rocksdb/include/crashpoint_loop.inc
+
+--echo # Leg B: XA PREPARE and XA ROLLBACK by XID on the same connection
+--let $crashpoint_body = suite/rocksdb/include/crashpoint_body_xa.inc
+--let $crashpoint_xa_xid = c2
+--let $crashpoint_xa_finish = XA ROLLBACK 'c2'
+--let $crashpoint_finish = XA ROLLBACK 'c2'
+--let $crashpoint_label = XA PREPARE ROLLBACK
+--let $crashpoint_final_from = 6
+--let $crashpoint_prepared_windows = 6
+--source suite/rocksdb/include/crashpoint_loop.inc
+
+DROP DATABASE IF EXISTS cp;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

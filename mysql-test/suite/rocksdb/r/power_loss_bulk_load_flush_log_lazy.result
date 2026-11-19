@@ -1,0 +1,50 @@
+CALL mtr.add_suppression("Attempting backtrace");
+SET SESSION cte_max_recursion_depth = 10000;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+CREATE TABLE t_sorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_unsorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sorted SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_unsorted SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+# rocksdb_flush_log_at_trx_commit = 2
+# Before the power cut both loads are complete, in the primary key and the secondary key.
+SELECT (SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)) AS sorted_pk,
+(SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0) AS sorted_sk,
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)) AS unsorted_pk,
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0) AS unsorted_sk;
+sorted_pk	sorted_sk	unsorted_pk	unsorted_sk
+5000	5000	5000	5000
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+t_sorted consistent: 1
+t_unsorted consistent: 1
+DROP TABLE t_sorted, t_unsorted;
+SET SESSION cte_max_recursion_depth = 10000;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+CREATE TABLE t_sorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_unsorted (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_sorted SELECT seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t_unsorted SELECT 10000 - seq, seq % 100 FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) AS x;
+SET SESSION rocksdb_bulk_load = 0;
+# rocksdb_flush_log_at_trx_commit = 1
+# Before the power cut both loads are complete, in the primary key and the secondary key.
+SELECT (SELECT COUNT(*) FROM t_sorted FORCE INDEX (PRIMARY)) AS sorted_pk,
+(SELECT COUNT(*) FROM t_sorted FORCE INDEX (ka) WHERE a >= 0) AS sorted_sk,
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (PRIMARY)) AS unsorted_pk,
+(SELECT COUNT(*) FROM t_unsorted FORCE INDEX (ka) WHERE a >= 0) AS unsorted_sk;
+sorted_pk	sorted_sk	unsorted_pk	unsorted_sk
+5000	5000	5000	5000
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+t_sorted consistent: 1
+t_unsorted consistent: 1
+DROP TABLE t_sorted, t_unsorted;
+# reach: the expected crashes were fired by the hook, with the expected unsynced data drops

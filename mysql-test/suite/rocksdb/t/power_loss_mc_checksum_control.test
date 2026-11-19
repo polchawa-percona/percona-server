@@ -1,0 +1,61 @@
+#
+# PS-11778: negative control of the per-index checksums of the
+# power_loss_manual_compaction_* tests (include/mc_checksum.inc).
+#
+# The table is in cf_mc (automatic compactions off, see the -master.opt file
+# shared with the crash tests), so only the explicit compaction below runs.
+#
+# The checks must fail when a secondary index lost entries of rows that the
+# primary key still has. This is made to happen for real: with
+# rocksdb_debug_ttl_ignore_pk the TTL compaction removes the expired entries
+# of the secondary index ka but keeps the rows of the primary key. Reading
+# every row through the primary key, or through ka without covering it (what
+# the checks did before), cannot see this; the checks of mc_checksum.inc read
+# the columns that ka holds through ka itself and must report a mismatch.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+CREATE TABLE mc_state (k VARCHAR(64) PRIMARY KEY, v VARCHAR(64)) ENGINE=InnoDB;
+CREATE TABLE tt (id INT, a INT, b INT, c VARCHAR(200), ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (id) COMMENT 'cfname=cf_mc', KEY ka (a) COMMENT 'cfname=cf_mc',
+  UNIQUE KEY kb (b) COMMENT 'cfname=cf_mc', KEY kc (c(20)) COMMENT 'cfname=cf_mc')
+  ENGINE=ROCKSDB COMMENT = 'ttl_duration=1000;ttl_col=ts;';
+# Rows 1-100 have expired (year 2001), rows 101-200 have not (year 2096).
+INSERT INTO tt SELECT seq, seq % 97, seq, REPEAT('x', 100), IF(seq <= 100, 1000000000, 4000000000)
+  FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 200)
+        SELECT seq FROM s) AS x;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Nothing is read-filtered, so the expired rows are all still visible.
+SET GLOBAL rocksdb_enable_ttl_read_filtering = 0;
+--let $mc_no_b =
+--let $mc_compare =
+--let $mc_store_keep =
+--let $mc_table = tt
+--let $mc_key = tt
+--let $mc_indexes = PRIMARY ka kb kc
+--source suite/rocksdb/include/mc_checksum.inc
+--enable_query_log
+
+--echo # Before the compaction every index shows all the rows
+--let $mc_compare = 1
+--source suite/rocksdb/include/mc_checksum.inc
+
+--echo # The compaction removes the expired entries of the secondary indexes only
+SET GLOBAL rocksdb_debug_ttl_ignore_pk = 1;
+SET GLOBAL rocksdb_compact_cf = 'cf_mc';
+SET GLOBAL rocksdb_debug_ttl_ignore_pk = DEFAULT;
+--echo # Through the primary key
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c))) FROM tt FORCE INDEX (PRIMARY);
+--echo # The old check, a non-covering read through ka (a primary key scan): the same
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, a, b, c))) FROM tt FORCE INDEX (ka);
+--echo # A covering scan of ka sees the loss
+SELECT COUNT(*) FROM tt FORCE INDEX (ka);
+--echo # The checks must report the secondary indexes
+--source suite/rocksdb/include/mc_checksum.inc
+
+--disable_query_log
+SET GLOBAL rocksdb_enable_ttl_read_filtering = DEFAULT;
+DROP TABLE tt, mc_state;
+--enable_query_log

@@ -48,6 +48,37 @@ enum RDB_IO_ERROR_TYPE {
 void rdb_handle_io_error(const rocksdb::Status status,
                          const RDB_IO_ERROR_TYPE err_type);
 
+/*
+  Crash-point enumeration, for testing only. In debug builds the
+  rocksdb_debug_crash_on_nth_durable_write session variable makes the
+  server abort (after logging which point fired) on the N-th durable
+  write made by the session's own thread, before the write is executed.
+  In release builds the macros expand to nothing.
+  RDB_CRASH_DETAIL(text) names, for the rest of the enclosing scope, what the
+  durable writes of that scope are about (e.g. the two names of a table
+  rename); the hook logs it in square brackets after the site, so that a
+  test can pin a window by meaning and not only by its number.
+*/
+#ifndef NDEBUG
+bool rdb_crash_point(const char *site);
+class Rdb_crash_detail {
+ public:
+  explicit Rdb_crash_detail(const std::string &detail);
+  ~Rdb_crash_detail();
+  Rdb_crash_detail(const Rdb_crash_detail &) = delete;
+  Rdb_crash_detail &operator=(const Rdb_crash_detail &) = delete;
+};
+#define RDB_CRASH_DETAIL(text) \
+  const myrocks::Rdb_crash_detail rdb_crash_detail_guard(text)
+#define RDB_CRASH_POINT(site)                    \
+  do {                                           \
+    if (myrocks::rdb_crash_point(site)) abort(); \
+  } while (0)
+#else
+#define RDB_CRASH_POINT(site)
+#define RDB_CRASH_DETAIL(text)
+#endif
+
 int rdb_normalize_tablename(const std::string &tablename, std::string *str)
     MY_ATTRIBUTE((__warn_unused_result__));
 
