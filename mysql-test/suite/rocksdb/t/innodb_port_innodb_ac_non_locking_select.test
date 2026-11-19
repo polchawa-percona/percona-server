@@ -1,0 +1,87 @@
+#
+# Port of innodb.innodb-ac-non-locking-select
+# (mysql-test/suite/innodb/t/innodb-ac-non-locking-select.test) to MyRocks.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - SERIALIZABLE sessions (con3, con4) dropped: MyRocks does not support SERIALIZABLE
+#   - the InnoDB debug sync point lock_wait_suspend_thread_enter and the
+#     INFORMATION_SCHEMA.INNODB_TRX checks are replaced by processlist checks for the
+#     MyRocks row-lock wait state
+#   - runs at READ COMMITTED: the default session's SELECT ... FOR UPDATE of the whole
+#     table inside a transaction is rejected by the gap-lock rule at REPEATABLE READ.
+#     The XA session therefore sees the row committed while it is active
+#   - the waiting session uses a long rocksdb_lock_wait_timeout
+#
+# Checks: an autocommit locking read waits for the row locks; autocommit and
+# BEGIN non-locking reads do not; a read-only XA transaction reads without blocking,
+# and can be prepared and rolled back.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (c1 INT , c2 CHAR(10), PRIMARY KEY (c1)) ENGINE = ROCKSDB;
+INSERT INTO t1 VALUES(0, "0");
+INSERT INTO t1 VALUES(1, "1");
+INSERT INTO t1 VALUES(2, "2");
+INSERT INTO t1 VALUES(3, "3");
+
+--connect (con1,localhost,root,,)
+--connect (con2,localhost,root,,)
+--connect (con5,localhost,root,,)
+--connect (con6,localhost,root,,)
+
+connection default;
+SET AUTOCOMMIT=0;
+BEGIN;
+SELECT * FROM t1 FOR UPDATE;
+
+connection con1;
+SET AUTOCOMMIT=1;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+--echo # Locking autocommit select: blocks
+--send SELECT COUNT(*) FROM t1 LOCK IN SHARE MODE
+
+connection con2;
+SET AUTOCOMMIT=1;
+--echo # Non-locking autocommit select: does not block
+SELECT COUNT(*) FROM t1;
+
+connection con5;
+SET AUTOCOMMIT=1;
+BEGIN;
+--echo # Non-locking select in a transaction: does not block
+SELECT COUNT(*) FROM t1;
+COMMIT;
+
+connection con6;
+SET AUTOCOMMIT=1;
+XA START '1';
+SELECT * FROM t1 WHERE c1 <= 3;
+
+connection default;
+let $wait_condition=
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'SELECT COUNT(*) FROM t1 LOCK IN SHARE MODE' AND state LIKE '%row lock%';
+--source include/wait_condition.inc
+
+INSERT INTO t1 VALUES(4, '4');
+COMMIT;
+
+connection con6;
+SELECT * FROM t1 WHERE c1 <= 4;
+XA END '1';
+XA PREPARE '1';
+XA ROLLBACK '1';
+
+connection default;
+disconnect con2;
+disconnect con5;
+disconnect con6;
+
+connection con1;
+reap;
+disconnect con1;
+
+connection default;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

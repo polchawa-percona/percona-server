@@ -1,0 +1,112 @@
+# Write-policy coverage (step 3c): XA transactions under every write policy.
+#
+# Under write_prepared and write_unprepared, MyRocks writes a transaction's
+# changes into the database before COMMIT (at PREPARE, or during the
+# transaction when the batch exceeds rocksdb_write_batch_flush_threshold,
+# which is 1 in the write_unprepared combination). XA exposes the window
+# between PREPARE and COMMIT to other sessions, so this test checks that:
+#   - rows of a prepared XA transaction stay invisible to other readers,
+#     through the primary key, a secondary key and a covering index;
+#   - the prepared transaction keeps its row locks;
+#   - XA RECOVER lists it, from another session too;
+#   - XA COMMIT makes all of it visible; XA ROLLBACK removes all of it,
+#     including rows already written before PREPARE;
+#   - one-phase commit and rollback of an active XA transaction work;
+#   - secondary indexes stay consistent with the primary key.
+#
+# Needs the XA fix (PS-11631, replace_native_transaction_in_thd); without it
+# the first statement after XA COMMIT/ROLLBACK crashes the server.
+# "Warning 1031" on XA PREPARE is PS-11632 (tested by
+# rocksdb.xa_prepared_restart), so warnings are not printed for XA PREPARE.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v VARCHAR(100), KEY k (k)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 'base1'), (2, 20, 'base2'), (3, 30, 'base3');
+
+connect (con1,localhost,root,,test);
+connect (con2,localhost,root,,test);
+
+--echo # Prepared XA transaction: invisible to readers, then committed.
+connection con1;
+XA START 'xc';
+INSERT INTO t1 VALUES (100, 1000, REPEAT('a', 100));
+INSERT INTO t1 SELECT id + 200, k + 2000, 'bulk' FROM t1 WHERE id < 100;
+UPDATE t1 SET v = 'changed' WHERE id = 1;
+DELETE FROM t1 WHERE id = 3;
+XA END 'xc';
+--disable_warnings
+XA PREPARE 'xc';
+--enable_warnings
+
+connection con2;
+SELECT id, k, v FROM t1 ORDER BY id;
+SELECT id, k FROM t1 FORCE INDEX(k) WHERE k >= 1000 ORDER BY k;
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+XA RECOVER;
+--echo # The prepared transaction still holds its row locks.
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 SET v = 'blocked' WHERE id = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+INSERT INTO t1 VALUES (100, 1, 'dup');
+XA COMMIT 'xc';
+SELECT id, k, v FROM t1 ORDER BY id;
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
+
+--echo # Prepared XA transaction rolled back from another session.
+connection con1;
+XA START 'xr';
+INSERT INTO t1 VALUES (500, 5000, 'gone'), (501, 5001, 'gone');
+UPDATE t1 SET k = k + 1 WHERE id < 100;
+DELETE FROM t1 WHERE id = 100;
+XA END 'xr';
+--disable_warnings
+XA PREPARE 'xr';
+--enable_warnings
+connection con2;
+XA RECOVER;
+XA ROLLBACK 'xr';
+SELECT id, k, v FROM t1 ORDER BY id;
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
+
+--echo # One-phase commit and rollback of an active XA transaction.
+connection con1;
+XA START 'x1';
+INSERT INTO t1 VALUES (600, 6000, 'one phase');
+XA END 'x1';
+XA COMMIT 'x1' ONE PHASE;
+XA START 'x2';
+INSERT INTO t1 VALUES (601, 6001, 'rolled back');
+UPDATE t1 SET v = 'not kept' WHERE id = 600;
+XA END 'x2';
+XA ROLLBACK 'x2';
+SELECT id, k, v FROM t1 WHERE id >= 600 ORDER BY id;
+
+--echo # A large XA transaction (many flushed batches under write_unprepared)
+--echo # rolled back after PREPARE leaves nothing behind.
+SET SESSION cte_max_recursion_depth = 5000;
+XA START 'xbig';
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 2000) SELECT 10000 + n, 10000 + n, 'big' FROM s;
+UPDATE t1 SET v = 'big-updated' WHERE id > 10000;
+XA END 'xbig';
+--disable_warnings
+XA PREPARE 'xbig';
+--enable_warnings
+connection con2;
+SELECT COUNT(*) FROM t1 WHERE id > 10000;
+XA ROLLBACK 'xbig';
+SELECT COUNT(*) FROM t1 WHERE id > 10000;
+SELECT COUNT(*) FROM t1 FORCE INDEX(k) WHERE k > 10000;
+XA RECOVER;
+
+CHECK TABLE t1;
+
+connection default;
+disconnect con1;
+disconnect con2;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

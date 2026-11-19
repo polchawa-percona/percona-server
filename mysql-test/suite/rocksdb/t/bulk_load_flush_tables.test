@@ -1,0 +1,47 @@
+# PS-11791: an ingest error raised while another thread closes the bulk
+# loading session's handler is lost.
+#
+# Between statements the handler of a session with rocksdb_bulk_load=1 sits
+# unused in the table cache and shares its Rdb_sst_info with the session's
+# transaction. FLUSH TABLES from another connection destroys that handler;
+# ~ha_rocksdb() finalizes the bulk load, the ingest fails (the loaded key
+# range contains an existing row), the SST files are removed, and the error
+# is only written to the error log. The loading session's
+# SET rocksdb_bulk_load=0 then finds nothing to ingest and reports success,
+# so the loaded rows are silently lost. FLUSH TABLES takes no metadata lock
+# on the table.
+#
+# Correct behaviour: SET rocksdb_bulk_load=0 fails with ER_OVERLAPPING_KEYS,
+# exactly as it does when no FLUSH TABLES runs in between.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("finalizing bulk load while closing handler");
+call mtr.add_suppression("finalizing last SST file while setting bulk loading variable");
+
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+SET rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1), (10);
+SET rocksdb_bulk_load = 0;
+
+--connect (con1,localhost,root,,)
+SET rocksdb_bulk_load = 1;
+# The loaded key range 5..20 contains row 10, so it cannot be ingested.
+INSERT INTO t1 VALUES (5), (20);
+
+--connection default
+# Destroys the unused handler of con1, which finalizes con1's bulk load.
+FLUSH TABLES;
+
+--connection con1
+--error ER_OVERLAPPING_KEYS
+SET rocksdb_bulk_load = 0;
+
+SELECT * FROM t1;
+
+--disconnect con1
+--connection default
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

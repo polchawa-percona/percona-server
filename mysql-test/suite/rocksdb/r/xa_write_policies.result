@@ -1,0 +1,106 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v VARCHAR(100), KEY k (k)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 'base1'), (2, 20, 'base2'), (3, 30, 'base3');
+# Prepared XA transaction: invisible to readers, then committed.
+XA START 'xc';
+INSERT INTO t1 VALUES (100, 1000, REPEAT('a', 100));
+INSERT INTO t1 SELECT id + 200, k + 2000, 'bulk' FROM t1 WHERE id < 100;
+UPDATE t1 SET v = 'changed' WHERE id = 1;
+DELETE FROM t1 WHERE id = 3;
+XA END 'xc';
+XA PREPARE 'xc';
+SELECT id, k, v FROM t1 ORDER BY id;
+id	k	v
+1	10	base1
+2	20	base2
+3	30	base3
+SELECT id, k FROM t1 FORCE INDEX(k) WHERE k >= 1000 ORDER BY k;
+id	k
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+COUNT(*)
+3
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	2	0	xc
+# The prepared transaction still holds its row locks.
+SET SESSION rocksdb_lock_wait_timeout = 1;
+UPDATE t1 SET v = 'blocked' WHERE id = 1;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+INSERT INTO t1 VALUES (100, 1, 'dup');
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+XA COMMIT 'xc';
+SELECT id, k, v FROM t1 ORDER BY id;
+id	k	v
+1	10	changed
+2	20	base2
+100	1000	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+201	2010	bulk
+202	2020	bulk
+203	2030	bulk
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+COUNT(*)
+6
+SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
+COUNT(*)
+6
+# Prepared XA transaction rolled back from another session.
+XA START 'xr';
+INSERT INTO t1 VALUES (500, 5000, 'gone'), (501, 5001, 'gone');
+UPDATE t1 SET k = k + 1 WHERE id < 100;
+DELETE FROM t1 WHERE id = 100;
+XA END 'xr';
+XA PREPARE 'xr';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	2	0	xr
+XA ROLLBACK 'xr';
+SELECT id, k, v FROM t1 ORDER BY id;
+id	k	v
+1	10	changed
+2	20	base2
+100	1000	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+201	2010	bulk
+202	2020	bulk
+203	2030	bulk
+SELECT COUNT(*) FROM t1 FORCE INDEX(k);
+COUNT(*)
+6
+SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
+COUNT(*)
+6
+# One-phase commit and rollback of an active XA transaction.
+XA START 'x1';
+INSERT INTO t1 VALUES (600, 6000, 'one phase');
+XA END 'x1';
+XA COMMIT 'x1' ONE PHASE;
+XA START 'x2';
+INSERT INTO t1 VALUES (601, 6001, 'rolled back');
+UPDATE t1 SET v = 'not kept' WHERE id = 600;
+XA END 'x2';
+XA ROLLBACK 'x2';
+SELECT id, k, v FROM t1 WHERE id >= 600 ORDER BY id;
+id	k	v
+600	6000	one phase
+# A large XA transaction (many flushed batches under write_unprepared)
+# rolled back after PREPARE leaves nothing behind.
+SET SESSION cte_max_recursion_depth = 5000;
+XA START 'xbig';
+INSERT INTO t1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 2000) SELECT 10000 + n, 10000 + n, 'big' FROM s;
+UPDATE t1 SET v = 'big-updated' WHERE id > 10000;
+XA END 'xbig';
+XA PREPARE 'xbig';
+SELECT COUNT(*) FROM t1 WHERE id > 10000;
+COUNT(*)
+0
+XA ROLLBACK 'xbig';
+SELECT COUNT(*) FROM t1 WHERE id > 10000;
+COUNT(*)
+0
+SELECT COUNT(*) FROM t1 FORCE INDEX(k) WHERE k > 10000;
+COUNT(*)
+0
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

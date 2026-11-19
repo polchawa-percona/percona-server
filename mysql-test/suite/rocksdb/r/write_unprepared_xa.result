@@ -1,0 +1,133 @@
+SELECT @@rocksdb_write_policy;
+@@rocksdb_write_policy
+write_unprepared
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE seq (n INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO seq SELECT n FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) x;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT, u INT, KEY kv (v), UNIQUE KEY ku (u)) ENGINE=ROCKSDB;
+#
+# 1. XA COMMIT of a transaction whose batches were flushed
+#
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+XA START 'x1';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n <= 500;
+UPDATE t1 SET v = -1 WHERE id = 1;
+# Keys written to the database before COMMIT: yes
+XA END 'x1';
+XA PREPARE 'x1';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+0
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	2	0	x1
+XA COMMIT 'x1';
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+500	125248
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+500	125248
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+500
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+500
+#
+# 2. XA ROLLBACK after PREPARE removes the flushed rows
+#
+XA START 'x2';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 1000;
+DELETE FROM t1 WHERE id = 2;
+XA END 'x2';
+XA PREPARE 'x2';
+XA ROLLBACK 'x2';
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+500	125248
+SELECT COUNT(*) FROM t1 FORCE INDEX (kv);
+COUNT(*)
+500
+SELECT COUNT(*) FROM t1 FORCE INDEX (ku);
+COUNT(*)
+500
+#
+# 3. XA ROLLBACK before PREPARE (rollback of an unprepared XA)
+#
+XA START 'x3';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 700;
+XA END 'x3';
+XA ROLLBACK 'x3';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+500
+#
+# 4. One-phase XA COMMIT
+#
+XA START 'x4';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 501 AND 600;
+XA END 'x4';
+XA COMMIT 'x4' ONE PHASE;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+600
+#
+# 5. Prepared by one session, committed by another
+#
+XA START 'x5';
+INSERT INTO t1 SELECT n, n, n FROM seq WHERE n BETWEEN 601 AND 800;
+XA END 'x5';
+XA PREPARE 'x5';
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+1	2	0	x5
+# Still invisible, and its unique values are locked
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+600
+INSERT INTO t1 VALUES (601, 0, 99999);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+XA COMMIT 'x5';
+SELECT COUNT(*), SUM(v) FROM t1;
+COUNT(*)	SUM(v)
+800	320398
+#
+# 6. Several XA transactions on one connection, then a normal one
+#
+XA START 'y1';
+INSERT INTO t1 VALUES (2000 + 1, 1, 2000 + 1);
+XA END 'y1';
+XA PREPARE 'y1';
+XA COMMIT 'y1';
+XA START 'y2';
+INSERT INTO t1 VALUES (2000 + 2, 1, 2000 + 2);
+XA END 'y2';
+XA PREPARE 'y2';
+XA COMMIT 'y2';
+XA START 'y3';
+INSERT INTO t1 VALUES (2000 + 3, 1, 2000 + 3);
+XA END 'y3';
+XA PREPARE 'y3';
+XA COMMIT 'y3';
+BEGIN;
+INSERT INTO t1 VALUES (3000, 1, 3000);
+COMMIT;
+SELECT COUNT(*) FROM t1 WHERE id > 2000;
+COUNT(*)
+4
+SELECT COUNT(*), SUM(v), SUM(u) FROM t1;
+COUNT(*)	SUM(v)	SUM(u)
+804	320402	329406
+SELECT COUNT(*), SUM(v) FROM t1 FORCE INDEX (kv);
+COUNT(*)	SUM(v)
+804	320402
+SELECT COUNT(*), SUM(u) FROM t1 FORCE INDEX (ku);
+COUNT(*)	SUM(u)
+804	329406
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1, seq;

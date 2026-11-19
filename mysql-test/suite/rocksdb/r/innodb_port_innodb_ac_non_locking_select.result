@@ -1,0 +1,52 @@
+CREATE TABLE t1 (c1 INT , c2 CHAR(10), PRIMARY KEY (c1)) ENGINE = ROCKSDB;
+INSERT INTO t1 VALUES(0, "0");
+INSERT INTO t1 VALUES(1, "1");
+INSERT INTO t1 VALUES(2, "2");
+INSERT INTO t1 VALUES(3, "3");
+SET AUTOCOMMIT=0;
+BEGIN;
+SELECT * FROM t1 FOR UPDATE;
+c1	c2
+0	0
+1	1
+2	2
+3	3
+SET AUTOCOMMIT=1;
+SET SESSION rocksdb_lock_wait_timeout = 100;
+# Locking autocommit select: blocks
+SELECT COUNT(*) FROM t1 LOCK IN SHARE MODE;
+SET AUTOCOMMIT=1;
+# Non-locking autocommit select: does not block
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+SET AUTOCOMMIT=1;
+BEGIN;
+# Non-locking select in a transaction: does not block
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+COMMIT;
+SET AUTOCOMMIT=1;
+XA START '1';
+SELECT * FROM t1 WHERE c1 <= 3;
+c1	c2
+0	0
+1	1
+2	2
+3	3
+INSERT INTO t1 VALUES(4, '4');
+COMMIT;
+SELECT * FROM t1 WHERE c1 <= 4;
+c1	c2
+0	0
+1	1
+2	2
+3	3
+4	4
+XA END '1';
+XA PREPARE '1';
+XA ROLLBACK '1';
+COUNT(*)
+4
+DROP TABLE t1;

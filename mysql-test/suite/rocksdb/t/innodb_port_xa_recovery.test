@@ -1,0 +1,74 @@
+#
+# Port of innodb.xa_recovery (mysql-test/suite/innodb/t/xa_recovery.test) to MyRocks.
+# Changes from the original:
+#   - runs at READ COMMITTED: the UPDATEs inside the XA transactions are not on a full
+#     unique key, which the gap-lock rule rejects at REPEATABLE READ
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB, also on the partitioned table
+#   - MyRocks has no READ UNCOMMITTED, so the check that the prepared change is
+#     still pending is a locking read that must wait (lock wait timeout) instead
+#   - the partitioned table also gets a secondary index, and the committed row is
+#     read back through both indexes after XA COMMIT
+#
+# Expected (as with InnoDB): a prepared XA transaction survives a kill and a clean
+# restart, keeps its row locks, and XA ROLLBACK / XA COMMIT then discard or apply it.
+# Blocked by port-findings.md #2 (prepared XA lost on restart); needs the XA crash
+# fix (#1) to get past the first XA PREPARE.
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1);
+connect (con1,localhost,root);
+XA START 'x'; UPDATE t1 set a=2; XA END 'x'; XA PREPARE 'x';
+connection default;
+
+--source include/kill_and_restart_mysqld.inc
+
+disconnect con1;
+connect (con1,localhost,root);
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--echo # The recovered prepared transaction still holds its row locks
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT * FROM t1 LOCK IN SHARE MODE;
+disconnect con1;
+connection default;
+
+--source include/restart_mysqld.inc
+
+--echo # Readers see the committed state while the transaction is prepared
+SELECT * FROM t1;
+XA RECOVER;
+XA ROLLBACK 'x';
+SELECT * FROM t1;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug #31437127 - ERROR LOG REPORTS INVALID (OLD?) TABLE OR DATABASE NAME:
+--echo # ERROR] [MY-010520] [Server] Invalid (old?) table or database name 't1#p#p1'
+--echo #
+
+CREATE TABLE t1(a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB
+  PARTITION BY HASH(a) PARTITIONS 4;
+connect (con1,localhost,root);
+
+--connection con1
+XA BEGIN '123';
+INSERT INTO t1 VALUES(1,2);
+XA END '123';
+XA PREPARE '123';
+
+--connection default
+--source include/restart_mysqld.inc
+
+disconnect con1;
+
+--connection default
+XA RECOVER;
+XA COMMIT '123';
+SELECT * FROM t1;
+SELECT * FROM t1 FORCE INDEX (kb) WHERE b = 2;
+DROP TABLE t1;
