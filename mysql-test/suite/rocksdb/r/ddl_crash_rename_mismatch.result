@@ -1,0 +1,50 @@
+CREATE DATABASE db2;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# RENAME TABLE within the database.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO t2
+RENAME TABLE t1 TO t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT COUNT(*) AS names_in_dd FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+names_in_dd
+1
+SELECT COUNT(DISTINCT TABLE_SCHEMA, TABLE_NAME) AS names_in_myrocks FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('test','t2'));
+names_in_myrocks
+1
+SELECT COUNT(*) AS row_count FROM TABLE;
+row_count
+3
+CHECK TABLE TABLE;
+Table	Op	Msg_type	Msg_text
+TABLE	check	status	OK
+DROP TABLE TABLE;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+# RENAME TABLE to another database.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1 TO db2.t2
+RENAME TABLE t1 TO db2.t2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT COUNT(*) AS rocksdb_available FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB' AND SUPPORT IN ('YES', 'DEFAULT');
+rocksdb_available
+1
+SELECT COUNT(*) AS names_in_dd FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('db2','t2'));
+names_in_dd
+1
+SELECT COUNT(DISTINCT TABLE_SCHEMA, TABLE_NAME) AS names_in_myrocks FROM information_schema.ROCKSDB_DDL WHERE (TABLE_SCHEMA, TABLE_NAME) IN (('test','t1'), ('db2','t2'));
+names_in_myrocks
+1
+SELECT COUNT(*) AS row_count FROM TABLE;
+row_count
+3
+CHECK TABLE TABLE;
+Table	Op	Msg_type	Msg_text
+TABLE	check	status	OK
+DROP TABLE TABLE;
+DROP DATABASE db2;
