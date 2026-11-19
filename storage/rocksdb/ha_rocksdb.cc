@@ -4707,6 +4707,8 @@ class Rdb_transaction {
           file_count);
     }
 
+    DEBUG_SYNC(m_thd, "rocksdb.bulk_load_before_ingest");
+
     const rocksdb::Status s = ingest_bulk_load_files(args);
     if (trace_sst_api) {
       // NO_LINT_DEBUG
@@ -17296,6 +17298,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {
@@ -17306,6 +17311,9 @@ int ha_rocksdb::inplace_populate_sk(
     }
 
     ha_rnd_end();
+
+    /* The scan is done; the merge sort and SST ingestion have not started. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_before_merge");
 
     // Write this index without completing the bulk-load session, which spans
     // all the indexes and partitions of the ALTER.

@@ -1,0 +1,93 @@
+#
+# Port of the "DML during index creation on a virtual column" parts of
+# innodb.virtual_debug (mysql-test/suite/innodb/t/virtual_debug.test) to MyRocks,
+# with the ALTER paused in the middle of the index build.
+# rocksdb.innodb_port_virtual_debug pauses before the build starts; this test
+# pauses inside it.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB applies concurrent DML from a row log. MyRocks blocks writes while an
+#     INPLACE ADD INDEX runs (shared metadata lock), so the DML waits behind the
+#     paused ALTER and must reach the new index afterwards.
+#   - InnoDB's innodb_inplace_alter_table_enter / row_log_* points are replaced
+#     by rocksdb.inplace_populate_sk_scan_row (in the primary key scan, after the
+#     first row), where MyRocks computes the virtual column for each row.
+#   - Covers an index on a virtual column, a mixed index on a virtual and a base
+#     column, and an index on a stored and a virtual column. A functional index
+#     is not covered: it adds a hidden virtual column, which MyRocks builds only
+#     with ALGORITHM=COPY.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (a INT PRIMARY KEY, b INT, c INT GENERATED ALWAYS AS (a + b) VIRTUAL,
+                d VARCHAR(20), e INT GENERATED ALWAYS AS (b * 2 + 1) STORED) ENGINE = ROCKSDB;
+SET SESSION cte_max_recursion_depth = 2000;
+INSERT INTO t (a, b, d) WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+SELECT n, n % 10, CONCAT('d', n % 37) FROM v;
+
+connect (con1,localhost,root,,);
+connect (con2,localhost,root,,);
+
+--let $i= 1
+while ($i <= 3)
+{
+  if ($i == 1)
+  {
+    --let $index= idx
+    --let $def= (c)
+    --let $cols= c
+  }
+  if ($i == 2)
+  {
+    --let $index= idx
+    --let $def= (c, b)
+    --let $cols= c, b
+  }
+  if ($i == 3)
+  {
+    --let $index= idx
+    --let $def= (e, c)
+    --let $cols= e, c
+  }
+  --echo # INPLACE ADD INDEX $index $def paused in the primary key scan
+  connection con1;
+  SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_scan_row SIGNAL start_dml WAIT_FOR resume_ddl';
+  --send_eval ALTER TABLE t ADD INDEX $index $def, ALGORITHM = INPLACE, LOCK = SHARED
+
+  connection default;
+  SET DEBUG_SYNC = 'now WAIT_FOR start_dml';
+  SELECT COUNT(*), SUM(c) FROM t;
+  connection con2;
+  eval SET @i = $i;
+  --send UPDATE t SET b = b + 100 * @i WHERE a % 50 = 0
+  connection default;
+  let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist
+    WHERE state = 'Waiting for table metadata lock' AND info LIKE 'UPDATE t SET%';
+  --source include/wait_condition.inc
+  SET DEBUG_SYNC = 'now SIGNAL resume_ddl';
+
+  connection con1;
+  reap;
+  connection con2;
+  reap;
+  INSERT INTO t (a, b, d) VALUES (2000 + @i, 7, 'new');
+  DELETE FROM t WHERE a = 3;
+
+  connection default;
+  SET DEBUG_SYNC = 'RESET';
+  CHECK TABLE t;
+  eval SELECT
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', $cols)))) FROM t FORCE INDEX ($index)) =
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', $cols)))) FROM t IGNORE INDEX ($index))
+    AS index_matches_table;
+  eval ALTER TABLE t DROP INDEX $index;
+  --inc $i
+}
+
+SELECT COUNT(*), SUM(b), SUM(c), SUM(e) FROM t;
+DROP TABLE t;
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc
