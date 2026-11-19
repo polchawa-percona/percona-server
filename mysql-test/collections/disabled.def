@@ -145,6 +145,10 @@ rocksdb.errinj_dict_crash_truncate : BUG#11668 PS-11668 TRUNCATE crash window
 rocksdb.errinj_dict_crash_drop_index : BUG#11670 PS-11670 crash window
 rocksdb.errinj_dict_crash_copy_alter : BUG#11681 PS-11681 crash window
 rocksdb.flush_wal_error_group_commit : BUG#11761 PS-11761 WAL flush error
+rocksdb.errinj_xa : BUG#11631 PS-11631 PS-11773 XA crash, by-XID commit error
+rocksdb.xa_commit_by_xid_error : BUG#11773 PS-11773 PS-11631 commit error
+rocksdb.errinj_part_write : BUG#11745 PS-11745 partition DDL write status
+rocksdb.errinj_ttl_write : BUG#11745 PS-11745 COPY ALTER write status
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.crashpoint_copy_alter_rename : BUG#0 PS-11681 table lost after crash

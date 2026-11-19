@@ -1,0 +1,36 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# WRITE/BUSY INSERT over an expired row (hidden TTL): every injected failure was handled correctly
+# WRITE/BUSY INSERT over an expired row (TTL column): every injected failure was handled correctly
+# WRITE/BUSY UPDATE of expired and unexpired rows (hidden TTL): the statement does not change the state
+# WRITE/BUSY UPDATE of expired and unexpired rows (hidden TTL): every injected failure was handled correctly
+# WRITE/BUSY UPDATE of expired and unexpired rows (TTL column): the statement does not change the state
+# WRITE/BUSY UPDATE of expired and unexpired rows (TTL column): every injected failure was handled correctly
+# WRITE/BUSY DELETE of expired and unexpired rows: every injected failure was handled correctly
+# WRITE/BUSY REPLACE of an expired and an unexpired row: every injected failure was handled correctly
+# WRITE/BUSY scan with TTL filtering: no RocksDB call of this class was made
+# WRITE/BUSY point reads with TTL filtering: no RocksDB call of this class was made
+# WRITE/BUSY INSERT ... SELECT from a TTL table: every injected failure was handled correctly
+# WRITE/BUSY OPTIMIZE TABLE (TTL compaction, hidden TTL): the statement does not change the state
+# WRITE/BUSY OPTIMIZE TABLE (TTL compaction, hidden TTL): no RocksDB call of this class was made
+# WRITE/BUSY OPTIMIZE TABLE (TTL compaction, TTL column): the statement does not change the state
+# WRITE/BUSY OPTIMIZE TABLE (TTL compaction, TTL column): no RocksDB call of this class was made
+# WRITE/BUSY COPY ALTER of a TTL table: the statement does not change the state
+# WRITE/BUSY COPY ALTER of a TTL table: every injected failure was handled correctly
+SET GLOBAL rocksdb_debug_ttl_rec_ts = DEFAULT;
+DROP TABLE IF EXISTS tt_h, tt_c;
+DROP TABLE t_outt;
+DROP PROCEDURE errinj_ttl_reset;
+DROP PROCEDURE errinj_tables_state;

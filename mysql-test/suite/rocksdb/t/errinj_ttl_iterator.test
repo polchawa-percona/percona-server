@@ -1,0 +1,34 @@
+#
+# Systematic error injection into the iterator steps of reads and DML on
+# TTL tables (see suite/rocksdb/include/errinj_loop.inc).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("Status error, code: [0-9]+");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+--let $errinj_ttl_sk = 1
+--source suite/rocksdb/include/errinj_ttl_setup.inc
+--let $errinj_class = ITERATOR
+--let $errinj_status = INCOMPLETE
+--source suite/rocksdb/include/errinj_ttl_workloads.inc
+
+--let $errinj_state_proc =
+SET GLOBAL rocksdb_debug_ttl_rec_ts = DEFAULT;
+DROP TABLE IF EXISTS tt_h, tt_c;
+DROP TABLE t_outt;
+DROP PROCEDURE errinj_ttl_reset;
+DROP PROCEDURE errinj_tables_state;
