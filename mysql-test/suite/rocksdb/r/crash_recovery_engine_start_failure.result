@@ -1,0 +1,19 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+# Crash after the binary log write of the INSERT, before the MyRocks commit.
+SET SESSION debug = '+d,crash_commit_after_log';
+INSERT INTO t1 VALUES (2, 2);
+ERROR HY000: Lost connection to MySQL server during query
+# Start once with an invalid MyRocks option, shut down at once.
+Pattern "Plugin 'ROCKSDB' init function returned error" found
+# Start with the valid options.
+# restart
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.engines
+WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT');
+rocksdb_loaded
+1
+SELECT * FROM t1 ORDER BY pk;
+pk	a
+1	1
+2	2
+DROP TABLE t1;

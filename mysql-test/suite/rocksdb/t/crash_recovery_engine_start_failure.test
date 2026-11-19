@@ -1,0 +1,60 @@
+#
+# PS-NNNNN: after a crash, a server start in which MyRocks fails to
+# initialize still runs the binary log crash recovery, without MyRocks,
+# and then closes the binary log as cleanly shut down. The MyRocks
+# transactions that were prepared at the crash (written to the binary log,
+# not yet committed in MyRocks) can then never be recovered: the next start
+# with a working MyRocks aborts with "Found 1 prepared transactions!".
+#
+# MyRocks fails to initialize, for example, when it refuses to start after a
+# DDL crash (PS-11666, PS-11668: "Problems validating data dictionary against
+# DD tables, exiting") or with an invalid MyRocks option; the server then
+# keeps running without the engine. Here the start fails because of an
+# invalid rocksdb_default_cf_options value, which needs no other bug.
+#
+# Scenario: an INSERT into a MyRocks table crashes the server after the
+# binary log write and before the MyRocks commit (crash_commit_after_log),
+# so the transaction is prepared in MyRocks and committed in the binary log.
+# The server is started once with the invalid option and shut down (a fixed
+# server may also refuse to start then: both outcomes are accepted), then
+# started with the valid options.
+#
+# Expected (as after a direct restart, where the binary log crash recovery
+# commits the prepared transaction): the server starts with MyRocks and the
+# table has both rows.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+
+--echo # Crash after the binary log write of the INSERT, before the MyRocks commit.
+SET SESSION debug = '+d,crash_commit_after_log';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+INSERT INTO t1 VALUES (2, 2);
+--source include/wait_until_disconnected.inc
+
+--echo # Start once with an invalid MyRocks option, shut down at once.
+--let $start_failure_sql = $MYSQLTEST_VARDIR/tmp/start_failure_shutdown.sql
+--let $start_failure_log = $MYSQLTEST_VARDIR/tmp/start_failure.err
+--write_file $start_failure_sql
+SHUTDOWN;
+EOF
+--error 0,1,2
+--exec $MYSQLD --defaults-file=$MYSQLTEST_VARDIR/my.cnf --defaults-group-suffix=.1 $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD" --rocksdb_default_cf_options=write_buffer_size=abc --init-file=$start_failure_sql --log-error=$start_failure_log
+--let SEARCH_FILE = $start_failure_log
+--let SEARCH_PATTERN = Plugin 'ROCKSDB' init function returned error
+--source include/search_pattern.inc
+--remove_file $start_failure_sql
+--remove_file $start_failure_log
+
+--echo # Start with the valid options.
+--source include/start_mysqld.inc
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.engines
+  WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT');
+SELECT * FROM t1 ORDER BY pk;
+
+DROP TABLE t1;
