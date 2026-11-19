@@ -1,0 +1,38 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+# WRITE/BUSY multi-row INSERT: every injected failure was handled correctly
+# WRITE/BUSY UPDATE of a secondary key column: every injected failure was handled correctly
+# WRITE/BUSY UPDATE of the primary key: every injected failure was handled correctly
+# WRITE/BUSY DELETE: every injected failure was handled correctly
+# WRITE/BUSY INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# WRITE/BUSY REPLACE: every injected failure was handled correctly
+# WRITE/BUSY INSERT ... SELECT: every injected failure was handled correctly
+# WRITE/BUSY read through a secondary key: no RocksDB call of this class was made
+# WRITE/BUSY point reads in a join: no RocksDB call of this class was made
+# WRITE/BUSY transaction at REPEATABLE READ: every injected failure was handled correctly
+# WRITE/BUSY transaction at READ COMMITTED: every injected failure was handled correctly
+# WRITE/TIMEDOUT multi-row INSERT: every injected failure was handled correctly
+# WRITE/TIMEDOUT UPDATE of a secondary key column: every injected failure was handled correctly
+# WRITE/TIMEDOUT UPDATE of the primary key: every injected failure was handled correctly
+# WRITE/TIMEDOUT DELETE: every injected failure was handled correctly
+# WRITE/TIMEDOUT INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# WRITE/TIMEDOUT REPLACE: every injected failure was handled correctly
+# WRITE/TIMEDOUT INSERT ... SELECT: every injected failure was handled correctly
+# WRITE/TIMEDOUT read through a secondary key: no RocksDB call of this class was made
+# WRITE/TIMEDOUT point reads in a join: no RocksDB call of this class was made
+# WRITE/TIMEDOUT transaction at REPEATABLE READ: every injected failure was handled correctly
+# WRITE/TIMEDOUT transaction at READ COMMITTED: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT multi-row INSERT: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT UPDATE of a secondary key column: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT UPDATE of the primary key: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT DELETE: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT INSERT ... ON DUPLICATE KEY UPDATE: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT REPLACE: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT INSERT ... SELECT: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT read through a secondary key: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT point reads in a join: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT transaction at REPEATABLE READ: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT transaction at READ COMMITTED: every injected failure was handled correctly
+DROP PROCEDURE errinj_reset;
+DROP PROCEDURE errinj_tx_rr;
+DROP PROCEDURE errinj_tx_rc;
+DROP TABLE t1, t_out;

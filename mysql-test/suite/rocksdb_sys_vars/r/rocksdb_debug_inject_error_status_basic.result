@@ -1,0 +1,112 @@
+SET @start_global_value = @@global.rocksdb_debug_inject_error_status;
+SELECT @start_global_value;
+@start_global_value
+IOERROR
+SET @start_session_value = @@session.rocksdb_debug_inject_error_status;
+SELECT @start_session_value;
+@start_session_value
+IOERROR
+SET @@global.rocksdb_debug_inject_error_status = 'IOERROR';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+IOERROR
+SET @@session.rocksdb_debug_inject_error_status = 'IOERROR';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+IOERROR
+SET @@global.rocksdb_debug_inject_error_status = 'NOSPACE';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+NOSPACE
+SET @@session.rocksdb_debug_inject_error_status = 'NOSPACE';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+NOSPACE
+SET @@global.rocksdb_debug_inject_error_status = 'CORRUPTION';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+CORRUPTION
+SET @@session.rocksdb_debug_inject_error_status = 'CORRUPTION';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+CORRUPTION
+SET @@global.rocksdb_debug_inject_error_status = 'BUSY';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+BUSY
+SET @@session.rocksdb_debug_inject_error_status = 'BUSY';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+BUSY
+SET @@global.rocksdb_debug_inject_error_status = 'TIMEDOUT';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+TIMEDOUT
+SET @@session.rocksdb_debug_inject_error_status = 'TIMEDOUT';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+TIMEDOUT
+SET @@global.rocksdb_debug_inject_error_status = 'TRYAGAIN';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+TRYAGAIN
+SET @@session.rocksdb_debug_inject_error_status = 'TRYAGAIN';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+TRYAGAIN
+SET @@global.rocksdb_debug_inject_error_status = 'INCOMPLETE';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+INCOMPLETE
+SET @@session.rocksdb_debug_inject_error_status = 'INCOMPLETE';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+INCOMPLETE
+SET @@global.rocksdb_debug_inject_error_status = 'ABORTED';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+ABORTED
+SET @@session.rocksdb_debug_inject_error_status = 'ABORTED';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+ABORTED
+SET @@global.rocksdb_debug_inject_error_status = 'MEMORYLIMIT';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+MEMORYLIMIT
+SET @@session.rocksdb_debug_inject_error_status = 'MEMORYLIMIT';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+MEMORYLIMIT
+SET @@global.rocksdb_debug_inject_error_status = 'EXPIRED';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+EXPIRED
+SET @@session.rocksdb_debug_inject_error_status = 'EXPIRED';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+EXPIRED
+SET @@global.rocksdb_debug_inject_error_status = 'INVALIDARGUMENT';
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+INVALIDARGUMENT
+SET @@session.rocksdb_debug_inject_error_status = 'INVALIDARGUMENT';
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+INVALIDARGUMENT
+SET @@global.rocksdb_debug_inject_error_status = 1;
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+NOSPACE
+SET @@global.rocksdb_debug_inject_error_status = 'aaa';
+ERROR 42000: Variable 'rocksdb_debug_inject_error_status' can't be set to the value of 'aaa'
+SET @@session.rocksdb_debug_inject_error_status = 100;
+ERROR 42000: Variable 'rocksdb_debug_inject_error_status' can't be set to the value of '100'
+SET @@global.rocksdb_debug_inject_error_status = DEFAULT;
+SELECT @@global.rocksdb_debug_inject_error_status;
+@@global.rocksdb_debug_inject_error_status
+IOERROR
+SET @@session.rocksdb_debug_inject_error_status = DEFAULT;
+SELECT @@session.rocksdb_debug_inject_error_status;
+@@session.rocksdb_debug_inject_error_status
+IOERROR

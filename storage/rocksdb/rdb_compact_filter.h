@@ -57,6 +57,7 @@ class Rdb_compact_filter : public rocksdb::CompactionFilter {
                       std::string *new_value,
                       bool *value_changed) const override {
     assert(key.size() >= sizeof(uint32));
+    RDB_BG_THREAD_SCOPE(Rdb_bg_thread::COMPACTION_FILTER);
 
 #ifndef NDEBUG
     if (m_is_manual_compaction && ++m_dbug_num_keys == 1000) {

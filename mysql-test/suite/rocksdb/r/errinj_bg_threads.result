@@ -1,0 +1,133 @@
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("BG thread failed to write to RocksDB");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("Failed to get column family flags");
+call mtr.add_suppression("MyRocks data dictionary may get corrupted");
+call mtr.add_suppression("failed to write to WAL");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("Manual Compaction id [0-9]+ cf .* aborted");
+call mtr.add_suppression("Could not access RocksDB properties");
+#
+# Drop-index thread
+#
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 1';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT BUSY 2';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT INCOMPLETE 2';
+DROP TABLE t1;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+# An I/O error in the compaction aborts the server.
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX COMPACT IOERROR 2';
+DROP TABLE t1;
+SHOW TABLES LIKE 't1';
+Tables_in_test (t1)
+# drop queue drained, indexes with orphaned rows: 0
+# An I/O error reading the dictionary aborts the server.
+SET GLOBAL rocksdb_debug_inject_bg_error = 'DROP_INDEX DICT IOERROR 1';
+DROP TABLE t1;
+SHOW TABLES LIKE 't1';
+Tables_in_test (t1)
+# drop queue drained, indexes with orphaned rows: 0
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t0;
+COUNT(*)	SUM(pk)	SUM(a)
+2000	2001000	94950
+CHECK TABLE t0;
+Table	Op	Msg_type	Msg_text
+test.t0	check	status	OK
+#
+# Background thread: WAL sync and statistics persistence
+#
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND COMMIT BUSY 1';
+INSERT INTO t2 VALUES (5001, 1, 'after');
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+INSERT INTO t2 VALUES (5002, 2, 'after');
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+2002
+# An I/O error in the background WAL sync aborts the server.
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND COMMIT IOERROR 1';
+INSERT INTO t2 VALUES (5003, 3, 'after');
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+2003
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+# An I/O error persisting index statistics aborts the server.
+INSERT INTO t2 VALUES (5004, 4, 'after');
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND DICT IOERROR 1';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+2004
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t0;
+COUNT(*)	SUM(pk)	SUM(a)
+2000	2001000	94950
+# A failed statistics read in the background recalculation is
+# reported and leaves the statistics unchanged.
+SET GLOBAL rocksdb_stats_recalc_rate = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = 'BACKGROUND READ BUSY 1';
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+SET GLOBAL rocksdb_stats_recalc_rate = DEFAULT;
+#
+# Manual compaction thread
+#
+SET GLOBAL rocksdb_debug_inject_bg_error = 'MANUAL_COMPACTION COMPACT BUSY 1';
+SET GLOBAL rocksdb_compact_cf = 'default';
+ERROR HY000: Internal error: Manual Compaction Failed. Reason: General failures.
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+SET GLOBAL rocksdb_compact_cf = 'default';
+# An I/O error in the manual compaction aborts the server.
+SET GLOBAL rocksdb_debug_inject_bg_error = 'MANUAL_COMPACTION COMPACT IOERROR 1';
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+2004
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# Compaction filter
+#
+SET GLOBAL rocksdb_debug_inject_bg_error = 'COMPACTION_FILTER DICT BUSY 1';
+DROP TABLE t3;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+SET GLOBAL rocksdb_debug_inject_bg_error = 'COMPACTION_FILTER DICT IOERROR 1';
+DROP TABLE t3;
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_debug_inject_bg_error = '';
+# drop queue drained, indexes with orphaned rows: 0
+#
+# Restart with table validation: dictionaries agree, data intact
+#
+# restart: --rocksdb_validate_tables=1
+SELECT COUNT(*), SUM(pk), SUM(a) FROM t0;
+COUNT(*)	SUM(pk)	SUM(a)
+2000	2001000	94950
+CHECK TABLE t0, t2;
+Table	Op	Msg_type	Msg_text
+test.t0	check	status	OK
+test.t2	check	status	OK
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+2004
+# drop queue drained, indexes with orphaned rows: 0
+DROP TABLE t0, t2;

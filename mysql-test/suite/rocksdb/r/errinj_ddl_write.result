@@ -1,0 +1,36 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+# WRITE/BUSY INPLACE ADD INDEX: no RocksDB call of this class was made
+# WRITE/BUSY INPLACE ADD UNIQUE INDEX: no RocksDB call of this class was made
+# WRITE/BUSY INPLACE DROP INDEX: no RocksDB call of this class was made
+# WRITE/BUSY COPY ALTER: every injected failure was handled correctly
+# WRITE/BUSY TRUNCATE: no RocksDB call of this class was made
+# WRITE/BUSY bulk load: every injected failure was handled correctly
+# WRITE/BUSY OPTIMIZE TABLE: the statement does not change the state
+# WRITE/BUSY OPTIMIZE TABLE: no RocksDB call of this class was made
+# WRITE/BUSY ANALYZE TABLE: the statement does not change the state
+# WRITE/BUSY ANALYZE TABLE: no RocksDB call of this class was made
+# WRITE/BUSY RENAME TABLE: the statement does not change the state
+# WRITE/BUSY RENAME TABLE: no RocksDB call of this class was made
+# WRITE/BUSY DROP TABLE: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT INPLACE ADD INDEX: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT INPLACE ADD UNIQUE INDEX: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT INPLACE DROP INDEX: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT COPY ALTER: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT TRUNCATE: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT bulk load: every injected failure was handled correctly
+# WRITE/MEMORYLIMIT OPTIMIZE TABLE: the statement does not change the state
+# WRITE/MEMORYLIMIT OPTIMIZE TABLE: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT ANALYZE TABLE: the statement does not change the state
+# WRITE/MEMORYLIMIT ANALYZE TABLE: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT RENAME TABLE: the statement does not change the state
+# WRITE/MEMORYLIMIT RENAME TABLE: no RocksDB call of this class was made
+# WRITE/MEMORYLIMIT DROP TABLE: no RocksDB call of this class was made
+DROP TABLE IF EXISTS t2;
+Warnings:
+Note	1051	Unknown table 'test.t2'
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;

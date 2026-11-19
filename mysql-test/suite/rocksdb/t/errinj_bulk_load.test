@@ -1,0 +1,94 @@
+#
+# Error injection into the primary key SST file and the ingest of a bulk load
+# into a table with a secondary index. A failed bulk load must leave the
+# table as it was.
+#
+# PS-11759: the secondary-index entries of the bulk-loaded rows are committed
+# by each INSERT; when finishing or ingesting the primary key SST file fails,
+# they stay and the table is corrupt.
+#
+# A failure of an earlier SST call (open, add of a row) is not part of this
+# test: the failed bulk load stays open, and ending it commits the rows
+# loaded before the failure, together with their secondary-index entries.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("bulk load error");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+call mtr.add_suppression("Error finishing bulk load");
+
+--source suite/rocksdb/include/errinj_ddl_setup.inc
+
+# A failed INSERT of a bulk load leaves the bulk load of t2 unfinished: the
+# SQLEXCEPTION handler of errinj_bulk_load() does not run, so the session
+# keeps rocksdb_bulk_load = 1, and DROP TABLE t2 is refused
+# (ER_LOCK_REFUSED_BY_ENGINE) until the bulk load ends. End it, as that
+# handler would, before the state is read; its own error is not part of the
+# test (the state shows what it left).
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE errinj_bulk_load_state()
+BEGIN
+  BEGIN
+    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN END;
+    SET SESSION rocksdb_bulk_load = 0;
+  END;
+  CALL errinj_ddl_state();
+END|
+delimiter ;|
+--enable_query_log
+--let $errinj_state_proc = CALL errinj_bulk_load_state()
+
+--echo # SST/ABORTED: finishing the primary key SST file fails
+--disable_query_log
+CALL errinj_ddl_reset();
+CALL errinj_bulk_load_state();
+--let $errinj_before = `SELECT @errinj_state`
+SET SESSION rocksdb_debug_inject_error_class = 'SST';
+SET SESSION rocksdb_debug_inject_error_status = 'ABORTED';
+# Count the SST calls of the bulk load: the last one finishes the file.
+SET SESSION rocksdb_debug_inject_error_nth = 1000;
+CALL errinj_bulk_load();
+--let $errinj_sst_calls = `SELECT 1000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+CALL errinj_ddl_reset();
+eval SET SESSION rocksdb_debug_inject_error_nth = $errinj_sst_calls;
+--disable_result_log
+--disable_abort_on_error
+CALL errinj_bulk_load();
+--let $errinj_err = $mysql_errno
+--enable_abort_on_error
+--enable_result_log
+--let $errinj_left = `SELECT @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+if ($errinj_left) {
+  --die The injected SST failure was not reached
+}
+CALL errinj_bulk_load_state();
+--let $errinj_now = `SELECT @errinj_state`
+--enable_query_log
+--let $errinj_reported = `SELECT $errinj_err <> 0`
+--let $errinj_unchanged = `SELECT '$errinj_before' = '$errinj_now'`
+--echo # error reported: $errinj_reported, table unchanged: $errinj_unchanged
+if (!$errinj_unchanged) {
+  --echo before: $errinj_before
+  --echo now:    $errinj_now
+}
+CHECK TABLE t2;
+
+--let $errinj_bulk_load = 1
+--let $errinj_tables = t2
+--let $errinj_class = INGEST
+--let $errinj_status = ABORTED
+--source suite/rocksdb/include/errinj_ddl_workloads.inc
+
+--let $errinj_state_proc =
+--let $errinj_bulk_load =
+DROP TABLE IF EXISTS t2;
+DROP PROCEDURE errinj_ddl_reset;
+DROP PROCEDURE errinj_ddl_state;
+DROP PROCEDURE errinj_bulk_load;
+DROP PROCEDURE errinj_bulk_load_state;
