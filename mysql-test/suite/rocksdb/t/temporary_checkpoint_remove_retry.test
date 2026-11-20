@@ -1,0 +1,47 @@
+# PS-12188: MyRocks: a failed SET rocksdb_create_temporary_checkpoint = NULL
+# forgets the temporary checkpoint, which is then never removed.
+#
+# SET SESSION rocksdb_create_temporary_checkpoint = NULL removes the session's
+# temporary checkpoint with DestroyDB(). When that fails, the statement
+# reports the error but MyRocks has already dropped the session's record of
+# the checkpoint: a retry, once the cause is gone, succeeds without removing
+# anything, and the disconnect does not remove it either. The checkpoint
+# (hard links to live SST files) stays behind and keeps their disk space.
+# A directory placed at <checkpoint>/LOCK makes DestroyDB() fail.
+#
+# Expected: after the failed attempt the session still owns the checkpoint,
+# so the retry removes it.
+
+--source include/have_rocksdb.inc
+
+--let $ckpt = $MYSQLTEST_VARDIR/tmp/ckpt_remove_retry
+
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--source include/count_sessions.inc
+connect (con1,localhost,root,,);
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt'
+--file_exists $ckpt/CURRENT
+
+--echo # Removing the checkpoint fails.
+--mkdir $ckpt/LOCK
+--replace_regex /Got error [0-9]+ '.*' from/Got error N 'DestroyDB failure' from/
+--error ER_GET_ERRMSG
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+--file_exists $ckpt/CURRENT
+
+--echo # The cause is gone: the retry must remove the checkpoint.
+--rmdir $ckpt/LOCK
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+--error 1
+--file_exists $ckpt/CURRENT
+
+disconnect con1;
+connection default;
+--source include/wait_until_count_sessions.inc
+--error 0,1
+--force-rmdir $ckpt
+DROP TABLE t1;
