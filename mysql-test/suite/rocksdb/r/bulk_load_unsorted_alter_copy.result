@@ -1,0 +1,27 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+SELECT n, n % 7 FROM seq;
+SET SESSION rocksdb_bulk_load_allow_unsorted = ON;
+SET SESSION rocksdb_bulk_load = ON;
+ALTER TABLE t1 ADD COLUMN b INT NOT NULL DEFAULT 5, ALGORITHM=COPY;
+SET SESSION rocksdb_bulk_load = OFF;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int NOT NULL DEFAULT '5',
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT COUNT(*), SUM(id), SUM(a), SUM(b) FROM t1;
+COUNT(*)	SUM(id)	SUM(a)	SUM(b)
+100	5050	297	500
+SELECT COUNT(*), SUM(id) FROM t1 FORCE INDEX (ka) WHERE a >= 0;
+COUNT(*)	SUM(id)
+100	5050
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

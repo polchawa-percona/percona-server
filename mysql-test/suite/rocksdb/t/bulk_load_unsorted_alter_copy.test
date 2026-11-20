@@ -1,0 +1,28 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+#
+# PS-12170: a COPY ALTER in a session with rocksdb_bulk_load=ON and
+# rocksdb_bulk_load_allow_unsorted=ON loads the primary key of the new table
+# through a key merge. HA_EXTRA_END_ALTER_COPY finishes the load with the new
+# table, and Rdb_transaction::commit_bulk_load() asserts that every merged key
+# is a unique key exactly when it is a unique secondary key, which fails for
+# the primary key (debug builds abort).
+#
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+  SELECT n, n % 7 FROM seq;
+
+SET SESSION rocksdb_bulk_load_allow_unsorted = ON;
+SET SESSION rocksdb_bulk_load = ON;
+ALTER TABLE t1 ADD COLUMN b INT NOT NULL DEFAULT 5, ALGORITHM=COPY;
+SET SESSION rocksdb_bulk_load = OFF;
+
+SHOW CREATE TABLE t1;
+SELECT COUNT(*), SUM(id), SUM(a), SUM(b) FROM t1;
+SELECT COUNT(*), SUM(id) FROM t1 FORCE INDEX (ka) WHERE a >= 0;
+CHECK TABLE t1;
+
+DROP TABLE t1;
