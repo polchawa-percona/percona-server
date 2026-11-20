@@ -1,0 +1,22 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, b TEXT NOT NULL,
+KEY kb (b(8))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'B1xxxxxxxxxxxxx'), (4, 4, 'B4B4B4B4B4B4B4'),
+(5, 5, 'B5B5B5B5B5B5'), (11, 11, 'B4B4B4B4B4B4B4B4'),
+(12, 12, 'B5B5B5B5B5B5B5');
+BEGIN;
+UPDATE t1 SET a = a + 100 WHERE pk = 4;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+SELECT pk FROM t1 FORCE INDEX (kb) WHERE b >= 'b4' FOR UPDATE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+UPDATE t1 FORCE INDEX (kb) SET a = a + 1000 WHERE b >= 'b4';
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT pk, a FROM t1 ORDER BY pk;
+pk	a
+1	1
+4	4
+5	5
+11	11
+12	12
+ROLLBACK;
+DROP TABLE t1;

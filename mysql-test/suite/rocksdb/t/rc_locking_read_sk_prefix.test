@@ -1,0 +1,37 @@
+#
+# PS-11905 (prefix-key variant): at READ COMMITTED a locking read or an UPDATE
+# through a prefix secondary key must fail with ER_LOCK_WAIT_TIMEOUT when
+# another transaction holds a matching row, as InnoDB does and as MyRocks does
+# for a full-column key. ha_rocksdb::secondary_index_read() ignores the failed
+# primary-key lookup; the re-packed key of the stale record buffer differs
+# from the index entry, so the row is skipped as "changed" and the statement
+# succeeds without the locked row.
+#
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, b TEXT NOT NULL,
+                 KEY kb (b(8))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 'B1xxxxxxxxxxxxx'), (4, 4, 'B4B4B4B4B4B4B4'),
+  (5, 5, 'B5B5B5B5B5B5'), (11, 11, 'B4B4B4B4B4B4B4B4'),
+  (12, 12, 'B5B5B5B5B5B5B5');
+
+connect (con2,localhost,root,,test);
+BEGIN;
+UPDATE t1 SET a = a + 100 WHERE pk = 4;
+
+connection default;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+--error ER_LOCK_WAIT_TIMEOUT
+SELECT pk FROM t1 FORCE INDEX (kb) WHERE b >= 'b4' FOR UPDATE;
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 FORCE INDEX (kb) SET a = a + 1000 WHERE b >= 'b4';
+SELECT pk, a FROM t1 ORDER BY pk;
+
+connection con2;
+ROLLBACK;
+disconnect con2;
+connection default;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
