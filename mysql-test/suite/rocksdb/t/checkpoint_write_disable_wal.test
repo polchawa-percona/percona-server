@@ -1,0 +1,90 @@
+# PS-12190: MyRocks: a checkpoint taken while a session writes with
+# rocksdb_write_disable_wal=ON is not consistent.
+#
+# rocksdb_create_checkpoint flushes the memtables of the column families one
+# after the other (atomic flush is off) and copies the WAL. Writes made with
+# rocksdb_write_disable_wal=ON are only in the memtables, so a transaction
+# that commits between two of these flushes is in the checkpoint for one
+# column family and missing for the other: on the copy, transactions are
+# split and secondary keys disagree with the primary key (CHECK TABLE says
+# Corrupt).
+#
+# A writer moves money between two tables (primary keys in the default
+# column family, secondary keys in two others) with write_disable_wal=ON
+# while three checkpoints are taken; each checkpoint is then opened by
+# restarting the server on it. The binary log is off, so no prepare record
+# is involved.
+# The race is hit on every checkpoint here, but it is still a race.
+#
+# Expected: every checkpoint is a consistent copy: the total is 1000000 and
+# CHECK TABLE reports OK.
+
+--source include/have_rocksdb.inc
+
+SET GLOBAL transaction_isolation = 'READ-COMMITTED';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+CREATE TABLE acc1 (id INT PRIMARY KEY, bal INT,
+                   KEY kb (bal) COMMENT 'cfname=rev:cfs') ENGINE=ROCKSDB;
+CREATE TABLE acc2 (id INT PRIMARY KEY, bal INT,
+                   KEY kb (bal) COMMENT 'cfname=cfs') ENGINE=ROCKSDB;
+CREATE TABLE ctl (stop_now INT) ENGINE=InnoDB;
+INSERT INTO ctl VALUES (0);
+SET SESSION cte_max_recursion_depth = 1000;
+INSERT INTO acc1 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 500)
+  SELECT n, 1000 FROM s;
+INSERT INTO acc2 SELECT id, 1000 FROM acc1;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+# write_disable_wal needs rocksdb_flush_log_at_trx_commit != 1
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+
+DELIMITER |;
+CREATE PROCEDURE transfers()
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE (SELECT stop_now FROM ctl) = 0 DO
+    START TRANSACTION;
+    UPDATE acc1 SET bal = bal - 1 WHERE id = 1 + (i * 7) % 500;
+    UPDATE acc2 SET bal = bal + 1 WHERE id = 1 + (i * 13) % 500;
+    COMMIT;
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+
+connect (writer,localhost,root,,test);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_write_disable_wal = ON;
+--send CALL transfers()
+
+connection default;
+--let $wait_condition = SELECT SUM(bal) > 500100 FROM acc2
+--source include/wait_condition.inc
+--let $i = 1
+while ($i <= 3) {
+  --disable_query_log
+  --eval SET GLOBAL rocksdb_create_checkpoint = '$MYSQLTEST_VARDIR/tmp/ckpt_wdw_$i'
+  --enable_query_log
+  --inc $i
+}
+UPDATE ctl SET stop_now = 1;
+connection writer;
+--reap
+disconnect writer;
+connection default;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+
+--let $datadir = `SELECT @@datadir`
+--let $i = 1
+while ($i <= 3) {
+  --echo # Checkpoint $i
+  --source include/shutdown_mysqld.inc
+  --exec rm -rf $datadir/.rocksdb
+  --exec mv $MYSQLTEST_VARDIR/tmp/ckpt_wdw_$i $datadir/.rocksdb
+  --source include/start_mysqld.inc
+  SELECT (SELECT SUM(bal) FROM acc1) + (SELECT SUM(bal) FROM acc2) AS total;
+  CHECK TABLE acc1, acc2;
+  --inc $i
+}
+
+DROP PROCEDURE transfers;
+DROP TABLE acc1, acc2, ctl;
