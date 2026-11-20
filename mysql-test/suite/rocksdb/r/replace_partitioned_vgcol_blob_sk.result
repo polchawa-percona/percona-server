@@ -1,0 +1,33 @@
+CREATE TABLE t1 (
+pk INT NOT NULL,
+i1 INT,
+c1 CHAR(10),
+g1 BLOB GENERATED ALWAYS AS (CONCAT(pk, c1, i1)) VIRTUAL,
+PRIMARY KEY (pk),
+KEY k1 (i1, g1(8))
+) ENGINE=ROCKSDB PARTITION BY HASH (pk) PARTITIONS 2;
+INSERT INTO t1 (pk, i1, c1) VALUES (1, 10, 'aaaa'), (2, 20, 'bbbb'), (3, 30, 'cccc');
+# Replace an existing row: g1 changes from '1aaaa10' to '1zzzz11'
+REPLACE INTO t1 (pk, i1, c1) VALUES (1, 11, 'zzzz');
+# The secondary key must hold the new value of g1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT pk, i1, g1 FROM t1 FORCE INDEX (k1) WHERE i1 = 11 AND g1 LIKE '1zzzz%';
+pk	i1	g1
+1	11	1zzzz11
+SELECT pk, i1, g1 FROM t1 IGNORE INDEX (k1) WHERE i1 = 11 AND g1 LIKE '1zzzz%';
+pk	i1	g1
+1	11	1zzzz11
+# Deleting the row must also delete its secondary key entry
+DELETE FROM t1 WHERE pk = 1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+2
+SELECT COUNT(*) FROM t1 FORCE INDEX (k1);
+COUNT(*)
+2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

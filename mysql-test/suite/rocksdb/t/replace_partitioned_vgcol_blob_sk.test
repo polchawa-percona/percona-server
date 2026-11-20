@@ -1,0 +1,35 @@
+# PS-12195: REPLACE of an existing row in a partitioned MyRocks table writes
+# the secondary key entry of an indexed VIRTUAL BLOB generated column with the
+# column's old value. Index lookups by the new value then miss the row, and a
+# later DELETE leaves an orphan secondary key entry.
+# Found by pstress (campaign pstress, run myrocks-8.4-v2, seed 9013).
+# Expected result recorded from InnoDB.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (
+  pk INT NOT NULL,
+  i1 INT,
+  c1 CHAR(10),
+  g1 BLOB GENERATED ALWAYS AS (CONCAT(pk, c1, i1)) VIRTUAL,
+  PRIMARY KEY (pk),
+  KEY k1 (i1, g1(8))
+) ENGINE=ROCKSDB PARTITION BY HASH (pk) PARTITIONS 2;
+
+INSERT INTO t1 (pk, i1, c1) VALUES (1, 10, 'aaaa'), (2, 20, 'bbbb'), (3, 30, 'cccc');
+
+--echo # Replace an existing row: g1 changes from '1aaaa10' to '1zzzz11'
+REPLACE INTO t1 (pk, i1, c1) VALUES (1, 11, 'zzzz');
+
+--echo # The secondary key must hold the new value of g1
+CHECK TABLE t1;
+SELECT pk, i1, g1 FROM t1 FORCE INDEX (k1) WHERE i1 = 11 AND g1 LIKE '1zzzz%';
+SELECT pk, i1, g1 FROM t1 IGNORE INDEX (k1) WHERE i1 = 11 AND g1 LIKE '1zzzz%';
+
+--echo # Deleting the row must also delete its secondary key entry
+DELETE FROM t1 WHERE pk = 1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (k1);
+CHECK TABLE t1;
+
+DROP TABLE t1;
