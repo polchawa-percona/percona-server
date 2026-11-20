@@ -1,0 +1,40 @@
+--source include/have_rocksdb.inc
+--source include/have_binlog_format_row.inc
+
+#
+# PS-12174: with rocksdb_read_free_rpl=PK_SK the replica applies an UPDATE
+# rows event without reading the row, and takes the old row from the before
+# image. The before image and the after image of a BLOB/TEXT column are
+# unpacked into the same buffer, so the old value of the column is lost and a
+# secondary key on a prefix of the column keeps the entry of the old value
+# and gets no entry for the new one.
+#
+
+--source include/rpl/init_source_replica.inc
+--source include/rpl/connection_replica.inc
+--source include/rpl/stop_replica.inc
+SET @saved_read_free_rpl = @@GLOBAL.rocksdb_read_free_rpl;
+SET GLOBAL rocksdb_read_free_rpl = PK_SK;
+--source include/rpl/start_replica.inc
+
+--source include/rpl/connection_source.inc
+CREATE TABLE t1 (id INT PRIMARY KEY, c TEXT, KEY kc (c(10))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'old value'), (2, 'other');
+UPDATE t1 SET c = 'new value' WHERE id = 1;
+SELECT id FROM t1 FORCE INDEX (kc) WHERE c = 'new value';
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c > '';
+--source include/rpl/sync_to_replica.inc
+
+--echo # The replica gives the same results as the source
+SELECT id FROM t1 FORCE INDEX (kc) WHERE c = 'new value';
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c > '';
+SELECT id, c FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+CHECK TABLE t1;
+
+--source include/rpl/connection_source.inc
+DROP TABLE t1;
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/stop_replica.inc
+SET GLOBAL rocksdb_read_free_rpl = @saved_read_free_rpl;
+--source include/rpl/start_replica.inc
+--source include/rpl/deinit.inc

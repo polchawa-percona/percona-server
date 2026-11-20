@@ -1,0 +1,42 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+[connection slave]
+include/rpl/stop_replica.inc
+SET @saved_read_free_rpl = @@GLOBAL.rocksdb_read_free_rpl;
+SET GLOBAL rocksdb_read_free_rpl = PK_SK;
+include/rpl/start_replica.inc
+[connection master]
+CREATE TABLE t1 (id INT PRIMARY KEY, c TEXT, KEY kc (c(10))) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'old value'), (2, 'other');
+UPDATE t1 SET c = 'new value' WHERE id = 1;
+SELECT id FROM t1 FORCE INDEX (kc) WHERE c = 'new value';
+id
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c > '';
+COUNT(*)
+2
+include/rpl/sync_to_replica.inc
+# The replica gives the same results as the source
+SELECT id FROM t1 FORCE INDEX (kc) WHERE c = 'new value';
+id
+1
+SELECT COUNT(*) FROM t1 FORCE INDEX (kc) WHERE c > '';
+COUNT(*)
+2
+SELECT id, c FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+id	c
+1	new value
+2	other
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+[connection master]
+DROP TABLE t1;
+include/rpl/sync_to_replica.inc
+include/rpl/stop_replica.inc
+SET GLOBAL rocksdb_read_free_rpl = @saved_read_free_rpl;
+include/rpl/start_replica.inc
+include/rpl/deinit.inc
