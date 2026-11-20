@@ -1,0 +1,45 @@
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+# Durable settings.
+SELECT @@rocksdb_flush_log_at_trx_commit, @@sync_binlog,
+@@innodb_flush_log_at_trx_commit;
+@@rocksdb_flush_log_at_trx_commit	@@sync_binlog	@@innodb_flush_log_at_trx_commit
+1	1	1
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t3 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1);
+# An XA transaction on MyRocks and InnoDB, to be committed.
+XA START 'xc';
+INSERT INTO t1 VALUES (1);
+INSERT INTO t2 VALUES (1);
+XA END 'xc';
+XA PREPARE 'xc';
+# An XA transaction on MyRocks, to be rolled back.
+XA START 'xr';
+DELETE FROM t3 WHERE a = 1;
+INSERT INTO t3 VALUES (2);
+XA END 'xr';
+XA PREPARE 'xr';
+# Finish both without writing to the binary log.
+SET SESSION sql_log_bin = 0;
+XA COMMIT 'xc';
+XA ROLLBACK 'xr';
+SET SESSION sql_log_bin = 1;
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+# Kill and restart
+# Both completions were acknowledged: nothing is prepared, t1 has the
+# committed row as t2 has, and t3 has its old row.
+XA RECOVER;
+formatID	gtrid_length	bqual_length	data
+SELECT * FROM t1;
+a
+1
+SELECT * FROM t2;
+a
+1
+SELECT * FROM t3;
+a
+1
+# Cleanup
+DROP TABLE t1, t2, t3;

@@ -1,0 +1,67 @@
+#
+# PS-12172: XA COMMIT and XA ROLLBACK of a prepared MyRocks XA transaction
+# are not durable when the binary log does not record them.
+#
+# With the binary log enabled, XA PREPARE runs in the binary log group
+# commit, which prepares the MyRocks transaction without syncing it
+# (HA_IGNORE_DURABILITY) and flushes the engine log itself. The detached
+# transaction keeps that write option. If the session then finishes it with
+# sql_log_bin=0, nothing is written to the binary log, and MyRocks commits
+# or rolls back the transaction by XID without making the completion
+# durable: with manual_wal_flush it stays in the RocksDB WAL buffer. A crash
+# then brings back an acknowledged XA COMMIT or XA ROLLBACK as a prepared
+# transaction, even with rocksdb_flush_log_at_trx_commit=1 and
+# sync_binlog=1. The InnoDB part of the same XA transaction stays committed.
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+CALL mtr.add_suppression("Found [0-9]+ prepared XA transactions");
+
+--echo # Durable settings.
+SELECT @@rocksdb_flush_log_at_trx_commit, @@sync_binlog,
+       @@innodb_flush_log_at_trx_commit;
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t3 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1);
+
+--echo # An XA transaction on MyRocks and InnoDB, to be committed.
+XA START 'xc';
+INSERT INTO t1 VALUES (1);
+INSERT INTO t2 VALUES (1);
+XA END 'xc';
+XA PREPARE 'xc';
+
+--echo # An XA transaction on MyRocks, to be rolled back.
+XA START 'xr';
+DELETE FROM t3 WHERE a = 1;
+INSERT INTO t3 VALUES (2);
+XA END 'xr';
+XA PREPARE 'xr';
+
+--echo # Finish both without writing to the binary log.
+SET SESSION sql_log_bin = 0;
+XA COMMIT 'xc';
+XA ROLLBACK 'xr';
+SET SESSION sql_log_bin = 1;
+XA RECOVER;
+
+--source include/kill_and_restart_mysqld.inc
+
+--echo # Both completions were acknowledged: nothing is prepared, t1 has the
+--echo # committed row as t2 has, and t3 has its old row.
+XA RECOVER;
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+
+--echo # Cleanup
+--disable_query_log
+--error 0,ER_XAER_NOTA
+XA ROLLBACK 'xc';
+--error 0,ER_XAER_NOTA
+XA ROLLBACK 'xr';
+--enable_query_log
+DROP TABLE t1, t2, t3;
