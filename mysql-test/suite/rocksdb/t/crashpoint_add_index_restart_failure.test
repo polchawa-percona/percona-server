@@ -1,0 +1,63 @@
+#
+# PS-NNNNN: after a crash in INPLACE ADD INDEX between the MyRocks commit of
+# the new table definition and the removal of the index's "create ongoing"
+# marker, startup rolls the new index back (rollback_ongoing_index_creation():
+# "Removing incomplete create index") although the committed MyRocks table
+# definition uses it. The drop-index thread then removes the index's data and
+# its index information, and every later start fails in MyRocks:
+# "Could not get index information for Index Number (0,N), table test.t",
+# "Failed to initialize DDL manager" (in a debug build the cleanup of the
+# failed initialization then also hits the RocksDB assertion `last_ref` in
+# ~ColumnFamilySet). MyRocks cannot be loaded any more, also not with
+# rocksdb_validate_tables=2.
+#
+# The crash is made by the crash-point hook (PS-12008):
+# rocksdb_debug_crash_on_nth_durable_write = 5 aborts the server before the
+# 5th durable write of the ALTER, the dictionary commit of
+# Rdb_dict_manager::finish_indexes_operation() (pinned below through the
+# backtrace of the abort, so that the test cannot silently move to another
+# write).
+#
+# Expected: the second restart succeeds with MyRocks loaded, and the table is
+# readable with all its rows (with or without the new index).
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Attempting backtrace");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Table 'test.t' definition differs between MyRocks");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Start the server with");
+--enable_query_log
+
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+
+--echo # Crash before the dictionary commit of finish_indexes_operation().
+--let $hook0 = `SELECT ROUND((LENGTH(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err')) - LENGTH(REPLACE(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err'), 'crash-point hook fired at dict_commit', ''))) / LENGTH('crash-point hook fired at dict_commit'))`
+--let $fin0 = `SELECT ROUND((LENGTH(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err')) - LENGTH(REPLACE(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err'), 'finish_indexes_operation', ''))) / LENGTH('finish_indexes_operation'))`
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 5;
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE;
+--source include/wait_until_disconnected.inc
+--source include/start_mysqld.inc
+
+--let $hook1 = `SELECT ROUND((LENGTH(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err')) - LENGTH(REPLACE(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err'), 'crash-point hook fired at dict_commit', ''))) / LENGTH('crash-point hook fired at dict_commit'))`
+--let $fin1 = `SELECT ROUND((LENGTH(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err')) - LENGTH(REPLACE(LOAD_FILE('$MYSQLTEST_VARDIR/log/mysqld.1.err'), 'finish_indexes_operation', ''))) / LENGTH('finish_indexes_operation'))`
+--let $hook_ok = `SELECT $hook1 - $hook0 = 1`
+--let $fin_ok = `SELECT $fin1 > $fin0`
+--echo # The hook crashed the ALTER at a dictionary commit: $hook_ok
+--echo # The crash was in finish_indexes_operation(): $fin_ok
+
+--echo # Let the drop-index thread finish its queue, then restart again.
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING'
+--let $wait_timeout = 180
+--source include/wait_condition.inc
+--source include/restart_mysqld.inc
+
+SELECT COUNT(*) AS rocksdb_loaded FROM information_schema.engines
+  WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT');
+SELECT * FROM t FORCE INDEX (PRIMARY) ORDER BY pk;
+
+DROP TABLE t;

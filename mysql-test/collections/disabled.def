@@ -174,3 +174,4 @@ group_replication.gr_xa_commit_failure_before_gtid_externalization @windows : BU
 group_replication.gr_xa_commit_one_phase_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
+rocksdb.crashpoint_add_index_restart_failure : BUG#0 PS-NNNNN no MyRocks init
