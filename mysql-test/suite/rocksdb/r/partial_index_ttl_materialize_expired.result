@@ -1,0 +1,47 @@
+CREATE TABLE t (i INT, j INT, k INT, ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (i, j),
+KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=1000;ttl_col=ts;';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# con1: first snapshot
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE i = 2;
+COUNT(*)
+0
+SELECT UNIX_TIMESTAMP() INTO @t1;
+# con1: all 8 rows are visible
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE i = 2;
+COUNT(*)
+8
+# Wait until rows 7 and 8 are expired for new transactions
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY j;
+j
+1
+2
+3
+4
+5
+6
+# con1: both reads must return rows 1-8
+SELECT j FROM t FORCE INDEX (PRIMARY) WHERE i = 2 ORDER BY j;
+j
+1
+2
+3
+4
+5
+6
+7
+8
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY j;
+j
+1
+2
+3
+4
+5
+6
+7
+8
+COMMIT;
+DROP TABLE t;
