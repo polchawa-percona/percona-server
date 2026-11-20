@@ -1,0 +1,44 @@
+# PS-12192: in a REPEATABLE READ transaction, REPLACE that conflicts on a
+# unique secondary key with a row committed after the transaction's snapshot
+# fails with ER_KEY_NOT_FOUND ("Can't find record") instead of the snapshot
+# conflict error (ER_LOCK_DEADLOCK) that INSERT ... ON DUPLICATE KEY UPDATE
+# and a REPLACE conflicting on the primary key return in the same situation.
+#
+# The uniqueness check finds the committed duplicate; the server then reads it
+# through the unique key at the transaction's snapshot, where it does not exist.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (id INT PRIMARY KEY, b INT, c INT, UNIQUE KEY ub (b))
+  ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,10,1);
+
+--connect (con1,localhost,root,,)
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+
+--echo # INSERT ... ON DUPLICATE KEY UPDATE: snapshot conflict
+BEGIN;
+SELECT * FROM t;
+--connection default
+INSERT INTO t VALUES (6,50,6);
+--connection con1
+--error ER_LOCK_DEADLOCK
+INSERT INTO t VALUES (9,50,9) ON DUPLICATE KEY UPDATE c = 100;
+ROLLBACK;
+
+--echo # REPLACE: the same conflict
+BEGIN;
+SELECT * FROM t;
+--connection default
+INSERT INTO t VALUES (7,70,7);
+--connection con1
+--error ER_LOCK_DEADLOCK
+REPLACE INTO t VALUES (11,70,11);
+ROLLBACK;
+
+SELECT * FROM t;
+--disconnect con1
+--connection default
+--source include/wait_until_count_sessions.inc
+DROP TABLE t;
