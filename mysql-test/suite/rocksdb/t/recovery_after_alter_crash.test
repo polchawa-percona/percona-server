@@ -18,8 +18,10 @@ CREATE TABLE t (
 --echo # 3. Insert sample data into the table
 INSERT INTO t VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
 
---echo # 4. Set debug sync to simulate crash after RocksDB commits an ALTER operation
-SET SESSION debug='+d,crash_commit_after_prepare';
+--echo # 4. Simulate a crash after the MyRocks dictionary commit, without a
+--echo # pending record (rocksdb_skip_pending_alter), so the rebuild path is
+--echo # exercised
+SET SESSION debug='+d,crash_commit_after_prepare,rocksdb_skip_pending_alter';
 
 --echo # 5. Expect the server to crash when committing the ALTER statement
 --source include/expect_crash.inc
