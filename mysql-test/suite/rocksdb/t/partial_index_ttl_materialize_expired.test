@@ -1,0 +1,54 @@
+# PS-12179: materializing a partial-index group of a TTL table skips the rows
+# that are expired for the materializing transaction, although they are still
+# in the primary key. A READ COMMITTED transaction whose first snapshot (which
+# fixes its TTL read filter time) is older than the materialization still sees
+# such rows through the primary key, but not through the partial index.
+# Expected: the partial index returns the same rows as the primary key.
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (i INT, j INT, k INT, ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (i, j),
+  KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5'
+) ENGINE=ROCKSDB COMMENT='ttl_duration=1000;ttl_col=ts;';
+
+--connect (con1,localhost,root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+--echo # con1: first snapshot
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE i = 2;
+# The snapshot was taken before this statement started, so its time is not
+# later than @t1.
+SELECT UNIX_TIMESTAMP() INTO @t1;
+--let $t1= `SELECT @t1`
+
+--connection default
+# Six live rows and two rows that expire one second after @t1: alive for con1,
+# expired for transactions that start later.
+--disable_query_log
+eval INSERT INTO t VALUES (2,1,1,UNIX_TIMESTAMP()), (2,2,2,UNIX_TIMESTAMP()),
+  (2,3,3,UNIX_TIMESTAMP()), (2,4,4,UNIX_TIMESTAMP()), (2,5,5,UNIX_TIMESTAMP()),
+  (2,6,6,UNIX_TIMESTAMP()), (2,7,7,$t1 + 1 - 1000), (2,8,8,$t1 + 1 - 1000);
+--enable_query_log
+
+--connection con1
+--echo # con1: all 8 rows are visible
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE i = 2;
+
+--connection default
+--echo # Wait until rows 7 and 8 are expired for new transactions
+--let $wait_timeout= 60
+--let $wait_condition= SELECT COUNT(*) = 6 FROM t FORCE INDEX (PRIMARY) WHERE i = 2
+--source include/wait_condition.inc
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY j;
+
+--connection con1
+--echo # con1: both reads must return rows 1-8
+SELECT j FROM t FORCE INDEX (PRIMARY) WHERE i = 2 ORDER BY j;
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY j;
+COMMIT;
+--disconnect con1
+
+--connection default
+DROP TABLE t;
+--source include/wait_until_count_sessions.inc
