@@ -1,0 +1,101 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11744: a statement whose secondary index write exceeds
+# rocksdb_write_batch_max_bytes must fail with the write batch limit error and
+# leave the table unchanged. ha_rocksdb::update_write_sk() ignores the status
+# of the secondary key Put, so the statement succeeds with the primary key row
+# written and the secondary key entry missing, and CHECK TABLE does not notice.
+#
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # Autocommit INSERT: the secondary key entry crosses the limit
+CREATE TABLE t1 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+INSERT INTO t1 VALUES (1, REPEAT('a', 300));
+--error ER_GET_ERRMSG
+INSERT INTO t1 VALUES (2, REPEAT('b', 450));
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (w);
+
+--echo # UPDATE of the indexed column: the new entry crosses the limit
+CREATE TABLE t2 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t2 VALUES (1, 'a'), (2, 'b');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+UPDATE t2 SET w = REPEAT('z', 480) WHERE id = 1;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT id, w FROM t2 FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT COUNT(*) FROM t2 FORCE INDEX (w);
+
+--echo # REPLACE of an existing row with a unique secondary key: the new
+--echo # entry crosses the limit
+CREATE TABLE t5 (id INT PRIMARY KEY, w VARCHAR(700), UNIQUE KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t5 VALUES (1, 'a'), (2, 'b');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+REPLACE INTO t5 VALUES (1, REPEAT('z', 480));
+--error ER_GET_ERRMSG
+INSERT INTO t5 VALUES (2, 'b') ON DUPLICATE KEY UPDATE w = REPEAT('y', 480);
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT id, w FROM t5 FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT id, w FROM t5 FORCE INDEX (w) ORDER BY id;
+
+--echo # Two secondary keys: the second entry crosses the limit after the
+--echo # first one was written, so the statement rollback must remove it
+CREATE TABLE t6 (id INT PRIMARY KEY, a INT, w VARCHAR(700), KEY (a), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t6 VALUES (1, 1, 'a');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+INSERT INTO t6 VALUES (2, 2, REPEAT('b', 450));
+--error 0,ER_GET_ERRMSG
+INSERT IGNORE INTO t6 VALUES (3, 3, REPEAT('c', 450));
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT COUNT(*) FROM t6 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t6 FORCE INDEX (a);
+SELECT COUNT(*) FROM t6 FORCE INDEX (w);
+
+--echo # Multi-statement transaction: no row may lack its secondary key entry
+CREATE TABLE t3 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+BEGIN;
+--disable_query_log
+let $i = 0;
+let $ok = 0;
+let $hit = 0;
+let $stop = 0;
+while (!$stop) {
+  --error 0,ER_GET_ERRMSG
+  eval INSERT INTO t3 VALUES ($i, REPEAT(CHAR(65 + ($i % 26)), 690));
+  if ($mysql_errno) {
+    let $hit = 1;
+    let $stop = 1;
+  }
+  if (!$mysql_errno) {
+    inc $ok;
+  }
+  inc $i;
+  if ($i > 400) {
+    let $stop = 1;
+  }
+}
+--enable_query_log
+COMMIT;
+--echo limit hit: $hit
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+# The statements before the failing one are committed, the failing one is not.
+--disable_query_log
+eval SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) = $ok AND
+            (SELECT COUNT(*) FROM t3 FORCE INDEX (w)) = $ok AS committed_rows_ok;
+--enable_query_log
+
+DROP TABLE t1, t2, t3, t5, t6;
+--source include/wait_until_count_sessions.inc

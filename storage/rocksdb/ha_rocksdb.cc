@@ -4715,6 +4715,8 @@ class Rdb_transaction {
           file_count);
     }
 
+    DEBUG_SYNC(m_thd, "rocksdb.bulk_load_before_ingest");
+
     const rocksdb::Status s = ingest_bulk_load_files(args);
     if (trace_sst_api) {
       // NO_LINT_DEBUG
@@ -14763,9 +14765,16 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
   if (bulk_load_sk && row_info.old_data == nullptr) {
     rc = bulk_load_key(row_info.tx, kd, new_key_slice, new_value_slice, true);
   } else {
-    RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_put_sk",
-                     row_info.tx->get_indexed_write_batch().Put(
-                         kd.get_cf(), new_key_slice, new_value_slice));
+    const auto s =
+        RDB_INJECT_ERROR(Rdb_inject_class::WRITE, "iwb_put_sk",
+                         row_info.tx->get_indexed_write_batch().Put(
+                             kd.get_cf(), new_key_slice, new_value_slice));
+    if (!s.ok()) {
+      // E.g. MemoryLimit when the write batch exceeds
+      // rocksdb_write_batch_max_bytes: the statement must fail rather than
+      // leave the row without its secondary key entry.
+      return row_info.tx->set_status_error(table->in_use, s, kd, m_tbl_def);
+    }
   }
 
   return rc;
@@ -18303,6 +18312,9 @@ int ha_rocksdb::inplace_populate_sk(
         ha_rnd_end();
         DBUG_RETURN(res);
       }
+
+      /* Fires after each primary key row is added to the merge buffer. */
+      DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_scan_row");
     }
 
     if (res != HA_ERR_END_OF_FILE) {
@@ -18313,6 +18325,9 @@ int ha_rocksdb::inplace_populate_sk(
     }
 
     ha_rnd_end();
+
+    /* The scan is done; the merge sort and SST ingestion have not started. */
+    DEBUG_SYNC(ha_thd(), "rocksdb.inplace_populate_sk_before_merge");
 
     // Write this index without completing the bulk-load session, which spans
     // all the indexes and partitions of the ALTER.

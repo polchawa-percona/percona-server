@@ -1,0 +1,110 @@
+#
+# Port of Test#5 of innodb.alter_table_rebuild_missing_record
+# (mysql-test/suite/innodb/t/alter_table_rebuild_missing_record.test) to MyRocks,
+# with the ALTER paused in the middle of the index build.
+# rocksdb.innodb_port_alter_table_rebuild_missing_record pauses the INPLACE build
+# before it starts; this test pauses inside it.
+# Changes from the original:
+#   - ENGINE=InnoDB replaced by ENGINE=ROCKSDB
+#   - InnoDB purge of delete-marked records becomes RocksDB compaction of deleted
+#     versions. INNODB_PURGE_STOP_NOW becomes a consistent snapshot in another
+#     connection; purge becomes releasing that snapshot, a memtable flush and a
+#     manual compaction, run while the ALTER is paused.
+#   - The InnoDB page-cursor case (PCursor::move_to_next_block,
+#     innodb_limit_optimistic_insert_debug) has no MyRocks equivalent. It becomes
+#     a table with deleted ranges, indexed by an INPLACE ADD INDEX paused at each
+#     MyRocks build point: rocksdb.inplace_populate_sk_scan_row (in the primary
+#     key scan, after the first row), rocksdb.inplace_populate_sk_before_merge and
+#     rocksdb.bulk_load_before_ingest. At the ingest point the compaction runs
+#     while the new index's SST files wait to be ingested.
+#   - Rows are also written to another table in the same column family while the
+#     ALTER is paused, so the flush and compaction have new data to process.
+#   - The steps are inlined in a loop instead of an include file.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+connect (con1, localhost, root,,);
+connect (con2, localhost, root,,);
+connection default;
+
+CREATE TABLE t1 (id INT NOT NULL, c INT, PRIMARY KEY(id)) ENGINE=ROCKSDB;
+CREATE TABLE t_other (id INT NOT NULL PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 6000)
+SELECT n, n % 97 FROM v;
+
+--let $i= 1
+while ($i <= 3)
+{
+  if ($i == 1)
+  {
+    --let $point= rocksdb.inplace_populate_sk_scan_row
+    --let $delete_where= id BETWEEN 2 AND 6 OR id BETWEEN 500 AND 1499
+  }
+  if ($i == 2)
+  {
+    --let $point= rocksdb.inplace_populate_sk_before_merge
+    --let $delete_where= id BETWEEN 1500 AND 1899
+  }
+  if ($i == 3)
+  {
+    --let $point= rocksdb.bulk_load_before_ingest
+    --let $delete_where= id BETWEEN 3000 AND 3999
+  }
+  --echo # Online index build paused at $point, deleting $delete_where
+
+  connection con2;
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+  connection default;
+  eval DELETE FROM t1 WHERE $delete_where;
+  --let $before= `SELECT COUNT(*) FROM t1`
+  SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+  connection con1;
+  eval SET DEBUG_SYNC='$point SIGNAL paused WAIT_FOR go';
+  --send ALTER TABLE t1 ADD INDEX k_c (c), ALGORITHM=INPLACE
+
+  connection default;
+  SET DEBUG_SYNC='now WAIT_FOR paused';
+  connection con2;
+  COMMIT;
+  connection default;
+  eval INSERT INTO t_other WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+       SELECT n + $i * 1000, n FROM v;
+  SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  SET DEBUG_SYNC='now SIGNAL go';
+
+  connection con1;
+  --reap
+
+  connection default;
+  SET DEBUG_SYNC='RESET';
+  --let $after= `SELECT COUNT(*) FROM t1`
+  if ($before != $after)
+  {
+    --echo # Records, before rebuild=$before != after rebuild=$after
+    --die Record count mismatch after the index build
+  }
+  --echo # Row count unchanged by the index build: $after
+  CHECK TABLE t1;
+  SELECT
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c))) FROM t1 FORCE INDEX (k_c)) =
+    (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(c))) FROM t1 IGNORE INDEX (k_c))
+    AS k_c_matches_table;
+  SELECT COUNT(*) FROM t1 FORCE INDEX (k_c) WHERE c = 5;
+  SELECT COUNT(*) FROM t1 IGNORE INDEX (k_c) WHERE c = 5;
+  ALTER TABLE t1 DROP INDEX k_c;
+  --inc $i
+}
+
+SELECT COUNT(*), MIN(id), MAX(id), SUM(c) FROM t1;
+SELECT COUNT(*), SUM(c) FROM t_other;
+
+DROP TABLE t1, t_other;
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,15 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Bulk load without SST files for secondary keys and without
+# commit in the middle: the secondary keys go to the write batch
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384, rocksdb_bulk_load_size = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t4 SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_write_batch_max_bytes = 0, rocksdb_bulk_load_size = DEFAULT;
+SELECT (SELECT COUNT(*) FROM t4 FORCE INDEX (PRIMARY)) =
+(SELECT COUNT(*) FROM t4 FORCE INDEX (k)) AS pk_equals_sk;
+pk_equals_sk
+1
+DROP TABLE t4, src;
