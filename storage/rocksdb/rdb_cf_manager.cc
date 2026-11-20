@@ -377,6 +377,8 @@ int Rdb_cf_manager::remove_dropped_cf(Rdb_dict_manager *const dict_manager,
     return HA_EXIT_FAILURE;
   }
 
+  RDB_CRASH_DETAIL("cf " + cf_name + " id " + std::to_string(cf_id));
+  RDB_CRASH_POINT("cf_drop");
   auto status = m_db->DropColumnFamily(cf_handle);
   DBUG_EXECUTE_IF("rocksdb_remove_dropped_cf_options_failure", {
     if (status.ok()) {

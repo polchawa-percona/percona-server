@@ -1780,6 +1780,73 @@ static MYSQL_SYSVAR_STR(
     rocksdb_check_debug_inject_bg_error, rocksdb_update_debug_inject_bg_error,
     "");
 
+/*
+  For testing: rocksdb_debug_crash_bg_durable_write = '<thread> <n>' makes the
+  MyRocks background thread kind <thread> crash before its n-th durable write
+  (the RDB_CRASH_POINT sites), as rocksdb_debug_crash_on_nth_durable_write does
+  for a session. The counter is global; an empty value disables it.
+*/
+static char *rocksdb_debug_crash_bg_durable_write = nullptr;
+static std::string rdb_crash_bg_value;
+static std::atomic<ulong> rdb_crash_bg_thread{0};
+static std::atomic<ulonglong> rdb_crash_bg_nth{0};
+
+/* Returns false if str is not a valid rocksdb_debug_crash_bg_durable_write. */
+static bool rdb_parse_crash_bg(const char *str, ulong *thread, ulonglong *nth) {
+  *thread = 0;
+  *nth = 0;
+  if (str == nullptr || *str == '\0') return true;
+  std::istringstream in(str);
+  std::string thread_name, extra;
+  long long n = 0;
+  if (!(in >> thread_name >> n) || in >> extra || n <= 0) return false;
+  if (!rdb_find_name(inject_bg_thread_names,
+                     array_elements(inject_bg_thread_names), thread_name,
+                     thread) ||
+      *thread == 0)
+    return false;
+  *nth = static_cast<ulonglong>(n);
+  return true;
+}
+
+static int rocksdb_check_debug_crash_bg(
+    THD *const thd, struct SYS_VAR *const var MY_ATTRIBUTE((__unused__)),
+    void *const save, struct st_mysql_value *const value) {
+  char buff[STRING_BUFFER_USUAL_SIZE];
+  int len = sizeof(buff);
+  const char *str = value->val_str(value, buff, &len);
+  ulong thread;
+  ulonglong nth;
+  if (!rdb_parse_crash_bg(str, &thread, &nth)) return 1;
+  if (str != nullptr) str = thd->strmake(str, len);
+  *static_cast<const char **>(save) = str;
+  return 0;
+}
+
+static void rocksdb_update_debug_crash_bg(
+    THD *const thd MY_ATTRIBUTE((__unused__)),
+    struct SYS_VAR *const var MY_ATTRIBUTE((__unused__)), void *const var_ptr,
+    const void *const save) {
+  const char *const str = *static_cast<const char *const *>(save);
+  ulong thread;
+  ulonglong nth;
+  if (!rdb_parse_crash_bg(str, &thread, &nth)) return;
+  rdb_crash_bg_nth = 0;
+  rdb_crash_bg_thread = thread;
+  rdb_crash_bg_nth = nth;
+  rdb_crash_bg_value = str == nullptr ? "" : str;
+  *static_cast<const char **>(var_ptr) = rdb_crash_bg_value.c_str();
+}
+
+static MYSQL_SYSVAR_STR(
+    debug_crash_bg_durable_write, rocksdb_debug_crash_bg_durable_write,
+    PLUGIN_VAR_RQCMDARG,
+    "For testing, debug builds only: '<thread> <n>' makes the MyRocks "
+    "background thread <thread> (DROP_INDEX, BACKGROUND, INDEX_STATS, "
+    "MANUAL_COMPACTION, COMPACTION_FILTER) crash before its n-th durable "
+    "write. Empty disables it.",
+    rocksdb_check_debug_crash_bg, rocksdb_update_debug_crash_bg, "");
+
 static MYSQL_SYSVAR_BOOL(
     create_if_missing,
     *static_cast<bool *>(&rocksdb_db_options->create_if_missing),
@@ -3168,6 +3235,7 @@ static struct SYS_VAR *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(debug_inject_error_status),
     MYSQL_SYSVAR(debug_inject_error_nth),
     MYSQL_SYSVAR(debug_inject_bg_error),
+    MYSQL_SYSVAR(debug_crash_bg_durable_write),
     MYSQL_SYSVAR(rollback_on_timeout),
 
     MYSQL_SYSVAR(enable_insert_with_update_caching),
@@ -5537,9 +5605,15 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     private_ctr_inc(m_write_count);
+#ifndef NDEBUG
+    const uint32_t wup_count_before = wup_batch_count();
+#endif
     const rocksdb::Status s = RDB_INJECT_ERROR(
         Rdb_inject_class::WRITE, "tx_put",
         m_rocksdb_tx->Put(column_family, key, value, assume_tracked));
+#ifndef NDEBUG
+    if (s.ok()) wup_flush_crash_point(wup_count_before);
+#endif
     if (s.ok()) track_xa_write(column_family, key);
     return s;
   }
@@ -5550,9 +5624,15 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     private_ctr_inc(m_write_count);
+#ifndef NDEBUG
+    const uint32_t wup_count_before = wup_batch_count();
+#endif
     const rocksdb::Status s = RDB_INJECT_ERROR(
         Rdb_inject_class::WRITE, "tx_delete",
         m_rocksdb_tx->Delete(column_family, key, assume_tracked));
+#ifndef NDEBUG
+    if (s.ok()) wup_flush_crash_point(wup_count_before);
+#endif
     if (s.ok()) track_xa_write(column_family, key);
     return s;
   }
@@ -5563,12 +5643,38 @@ class Rdb_transaction_impl : public Rdb_transaction {
     assert(!is_ac_nl_ro_rc_transaction());
 
     private_ctr_inc(m_write_count);
+#ifndef NDEBUG
+    const uint32_t wup_count_before = wup_batch_count();
+#endif
     const rocksdb::Status s = RDB_INJECT_ERROR(
         Rdb_inject_class::WRITE, "tx_single_delete",
         m_rocksdb_tx->SingleDelete(column_family, key, assume_tracked));
+#ifndef NDEBUG
+    if (s.ok()) wup_flush_crash_point(wup_count_before);
+#endif
     if (s.ok()) track_xa_write(column_family, key);
     return s;
   }
+
+#ifndef NDEBUG
+  // write_unprepared flushes the transaction's write batch to the database
+  // inside Put/Delete once it exceeds write_batch_flush_threshold. The batch
+  // then holds only the new entry, so a count that did not grow means the
+  // write before this one was such an intermediate (unprepared) write. The
+  // crash point fires after it, i.e. with unprepared data in the WAL.
+  uint32_t wup_batch_count() const {
+    if (rocksdb_write_policy != rocksdb::TxnDBWritePolicy::WRITE_UNPREPARED ||
+        m_rocksdb_tx == nullptr || m_rocksdb_tx->GetWriteBatch() == nullptr)
+      return 0;
+    return m_rocksdb_tx->GetWriteBatch()->GetWriteBatch()->Count();
+  }
+  void wup_flush_crash_point(uint32_t count_before) const {
+    if (count_before == 0 || wup_batch_count() > count_before) return;
+    RDB_CRASH_DETAIL("after flushing " + std::to_string(count_before) +
+                     " unprepared entries");
+    RDB_CRASH_POINT("wup_batch_flush");
+  }
+#endif
 
   bool has_modifications() const override {
     return m_rocksdb_tx->GetWriteBatch() &&
@@ -15055,6 +15161,7 @@ static rocksdb::Status delete_range(rocksdb::ColumnFamilyHandle *cfh,
   rocksdb::WriteBatch batch;
   auto status = batch.DeleteRange(cfh, range.start, range.limit);
   if (!status.ok()) return status;
+  RDB_CRASH_POINT("drop_index_delete_range");
 
   // Followed the same policy as we do in Rdb_dict_manager::commit.
   rocksdb::TransactionDBWriteOptimizations optimize;
@@ -15190,6 +15297,9 @@ void Rdb_drop_index_thread::run() {
           rocksdb::Range range = get_range(
               d.index_id, buf, is_reverse_cf ? 1 : 0, is_reverse_cf ? 0 : 1);
 
+          RDB_CRASH_DETAIL("index (" + std::to_string(d.cf_id) + "," +
+                           std::to_string(d.index_id) + ")");
+          RDB_CRASH_POINT("drop_index_delete_files");
           rocksdb::Status status = RDB_INJECT_ERROR(
               Rdb_inject_class::COMPACT, "drop_index_delete_files",
               DeleteFilesInRange(rdb->GetBaseDB(), cfh.get(), &range.start,
@@ -15203,6 +15313,8 @@ void Rdb_drop_index_thread::run() {
             rdb_handle_io_error(status, RDB_IO_ERROR_BG_THREAD);
           }
 
+          if (!rocksdb_enable_delete_range_for_drop_index)
+            RDB_CRASH_POINT("drop_index_compact_range");
           status = RDB_INJECT_ERROR(
               Rdb_inject_class::COMPACT, "drop_index_compact_range",
               rocksdb_enable_delete_range_for_drop_index
@@ -15233,6 +15345,8 @@ void Rdb_drop_index_thread::run() {
         }
 
         if (!finished.empty()) {
+          RDB_CRASH_DETAIL("finish drop of " + std::to_string(finished.size()) +
+                           " index(es)");
           local_dict_manager->finish_drop_indexes(finished);
         }
       }
@@ -18537,6 +18651,7 @@ void Rdb_manual_compaction_thread::run() {
     // CompactRange may take a very long time. On clean shutdown,
     // it is cancelled by CancelAllBackgroundWork, then status is
     // set to shutdownInProgress.
+    RDB_CRASH_POINT("manual_compaction");
     const rocksdb::Status s = RDB_INJECT_ERROR(
         Rdb_inject_class::COMPACT, "manual_compaction",
         rdb->CompactRange(mcr.option, mcr.cf.get(), mcr.start, mcr.limit));
@@ -19003,18 +19118,37 @@ Rdb_crash_detail::Rdb_crash_detail(const std::string &detail) {
 Rdb_crash_detail::~Rdb_crash_detail() { rdb_crash_detail_text.clear(); }
 
 bool rdb_crash_point(const char *site) {
-  THD *const thd = current_thd;
-  if (thd == nullptr) return false;
-  auto &nth = THDVAR(thd, debug_crash_on_nth_durable_write);
-  if (nth == 0) return false;
-  if (--nth != 0) return false;
+  if (rdb_bg_thread_kind != Rdb_bg_thread::NONE) {
+    // Background threads count against rocksdb_debug_crash_bg_durable_write.
+    if (static_cast<Rdb_bg_thread>(rdb_crash_bg_thread.load()) !=
+        rdb_bg_thread_kind)
+      return false;
+    ulonglong n = rdb_crash_bg_nth.load();
+    do {
+      if (n == 0) return false;
+    } while (!rdb_crash_bg_nth.compare_exchange_weak(n, n - 1));
+    if (n != 1) return false;
+    LogPluginErrMsg(
+        INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+        "MyRocks: crash-point hook fired at %s%s%s%s in background thread %s "
+        "(nth durable write counter reached 0)",
+        site, rdb_crash_detail_text.empty() ? "" : " [",
+        rdb_crash_detail_text.c_str(), rdb_crash_detail_text.empty() ? "" : "]",
+        inject_bg_thread_names[static_cast<ulong>(rdb_bg_thread_kind)]);
+  } else {
+    THD *const thd = current_thd;
+    if (thd == nullptr) return false;
+    auto &nth = THDVAR(thd, debug_crash_on_nth_durable_write);
+    if (nth == 0) return false;
+    if (--nth != 0) return false;
 
-  LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
-                  "MyRocks: crash-point hook fired at %s%s%s%s (nth durable "
-                  "write counter reached 0)",
-                  site, rdb_crash_detail_text.empty() ? "" : " [",
-                  rdb_crash_detail_text.c_str(),
-                  rdb_crash_detail_text.empty() ? "" : "]");
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: crash-point hook fired at %s%s%s%s (nth durable "
+                    "write counter reached 0)",
+                    site, rdb_crash_detail_text.empty() ? "" : " [",
+                    rdb_crash_detail_text.c_str(),
+                    rdb_crash_detail_text.empty() ? "" : "]");
+  }
   if (rdb_unsynced_loss_fs) {
     // Power loss: also forget files whose directory entries were not
     // synced, then die at once. Unsynced appends are lost with the process
