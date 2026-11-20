@@ -1,0 +1,82 @@
+CREATE TABLE t_def (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_cf (pk INT, a INT, b INT,
+PRIMARY KEY (pk) COMMENT 'cfname=cf_skiptx',
+KEY ka (a) COMMENT 'cfname=cf_skiptx') ENGINE=ROCKSDB;
+CREATE TABLE t_rev (pk INT, a INT, b INT,
+PRIMARY KEY (pk) COMMENT 'cfname=rev:cf_skiptx_rev') ENGINE=ROCKSDB;
+SELECT TABLE_NAME, INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' ORDER BY TABLE_NAME, INDEX_NAME;
+TABLE_NAME	INDEX_NAME	CF
+t_cf	ka	cf_skiptx
+t_cf	PRIMARY	cf_skiptx
+t_def	ka	default
+t_def	PRIMARY	default
+t_rev	PRIMARY	rev:cf_skiptx_rev
+INSERT INTO t_def VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+INSERT INTO t_cf VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+INSERT INTO t_rev VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+CREATE TABLE t_copy (pk INT PRIMARY KEY, a INT, b INT) ENGINE=InnoDB;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Full scans and an index range scan
+SELECT 't_def', COUNT(*) FROM t_def UNION ALL
+SELECT 't_cf', COUNT(*) FROM t_cf UNION ALL
+SELECT 't_rev', COUNT(*) FROM t_rev;
+t_def	COUNT(*)
+t_def	4
+t_cf	4
+t_rev	4
+SELECT pk FROM t_cf FORCE INDEX (ka) WHERE a >= 2 ORDER BY a;
+pk
+2
+3
+4
+SELECT pk FROM t_rev WHERE pk BETWEEN 2 AND 3 ORDER BY pk;
+pk
+2
+3
+# Range UPDATE / DELETE change every matching row
+UPDATE t_cf SET b = 1 WHERE pk BETWEEN 1 AND 3;
+SELECT ROW_COUNT();
+ROW_COUNT()
+3
+UPDATE t_cf SET b = 2 WHERE a >= 2;
+SELECT ROW_COUNT();
+ROW_COUNT()
+3
+DELETE FROM t_cf WHERE pk > 3;
+SELECT ROW_COUNT();
+ROW_COUNT()
+1
+UPDATE t_rev SET b = 5 WHERE pk < 3;
+SELECT ROW_COUNT();
+ROW_COUNT()
+2
+INSERT INTO t_copy SELECT * FROM t_cf;
+SELECT ROW_COUNT();
+ROW_COUNT()
+3
+# COPY ALTER keeps every row
+ALTER TABLE t_rev MODIFY b BIGINT, ALGORITHM=COPY;
+SET SESSION rocksdb_master_skip_tx_api = OFF;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT * FROM t_cf ORDER BY pk;
+pk	a	b
+1	1	1
+2	2	2
+3	3	2
+SELECT * FROM t_rev ORDER BY pk;
+pk	a	b
+1	1	5
+2	2	5
+3	3	0
+4	4	0
+SELECT * FROM t_copy ORDER BY pk;
+pk	a	b
+1	1	1
+2	2	2
+3	3	2
+CHECK TABLE t_cf, t_rev;
+Table	Op	Msg_type	Msg_text
+test.t_cf	check	status	OK
+test.t_rev	check	status	OK
+DROP TABLE t_def, t_cf, t_rev, t_copy;
