@@ -1,0 +1,42 @@
+# PS-12185: MyRocks: a transaction committed with rocksdb_write_disable_wal=ON
+# comes back as prepared at recovery.
+#
+# A transaction committed with rocksdb_write_disable_wal=ON is still
+# prepared through the WAL (RocksDB always logs the prepare record), but its
+# commit marker is not logged. After a process crash, WAL recovery brings it
+# back as a prepared transaction and binary log recovery commits it again,
+# on top of the later transactions: a later, durably committed update of the
+# same row is overwritten.
+#
+# Expected: after the crash the row keeps the value of the last durably
+# committed transaction (rocksdb_flush_log_at_trx_commit=1, sync_binlog=1).
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+SET GLOBAL sync_binlog = 1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 0), (2, 0);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # T1: committed without the WAL (needs flush_log_at_trx_commit != 1)
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_write_disable_wal = 1;
+UPDATE t1 SET b = 1 WHERE a = 1;
+SET SESSION rocksdb_write_disable_wal = 0;
+
+--echo # T2, T3: committed durably after T1
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+UPDATE t1 SET b = 2 WHERE a = 1;
+INSERT INTO t1 VALUES (3, 3);
+SELECT * FROM t1 ORDER BY a;
+
+--source include/kill_mysqld.inc
+--source include/start_mysqld.inc
+# The restart resets the global settings changed above.
+
+--echo # T2 must survive: a = 1 has b = 2
+SELECT * FROM t1 ORDER BY a;
+
+DROP TABLE t1;

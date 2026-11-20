@@ -1,0 +1,38 @@
+# PS-12185: MyRocks: a transaction committed with rocksdb_write_disable_wal=ON
+# comes back as prepared at recovery.
+#
+# A transaction committed with rocksdb_write_disable_wal=ON leaves its
+# prepare record in the WAL without a commit marker. A prepared XA
+# transaction keeps that WAL file for recovery, so after a clean shutdown the
+# next start finds the committed transaction as prepared again. The binary
+# log was closed cleanly and cannot resolve it: the server refuses to start
+# ("Found 1 prepared transactions!"). A checkpoint taken while the XA
+# transaction is prepared cannot be opened for the same reason.
+#
+# Expected: the server restarts, the XA transaction is still prepared and the
+# rows of the committed transaction are there.
+
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+call mtr.add_suppression("Found 1 prepared XA transactions");
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_write_disable_wal = 1;
+INSERT INTO t1 VALUES (3, 3);
+SET SESSION rocksdb_write_disable_wal = 0;
+
+XA START 'x1';
+INSERT INTO t1 VALUES (10, 10);
+XA END 'x1';
+XA PREPARE 'x1';
+
+--echo # clean shutdown and start
+--source include/restart_mysqld.inc
+XA RECOVER;
+XA ROLLBACK 'x1';
+SELECT * FROM t1 ORDER BY a;
+DROP TABLE t1;

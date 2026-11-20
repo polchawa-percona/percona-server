@@ -1,0 +1,27 @@
+SET GLOBAL sync_binlog = 1;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 0), (2, 0);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# T1: committed without the WAL (needs flush_log_at_trx_commit != 1)
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_write_disable_wal = 1;
+UPDATE t1 SET b = 1 WHERE a = 1;
+SET SESSION rocksdb_write_disable_wal = 0;
+# T2, T3: committed durably after T1
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+UPDATE t1 SET b = 2 WHERE a = 1;
+INSERT INTO t1 VALUES (3, 3);
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	2
+2	0
+3	3
+# Kill the server
+# restart
+# T2 must survive: a = 1 has b = 2
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	2
+2	0
+3	3
+DROP TABLE t1;
