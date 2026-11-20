@@ -1,0 +1,23 @@
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+# Crash after the MyRocks commit of ADD UNIQUE INDEX, before the DD commit.
+SET SESSION debug = '+d,crash_commit_after_prepare';
+ALTER TABLE t ADD UNIQUE INDEX ua (a), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_validate_tables=2
+# The first open rebuilds the definition without ua.
+SELECT * FROM t FORCE INDEX (kb) WHERE b = 'x2';
+pk	a	b
+2	20	x2
+include/assert_grep.inc [The MyRocks table definition was reconstructed]
+SELECT * FROM t FORCE INDEX (kb) ORDER BY b;
+pk	a	b
+1	10	x1
+2	20	x2
+3	30	x3
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+# kb keeps its index number: 1
+DROP TABLE t;
+# restart
