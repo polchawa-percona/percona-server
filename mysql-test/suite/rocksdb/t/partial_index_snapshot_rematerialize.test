@@ -1,0 +1,48 @@
+# PS-12191: a transaction started WITH CONSISTENT SNAPSHOT materializes a
+# partial-index group again when another session materialized it after the
+# snapshot. The group's secondary-key entries are then written twice; MyRocks
+# removes them with SingleDelete, which cancels only the newest write, so after
+# a memtable flush later UPDATEs and DELETEs leave stale entries behind.
+#
+# Rdb_iterator_partial::materialize_prefix() re-checks the sentinel at the
+# transaction's snapshot, where it is not visible. Expected: the partial index
+# returns the same rows as the primary key, CHECK TABLE OK.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (i INT, j INT, k INT, PRIMARY KEY (i, j),
+  KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5')
+  ENGINE=ROCKSDB;
+INSERT INTO t VALUES (3,1,1),(3,2,2),(3,3,3),(3,4,4),(3,5,5),(3,6,6);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--connect (con1,localhost,root,,)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+--echo # the snapshot is taken by the statement above; read through the primary key so
+--echo # that this transaction does not materialize the group itself
+SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY);
+
+--connection default
+--echo # group i = 3 has more rows than the threshold: this read materializes it
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 3 ORDER BY k;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--connection con1
+--echo # the sentinel is newer than con1's snapshot
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 3 ORDER BY k;
+COMMIT;
+--disconnect con1
+
+--connection default
+--source include/wait_until_count_sessions.inc
+UPDATE t SET k = k + 10 WHERE i = 3 AND j IN (1, 2);
+DELETE FROM t WHERE i = 3 AND j = 3;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+SELECT i, j, k FROM t FORCE INDEX (PRIMARY) ORDER BY k, j;
+--echo # same rows through the partial index
+SELECT i, j, k FROM t FORCE INDEX (ik1) WHERE i = 3 ORDER BY k, j;
+CHECK TABLE t;
+
+DROP TABLE t;
