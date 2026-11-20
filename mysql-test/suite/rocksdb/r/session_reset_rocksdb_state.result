@@ -1,0 +1,32 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+# 1. Temporary checkpoint and COM_RESET_CONNECTION
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_reset_a';
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint;
+@@SESSION.rocksdb_create_temporary_checkpoint
+NULL
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_reset_b';
+errno: 0
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+# 2. Temporary checkpoint and COM_CHANGE_USER
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_reset_c';
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint;
+@@SESSION.rocksdb_create_temporary_checkpoint
+NULL
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_reset_d';
+errno: 0
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+# 3. rocksdb_disable_file_deletions and COM_RESET_CONNECTION
+SET SESSION rocksdb_disable_file_deletions = ON;
+SELECT @@SESSION.rocksdb_disable_file_deletions;
+@@SESSION.rocksdb_disable_file_deletions
+0
+INSERT INTO t1 VALUES (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (4, 4);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# No obsolete SST file is left: every SST file on disk is a live one.
+obsolete SST files on disk: no
+DROP TABLE t1;

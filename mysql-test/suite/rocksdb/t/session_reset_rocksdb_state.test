@@ -1,0 +1,86 @@
+# PS-12189: MyRocks keeps a session's temporary checkpoint and disabled file
+# deletions across RESET CONNECTION and COM_CHANGE_USER.
+#
+# COM_RESET_CONNECTION and COM_CHANGE_USER reset the session variables to
+# their global defaults without calling their update callbacks, and MyRocks
+# does not clean up its per-session state for them. After the reset
+#  - @@rocksdb_create_temporary_checkpoint is NULL, but the session still
+#    owns the old checkpoint: creating a new one fails with "Temporary
+#    checkpoint already exists for session", and the old one is removed only
+#    when the connection closes;
+#  - @@rocksdb_disable_file_deletions is OFF, but file deletions stay
+#    disabled: obsolete SST files are not deleted until the connection closes.
+#
+# Expected: the reset session has no temporary checkpoint and does not keep
+# file deletions disabled, as its variables say.
+
+--source include/have_rocksdb.inc
+
+--let $ckpt_a = $MYSQLTEST_VARDIR/tmp/ckpt_reset_a
+--let $ckpt_b = $MYSQLTEST_VARDIR/tmp/ckpt_reset_b
+--let $ckpt_c = $MYSQLTEST_VARDIR/tmp/ckpt_reset_c
+--let $ckpt_d = $MYSQLTEST_VARDIR/tmp/ckpt_reset_d
+--let $datadir = `SELECT @@datadir`
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+--source include/count_sessions.inc
+
+--echo # 1. Temporary checkpoint and COM_RESET_CONNECTION
+connect (con1,localhost,root,,test);
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt_a'
+--reset_connection
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint;
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--error 0,ER_GET_ERRMSG
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt_b'
+--echo errno: $mysql_errno
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+
+--echo # 2. Temporary checkpoint and COM_CHANGE_USER
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt_c'
+--change_user root,,test
+SELECT @@SESSION.rocksdb_create_temporary_checkpoint;
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--error 0,ER_GET_ERRMSG
+--eval SET SESSION rocksdb_create_temporary_checkpoint = '$ckpt_d'
+--echo errno: $mysql_errno
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+
+--echo # 3. rocksdb_disable_file_deletions and COM_RESET_CONNECTION
+SET SESSION rocksdb_disable_file_deletions = ON;
+--reset_connection
+SELECT @@SESSION.rocksdb_disable_file_deletions;
+connection default;
+INSERT INTO t1 VALUES (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+INSERT INTO t1 VALUES (4, 4);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+--echo # No obsolete SST file is left: every SST file on disk is a live one.
+--let $live = `SELECT COUNT(*) FROM information_schema.rocksdb_live_files_metadata`
+--let OBS_DIR = $datadir/.rocksdb
+--let OBS_LIVE = $live
+--perl
+  my $n = () = glob("$ENV{OBS_DIR}/*.sst");
+  my $extra = $n - $ENV{OBS_LIVE};
+  print "obsolete SST files on disk: " . ($extra > 0 ? "yes" : "no") . "\n";
+EOF
+
+connection con1;
+disconnect con1;
+connection default;
+--source include/wait_until_count_sessions.inc
+--error 0,1
+--force-rmdir $ckpt_a
+--error 0,1
+--force-rmdir $ckpt_b
+--error 0,1
+--force-rmdir $ckpt_c
+--error 0,1
+--force-rmdir $ckpt_d
+DROP TABLE t1;
