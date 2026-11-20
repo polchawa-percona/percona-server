@@ -142,6 +142,7 @@ rocksdb.errinj_dict_crash_create_drop : BUG#11666 PS-11666 partitioned DROP
 rocksdb.errinj_dict_crash_truncate : BUG#11831 PS-11831 TRUNCATE leftover kept
 rocksdb.errinj_dict_crash_copy_alter : BUG#11681 PS-11681 crash window
 rocksdb.flush_wal_error_group_commit : BUG#11761 PS-11761 WAL flush error
+rocksdb.skip_tx_api_binlog_durability : BUG#0 PS-12197 commit lost on crash
 rocksdb.errinj_xa : BUG#11631 PS-11631 PS-11773 XA crash, by-XID commit error
 rocksdb.xa_commit_by_xid_error : BUG#11773 PS-11773 PS-11631 commit error
 rocksdb.errinj_part_write : BUG#11745 PS-11745 partition DDL write status

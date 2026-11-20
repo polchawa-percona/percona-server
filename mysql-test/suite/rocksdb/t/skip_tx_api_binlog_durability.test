@@ -1,0 +1,49 @@
+#
+# PS-12197: with rocksdb_master_skip_tx_api=ON and the binary log on, an
+# acknowledged autocommit transaction is lost when the idle server is killed,
+# although the binary log has it.
+#
+# A session with rocksdb_master_skip_tx_api=ON writes through a write batch
+# (Rdb_writebatch_impl). Its prepare() persists nothing, and in the binary log
+# group commit (durability HA_IGNORE_DURABILITY) rocksdb_prepare() turns off
+# the sync of its commit, which then writes the batch only into the RocksDB
+# WAL buffer (rocksdb_manual_wal_flush=ON, the default) after the flush stage
+# has already flushed the WAL. Nothing flushes it until the next transaction's
+# flush stage, so a process crash loses the commit, and crash recovery has no
+# prepared transaction to commit from the binary log.
+#
+# With rocksdb_flush_log_at_trx_commit=1 and sync_binlog=1 a committed
+# transaction must survive a crash, in the engine as in the binary log.
+#
+--source include/have_rocksdb.inc
+--source include/have_log_bin.inc
+
+SELECT @@rocksdb_flush_log_at_trx_commit, @@sync_binlog, @@rocksdb_manual_wal_flush;
+
+--disable_query_log
+FLUSH BINARY LOGS;
+--let $first_binlog = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--enable_query_log
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+
+SET SESSION rocksdb_master_skip_tx_api = ON;
+INSERT INTO t1 VALUES (2, 2);
+INSERT INTO t1 VALUES (3, 3);
+SET SESSION rocksdb_master_skip_tx_api = OFF;
+SELECT * FROM t1 ORDER BY a;
+
+--echo # Kill the idle server: every INSERT above was acknowledged.
+--source include/kill_and_restart_mysqld.inc
+
+--echo # The binary log has the last INSERT.
+--let $datadir = `SELECT @@datadir`
+--exec $MYSQL_BINLOG --force-if-open -v --base64-output=DECODE-ROWS `ls $datadir/binlog.0* | sort | grep -A1000 -F $first_binlog` 2>/dev/null | grep -cw "@1=3" > $MYSQLTEST_VARDIR/tmp/skip_tx_api_binlog_durability.txt || true
+--let $in_binlog = `SELECT CAST(LOAD_FILE('$MYSQLTEST_VARDIR/tmp/skip_tx_api_binlog_durability.txt') AS SIGNED)`
+--echo Row events for a=3 in the binary log: $in_binlog
+--remove_file $MYSQLTEST_VARDIR/tmp/skip_tx_api_binlog_durability.txt
+
+--echo # Every acknowledged row is still in the table.
+SELECT * FROM t1 ORDER BY a;
+
+DROP TABLE t1;
