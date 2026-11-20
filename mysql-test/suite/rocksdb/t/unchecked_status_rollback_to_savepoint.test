@@ -1,0 +1,43 @@
+#
+# Rdb_transaction_impl::do_rollback_to_savepoint() ignores the status of
+# Transaction::RollbackToSavePoint(). With write_unprepared the call reads
+# and writes the database (RollbackToSavePointInternal) and can fail, leaving
+# writes of the failed statement in the transaction. The statement then
+# reports its own error, but COMMIT persists a part of it: the statement is
+# not atomic.
+#
+# The debug point makes the statement rollback fail without rolling anything
+# back. The correct behaviour is that no change of the failed statement
+# becomes visible: either the failure is reported and the transaction is
+# rolled back, or COMMIT is refused.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, u INT, UNIQUE KEY k_u (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE seq (n) AS
+  (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10)
+  SELECT n, n FROM seq;
+INSERT INTO t1 VALUES (100, 0);
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO t1 VALUES (200, 200);
+SET SESSION debug = '+d,myrocks_rollback_to_savepoint_error';
+--echo # Rows 1..9 are moved before row 10 hits the duplicate key.
+--error ER_DUP_ENTRY
+UPDATE t1 SET u = IF(id = 10, 0, u + 1000) WHERE id <= 10 ORDER BY id;
+SET SESSION debug = '-d,myrocks_rollback_to_savepoint_error';
+--disable_result_log
+--disable_abort_on_error
+COMMIT;
+--enable_abort_on_error
+--enable_result_log
+
+--echo # No change of the failed UPDATE may be visible.
+SELECT COUNT(*) AS rows_of_failed_update FROM t1 WHERE u > 1000;
+SELECT COUNT(*) AS rows_of_failed_update FROM t1 FORCE INDEX (k_u)
+  WHERE u > 1000;
+CHECK TABLE t1;
+
+DROP TABLE t1;

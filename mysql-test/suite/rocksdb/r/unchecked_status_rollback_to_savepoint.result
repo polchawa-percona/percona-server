@@ -1,0 +1,26 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, u INT, UNIQUE KEY k_u (u)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE seq (n) AS
+(SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10)
+SELECT n, n FROM seq;
+INSERT INTO t1 VALUES (100, 0);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+INSERT INTO t1 VALUES (200, 200);
+SET SESSION debug = '+d,myrocks_rollback_to_savepoint_error';
+# Rows 1..9 are moved before row 10 hits the duplicate key.
+UPDATE t1 SET u = IF(id = 10, 0, u + 1000) WHERE id <= 10 ORDER BY id;
+ERROR 23000: Duplicate entry '0' for key 't1.k_u'
+SET SESSION debug = '-d,myrocks_rollback_to_savepoint_error';
+COMMIT;
+# No change of the failed UPDATE may be visible.
+SELECT COUNT(*) AS rows_of_failed_update FROM t1 WHERE u > 1000;
+rows_of_failed_update
+0
+SELECT COUNT(*) AS rows_of_failed_update FROM t1 FORCE INDEX (k_u)
+WHERE u > 1000;
+rows_of_failed_update
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
