@@ -1,0 +1,25 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, c TEXT) ENGINE=ROCKSDB;
+CREATE TABLE t2 (id INT PRIMARY KEY, c TEXT, KEY k (c(20))) ENGINE=ROCKSDB;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Rows the transaction wrote, copied by the same transaction
+BEGIN;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 40)
+SELECT n, REPEAT(CHAR(97 + n % 26), 3000) FROM seq;
+INSERT INTO t2 SELECT id, c FROM t1;
+COMMIT;
+# The copies, read through the primary key and the secondary key
+SELECT COUNT(*), SUM(CRC32(c)) FROM t1;
+COUNT(*)	SUM(CRC32(c))
+40	67511675478
+SELECT COUNT(*), SUM(CRC32(c)) FROM t2 FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(CRC32(c))
+40	67511675478
+SELECT GROUP_CONCAT(id ORDER BY id) FROM t2 FORCE INDEX (k)
+WHERE c = REPEAT('b', 3000);
+GROUP_CONCAT(id ORDER BY id)
+1,27
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;
