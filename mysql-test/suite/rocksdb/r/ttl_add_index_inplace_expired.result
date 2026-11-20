@@ -1,0 +1,37 @@
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1);
+CREATE TABLE t1 (i INT, j INT, k INT, ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (i, j), KEY old_k (k)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=1000;ttl_col=ts;';
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# con1: first snapshot, on another table
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+SELECT UNIX_TIMESTAMP() INTO @t1;
+# Wait until rows 7 and 8 are expired for new transactions
+ALTER TABLE t1 ADD INDEX new_k (k), ALGORITHM=INPLACE;
+Warnings:
+Warning	1831	Duplicate index 'new_k' defined on the table 'test.t1'. This is deprecated and will be disallowed in a future release.
+# con1: all three reads must return rows 1, 2, 7, 8
+SELECT j FROM t1 FORCE INDEX (PRIMARY) ORDER BY j;
+j
+1
+2
+7
+8
+SELECT j FROM t1 FORCE INDEX (old_k) ORDER BY j;
+j
+1
+2
+7
+8
+SELECT j FROM t1 FORCE INDEX (new_k) ORDER BY j;
+j
+1
+2
+7
+8
+COMMIT;
+DROP TABLE t1, t2;
