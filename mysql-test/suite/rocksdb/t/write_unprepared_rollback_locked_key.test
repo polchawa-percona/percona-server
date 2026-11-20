@@ -1,0 +1,49 @@
+# PS-12186: under rocksdb_write_policy=write_unprepared, a transaction that
+# locked a key and was rolled back after flushing a write batch makes a later
+# DELETE or UPDATE of that key come undone at the next memtable flush.
+#
+# The rollback writes the key's current value again (Put) for every key the
+# transaction locked, also keys it never wrote. MyRocks removes secondary keys,
+# and primary keys that cover all columns, with SingleDelete, which only
+# cancels the newest Put: after the flush the original Put is visible again.
+# Expected results are those of write_committed.
+
+--source include/have_rocksdb.inc
+
+SELECT @@rocksdb_write_policy;
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+
+# a: primary key covering all columns; u: unique key that contains the PK
+CREATE TABLE a (x INT, y INT, PRIMARY KEY (x, y)) ENGINE=ROCKSDB;
+CREATE TABLE u (id INT PRIMARY KEY, b INT, c INT, UNIQUE KEY ub (b, id))
+  ENGINE=ROCKSDB;
+CREATE TABLE w (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO a VALUES (1,1),(2,2),(3,3);
+INSERT INTO u VALUES (1,11,1),(2,21,2);
+INSERT INTO w VALUES (1,1),(2,2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+--echo # Lock row (1,1) of a, write elsewhere (flushes a batch), roll back
+BEGIN;
+SELECT * FROM a WHERE x = 1 AND y = 1 FOR UPDATE;
+UPDATE w SET v = v + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 2;
+ROLLBACK;
+DELETE FROM a WHERE x = 1 AND y = 1;
+
+--echo # Update a non-key column of u row 1 (locks its ub key), roll back
+BEGIN;
+UPDATE u SET c = c + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 2;
+ROLLBACK;
+UPDATE u SET b = b + 1;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--echo # (1,1) was deleted
+SELECT * FROM a;
+--echo # ub has one entry per row
+SELECT b, id FROM u FORCE INDEX (ub);
+CHECK TABLE a, u;
+
+DROP TABLE a, u, w;

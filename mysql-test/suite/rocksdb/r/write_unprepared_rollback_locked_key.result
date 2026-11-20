@@ -1,0 +1,44 @@
+SELECT @@rocksdb_write_policy;
+@@rocksdb_write_policy
+write_unprepared
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+CREATE TABLE a (x INT, y INT, PRIMARY KEY (x, y)) ENGINE=ROCKSDB;
+CREATE TABLE u (id INT PRIMARY KEY, b INT, c INT, UNIQUE KEY ub (b, id))
+ENGINE=ROCKSDB;
+CREATE TABLE w (id INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+INSERT INTO a VALUES (1,1),(2,2),(3,3);
+INSERT INTO u VALUES (1,11,1),(2,21,2);
+INSERT INTO w VALUES (1,1),(2,2);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Lock row (1,1) of a, write elsewhere (flushes a batch), roll back
+BEGIN;
+SELECT * FROM a WHERE x = 1 AND y = 1 FOR UPDATE;
+x	y
+1	1
+UPDATE w SET v = v + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 2;
+ROLLBACK;
+DELETE FROM a WHERE x = 1 AND y = 1;
+# Update a non-key column of u row 1 (locks its ub key), roll back
+BEGIN;
+UPDATE u SET c = c + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 1;
+UPDATE w SET v = v + 1 WHERE id = 2;
+ROLLBACK;
+UPDATE u SET b = b + 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# (1,1) was deleted
+SELECT * FROM a;
+x	y
+2	2
+3	3
+# ub has one entry per row
+SELECT b, id FROM u FORCE INDEX (ub);
+b	id
+12	1
+22	2
+CHECK TABLE a, u;
+Table	Op	Msg_type	Msg_text
+test.a	check	status	OK
+test.u	check	status	OK
+DROP TABLE a, u, w;
