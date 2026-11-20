@@ -4241,6 +4241,7 @@ class Rdb_transaction {
                         s.code(), s.ToString().c_str());
         return s;
       }
+      DEBUG_SYNC(m_thd, "rocksdb.bulk_load_after_retry_compaction");
       // try again after compaction
       RDB_CRASH_POINT("bulk_load_ingest_retry");
       s = RDB_INJECT_ERROR(Rdb_inject_class::INGEST, "ingest_retry",
