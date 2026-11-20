@@ -1,0 +1,80 @@
+#
+# An interrupted inplace DROP INDEX leaves a pending ALTER TABLE record
+# (PS-11670), and a RENAME TABLE or TRUNCATE TABLE of that table, before
+# any other statement opens it, is then interrupted after the MyRocks rename
+# (PS-11667, PS-11668). RENAME TABLE moves the record with the table; the
+# startup recovery renames the table back and must move the record back with
+# it. Otherwise the table does not match its record (it fails to open, or the
+# data of the dropped index is never reclaimed) and a new table with the
+# other name is resolved against the stale record.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+CALL mtr.add_suppression("failed to finish an interrupted ALTER TABLE");
+CALL mtr.add_suppression("Renaming table .* back to .*: RENAME TABLE was interrupted");
+CALL mtr.add_suppression("Restoring table .* from .*: TRUNCATE TABLE was interrupted");
+--enable_query_log
+
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+--let $orphan_base = `SELECT INDEX_NUMBER - 1 FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'orphan_probe'`
+DROP TABLE orphan_probe;
+
+--let $ddl_cols = (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b))
+--let $ddl_alter = DROP INDEX ka
+--let $ddl_part =
+--let $vdb = test
+
+--let $k = 0
+while ($k < 4)
+{
+  --let $st = t1_$k
+  --let $crash_point = crash_commit_after_prepare
+  if ($k == 1)
+  {
+    --let $crash_point = crash_after_index_create
+  }
+  if ($k == 3)
+  {
+    --let $crash_point = crash_after_index_create
+  }
+  --source suite/rocksdb/include/ddl_crash_unresolved_setup.inc
+  if ($k < 2)
+  {
+    --echo # RENAME TABLE interrupted after the MyRocks rename.
+    --let $crash_point = rocksdb_crash_after_rename
+    --let $crash_stmt = RENAME TABLE $st TO t2_$k
+  }
+  if ($k >= 2)
+  {
+    --echo # TRUNCATE TABLE interrupted after the MyRocks rename.
+    --let $crash_point = rocksdb_truncate_failure_crash
+    --let $crash_stmt = TRUNCATE TABLE $st
+  }
+  --source suite/rocksdb/include/ddl_crash.inc
+  --echo # The statement is rolled back: the table keeps its name and rows.
+  --let $vt = $st
+  --source suite/rocksdb/include/ddl_crash_unresolved_verify.inc
+  --source suite/rocksdb/include/ddl_crash_no_orphan_index.inc
+  --echo # A new table with the other name is not affected by the record.
+  --eval CREATE TABLE t2_$k $ddl_cols ENGINE=ROCKSDB
+  --eval INSERT INTO t2_$k VALUES (5,50,50)
+  --eval SELECT * FROM t2_$k ORDER BY id
+  --eval SELECT id, a FROM t2_$k FORCE INDEX(ka) ORDER BY a
+  --eval CHECK TABLE t2_$k
+  --inc $k
+}
+--source suite/rocksdb/include/ddl_crash_restart_no_pending.inc
+--let $k = 0
+while ($k < 4)
+{
+  --eval SELECT * FROM t1_$k ORDER BY id
+  --eval SELECT * FROM t2_$k ORDER BY id
+  --eval CHECK TABLE t1_$k, t2_$k
+  --eval DROP TABLE t1_$k, t2_$k
+  --inc $k
+}
+--source suite/rocksdb/include/ddl_crash_no_orphan_index.inc

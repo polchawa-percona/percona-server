@@ -1,0 +1,357 @@
+CREATE TABLE orphan_probe (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+DROP TABLE orphan_probe;
+CREATE TABLE t1_0 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB ;
+INSERT INTO t1_0 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1_0 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1_0 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_0' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	2
+# RENAME TABLE interrupted after the MyRocks rename.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1_0 TO t2_0
+RENAME TABLE t1_0 TO t2_0;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The statement is rolled back: the table keeps its name and rows.
+SHOW CREATE TABLE test.t1_0;
+Table	Create Table
+t1_0	CREATE TABLE `t1_0` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT PARTITION_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_0' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME
+NULL	ka
+NULL	kb
+NULL	PRIMARY
+SELECT * FROM test.t1_0 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, a FROM test.t1_0 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+SELECT id, b FROM test.t1_0 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+INSERT INTO test.t1_0 VALUES (4,40,40);
+UPDATE test.t1_0 SET a = a + 100, b = b + 100 WHERE id = 1;
+SELECT id, a FROM test.t1_0 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+2	20
+3	30
+4	40
+1	110
+SELECT id, b FROM test.t1_0 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE test.t1_0;
+Table	Op	Msg_type	Msg_text
+test.t1_0	check	status	OK
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# A new table with the other name is not affected by the record.
+CREATE TABLE t2_0 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t2_0 VALUES (5,50,50);
+SELECT * FROM t2_0 ORDER BY id;
+id	a	b
+5	50	50
+SELECT id, a FROM t2_0 FORCE INDEX(ka) ORDER BY a;
+id	a
+5	50
+CHECK TABLE t2_0;
+Table	Op	Msg_type	Msg_text
+test.t2_0	check	status	OK
+CREATE TABLE t1_1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB ;
+INSERT INTO t1_1 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_after_index_create during: ALTER TABLE t1_1 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1_1 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_1' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	2
+# RENAME TABLE interrupted after the MyRocks rename.
+# Crash at rocksdb_crash_after_rename during: RENAME TABLE t1_1 TO t2_1
+RENAME TABLE t1_1 TO t2_1;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The statement is rolled back: the table keeps its name and rows.
+SHOW CREATE TABLE test.t1_1;
+Table	Create Table
+t1_1	CREATE TABLE `t1_1` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT PARTITION_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_1' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME
+NULL	kb
+NULL	PRIMARY
+SELECT * FROM test.t1_1 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, a FROM test.t1_1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+SELECT id, b FROM test.t1_1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+INSERT INTO test.t1_1 VALUES (4,40,40);
+UPDATE test.t1_1 SET a = a + 100, b = b + 100 WHERE id = 1;
+SELECT id, a FROM test.t1_1 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+SELECT id, b FROM test.t1_1 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE test.t1_1;
+Table	Op	Msg_type	Msg_text
+test.t1_1	check	status	OK
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# A new table with the other name is not affected by the record.
+CREATE TABLE t2_1 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t2_1 VALUES (5,50,50);
+SELECT * FROM t2_1 ORDER BY id;
+id	a	b
+5	50	50
+SELECT id, a FROM t2_1 FORCE INDEX(ka) ORDER BY a;
+id	a
+5	50
+CHECK TABLE t2_1;
+Table	Op	Msg_type	Msg_text
+test.t2_1	check	status	OK
+CREATE TABLE t1_2 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB ;
+INSERT INTO t1_2 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_commit_after_prepare during: ALTER TABLE t1_2 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1_2 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_2' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	2
+# TRUNCATE TABLE interrupted after the MyRocks rename.
+# Crash at rocksdb_truncate_failure_crash during: TRUNCATE TABLE t1_2
+TRUNCATE TABLE t1_2;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The statement is rolled back: the table keeps its name and rows.
+SHOW CREATE TABLE test.t1_2;
+Table	Create Table
+t1_2	CREATE TABLE `t1_2` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ka` (`a`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT PARTITION_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_2' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME
+NULL	ka
+NULL	kb
+NULL	PRIMARY
+SELECT * FROM test.t1_2 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, a FROM test.t1_2 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+1	10
+2	20
+3	30
+SELECT id, b FROM test.t1_2 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+INSERT INTO test.t1_2 VALUES (4,40,40);
+UPDATE test.t1_2 SET a = a + 100, b = b + 100 WHERE id = 1;
+SELECT id, a FROM test.t1_2 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+id	a
+2	20
+3	30
+4	40
+1	110
+SELECT id, b FROM test.t1_2 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE test.t1_2;
+Table	Op	Msg_type	Msg_text
+test.t1_2	check	status	OK
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# A new table with the other name is not affected by the record.
+CREATE TABLE t2_2 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t2_2 VALUES (5,50,50);
+SELECT * FROM t2_2 ORDER BY id;
+id	a	b
+5	50	50
+SELECT id, a FROM t2_2 FORCE INDEX(ka) ORDER BY a;
+id	a
+5	50
+CHECK TABLE t2_2;
+Table	Op	Msg_type	Msg_text
+test.t2_2	check	status	OK
+CREATE TABLE t1_3 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB ;
+INSERT INTO t1_3 VALUES (1,10,30),(2,20,20),(3,30,10);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+# Crash at crash_after_index_create during: ALTER TABLE t1_3 DROP INDEX ka, ALGORITHM=INPLACE
+ALTER TABLE t1_3 DROP INDEX ka, ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# Unresolved: MyRocks still has the index list of the ALTER TABLE
+SELECT PARTITION_NAME, COUNT(*) AS rocksdb_indexes FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_3' GROUP BY PARTITION_NAME ORDER BY PARTITION_NAME;
+PARTITION_NAME	rocksdb_indexes
+NULL	2
+# TRUNCATE TABLE interrupted after the MyRocks rename.
+# Crash at rocksdb_truncate_failure_crash during: TRUNCATE TABLE t1_3
+TRUNCATE TABLE t1_3;
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The statement is rolled back: the table keeps its name and rows.
+SHOW CREATE TABLE test.t1_3;
+Table	Create Table
+t1_3	CREATE TABLE `t1_3` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `kb` (`b`)
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT PARTITION_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1_3' ORDER BY PARTITION_NAME, INDEX_NAME;
+PARTITION_NAME	INDEX_NAME
+NULL	kb
+NULL	PRIMARY
+SELECT * FROM test.t1_3 ORDER BY id;
+id	a	b
+1	10	30
+2	20	20
+3	30	10
+SELECT id, a FROM test.t1_3 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+SELECT id, b FROM test.t1_3 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+1	30
+INSERT INTO test.t1_3 VALUES (4,40,40);
+UPDATE test.t1_3 SET a = a + 100, b = b + 100 WHERE id = 1;
+SELECT id, a FROM test.t1_3 FORCE INDEX(ka) WHERE a > 0 ORDER BY a;
+SELECT id, b FROM test.t1_3 FORCE INDEX(kb) WHERE b > 0 ORDER BY b;
+id	b
+3	10
+2	20
+4	40
+1	130
+CHECK TABLE test.t1_3;
+Table	Op	Msg_type	Msg_text
+test.t1_3	check	status	OK
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0
+# A new table with the other name is not affected by the record.
+CREATE TABLE t2_3 (id INT PRIMARY KEY, a INT, b INT, KEY ka(a), KEY kb(b)) ENGINE=ROCKSDB;
+INSERT INTO t2_3 VALUES (5,50,50);
+SELECT * FROM t2_3 ORDER BY id;
+id	a	b
+5	50	50
+SELECT id, a FROM t2_3 FORCE INDEX(ka) ORDER BY a;
+id	a
+5	50
+CHECK TABLE t2_3;
+Table	Op	Msg_type	Msg_text
+test.t2_3	check	status	OK
+# restart
+include/assert_grep.inc [No pending ALTER TABLE record is left]
+SELECT * FROM t1_0 ORDER BY id;
+id	a	b
+1	110	130
+2	20	20
+3	30	10
+4	40	40
+SELECT * FROM t2_0 ORDER BY id;
+id	a	b
+5	50	50
+CHECK TABLE t1_0, t2_0;
+Table	Op	Msg_type	Msg_text
+test.t1_0	check	status	OK
+test.t2_0	check	status	OK
+DROP TABLE t1_0, t2_0;
+SELECT * FROM t1_1 ORDER BY id;
+id	a	b
+1	110	130
+2	20	20
+3	30	10
+4	40	40
+SELECT * FROM t2_1 ORDER BY id;
+id	a	b
+5	50	50
+CHECK TABLE t1_1, t2_1;
+Table	Op	Msg_type	Msg_text
+test.t1_1	check	status	OK
+test.t2_1	check	status	OK
+DROP TABLE t1_1, t2_1;
+SELECT * FROM t1_2 ORDER BY id;
+id	a	b
+1	110	130
+2	20	20
+3	30	10
+4	40	40
+SELECT * FROM t2_2 ORDER BY id;
+id	a	b
+5	50	50
+CHECK TABLE t1_2, t2_2;
+Table	Op	Msg_type	Msg_text
+test.t1_2	check	status	OK
+test.t2_2	check	status	OK
+DROP TABLE t1_2, t2_2;
+SELECT * FROM t1_3 ORDER BY id;
+id	a	b
+1	110	130
+2	20	20
+3	30	10
+4	40	40
+SELECT * FROM t2_3 ORDER BY id;
+id	a	b
+5	50	50
+CHECK TABLE t1_3, t2_3;
+Table	Op	Msg_type	Msg_text
+test.t1_3	check	status	OK
+test.t2_3	check	status	OK
+DROP TABLE t1_3, t2_3;
+# Index data that belongs to no table (expect 0):
+orphan_indexes
+0

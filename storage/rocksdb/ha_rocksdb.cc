@@ -8371,7 +8371,10 @@ static rdb_emptiness rdb_table_emptiness(const Rdb_tbl_def &tbl) {
 
 /*
   Renames a table back in the MyRocks dictionary. Used by the startup
-  recovery to roll back an interrupted RENAME TABLE.
+  recovery to roll back an interrupted RENAME TABLE or TRUNCATE TABLE.
+  A pending inplace ALTER TABLE record (Rdb_key_def::DDL_PENDING_ALTER) moved
+  by the interrupted rename_table() moves back with the table, in the same
+  batch, so that the record keeps describing the table it belongs to.
   @return false on success
 */
 static bool rdb_recovery_rename(const std::string &from,
@@ -8380,6 +8383,15 @@ static bool rdb_recovery_rename(const std::string &from,
       dict_manager.get_dict_manager_selector_non_const(is_tmp_table(from));
   auto wb = Rdb_dict_manager::begin();
   std::lock_guard<Rdb_dict_manager> dm_lock(*dict);
+  uint64 token;
+  std::vector<GL_INDEX_ID> old_ids;
+  const rocksdb::Status status =
+      dict->get_pending_alter(from, &token, &old_ids);
+  if (!status.ok() && !status.IsNotFound()) return true;
+  if (status.ok()) {
+    dict->delete_pending_alter(wb, from);
+    dict->put_pending_alter(wb, to, token, old_ids);
+  }
   if (ddl_manager.rename(from, to, wb)) return true;
   return dict->commit(wb);
 }
