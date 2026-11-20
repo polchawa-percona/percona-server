@@ -1,0 +1,25 @@
+SELECT @@rocksdb_flush_log_at_trx_commit, @@sync_binlog, @@rocksdb_manual_wal_flush;
+@@rocksdb_flush_log_at_trx_commit	@@sync_binlog	@@rocksdb_manual_wal_flush
+1	1	1
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1);
+SET SESSION rocksdb_master_skip_tx_api = ON;
+INSERT INTO t1 VALUES (2, 2);
+INSERT INTO t1 VALUES (3, 3);
+SET SESSION rocksdb_master_skip_tx_api = OFF;
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+# Kill the idle server: every INSERT above was acknowledged.
+# Kill and restart
+# The binary log has the last INSERT.
+Row events for a=3 in the binary log: 1
+# Every acknowledged row is still in the table.
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+DROP TABLE t1;
