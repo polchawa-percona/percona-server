@@ -1,0 +1,63 @@
+#
+# PS-NNNNN: the table definition reconstruction after a crash in
+# ALTER TABLE ... ADD INDEX, ALGORITHM=INPLACE (PS-10287) maps the server's
+# indexes onto the MyRocks index definitions by position. When the added
+# index is not the last one in the new definition (the server orders unique
+# indexes before non-unique ones, so ADD UNIQUE INDEX on a table with a
+# non-unique secondary index), an existing index is given the index number of
+# the half-added index: reads through it silently return wrong results, and
+# its own data is no longer reachable.
+#
+# Scenario: t has PRIMARY and the non-unique index kb (b). ALTER TABLE ADD
+# UNIQUE INDEX ua (a) crashes after the MyRocks commit of the new definition
+# (PRIMARY, ua, kb) and before the server data dictionary commit
+# (crash_commit_after_prepare). After a restart with
+# rocksdb_validate_tables=2 (what the error log advises) the first open
+# rebuilds the definition from the server definition (PRIMARY, kb).
+#
+# Expected (the same results as before the crash): kb finds the row with
+# b = 'x2', a scan through kb returns all rows, CHECK TABLE is OK, and kb
+# keeps its own index number.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Table 'test.t' definition differs between MyRocks");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Start the server with");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'CHECKTABLE t:");
+--enable_query_log
+
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+--let $kb_index_number = `SELECT index_number FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'kb'`
+
+--echo # Crash after the MyRocks commit of ADD UNIQUE INDEX, before the DD commit.
+SET SESSION debug = '+d,crash_commit_after_prepare';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+ALTER TABLE t ADD UNIQUE INDEX ua (a), ALGORITHM=INPLACE;
+--source include/wait_until_disconnected.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=2
+--source include/start_mysqld.inc
+
+--echo # The first open rebuilds the definition without ua.
+SELECT * FROM t FORCE INDEX (kb) WHERE b = 'x2';
+--let $assert_text = The MyRocks table definition was reconstructed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Reconstruction of the corrupted table test.t has finished
+--let $assert_count = 1
+--source include/assert_grep.inc
+# A wrong mapping makes this scan fail with ER_GET_ERRMSG (505, data
+# corruption); the error is accepted so that the result shows it.
+--error 0,ER_GET_ERRMSG
+SELECT * FROM t FORCE INDEX (kb) ORDER BY b;
+CHECK TABLE t;
+--let $kb_index_number_now = `SELECT index_number FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'kb'`
+--let $kb_same = `SELECT $kb_index_number_now = $kb_index_number`
+--echo # kb keeps its index number: $kb_same
+
+DROP TABLE t;
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
