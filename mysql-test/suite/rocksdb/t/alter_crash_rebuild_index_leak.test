@@ -1,0 +1,69 @@
+#
+# PS-NNNNN: the table definition reconstruction after a crash in
+# ALTER TABLE ... ADD INDEX, ALGORITHM=INPLACE (PS-10287) removes the
+# partially added index from the MyRocks definition but never schedules its
+# data for removal: the rows of that index stay in the database for ever.
+#
+# Scenario: the ALTER crashes after the MyRocks commit of the new definition
+# and before the server data dictionary commit (crash_commit_after_prepare),
+# so MyRocks has the new index kb and the server definition has not. The
+# server is restarted with rocksdb_validate_tables=2 (what the error log
+# advises); the first open of the table rebuilds its definition from the
+# server definition without kb.
+#
+# Expected (as for every index MyRocks removes from a definition, e.g. DROP
+# INDEX: the index goes through the drop-index queue): once the drop queue
+# has drained and the column family is compacted, no SST file has rows for an
+# index number that is not in the MyRocks dictionary.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Table 'test.t' definition differs between MyRocks");
+CALL mtr.add_suppression("Plugin rocksdb reported: 'Start the server with");
+--enable_query_log
+
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+# Index numbers created by this test are above the primary key's.
+--let $pk_index_number = `SELECT index_number FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'PRIMARY'`
+
+--echo # Crash after the MyRocks commit of ADD INDEX, before the DD commit.
+SET SESSION debug = '+d,crash_commit_after_prepare';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE;
+--source include/wait_until_disconnected.inc
+
+--let $restart_parameters = restart: --rocksdb_validate_tables=2
+--source include/start_mysqld.inc
+
+--echo # The first open rebuilds the definition without kb.
+SELECT * FROM t ORDER BY pk;
+--let $assert_text = The MyRocks table definition was reconstructed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Reconstruction of the corrupted table test.t has finished
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--echo # No SST rows may remain for an index that is not in the dictionary.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING'
+--let $wait_timeout = 180
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_compact_cf = 'default';
+--disable_query_log
+eval SELECT COUNT(*) AS orphan_index_numbers
+  FROM (SELECT f.index_number
+          FROM information_schema.rocksdb_index_file_map f
+         WHERE f.index_number > $pk_index_number AND f.num_rows > 0
+           AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+                            WHERE d.column_family = f.column_family
+                              AND d.index_number = f.index_number)
+         GROUP BY f.column_family, f.index_number) AS orphans;
+--enable_query_log
+
+DROP TABLE t;
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
