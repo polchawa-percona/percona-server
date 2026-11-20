@@ -1,0 +1,78 @@
+CREATE TABLE t (i INT, j INT, k INT, PRIMARY KEY (i, j),
+KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5')
+ENGINE=ROCKSDB;
+CREATE TABLE ti (i INT, j INT, k INT, PRIMARY KEY (i, j), KEY ik1 (i, k))
+ENGINE=InnoDB;
+INSERT INTO t VALUES (1,1,6),(1,2,5),(1,3,4),(1,4,3),(1,5,2),(1,6,1),
+(2,1,6),(2,2,5),(2,3,4),(2,4,3),(2,5,2),(2,6,1);
+INSERT INTO ti VALUES (1,1,6),(1,2,5),(1,3,4),(1,4,3),(1,5,2),(1,6,1),
+(2,1,6),(2,2,5),(2,3,4),(2,4,3),(2,5,2),(2,6,1);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# BEGIN: snapshot taken by the first read
+BEGIN;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+12
+SELECT COUNT(*) FROM ti;
+COUNT(*)
+12
+# group i = 1 has more rows than the threshold: this read materializes it
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+SELECT j FROM ti FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+COMMIT;
+# START TRANSACTION READ ONLY
+START TRANSACTION READ ONLY;
+SELECT COUNT(*) FROM t;
+COUNT(*)
+12
+SELECT COUNT(*) FROM ti;
+COUNT(*)
+12
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+SELECT j FROM ti FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+j
+6
+5
+4
+3
+2
+1
+COMMIT;
+DROP TABLE t, ti;

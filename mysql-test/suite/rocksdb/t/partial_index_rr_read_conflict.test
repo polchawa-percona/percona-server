@@ -1,0 +1,56 @@
+# PS-12184: a non-locking read through a partial index in a REPEATABLE READ
+# transaction fails with ER_LOCK_DEADLOCK when another session materialized
+# the group after the transaction took its snapshot.
+#
+# Rdb_iterator_partial::materialize_prefix() re-checks the group sentinel with
+# a validated get_for_update(); the sentinel is newer than the snapshot, so the
+# read gets a snapshot conflict. Expected rows come from an InnoDB copy read in
+# the same transaction.
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t (i INT, j INT, k INT, PRIMARY KEY (i, j),
+  KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5')
+  ENGINE=ROCKSDB;
+CREATE TABLE ti (i INT, j INT, k INT, PRIMARY KEY (i, j), KEY ik1 (i, k))
+  ENGINE=InnoDB;
+let $rows= (1,1,6),(1,2,5),(1,3,4),(1,4,3),(1,5,2),(1,6,1),
+            (2,1,6),(2,2,5),(2,3,4),(2,4,3),(2,5,2),(2,6,1);
+eval INSERT INTO t VALUES $rows;
+eval INSERT INTO ti VALUES $rows;
+
+--connect (con1,localhost,root,,)
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+
+--echo # BEGIN: snapshot taken by the first read
+BEGIN;
+SELECT COUNT(*) FROM t;
+SELECT COUNT(*) FROM ti;
+
+--connection default
+--echo # group i = 1 has more rows than the threshold: this read materializes it
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+
+--connection con1
+SELECT j FROM ti FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 1 ORDER BY k;
+COMMIT;
+
+--echo # START TRANSACTION READ ONLY
+START TRANSACTION READ ONLY;
+SELECT COUNT(*) FROM t;
+SELECT COUNT(*) FROM ti;
+
+--connection default
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+
+--connection con1
+SELECT j FROM ti FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+SELECT j FROM t FORCE INDEX (ik1) WHERE i = 2 ORDER BY k;
+COMMIT;
+
+--disconnect con1
+--connection default
+--source include/wait_until_count_sessions.inc
+DROP TABLE t, ti;
