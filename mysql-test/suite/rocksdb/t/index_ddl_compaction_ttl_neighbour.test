@@ -1,0 +1,55 @@
+#
+# PS-11785: a compaction between the ingest of a new INPLACE index and the
+# dictionary commit of the ALTER sees keys of an index that has no dictionary
+# info yet. The compaction filter must not treat them as TTL rows. Before the
+# fix it kept the TTL settings of the previous index in the compaction (here a
+# TTL table's primary key) and aborted the server while decoding the new
+# index's short values as TTL rows.
+#
+# The new index's key range must sit inside one compaction next to the TTL
+# index: t2 gets index id N, the TTL table t1 N+1, the new index N+2 and t3,
+# created while the ALTER waits, N+3. One L0 file with rows of t1 and t3 spans
+# the new index's range, so the compaction reads N+1, N+2 and N+3 in turn.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL,
+  b VARCHAR(32) COLLATE utf8mb4_0900_ai_ci NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+  SELECT n, n, CONCAT('Val', n) FROM v;
+CREATE TABLE t1 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB COMMENT='ttl_duration=3600';
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 1000)
+  SELECT n, n FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (con1,localhost,root,,);
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_before_merge SIGNAL p0 WAIT_FOR g0';
+SET DEBUG_SYNC = 'rocksdb.inplace_populate_sk_after_ingest SIGNAL p1 WAIT_FOR g1';
+--send ALTER TABLE t2 ADD INDEX k (b), ALGORITHM=INPLACE
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR p0';
+CREATE TABLE t3 (pk INT PRIMARY KEY, c INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 1), (2, 2);
+UPDATE t1 SET c = c + 1 WHERE pk <= 10;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET DEBUG_SYNC = 'now SIGNAL g0';
+--echo # The new index is ingested, its dictionary entry is not committed yet
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+
+connection con1;
+--reap
+connection default;
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) FROM t2 FORCE INDEX (k);
+SELECT COUNT(*) FROM t1;
+CHECK TABLE t1, t2;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT COUNT(*) FROM t2 FORCE INDEX (k);
+
+disconnect con1;
+DROP TABLE t1, t2, t3;
