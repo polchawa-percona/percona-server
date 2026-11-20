@@ -1,0 +1,21 @@
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+# Crash after the MyRocks commit of ADD INDEX, before the DD commit.
+SET SESSION debug = '+d,crash_commit_after_prepare';
+ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_validate_tables=2
+# The first open rebuilds the definition without kb.
+SELECT * FROM t ORDER BY pk;
+pk	a	b
+1	10	x1
+2	20	x2
+3	30	x3
+include/assert_grep.inc [The MyRocks table definition was reconstructed]
+# No SST rows may remain for an index that is not in the dictionary.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+orphan_index_numbers
+0
+DROP TABLE t;
+# restart
