@@ -1,0 +1,15 @@
+call mtr.add_suppression("CHECKTABLE t1: .* index scan error");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET DEBUG_SYNC = 'rocksdb.get_row_by_rowid SIGNAL reached WAIT_FOR go';
+CHECK TABLE t1;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+KILL QUERY CON1_ID;
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+interrupted reported: 1
+Corrupt reported: 0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
