@@ -4925,7 +4925,8 @@ bool Rdb_ddl_manager::validate_auto_incr() const {
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
 bool Rdb_ddl_manager::init(Rdb_dict_manager_selector *const dict_arg,
                            Rdb_cf_manager *const cf_manager,
-                           const uint32_t validate_tables) {
+                           const uint32_t validate_tables,
+                           const std::function<void()> &before_validation) {
 #else
 bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
                            Rdb_cf_manager *const cf_manager) {
@@ -5107,6 +5108,8 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
   initialized = true;
 
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
+  if (before_validation) before_validation();
+
   /*
     If validate_tables is greater than 0 run the validation.  Only fail the
     initialzation if the setting is 1.  If the setting is 2 we continue.
@@ -5391,6 +5394,67 @@ uint Rdb_ddl_manager::get_and_update_next_number(uint cf_id, bool is_dd_tbl) {
     return m_user_table_sequence.get_and_update_next_number(
         m_dict->get_dict_manager_selector_non_const(cf_id));
   }
+}
+
+/*
+  Build a table definition from a list of existing index ids, as it is read
+  from the data dictionary: used to restore the index list of a table after
+  an interrupted inplace ALTER TABLE. The caller owns the definition.
+*/
+Rdb_tbl_def *Rdb_ddl_manager::build_tbl_def(
+    const std::string &tbl_name,
+    const std::vector<GL_INDEX_ID> &index_ids) const {
+  if (index_ids.empty() || index_ids.size() > MAX_INDEXES + 1) return nullptr;
+
+  auto tdef = std::make_unique<Rdb_tbl_def>(tbl_name);
+  tdef->m_key_count = index_ids.size();
+  tdef->m_pk_index = MAX_INDEXES;
+  tdef->m_key_descr_arr = new std::shared_ptr<Rdb_key_def>[tdef->m_key_count];
+
+  for (uint keyno = 0; keyno < tdef->m_key_count; keyno++) {
+    const GL_INDEX_ID &gl_index_id = index_ids[keyno];
+    const auto *const dict =
+        m_dict->get_dict_manager_selector_const(gl_index_id.cf_id);
+    struct Rdb_index_info index_info;
+    uint flags = 0;
+    std::shared_ptr<rocksdb::ColumnFamilyHandle> cfh =
+        m_cf_manager->get_cf(gl_index_id.cf_id);
+    if (!cfh || !dict->get_index_info(gl_index_id, &index_info) ||
+        !dict->get_cf_flags(gl_index_id.cf_id, &flags)) {
+      LogPluginErrMsg(ERROR_LEVEL, 0,
+                      "Could not get index information for Index Number "
+                      "(%u,%u), table %s",
+                      gl_index_id.cf_id, gl_index_id.index_id,
+                      tbl_name.c_str());
+      /*
+        The destructor of Rdb_tbl_def unregisters the index numbers of its
+        keys, which may belong to the current definition of the table.
+      */
+      for (uint i = 0; i < keyno; i++) tdef->m_key_descr_arr[i] = nullptr;
+      return nullptr;
+    }
+
+    const uint32 ttl_rec_offset =
+        Rdb_key_def::has_index_flag(index_info.m_index_flags,
+                                    Rdb_key_def::TTL_FLAG)
+            ? Rdb_key_def::calculate_index_flag_offset(index_info.m_index_flags,
+                                                       Rdb_key_def::TTL_FLAG)
+            : UINT_MAX;
+
+    tdef->m_key_descr_arr[keyno] = std::make_shared<Rdb_key_def>(
+        gl_index_id.index_id, keyno, cfh, index_info.m_index_dict_version,
+        index_info.m_index_type, index_info.m_kv_version,
+        flags & Rdb_key_def::REVERSE_CF_FLAG,
+        flags & Rdb_key_def::PER_PARTITION_CF_FLAG, "",
+        dict->get_stats(gl_index_id), index_info.m_index_flags, ttl_rec_offset,
+        index_info.m_ttl_duration);
+    if (index_info.m_index_type == Rdb_key_def::INDEX_TYPE_PRIMARY) {
+      tdef->m_pk_index = keyno;
+    }
+  }
+
+  tdef->m_tbl_stats.set(tdef->m_key_descr_arr[0]->m_stats.m_rows, 0, 0);
+  return tdef.release();
 }
 
 /*
@@ -5965,6 +6029,194 @@ void Rdb_dict_manager::get_all_dropped_cfs(
   }
 
   delete it;
+}
+
+static std::string rdb_ddl_log_key(const Rdb_dict_manager::ddl_log_op op,
+                                   const std::string &name) {
+  std::string key(Rdb_key_def::INDEX_NUMBER_SIZE + 1, '\0');
+  rdb_netbuf_store_uint32(reinterpret_cast<uchar *>(&key[0]),
+                          Rdb_key_def::DDL_RECOVERY_LOG);
+  key[Rdb_key_def::INDEX_NUMBER_SIZE] = static_cast<char>(op);
+  key.append(name);
+  return key;
+}
+
+void Rdb_dict_manager::put_ddl_log(rocksdb::WriteBatch &batch,
+                                   const ddl_log_op op, const std::string &name,
+                                   const std::string &payload) const {
+  const std::string key = rdb_ddl_log_key(op, name);
+  std::string value(Rdb_key_def::VERSION_SIZE, '\0');
+  rdb_netbuf_store_uint16(reinterpret_cast<uchar *>(&value[0]),
+                          Rdb_key_def::DDL_RECOVERY_LOG_VERSION);
+  value.append(payload);
+  put_key(batch, key, value);
+}
+
+void Rdb_dict_manager::delete_ddl_log(rocksdb::WriteBatch &batch,
+                                      const ddl_log_op op,
+                                      const std::string &name) const {
+  delete_key(batch, rdb_ddl_log_key(op, name));
+}
+
+bool Rdb_dict_manager::get_all_ddl_log(
+    std::vector<ddl_log_entry> *entries) const {
+  uchar prefix_buf[Rdb_key_def::INDEX_NUMBER_SIZE];
+  rdb_netbuf_store_uint32(prefix_buf, Rdb_key_def::DDL_RECOVERY_LOG);
+  const rocksdb::Slice prefix(reinterpret_cast<char *>(prefix_buf),
+                              sizeof(prefix_buf));
+
+  std::unique_ptr<rocksdb::Iterator> it(new_iterator());
+  for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix);
+       it->Next()) {
+    const rocksdb::Slice key = it->key();
+    const rocksdb::Slice value = it->value();
+    if (key.size() <= Rdb_key_def::INDEX_NUMBER_SIZE ||
+        value.size() < Rdb_key_def::VERSION_SIZE) {
+      continue;
+    }
+    const uint16 version =
+        rdb_netbuf_to_uint16(reinterpret_cast<const uchar *>(value.data()));
+    if (version != Rdb_key_def::DDL_RECOVERY_LOG_VERSION) {
+      LogPluginErrMsg(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+                      "Ignoring a DDL recovery log record of version %u",
+                      version);
+      continue;
+    }
+    ddl_log_entry entry;
+    entry.op = static_cast<ddl_log_op>(key[Rdb_key_def::INDEX_NUMBER_SIZE]);
+    entry.name.assign(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE + 1,
+                      key.size() - Rdb_key_def::INDEX_NUMBER_SIZE - 1);
+    entry.payload.assign(value.data() + Rdb_key_def::VERSION_SIZE,
+                         value.size() - Rdb_key_def::VERSION_SIZE);
+    entries->push_back(std::move(entry));
+  }
+  return !it->status().ok();
+}
+
+namespace {
+using Rdb_pending_alter_key =
+    Rdb_buf_writer<FN_LEN * 2 + Rdb_key_def::INDEX_NUMBER_SIZE>;
+
+void rdb_pending_alter_key(Rdb_pending_alter_key *const key_writer,
+                           const std::string &tbl_name) {
+  key_writer->write_index(Rdb_key_def::DDL_PENDING_ALTER);
+  key_writer->write(tbl_name.c_str(), tbl_name.size());
+}
+}  // namespace
+
+void Rdb_dict_manager::put_pending_alter(
+    rocksdb::WriteBatch &batch, const std::string &tbl_name, const uint64 token,
+    const std::vector<GL_INDEX_ID> &old_index_ids) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+
+  StringBuffer<8 * Rdb_key_def::PACKED_SIZE> value;
+  value.alloc(Rdb_key_def::VERSION_SIZE + sizeof(uint64) +
+              old_index_ids.size() * Rdb_key_def::PACKED_SIZE * 2);
+  rdb_netstr_append_uint16(&value, Rdb_key_def::DDL_PENDING_ALTER_VERSION);
+  rdb_netstr_append_uint64(&value, token);
+  for (const auto &gl_index_id : old_index_ids) {
+    rdb_netstr_append_uint32(&value, gl_index_id.cf_id);
+    rdb_netstr_append_uint32(&value, gl_index_id.index_id);
+  }
+
+  put_key(batch, key_writer.to_slice(),
+          rocksdb::Slice(value.ptr(), value.length()));
+}
+
+rocksdb::Status Rdb_dict_manager::get_pending_alter(
+    const std::string &tbl_name, uint64 *const token,
+    std::vector<GL_INDEX_ID> *const old_index_ids) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+
+  std::string value;
+  const rocksdb::Status status = get_value(key_writer.to_slice(), &value);
+  if (!status.ok()) {
+    if (!status.IsNotFound()) {
+      LogPluginErrMsg(ERROR_LEVEL, 0,
+                      "Failed to read the pending ALTER TABLE record of table "
+                      "%s: %s",
+                      tbl_name.c_str(), status.ToString().c_str());
+    }
+    return status;
+  }
+
+  constexpr size_t header_size = Rdb_key_def::VERSION_SIZE + sizeof(uint64);
+  constexpr size_t id_size = Rdb_key_def::PACKED_SIZE * 2;
+  const uchar *ptr = reinterpret_cast<const uchar *>(value.data());
+  if (value.size() < header_size ||
+      (value.size() - header_size) % id_size != 0 ||
+      rdb_netbuf_read_uint16(&ptr) != Rdb_key_def::DDL_PENDING_ALTER_VERSION) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Invalid pending ALTER TABLE record for table %s",
+                    tbl_name.c_str());
+    return rocksdb::Status::Corruption();
+  }
+
+  *token = rdb_netbuf_read_uint64(&ptr);
+  old_index_ids->clear();
+  for (size_t i = 0; i < (value.size() - header_size) / id_size; i++) {
+    GL_INDEX_ID gl_index_id;
+    rdb_netbuf_read_gl_index(&ptr, &gl_index_id);
+    old_index_ids->push_back(gl_index_id);
+  }
+  return rocksdb::Status::OK();
+}
+
+void Rdb_dict_manager::delete_pending_alter(rocksdb::WriteBatch &batch,
+                                            const std::string &tbl_name) const {
+  Rdb_pending_alter_key key_writer;
+  rdb_pending_alter_key(&key_writer, tbl_name);
+  delete_key(batch, key_writer.to_slice());
+}
+
+/*
+  Whether an index of the column family is in the index list from before an
+  unfinished inplace ALTER TABLE: that index list can still be restored.
+*/
+bool Rdb_dict_manager::is_cf_used_by_pending_alter(const uint32_t cf_id) const {
+  std::vector<std::string> names;
+  // On a read error, keep the column family.
+  if (!get_pending_alter_tables(&names).ok()) return true;
+  for (const auto &name : names) {
+    uint64 token;
+    std::vector<GL_INDEX_ID> old_index_ids;
+    const rocksdb::Status status =
+        get_pending_alter(name, &token, &old_index_ids);
+    if (status.IsNotFound()) continue;
+    // On a read error, keep the column family.
+    if (!status.ok()) return true;
+    for (const auto &gl_index_id : old_index_ids) {
+      if (gl_index_id.cf_id == cf_id) return true;
+    }
+  }
+  return false;
+}
+
+rocksdb::Status Rdb_dict_manager::get_pending_alter_tables(
+    std::vector<std::string> *const names) const {
+  uchar prefix_buf[Rdb_key_def::INDEX_NUMBER_SIZE];
+  rdb_netbuf_store_index(prefix_buf, Rdb_key_def::DDL_PENDING_ALTER);
+  const rocksdb::Slice prefix(reinterpret_cast<char *>(prefix_buf),
+                              Rdb_key_def::INDEX_NUMBER_SIZE);
+
+  std::unique_ptr<rocksdb::Iterator> it(new_iterator());
+  for (it->Seek(prefix); it->Valid(); it->Next()) {
+    const rocksdb::Slice key = it->key();
+    if (key.size() <= Rdb_key_def::INDEX_NUMBER_SIZE ||
+        memcmp(key.data(), prefix_buf, Rdb_key_def::INDEX_NUMBER_SIZE)) {
+      break;
+    }
+    names->emplace_back(key.data() + Rdb_key_def::INDEX_NUMBER_SIZE,
+                        key.size() - Rdb_key_def::INDEX_NUMBER_SIZE);
+  }
+  if (!it->status().ok()) {
+    LogPluginErrMsg(ERROR_LEVEL, 0,
+                    "Failed to read the pending ALTER TABLE records: %s",
+                    it->status().ToString().c_str());
+  }
+  return it->status();
 }
 
 static std::string rdb_xa_prepared_key(const std::string &trx_name) {

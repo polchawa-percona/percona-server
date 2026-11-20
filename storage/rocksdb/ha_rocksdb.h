@@ -483,7 +483,7 @@ class ha_rocksdb : public my_core::handler, public blob_buffer {
   }
 
   int rename_table(const char *const from, const char *const to,
-                   const dd::Table *from_table_def MY_ATTRIBUTE((__unused__)),
+                   const dd::Table *from_table_def,
                    dd::Table *to_table_def MY_ATTRIBUTE((__unused__))) override
       MY_ATTRIBUTE((__warn_unused_result__, __nonnull__(2, 3)));
 
@@ -843,12 +843,22 @@ class ha_rocksdb : public my_core::handler, public blob_buffer {
                            key_range *const max_key) override
       MY_ATTRIBUTE((__warn_unused_result__));
 
-  int delete_table(Rdb_tbl_def *const tbl);
+  /*
+    drop_log_dd_id: if not nullptr, the DD table id of the table being
+    dropped; a DROP record is written to the DDL recovery log in the same
+    batch, see rocksdb_recover_interrupted_ddl().
+  */
+  int delete_table(Rdb_tbl_def *const tbl,
+                   const dd::Object_id *drop_log_dd_id = nullptr);
   int delete_table(const char *const from, const dd::Table *table_def) override
       MY_ATTRIBUTE((__warn_unused_result__));
   int create(const char *const name, TABLE *const form,
              HA_CREATE_INFO *const create_info, dd::Table *table_def) override
       MY_ATTRIBUTE((__warn_unused_result__));
+  int get_extra_columns_and_keys(const HA_CREATE_INFO *create_info,
+                                 const List<Create_field> *create_list,
+                                 const KEY *key_info, uint key_count,
+                                 dd::Table *table_obj) override;
   int truncate_table(Rdb_tbl_def *tbl_def,
                      const std::string &actual_user_table_name,
                      TABLE *table_arg, ulonglong auto_increment_value,
@@ -949,8 +959,14 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
   /* The new table definition */
   Rdb_tbl_def *const m_new_tdef;
 
+  /* Stores the original key definitions */
+  std::shared_ptr<Rdb_key_def> *const m_old_key_descr;
+
   /* Stores the new key definitions */
   std::shared_ptr<Rdb_key_def> *m_new_key_descr;
+
+  /* Stores the old number of key definitions */
+  const uint m_old_n_keys;
 
   /* Stores the added key glids */
   const std::unordered_set<std::shared_ptr<Rdb_key_def>> m_added_indexes;
@@ -962,13 +978,16 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
   const ulonglong m_max_auto_incr;
 
   Rdb_inplace_alter_ctx(
-      Rdb_tbl_def *new_tdef, std::shared_ptr<Rdb_key_def> *new_key_descr,
+      Rdb_tbl_def *new_tdef, std::shared_ptr<Rdb_key_def> *old_key_descr,
+      std::shared_ptr<Rdb_key_def> *new_key_descr, uint old_n_keys,
       std::unordered_set<std::shared_ptr<Rdb_key_def>> added_indexes,
       std::unordered_set<GL_INDEX_ID> dropped_index_ids,
       ulonglong max_auto_incr)
       : my_core::inplace_alter_handler_ctx(),
         m_new_tdef(new_tdef),
+        m_old_key_descr(old_key_descr),
         m_new_key_descr(new_key_descr),
+        m_old_n_keys(old_n_keys),
         m_added_indexes(added_indexes),
         m_dropped_index_ids(dropped_index_ids),
         m_max_auto_incr(max_auto_incr) {}

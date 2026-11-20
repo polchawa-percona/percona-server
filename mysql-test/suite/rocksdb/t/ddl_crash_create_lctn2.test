@@ -1,0 +1,35 @@
+#
+# PS-11833: with lower_case_table_names=2 the MyRocks DDL recovery of
+# PS-11666 does not log CREATE TABLE (the engine name derived from the
+# original spelling cannot be reproduced reliably), so a crash inside CREATE
+# TABLE after the server's data dictionary commit still leaves a table that
+# only the data dictionary knows, and MyRocks refuses to start with the
+# default rocksdb_validate_tables=1.
+#
+# Expected (as with lower_case_table_names=0/1): MyRocks starts, the CREATE is
+# rolled back and both dictionaries agree. Runs only on a case-insensitive
+# file system. Disabled until PS-11833 is fixed.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/have_case_insensitive_file_system.inc
+--source include/have_lowercase2.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Removing table .*: CREATE TABLE was interrupted");
+--enable_query_log
+
+--let $check_tables = 't1','T1'
+--let $crash_point = rocksdb_crash_before_create_table
+--let $crash_stmt = CREATE TABLE T1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS t1_in_dd FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = 'test' AND LOWER(TABLE_NAME) = 't1';
+SELECT COUNT(*) AS t1_in_myrocks FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND LOWER(TABLE_NAME) = 't1';
+CREATE TABLE T1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO T1 VALUES (1,1);
+SELECT * FROM T1;
+DROP TABLE T1;

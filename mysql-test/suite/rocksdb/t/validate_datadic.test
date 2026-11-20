@@ -73,6 +73,12 @@ CREATE TABLE t2 (pk int primary key) ENGINE=ROCKSDB PARTITION BY KEY(pk) PARTITI
 
 DROP TABLE t1;
 
+# DROP TABLE leaves a DDL recovery record until the next restart. With the old
+# DD restored below, startup would treat t1 as an interrupted DROP TABLE and
+# remove it from the DD as well (see ddl_crash_create_drop_mismatch). Restart
+# once so that the mismatch below is one without any record.
+--source include/restart_mysqld.inc
+
 # Shut down and replace MySQL DD with t1 and t2 tables (RocksDB DD has t1 removed now)
 --source include/shutdown_mysqld.inc
 --move_file $MYSQL_TMP_DIR/mysql.ibd.t1_t2 $MYSQLD_DATADIR/mysql.ibd

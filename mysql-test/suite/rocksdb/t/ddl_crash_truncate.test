@@ -1,0 +1,84 @@
+#
+# Finding 48 (port-findings.md): a crash inside TRUNCATE TABLE after the table
+# is renamed to #truncate_tmp#<name> and before the new table is committed.
+# Startup deletes the old data as a truncate leftover, then MyRocks refuses to
+# start because the table exists only in the server's data dictionary. For
+# TRUNCATE PARTITION MyRocks starts, but the table cannot be opened.
+# rocksdb.truncate_failures records today's behaviour with
+# rocksdb_validate_tables=2.
+#
+# Expected (as with atomic DDL): MyRocks starts with default options and the
+# table is usable, either with its old rows or empty.
+#
+# Fixed: startup renames #truncate_tmp#<name> back when the new table was not
+# created, so the TRUNCATE is rolled back and the old rows are kept. The crash
+# point precedes the creation of the new table, so the test checks that all
+# old rows are back. A crash during the startup recovery itself (debug crash
+# point rocksdb_crash_in_ddl_recovery) is covered too.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Removing truncated leftover table");
+CALL mtr.add_suppression("Restoring table .*: TRUNCATE TABLE was interrupted");
+--enable_query_log
+
+--let $check_tables = 't1'
+
+--echo # TRUNCATE TABLE
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = rocksdb_truncate_failure_crash
+--let $crash_stmt = TRUNCATE TABLE t1
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--echo # The TRUNCATE is rolled back: the old rows are kept.
+SELECT * FROM t1 ORDER BY id;
+SELECT a FROM t1 FORCE INDEX (ka) ORDER BY a;
+CHECK TABLE t1;
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
+
+--echo # ALTER TABLE ... TRUNCATE PARTITION
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB
+  PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (2),
+                           PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $crash_point = rocksdb_truncate_failure_crash
+--let $crash_stmt = ALTER TABLE t1 TRUNCATE PARTITION p0
+--source suite/rocksdb/include/ddl_crash.inc
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+--echo # The TRUNCATE PARTITION is rolled back: the old rows of p0 are kept.
+SELECT * FROM t1 PARTITION (p0) ORDER BY id;
+SELECT * FROM t1 PARTITION (p1) ORDER BY id;
+CHECK TABLE t1;
+INSERT INTO t1 VALUES (10,10);
+DROP TABLE t1;
+
+--echo # A crash during the startup recovery itself, after the old table is
+--echo # restored: the next startup finds nothing left to do.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, KEY ka(a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
+--let $recovery_log = $MYSQLTEST_VARDIR/log/ddl_crash_truncate_recovery_crash.err
+--source include/expect_crash.inc
+SET SESSION debug = "+d,rocksdb_truncate_failure_crash";
+--error CR_SERVER_LOST
+TRUNCATE TABLE t1;
+--source include/wait_until_disconnected.inc
+--error 137
+--exec $MYSQLD_CMD --debug=+d,rocksdb_crash_in_ddl_recovery --log-error=$recovery_log $ROCKSDB_OPT "$ROCKSDB_LOAD_ADD"
+--source include/start_mysqld.inc
+--let $assert_text = The recovery crashed after restoring the table
+--let $assert_file = $recovery_log
+--let $assert_select = Restoring table .*: TRUNCATE TABLE was interrupted
+--let $assert_count = 1
+--source include/assert_grep.inc
+--remove_file $recovery_log
+--source suite/rocksdb/include/ddl_crash_consistent.inc
+SELECT COUNT(*) AS leftovers FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE '#truncate_tmp#%';
+SELECT * FROM t1 ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
