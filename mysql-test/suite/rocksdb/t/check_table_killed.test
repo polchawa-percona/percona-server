@@ -1,0 +1,53 @@
+# PS-12181: CHECK TABLE on a MyRocks table that is killed while it scans a
+# secondary index reports the table as Corrupt. Expected, as InnoDB does: the
+# statement reports that it was interrupted, and no row says Corrupt. A second
+# CHECK TABLE shows that the table is fine.
+
+--source include/have_rocksdb.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+call mtr.add_suppression("CHECKTABLE t1: .* index scan error");
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+connect (con1,localhost,root,,test);
+--let $con1_id = `SELECT CONNECTION_ID()`
+# Hold CHECK TABLE at its first PK lookup of an index entry of ka.
+SET DEBUG_SYNC = 'rocksdb.get_row_by_rowid SIGNAL reached WAIT_FOR go';
+--send CHECK TABLE t1
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR reached';
+--replace_result $con1_id CON1_ID
+--eval KILL QUERY $con1_id
+SET DEBUG_SYNC = 'now SIGNAL go';
+
+connection con1;
+--let $out = $MYSQLTEST_VARDIR/tmp/check_table_killed.out
+--error 0,ER_QUERY_INTERRUPTED
+--output $out
+--reap
+connection default;
+SET DEBUG_SYNC = 'RESET';
+disconnect con1;
+
+# The killed CHECK TABLE must say that it was interrupted and must not report
+# the table as corrupt.
+
+--perl
+  my $f = "$ENV{MYSQLTEST_VARDIR}/tmp/check_table_killed.out";
+  open(my $fh, '<', $f) or die "cannot read $f: $!";
+  my $text = do { local $/; <$fh> };
+  close($fh);
+  my $interrupted = ($text =~ /interrupted/i) ? 1 : 0;
+  my $corrupt = ($text =~ /\tCorrupt\b/) ? 1 : 0;
+  print "interrupted reported: $interrupted\n";
+  print "Corrupt reported: $corrupt\n";
+EOF
+--remove_file $out
+
+CHECK TABLE t1;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
