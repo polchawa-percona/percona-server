@@ -1,0 +1,67 @@
+#
+# PS-12196: MyRocks: with rocksdb_master_skip_tx_api, scans of tables in a
+# non-default column family see no rows, and COPY ALTER empties the table.
+#
+# A session with rocksdb_master_skip_tx_api=ON uses a write batch instead of a
+# RocksDB transaction (Rdb_writebatch_impl). Its iterator must read the column
+# family of the index being scanned, as Rdb_transaction_impl does. Scans of a
+# table whose indexes are in a non-default column family must return the same
+# rows with the option ON as with it OFF, range UPDATE / DELETE and
+# INSERT ... SELECT must change the same rows, and ALTER TABLE ... ALGORITHM=COPY
+# must keep every row (it copies the table through the same iterator).
+#
+--source include/have_rocksdb.inc
+
+--let $skiptx = ON
+if ($skiptx_off) {
+  --let $skiptx = OFF
+}
+
+CREATE TABLE t_def (pk INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_cf (pk INT, a INT, b INT,
+  PRIMARY KEY (pk) COMMENT 'cfname=cf_skiptx',
+  KEY ka (a) COMMENT 'cfname=cf_skiptx') ENGINE=ROCKSDB;
+CREATE TABLE t_rev (pk INT, a INT, b INT,
+  PRIMARY KEY (pk) COMMENT 'cfname=rev:cf_skiptx_rev') ENGINE=ROCKSDB;
+SELECT TABLE_NAME, INDEX_NAME, CF FROM INFORMATION_SCHEMA.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' ORDER BY TABLE_NAME, INDEX_NAME;
+INSERT INTO t_def VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+INSERT INTO t_cf VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+INSERT INTO t_rev VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0);
+CREATE TABLE t_copy (pk INT PRIMARY KEY, a INT, b INT) ENGINE=InnoDB;
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+--disable_query_log
+eval SET SESSION rocksdb_master_skip_tx_api = $skiptx;
+--enable_query_log
+
+--echo # Full scans and an index range scan
+SELECT 't_def', COUNT(*) FROM t_def UNION ALL
+SELECT 't_cf', COUNT(*) FROM t_cf UNION ALL
+SELECT 't_rev', COUNT(*) FROM t_rev;
+SELECT pk FROM t_cf FORCE INDEX (ka) WHERE a >= 2 ORDER BY a;
+SELECT pk FROM t_rev WHERE pk BETWEEN 2 AND 3 ORDER BY pk;
+
+--echo # Range UPDATE / DELETE change every matching row
+UPDATE t_cf SET b = 1 WHERE pk BETWEEN 1 AND 3;
+SELECT ROW_COUNT();
+UPDATE t_cf SET b = 2 WHERE a >= 2;
+SELECT ROW_COUNT();
+DELETE FROM t_cf WHERE pk > 3;
+SELECT ROW_COUNT();
+UPDATE t_rev SET b = 5 WHERE pk < 3;
+SELECT ROW_COUNT();
+INSERT INTO t_copy SELECT * FROM t_cf;
+SELECT ROW_COUNT();
+
+--echo # COPY ALTER keeps every row
+ALTER TABLE t_rev MODIFY b BIGINT, ALGORITHM=COPY;
+
+SET SESSION rocksdb_master_skip_tx_api = OFF;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT * FROM t_cf ORDER BY pk;
+SELECT * FROM t_rev ORDER BY pk;
+SELECT * FROM t_copy ORDER BY pk;
+CHECK TABLE t_cf, t_rev;
+
+DROP TABLE t_def, t_cf, t_rev, t_copy;
