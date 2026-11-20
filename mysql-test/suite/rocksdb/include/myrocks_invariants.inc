@@ -200,7 +200,15 @@ DROP TEMPORARY TABLE inv_sk;
 # Invariant 3: MyRocks dictionary vs server data dictionary.
 #
 # Expected entries: one per (table, partition or subpartition, index), plus
-# HIDDEN_PK_ID for tables without a primary key. ROCKSDB_DDL shows table
+# HIDDEN_PK_ID for tables without a primary key. A table without a PRIMARY
+# KEY but with a UNIQUE key whose parts are all NOT NULL columns, not
+# prefixes and not virtual generated columns (functional key parts are
+# virtual generated columns) has no hidden primary key: the server uses the
+# first such key as the primary key (is_suitable_for_primary_key() in
+# sql/dd_table_share.cc). SUB_PART is NULL exactly when the key part
+# covers the whole column; a BLOB/TEXT key part always has a prefix and
+# qualifies when the prefix (SUB_PART characters times the character set's
+# MAXLEN bytes) equals the column's length in bytes. ROCKSDB_DDL shows table
 # and partition names in their file-name encoding (t,x appears as
 # t@002cx), so only tables and partitions whose names consist of letters,
 # digits and _ are compared; $inv_dict_skipped counts the skipped tables.
@@ -221,6 +229,26 @@ SELECT DISTINCT CONVERT(t.TABLE_NAME USING utf8mb4) COLLATE utf8mb4_general_ci A
    AND t.TABLE_NAME NOT REGEXP '[^[:alnum:]_]'
    AND IFNULL(CONCAT(p.PARTITION_NAME, IFNULL(p.SUBPARTITION_NAME, '')), 'p')
        NOT REGEXP '[^[:alnum:]_]';
+# Tables with a UNIQUE key the server promotes to the primary key. A
+# grouped query: nested EXISTS subqueries over these views in an
+# INSERT ... SELECT hit an optimizer assertion in
+# Join_node::get_const_ordered_table_node() on debug builds.
+CREATE TEMPORARY TABLE inv_cand ENGINE=InnoDB AS
+SELECT DISTINCT CONVERT(k.TABLE_NAME USING utf8mb4) COLLATE utf8mb4_general_ci AS tn
+  FROM information_schema.STATISTICS k
+  LEFT JOIN information_schema.COLUMNS c
+    ON c.TABLE_SCHEMA = k.TABLE_SCHEMA AND c.TABLE_NAME = k.TABLE_NAME
+   AND c.COLUMN_NAME = k.COLUMN_NAME
+  LEFT JOIN information_schema.CHARACTER_SETS cs
+    ON cs.CHARACTER_SET_NAME = c.CHARACTER_SET_NAME
+ WHERE k.TABLE_SCHEMA = @inv_schema AND k.NON_UNIQUE = 0
+ GROUP BY k.TABLE_NAME, k.INDEX_NAME
+HAVING SUM(k.COLUMN_NAME IS NULL OR k.NULLABLE = 'YES'
+           OR IFNULL(c.EXTRA LIKE '%VIRTUAL GENERATED%', 0)
+           OR (k.SUB_PART IS NOT NULL
+               AND NOT (c.DATA_TYPE IN ('tinyblob', 'blob', 'mediumblob', 'longblob',
+                                        'tinytext', 'text', 'mediumtext', 'longtext')
+                        AND k.SUB_PART * IFNULL(cs.MAXLEN, 1) <=> c.CHARACTER_OCTET_LENGTH))) = 0;
 INSERT INTO inv_dd
 SELECT DISTINCT t.TABLE_NAME,
        IF(p.SUBPARTITION_NAME IS NULL, p.PARTITION_NAME,
@@ -235,7 +263,10 @@ SELECT DISTINCT t.TABLE_NAME,
        NOT REGEXP '[^[:alnum:]_]'
    AND NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS s
                     WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA AND s.TABLE_NAME = t.TABLE_NAME
-                      AND s.INDEX_NAME = 'PRIMARY');
+                      AND s.INDEX_NAME = 'PRIMARY')
+   AND NOT EXISTS (SELECT 1 FROM inv_cand c
+                    WHERE c.tn = CONVERT(t.TABLE_NAME USING utf8mb4) COLLATE utf8mb4_general_ci);
+DROP TEMPORARY TABLE inv_cand;
 CREATE TEMPORARY TABLE inv_rdb ENGINE=InnoDB AS
 SELECT CONVERT(TABLE_NAME USING utf8mb4) COLLATE utf8mb4_general_ci AS tn, CONVERT(PARTITION_NAME USING utf8mb4) COLLATE utf8mb4_general_ci AS pn, CONVERT(INDEX_NAME USING utf8mb4) COLLATE utf8mb4_general_ci AS idx,
        COLUMN_FAMILY AS cf, INDEX_NUMBER AS ino
