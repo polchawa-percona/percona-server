@@ -1,0 +1,16 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(100), KEY kv (v)) ENGINE=ROCKSDB;
+# One request succeeded: every live SST file must be in the checkpoint
+SST files missing from the checkpoint: 0
+# Open the checkpoint as the RocksDB directory of the server
+# restart
+SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+SUPPORT
+YES
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+15000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# restart
+DROP TABLE t1;
