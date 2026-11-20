@@ -1,0 +1,101 @@
+#
+# PS-11669 (variant, found by the crash campaign): after a crash in INPLACE ADD
+# INDEX between the MyRocks commit of the new table definition and the removal
+# of the index's "create ongoing" marker (the separate dictionary commit of
+# Rdb_dict_manager::finish_indexes_operation()), startup rolls the new index
+# back (rollback_ongoing_index_creation(): "Removing incomplete create index")
+# although the committed MyRocks table definition uses it. The drop-index
+# thread then removes the index's data and its index information, and every
+# later start fails in MyRocks: "Could not get index information for Index
+# Number (0,N), table test.t", "Failed to initialize DDL manager" (in a debug
+# build the cleanup of the failed initialization then also hits the RocksDB
+# assertion `last_ref` in ~ColumnFamilySet). MyRocks cannot be loaded any more,
+# also not with rocksdb_validate_tables=2.
+#
+# The test crashes the ALTER before each of its durable writes in turn (crash-
+# point hook of PS-12008, test-only and not in the 8.4 base yet: this branch
+# is stacked on it), and after each crash restarts with the
+# default options, lets the drop-index thread finish its queue and restarts
+# once more. It does not depend on the number of the window, so a fix that
+# removes the separate commit (as the pending PS-11669 fix does) passes it
+# unchanged. On the unfixed server the window before the
+# finish_indexes_operation() commit fails at the second restart.
+#
+# Expected: after every crash both restarts succeed with MyRocks loaded, and
+# the table is readable with all its rows through every index it has.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+CALL mtr.add_suppression("Attempting backtrace");
+# Logged by a fix that rolls the interrupted ALTER back (PS-11669 pending fix).
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+--enable_query_log
+
+--let $n = 1
+--let $windows = 0
+--let $done = 0
+--disable_query_log
+while (!$done) {
+  --disable_warnings
+  DROP TABLE IF EXISTS t;
+  --enable_warnings
+  CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+  INSERT INTO t VALUES (1, 10, 'x1'), (2, 20, 'x2'), (3, 30, 'x3');
+  --eval SET SESSION rocksdb_debug_crash_on_nth_durable_write = $n
+  --exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+  --error 0,CR_SERVER_LOST
+  ALTER TABLE t ADD INDEX kb (b), ALGORITHM=INPLACE;
+  if (!$mysql_errno) {
+    # Fewer than $n durable writes: every window has been crashed.
+    --remove_file $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+    SET SESSION rocksdb_debug_crash_on_nth_durable_write = 0;
+    --let $done = 1
+  }
+  if (!$done) {
+    --inc $windows
+    # Restarts without the echo of start_mysqld.inc / restart_mysqld.inc:
+    # the number of windows is not part of the result.
+    --source include/wait_until_disconnected.inc
+    --disable_query_log
+    --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+    --source include/wait_until_connected_again.inc
+    --disable_query_log
+    SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+    --let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING'
+    --let $wait_timeout = 180
+    --source include/wait_condition.inc
+    --disable_query_log
+    --exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+    --shutdown_server
+    --source include/wait_until_disconnected.inc
+    --disable_query_log
+    --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+    --source include/wait_until_connected_again.inc
+    --disable_query_log
+    if (`SELECT COUNT(*) = 0 FROM information_schema.engines WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT')`) {
+      --die MyRocks is not loaded after the second restart (window $n)
+    }
+    --let $rows = `SELECT CONCAT(COUNT(*), '/', SUM(a)) FROM t FORCE INDEX (PRIMARY)`
+    if ($rows != 3/60) {
+      --die window $n: PRIMARY returns $rows, expected 3/60
+    }
+    if (`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'test' AND table_name = 't' AND index_name = 'kb'`) {
+      --let $rows = `SELECT CONCAT(COUNT(*), '/', SUM(a)) FROM t FORCE INDEX (kb) WHERE b >= ''`
+      if ($rows != 3/60) {
+        --die window $n: kb returns $rows, expected 3/60
+      }
+    }
+  }
+  --inc $n
+  if ($n > 20) {
+    --die more than 20 durable writes in INPLACE ADD INDEX
+  }
+}
+--let $some_windows = `SELECT $windows >= 4`
+--enable_query_log
+--echo # Crash windows enumerated (at least 4): $some_windows
+--echo # Every window recovered, and MyRocks loaded at the second restart.
+SELECT * FROM t FORCE INDEX (PRIMARY) ORDER BY pk;
+DROP TABLE t;

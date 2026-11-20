@@ -1,0 +1,8 @@
+# Crash windows enumerated (at least 4): 1
+# Every window recovered, and MyRocks loaded at the second restart.
+SELECT * FROM t FORCE INDEX (PRIMARY) ORDER BY pk;
+pk	a	b
+1	10	x1
+2	20	x2
+3	30	x3
+DROP TABLE t;
