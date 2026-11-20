@@ -1,0 +1,50 @@
+# PS-NNNNN: CREATE TABLE ... SELECT that fails with rocksdb_bulk_load=1 drops
+# the new table, but the rows it had already bulk loaded are still added to
+# the database when the bulk load ends. They belong to the index of a table
+# that no longer exists, so nothing ever removes them.
+#
+# Expected: after the failed statement, the end of the bulk load and the
+# processing of the dropped indexes, no SST file has rows of an index that is
+# not in the MyRocks data dictionary (as without rocksdb_bulk_load).
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE src (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO src VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 1);
+
+# CREATE TABLE ... SELECT from a MyRocks table needs READ COMMITTED (gap locks).
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_bulk_load = 1;
+# The rows come in order of a until the last one, which repeats a = 1.
+--error ER_KEYS_OUT_OF_ORDER
+CREATE TABLE t1 (PRIMARY KEY (a)) ENGINE=ROCKSDB SELECT * FROM src;
+
+# Another session waits until the drop-index thread is done with the indexes
+# of the dropped table, before this session ends its bulk load.
+connect (con1,localhost,root,,test);
+let $wait_condition = SELECT COUNT(*) = 0
+  FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+disconnect con1;
+
+connection default;
+SET SESSION rocksdb_bulk_load = 0;
+
+SHOW TABLES;
+
+# Remove whatever is left of the dropped indexes, then count their rows.
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+SELECT IFNULL(SUM(f.num_rows), 0) AS rows_of_dropped_indexes
+  FROM information_schema.rocksdb_index_file_map f
+  WHERE f.index_number > 255 AND f.num_rows > 0
+    AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+                    WHERE d.column_family = f.column_family
+                      AND d.index_number = f.index_number);
+
+DROP TABLE src;
+--source include/wait_until_count_sessions.inc
