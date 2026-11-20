@@ -13455,8 +13455,14 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
   if (bulk_load_sk && row_info.old_data == nullptr) {
     rc = bulk_load_key(row_info.tx, kd, new_key_slice, new_value_slice, true);
   } else {
-    row_info.tx->get_indexed_write_batch().Put(kd.get_cf(), new_key_slice,
-                                               new_value_slice);
+    const auto s = row_info.tx->get_indexed_write_batch().Put(
+        kd.get_cf(), new_key_slice, new_value_slice);
+    if (!s.ok()) {
+      // E.g. MemoryLimit when the write batch exceeds
+      // rocksdb_write_batch_max_bytes: the statement must fail rather than
+      // leave the row without its secondary key entry.
+      return row_info.tx->set_status_error(table->in_use, s, kd, m_tbl_def);
+    }
   }
 
   return rc;

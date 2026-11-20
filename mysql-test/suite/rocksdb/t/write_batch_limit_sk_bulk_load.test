@@ -1,0 +1,44 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-11899 (with PS-11744 fixed): a bulk load statement that fails because the
+# secondary key writes exceed rocksdb_write_batch_max_bytes must leave both
+# indexes with the same rows. With rocksdb_bulk_load_allow_sk=OFF the primary
+# key goes to SST files and the secondary keys to the write batch. Once the
+# secondary key write reports the limit error (PS-11744), the statement fails,
+# its write batch is discarded, but the primary key SST files are still
+# ingested, so the secondary key misses the rows the primary key has.
+#
+# Split from rocksdb.write_batch_limit_sk_missing. Disabled until PS-11899 is
+# fixed.
+#
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--echo # Bulk load without SST files for secondary keys and without
+--echo # commit in the middle: the secondary keys go to the write batch
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
+  inc $i;
+}
+--enable_query_log
+CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384, rocksdb_bulk_load_size = 100000;
+SET SESSION rocksdb_bulk_load = 1;
+# The statement may fail with the write batch limit error or succeed; only
+# the consistency of the two indexes matters.
+--disable_result_log
+--error 0,ER_GET_ERRMSG
+INSERT INTO t4 SELECT * FROM src;
+--enable_result_log
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_write_batch_max_bytes = 0, rocksdb_bulk_load_size = DEFAULT;
+SELECT (SELECT COUNT(*) FROM t4 FORCE INDEX (PRIMARY)) =
+       (SELECT COUNT(*) FROM t4 FORCE INDEX (k)) AS pk_equals_sk;
+
+DROP TABLE t4, src;
+--source include/wait_until_count_sessions.inc

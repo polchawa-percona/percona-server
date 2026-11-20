@@ -33,6 +33,35 @@ SET SESSION rocksdb_write_batch_max_bytes = 0;
 SELECT id, w FROM t2 FORCE INDEX (PRIMARY) ORDER BY id;
 SELECT COUNT(*) FROM t2 FORCE INDEX (w);
 
+--echo # REPLACE of an existing row with a unique secondary key: the new
+--echo # entry crosses the limit
+CREATE TABLE t5 (id INT PRIMARY KEY, w VARCHAR(700), UNIQUE KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t5 VALUES (1, 'a'), (2, 'b');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+REPLACE INTO t5 VALUES (1, REPEAT('z', 480));
+--error ER_GET_ERRMSG
+INSERT INTO t5 VALUES (2, 'b') ON DUPLICATE KEY UPDATE w = REPEAT('y', 480);
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT id, w FROM t5 FORCE INDEX (PRIMARY) ORDER BY id;
+SELECT id, w FROM t5 FORCE INDEX (w) ORDER BY id;
+
+--echo # Two secondary keys: the second entry crosses the limit after the
+--echo # first one was written, so the statement rollback must remove it
+CREATE TABLE t6 (id INT PRIMARY KEY, a INT, w VARCHAR(700), KEY (a), KEY (w))
+  ENGINE=ROCKSDB CHARSET latin1;
+INSERT INTO t6 VALUES (1, 1, 'a');
+SET SESSION rocksdb_write_batch_max_bytes = 1024;
+--error ER_GET_ERRMSG
+INSERT INTO t6 VALUES (2, 2, REPEAT('b', 450));
+--error 0,ER_GET_ERRMSG
+INSERT IGNORE INTO t6 VALUES (3, 3, REPEAT('c', 450));
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+SELECT COUNT(*) FROM t6 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t6 FORCE INDEX (a);
+SELECT COUNT(*) FROM t6 FORCE INDEX (w);
+
 --echo # Multi-statement transaction: no row may lack its secondary key entry
 CREATE TABLE t3 (id INT PRIMARY KEY, w VARCHAR(700), KEY (w))
   ENGINE=ROCKSDB CHARSET latin1;
@@ -40,12 +69,18 @@ SET SESSION rocksdb_write_batch_max_bytes = 16384;
 BEGIN;
 --disable_query_log
 let $i = 0;
+let $ok = 0;
+let $hit = 0;
 let $stop = 0;
 while (!$stop) {
   --error 0,ER_GET_ERRMSG
   eval INSERT INTO t3 VALUES ($i, REPEAT(CHAR(65 + ($i % 26)), 690));
   if ($mysql_errno) {
+    let $hit = 1;
     let $stop = 1;
+  }
+  if (!$mysql_errno) {
+    inc $ok;
   }
   inc $i;
   if ($i > 400) {
@@ -54,29 +89,13 @@ while (!$stop) {
 }
 --enable_query_log
 COMMIT;
+--echo limit hit: $hit
 SET SESSION rocksdb_write_batch_max_bytes = 0;
-SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) =
-       (SELECT COUNT(*) FROM t3 FORCE INDEX (w)) AS pk_equals_sk;
-
---echo # Bulk load without SST files for secondary keys and without
---echo # commit in the middle: the secondary keys go to the write batch
-CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+# The statements before the failing one are committed, the failing one is not.
 --disable_query_log
-let $i = 0;
-while ($i < 2000) {
-  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
-  inc $i;
-}
+eval SELECT (SELECT COUNT(*) FROM t3 FORCE INDEX (PRIMARY)) = $ok AND
+            (SELECT COUNT(*) FROM t3 FORCE INDEX (w)) = $ok AS committed_rows_ok;
 --enable_query_log
-CREATE TABLE t4 (id INT PRIMARY KEY, v VARCHAR(200), k INT, KEY (k)) ENGINE=ROCKSDB;
-SET SESSION rocksdb_write_batch_max_bytes = 16384, rocksdb_bulk_load_size = 100000;
-SET SESSION rocksdb_bulk_load = 1;
---error 0,ER_GET_ERRMSG
-INSERT INTO t4 SELECT * FROM src;
-SET SESSION rocksdb_bulk_load = 0;
-SET SESSION rocksdb_write_batch_max_bytes = 0, rocksdb_bulk_load_size = DEFAULT;
-SELECT (SELECT COUNT(*) FROM t4 FORCE INDEX (PRIMARY)) =
-       (SELECT COUNT(*) FROM t4 FORCE INDEX (k)) AS pk_equals_sk;
 
-DROP TABLE t1, t2, t3, t4, src;
+DROP TABLE t1, t2, t3, t5, t6;
 --source include/wait_until_count_sessions.inc
