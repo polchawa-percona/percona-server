@@ -1,0 +1,10 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1), (2);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET SESSION rocksdb_create_temporary_checkpoint = 'MYSQLTEST_VARDIR/tmp/ckpt_remove_retry';
+# Removing the checkpoint fails.
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+ERROR HY000: Got error N 'DestroyDB failure' from ROCKSDB
+# The cause is gone: the retry must remove the checkpoint.
+SET SESSION rocksdb_create_temporary_checkpoint = NULL;
+DROP TABLE t1;
