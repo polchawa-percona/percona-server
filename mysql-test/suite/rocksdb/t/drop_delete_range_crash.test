@@ -1,0 +1,66 @@
+#
+# PS-11792: MyRocks DROP with delete range removes data before the dictionary
+# commit.
+#
+# With rocksdb_enable_delete_range_for_drop_index=ON, DROP TABLE and INPLACE
+# DROP INDEX call delete_range() before the MyRocks dictionary commit and
+# before the server data dictionary commit. delete_range() removes the SST
+# files of the dropped indexes at once (DeleteFilesInRange) and writes the
+# DeleteRange batch. A crash before the dictionary commits leaves the table
+# and the index defined in both dictionaries, but their rows are gone: the
+# table reads as empty and the index returns no rows.
+#
+# Expected: a crash before the dictionary commit leaves the DDL undone; the
+# table and the index keep all their rows. The delete_range_off combination
+# (background drop thread) shows the expected result.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+# Each index in its own column family, flushed and compacted to the last
+# level, so that DeleteFilesInRange can remove whole SST files.
+CREATE TABLE t1 (pk INT, a INT,
+                 PRIMARY KEY (pk) COMMENT 'cfname=cf_t1_pk',
+                 KEY k(a) COMMENT 'cfname=cf_t1_k') ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE seq (n) AS
+  (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+  SELECT n, n FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'cf_t1_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_t1_k';
+
+--echo # Crash in DROP INDEX before the dictionary commit.
+--source include/expect_crash.inc
+SET SESSION debug = '+d,rocksdb_crash_before_drop_dict_commit';
+--error CR_SERVER_LOST
+ALTER TABLE t1 DROP INDEX k, ALGORITHM=INPLACE;
+--source include/wait_until_disconnected.inc
+--source include/start_mysqld.inc
+
+SHOW CREATE TABLE t1;
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(a) FROM t1 FORCE INDEX (k);
+DROP TABLE t1;
+
+CREATE TABLE t2 (pk INT, a INT,
+                 PRIMARY KEY (pk) COMMENT 'cfname=cf_t2_pk',
+                 KEY k(a) COMMENT 'cfname=cf_t2_k') ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE seq (n) AS
+  (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100)
+  SELECT n, n FROM seq;
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'cf_t2_pk';
+SET GLOBAL rocksdb_compact_cf = 'cf_t2_k';
+
+--echo # Crash in DROP TABLE before the dictionary commit.
+--source include/expect_crash.inc
+SET SESSION debug = '+d,rocksdb_crash_before_drop_dict_commit';
+--error CR_SERVER_LOST
+DROP TABLE t2;
+--source include/wait_until_disconnected.inc
+--source include/start_mysqld.inc
+
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (PRIMARY);
+SELECT COUNT(*), SUM(a) FROM t2 FORCE INDEX (k);
+DROP TABLE t2;
