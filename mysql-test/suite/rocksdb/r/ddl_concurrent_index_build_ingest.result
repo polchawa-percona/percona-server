@@ -1,0 +1,106 @@
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t2 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+CREATE TABLE t3 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(32) NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t3 WITH RECURSIVE v AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM v WHERE n < 3000)
+SELECT n, (n * 7) % 1000, CONCAT('v', n) FROM v;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+call mtr.add_suppression("Failed to bulk load. status code = 13");
+call mtr.add_suppression("Error finishing bulk load");
+# round 1
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = DEFAULT;
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME IN ('t1','t2') AND INDEX_NAME='ka' ORDER BY INDEX_NUMBER;
+TABLE_NAME	INDEX_NAME
+t1	ka
+t2	ka
+# t2.ka matches the primary key
+# t1.ka matches the primary key
+ALTER TABLE t1 DROP INDEX ka;
+ALTER TABLE t2 DROP INDEX ka;
+# round 2
+# the spanning file is compacted to the bottom level before A ingests
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = DEFAULT;
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME IN ('t1','t2') AND INDEX_NAME='ka' ORDER BY INDEX_NUMBER;
+TABLE_NAME	INDEX_NAME
+t1	ka
+t2	ka
+# t2.ka matches the primary key
+# t1.ka matches the primary key
+ALTER TABLE t1 DROP INDEX ka;
+ALTER TABLE t2 DROP INDEX ka;
+# round 3
+# rocksdb_bulk_load_fail_if_not_bottommost_level = ON for build A
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET DEBUG_SYNC = 'now SIGNAL g1';
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = DEFAULT;
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME IN ('t1','t2') AND INDEX_NAME='ka' ORDER BY INDEX_NUMBER;
+TABLE_NAME	INDEX_NAME
+t1	ka
+t2	ka
+# t2.ka matches the primary key
+# t1.ka matches the primary key
+ALTER TABLE t1 DROP INDEX ka;
+ALTER TABLE t2 DROP INDEX ka;
+# round 4
+# bottom level + fail_if_not_bottommost_level = ON
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = ON;
+SET DEBUG_SYNC = 'rocksdb.bulk_load_before_ingest SIGNAL p1 WAIT_FOR g1';
+ALTER TABLE t1 ADD INDEX ka(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR p1';
+ALTER TABLE t2 ADD INDEX ka(a), ALGORITHM=INPLACE;
+UPDATE t2 SET a = a + 1 WHERE pk <= 500;
+UPDATE t3 SET a = a + 1 WHERE pk <= 500;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET DEBUG_SYNC = 'now SIGNAL g1';
+ERROR HY000: [<sst file>] bulk load error: Operation failed. Try again.: Files cannot be ingested to Lmax. Please make sure key range of Lmax does not overlap with files to ingest.
+SET SESSION rocksdb_bulk_load_fail_if_not_bottommost_level = DEFAULT;
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL WHERE TABLE_NAME IN ('t1','t2') AND INDEX_NAME='ka' ORDER BY INDEX_NUMBER;
+TABLE_NAME	INDEX_NAME
+t2	ka
+# t2.ka matches the primary key
+ALTER TABLE t2 DROP INDEX ka;
+SET DEBUG_SYNC = 'RESET';
+CHECK TABLE t1, t2, t3;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+# data of dropped indexes left in SST files
+SELECT m.COLUMN_FAMILY, m.INDEX_NUMBER, m.NUM_ROWS FROM information_schema.ROCKSDB_INDEX_FILE_MAP m
+WHERE m.COLUMN_FAMILY <> 1 AND (m.COLUMN_FAMILY, m.INDEX_NUMBER) NOT IN (SELECT COLUMN_FAMILY, INDEX_NUMBER FROM information_schema.ROCKSDB_DDL);
+COLUMN_FAMILY	INDEX_NUMBER	NUM_ROWS
+SELECT TYPE, NAME FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE LIKE 'DDL%';
+TYPE	NAME
+DROP TABLE t1, t2, t3;
