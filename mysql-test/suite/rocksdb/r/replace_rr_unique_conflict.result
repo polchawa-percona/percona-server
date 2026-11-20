@@ -1,0 +1,29 @@
+CREATE TABLE t (id INT PRIMARY KEY, b INT, c INT, UNIQUE KEY ub (b))
+ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1,10,1);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# INSERT ... ON DUPLICATE KEY UPDATE: snapshot conflict
+BEGIN;
+SELECT * FROM t;
+id	b	c
+1	10	1
+INSERT INTO t VALUES (6,50,6);
+INSERT INTO t VALUES (9,50,9) ON DUPLICATE KEY UPDATE c = 100;
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+# REPLACE: the same conflict
+BEGIN;
+SELECT * FROM t;
+id	b	c
+1	10	1
+6	50	6
+INSERT INTO t VALUES (7,70,7);
+REPLACE INTO t VALUES (11,70,11);
+ERROR 40001: Deadlock found when trying to get lock; try restarting transaction
+ROLLBACK;
+SELECT * FROM t;
+id	b	c
+1	10	1
+6	50	6
+7	70	7
+DROP TABLE t;
