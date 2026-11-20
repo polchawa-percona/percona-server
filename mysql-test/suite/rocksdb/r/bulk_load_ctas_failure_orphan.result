@@ -1,0 +1,21 @@
+CREATE TABLE src (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO src VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 1);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_bulk_load = 1;
+CREATE TABLE t1 (PRIMARY KEY (a)) ENGINE=ROCKSDB SELECT * FROM src;
+ERROR HY000: Rows must be inserted in primary key order during bulk load operation
+SET SESSION rocksdb_bulk_load = 0;
+SHOW TABLES;
+Tables_in_test
+src
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT IFNULL(SUM(f.num_rows), 0) AS rows_of_dropped_indexes
+FROM information_schema.rocksdb_index_file_map f
+WHERE f.index_number > 255 AND f.num_rows > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+WHERE d.column_family = f.column_family
+AND d.index_number = f.index_number);
+rows_of_dropped_indexes
+0
+DROP TABLE src;

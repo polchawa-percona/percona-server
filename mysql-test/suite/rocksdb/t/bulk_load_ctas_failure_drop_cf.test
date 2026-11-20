@@ -1,0 +1,51 @@
+# PS-12183: CREATE TABLE ... SELECT that fails with rocksdb_bulk_load=1 drops
+# the new table but keeps its bulk-loaded data for the end of the bulk load.
+# If the column family of that table is deleted in between, ending the bulk
+# load ingests the data into the deleted column family: heap-use-after-free of
+# its handle on ASAN builds, signal 11 on debug and release builds.
+#
+# Expected: ending the bulk load succeeds and leaves no data of the dropped
+# table (as without rocksdb_bulk_load).
+
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE src (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO src VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 1);
+
+# CREATE TABLE ... SELECT from a MyRocks table needs READ COMMITTED (gap locks).
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_bulk_load = 1;
+# The rows come in order of a until the last one, which repeats a = 1.
+--error ER_KEYS_OUT_OF_ORDER
+CREATE TABLE t1 (a INT NOT NULL, pk INT,
+  PRIMARY KEY (a) COMMENT 'cfname=cf_bulk_ctas') ENGINE=ROCKSDB
+  SELECT * FROM src;
+
+# Another session deletes the column family, which no table uses any more.
+connect (con1,localhost,root,,test);
+let $wait_condition = SELECT COUNT(*) = 0
+  FROM information_schema.rocksdb_global_info
+  WHERE type = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+SET GLOBAL rocksdb_delete_cf = 'cf_bulk_ctas';
+# The drop-index thread drops the column family in the background. Wait until
+# it is gone: ending the bulk load below then uses its freed handle.
+let $wait_condition = SELECT COUNT(*) = 0
+  FROM information_schema.rocksdb_cfstats WHERE cf_name = 'cf_bulk_ctas';
+--source include/wait_condition.inc
+disconnect con1;
+
+connection default;
+SET SESSION rocksdb_bulk_load = 0;
+
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT IFNULL(SUM(f.num_rows), 0) AS rows_of_dropped_indexes
+  FROM information_schema.rocksdb_index_file_map f
+  WHERE f.index_number > 255 AND f.num_rows > 0
+    AND NOT EXISTS (SELECT 1 FROM information_schema.rocksdb_ddl d
+                    WHERE d.column_family = f.column_family
+                      AND d.index_number = f.index_number);
+
+DROP TABLE src;
+--source include/wait_until_count_sessions.inc
