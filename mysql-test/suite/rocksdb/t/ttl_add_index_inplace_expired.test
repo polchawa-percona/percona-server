@@ -1,0 +1,50 @@
+# PS-12180: ALTER TABLE ... ADD INDEX, ALGORITHM=INPLACE on a TTL table builds
+# the new index from a primary key scan that skips the rows that are expired for
+# the ALTER, although they are still in the primary key. A READ COMMITTED
+# transaction whose first snapshot (which fixes its TTL read filter time) is
+# older than the ALTER still sees such rows through the primary key and the
+# indexes that existed before, but not through the new index.
+# Expected: the new index returns the same rows as the primary key.
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1);
+CREATE TABLE t1 (i INT, j INT, k INT, ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (i, j), KEY old_k (k)
+) ENGINE=ROCKSDB COMMENT='ttl_duration=1000;ttl_col=ts;';
+
+--connect (con1,localhost,root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+--echo # con1: first snapshot, on another table
+SELECT COUNT(*) FROM t2;
+# The snapshot was taken before this statement started, so its time is not
+# later than @t1.
+SELECT UNIX_TIMESTAMP() INTO @t1;
+--let $t1= `SELECT @t1`
+
+--connection default
+# Two live rows and two rows that expire one second after @t1: alive for con1,
+# expired for transactions that start later.
+--disable_query_log
+eval INSERT INTO t1 VALUES (1,1,1,UNIX_TIMESTAMP()), (1,2,2,UNIX_TIMESTAMP()),
+  (1,7,7,$t1 + 1 - 1000), (1,8,8,$t1 + 1 - 1000);
+--enable_query_log
+--echo # Wait until rows 7 and 8 are expired for new transactions
+--let $wait_timeout= 60
+--let $wait_condition= SELECT COUNT(*) = 2 FROM t1 FORCE INDEX (PRIMARY)
+--source include/wait_condition.inc
+ALTER TABLE t1 ADD INDEX new_k (k), ALGORITHM=INPLACE;
+
+--connection con1
+--echo # con1: all three reads must return rows 1, 2, 7, 8
+SELECT j FROM t1 FORCE INDEX (PRIMARY) ORDER BY j;
+SELECT j FROM t1 FORCE INDEX (old_k) ORDER BY j;
+SELECT j FROM t1 FORCE INDEX (new_k) ORDER BY j;
+COMMIT;
+--disconnect con1
+
+--connection default
+DROP TABLE t1, t2;
+--source include/wait_until_count_sessions.inc
