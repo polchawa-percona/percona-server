@@ -1,0 +1,104 @@
+# PS-12193: two sessions create a checkpoint in the same directory at the
+# same time. RocksDB builds a checkpoint in "<dir>.tmp" and calls
+# CleanStagingDirectory() on it twice: before it starts, and after a failure.
+# The request that loses the race removes the other one's still-empty ".tmp",
+# creates it again, fails to link a file the other request has already linked
+# ("File exists"), and its error-path CleanStagingDirectory() deletes the hard
+# links the other request made. The other request returns success for a
+# checkpoint that lacks SST files and cannot be opened. A fix must cover both
+# call sites.
+#
+# Expected: a request that returns success leaves a complete checkpoint
+# (every live SST file is in it) that opens with all rows.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v VARCHAR(100), KEY kv (v)) ENGINE=ROCKSDB;
+# Many SST files (automatic compactions are off), so that linking them takes
+# long enough for the second request to start meanwhile.
+--disable_query_log
+--let $i = 0
+while ($i < 150) {
+  --eval INSERT INTO t1 SELECT $i * 100 + n, REPEAT('x', 50) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 100) SELECT n FROM s) d
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  --inc $i
+}
+--enable_query_log
+
+--let $datadir = `SELECT @@datadir`
+--let $ckpt = $MYSQLTEST_VARDIR/tmp/ckpt_same_dir
+
+connect (con1,localhost,root,,test);
+connect (con2,localhost,root,,test);
+
+# Both sessions request the same checkpoint at once, until one request
+# succeeds. The other one fails; its error code does not matter, only the
+# completeness of the successful request's checkpoint does.
+--disable_query_log
+--disable_result_log
+--let $succeeded = 0
+--let $attempt = 0
+--disable_abort_on_error
+while (!$succeeded) {
+  --inc $attempt
+  if ($attempt > 1000) {
+    --die No checkpoint request succeeded in 1000 attempts
+  }
+  connection con1;
+  --send_eval SET GLOBAL rocksdb_create_checkpoint = '$ckpt'
+  connection con2;
+  --send_eval SET GLOBAL rocksdb_create_checkpoint = '$ckpt'
+  connection con1;
+  --reap
+  --let $err1 = $mysql_errno
+  connection con2;
+  --reap
+  --let $err2 = $mysql_errno
+  --let $succeeded = `SELECT $err1 = 0 OR $err2 = 0`
+  if (!$succeeded) {
+    # Remove what a failed request left behind; either directory may be absent.
+    --error 0,1
+    --force-rmdir $ckpt.tmp
+    --error 0,1
+    --force-rmdir $ckpt
+  }
+}
+--enable_abort_on_error
+--enable_result_log
+--enable_query_log
+connection default;
+disconnect con1;
+disconnect con2;
+
+--echo # One request succeeded: every live SST file must be in the checkpoint
+--let SST_LIVE_DIR = $datadir/.rocksdb
+--let SST_CKPT_DIR = $ckpt
+perl;
+  my ($live, $ckpt) = ($ENV{SST_LIVE_DIR}, $ENV{SST_CKPT_DIR});
+  opendir(my $dh, $live) or die "opendir $live: $!";
+  my @sst = grep { /\.sst$/ } readdir($dh);
+  closedir($dh);
+  my $missing = grep { !-e "$ckpt/$_" } @sst;
+  print "SST files missing from the checkpoint: $missing\n";
+EOF
+
+--echo # Open the checkpoint as the RocksDB directory of the server
+--source include/shutdown_mysqld.inc
+--error 0,1
+--force-rmdir $ckpt.tmp
+--exec mv $datadir/.rocksdb $datadir/.rocksdb.orig
+--exec mv $ckpt $datadir/.rocksdb
+--source include/start_mysqld.inc
+SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE = 'ROCKSDB';
+# An incomplete checkpoint does not load: let the test continue to the cleanup.
+--error 0,ER_UNKNOWN_STORAGE_ENGINE
+SELECT COUNT(*) FROM t1;
+--error 0,ER_UNKNOWN_STORAGE_ENGINE
+CHECK TABLE t1;
+
+# Cleanup: put the original RocksDB directory back.
+--source include/shutdown_mysqld.inc
+--force-rmdir $datadir/.rocksdb
+--exec mv $datadir/.rocksdb.orig $datadir/.rocksdb
+--source include/start_mysqld.inc
+DROP TABLE t1;
