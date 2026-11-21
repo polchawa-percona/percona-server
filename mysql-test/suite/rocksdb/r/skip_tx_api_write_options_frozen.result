@@ -1,0 +1,14 @@
+CREATE TABLE t1 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+SET SESSION rocksdb_master_skip_tx_api = ON;
+SET SESSION rocksdb_write_disable_wal = ON;
+INSERT INTO t1 VALUES (1, 1);
+SET SESSION rocksdb_write_disable_wal = OFF;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+INSERT INTO t1 VALUES (2, 2);
+# Kill and restart
+# Row 2 was committed with the WAL on and must survive the kill
+SELECT * FROM t1 WHERE pk = 2;
+pk	v
+2	2
+DROP TABLE t1;
