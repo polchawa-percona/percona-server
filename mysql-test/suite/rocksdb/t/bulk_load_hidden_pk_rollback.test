@@ -1,0 +1,65 @@
+--source include/have_rocksdb.inc
+#
+# PS-12210: a rollback in a bulk-load session leaves secondary key entries
+# without rows in a table without a PRIMARY KEY.
+#
+# With rocksdb_bulk_load=1 and rocksdb_bulk_load_allow_sk=ON the secondary
+# keys are written to SST files (update_write_sk(), bulk_load_sk), but a
+# hidden primary key is never bulk loaded (update_write_pk() calls
+# bulk_load_key() only for an explicit primary key), so the rows go to the
+# transaction's write batch. A ROLLBACK, a failed statement or a ROLLBACK TO
+# SAVEPOINT discards the rows, while their secondary key entries are ingested
+# when the load ends.
+#
+# Expected: after the rollback every index has the same rows (with an
+# explicit primary key the rows are kept in all indexes, with
+# rocksdb_bulk_load_allow_sk=OFF they are in none), and CHECK TABLE is OK.
+# Related: PS-11899 (rocksdb_bulk_load_allow_sk=OFF, explicit primary key:
+# rows kept in the primary key, secondary key entries lost).
+#
+
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+
+--let $case = 0
+while ($case < 3)
+{
+  CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, KEY kb (b), KEY ka (a)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1, 1);
+  SET SESSION rocksdb_bulk_load = 1;
+  if ($case == 0)
+  {
+    --echo # ROLLBACK
+    BEGIN;
+    INSERT INTO t1 VALUES (2, 2), (3, 3);
+    ROLLBACK;
+  }
+  if ($case == 1)
+  {
+    --echo # failed statement
+    --error ER_BAD_NULL_ERROR
+    INSERT INTO t1 VALUES (2, 2), (3, NULL);
+  }
+  if ($case == 2)
+  {
+    --echo # ROLLBACK TO SAVEPOINT
+    BEGIN;
+    SAVEPOINT s;
+    INSERT INTO t1 VALUES (2, 2), (3, 3);
+    ROLLBACK TO SAVEPOINT s;
+    COMMIT;
+  }
+  SET SESSION rocksdb_bulk_load = 0;
+
+  # Index-only scans of both secondary keys against the primary key scan.
+  SELECT (SELECT GROUP_CONCAT(b ORDER BY b) FROM t1 USE INDEX ()) <=>
+         (SELECT GROUP_CONCAT(b ORDER BY b) FROM t1 FORCE INDEX (kb))
+         AS kb_matches_pk,
+         (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 USE INDEX ()) <=>
+         (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 FORCE INDEX (ka))
+         AS ka_matches_pk;
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $case
+}
+
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
