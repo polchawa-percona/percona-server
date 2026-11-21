@@ -1,0 +1,68 @@
+--source include/have_rocksdb.inc
+#
+# PS-12209: SET GLOBAL rocksdb_delayed_write_rate = DEFAULT (0), 1-3 or a
+# very large value crashes the server at the next write stall.
+#
+# The documented range of rocksdb_delayed_write_rate is 0..18446744073709551615
+# and its default is 0 (RocksDB then infers 16 MB/s when the database is
+# opened). At runtime the value goes to rocksdb::DB::SetDBOptions(), where 0
+# becomes 1 B/s. With a small memtable and level0_slowdown_writes_trigger=2
+# the inserts below put the default column family into an L0 slowdown and out
+# of it again. When the delay ends, RocksDB sets its low-priority rate limiter
+# to delayed_write_rate / 4, which is 0 for the values 0-3 (rate_limiter.cc
+# assertion bytes_per_second > 0, SIGFPE on release); for
+# 18446744073709551615 the rate scaling overflows and ends at 0 as well.
+#
+# Expected: every allowed value is accepted, clamped or rejected, and the
+# server keeps running.
+#
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(200)) ENGINE=ROCKSDB;
+
+--let $n = 0
+while ($n < 3)
+{
+  if ($n == 0)
+  {
+    --echo # rocksdb_delayed_write_rate = DEFAULT after another value
+    SET GLOBAL rocksdb_delayed_write_rate = 1000000;
+    --let $v = DEFAULT
+  }
+  if ($n == 1)
+  {
+    --echo # rocksdb_delayed_write_rate = 1
+    --let $v = 1
+  }
+  if ($n == 2)
+  {
+    --echo # rocksdb_delayed_write_rate = 18446744073709551615
+    --let $v = 18446744073709551615
+  }
+  # Accepted, clamped or rejected are all correct; only a crash is not.
+  # The statement and its outcome are not printed.
+  --disable_query_log
+  --disable_result_log
+  --disable_warnings
+  --error 0,ER_WRONG_VALUE_FOR_VAR,ER_WRONG_ARGUMENTS
+  eval SET GLOBAL rocksdb_delayed_write_rate = $v;
+  --enable_warnings
+  --enable_result_log
+  --let $i = 0
+  while ($i < 30)
+  {
+    eval INSERT INTO t1 SELECT $n * 100000 + $i * 1000 + seq, REPEAT('x', 200) FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < 500) SELECT seq FROM s) q;
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    --inc $i
+  }
+  # Back to the value the server infers for the default (16 MB/s) without
+  # going through 0.
+  SET GLOBAL rocksdb_delayed_write_rate = 16777216;
+  --enable_query_log
+  SELECT COUNT(*) FROM t1;
+  --inc $n
+}
+
+DROP TABLE t1;
+
+# The startup value 0 cannot be set back at runtime without the crash above.
+--source include/restart_mysqld.inc
