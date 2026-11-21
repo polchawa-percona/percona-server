@@ -12,6 +12,15 @@
 #      number is used twice, and no index number exceeds MAX_INDEX_ID.
 #   4. The drop-index queue drains, and afterwards no SST file has rows
 #      for an index number that is no longer in the dictionary.
+#   8. No internal DDL table (#sql*, #sql2*, #truncate_tmp#*) is left in
+#      the MyRocks dictionary or (debug builds) in the server data
+#      dictionary (myrocks_inv_orphans.inc). A #sql-* that exists only in
+#      the server data dictionary is what an abort during ALTER TABLE
+#      leaves; it is reported too, unless $inv_after_abort = 1.
+#   9. With $inv_fullrow_expect set: the full rows of every MyRocks table,
+#      read through the primary key (every column, myrocks_inv_fullrow.inc),
+#      are the same as when $inv_fullrow_expect was taken, for example
+#      before a restart. $inv_fullrow always returns the current value.
 #
 # Invariants 2 (InnoDB mirror), 5 (snapshot across compaction), 6 (crash
 # loses only a suffix) and 7 (errors are truthful) need scenario context;
@@ -33,6 +42,19 @@
 # [--let $inv_skip_dropped = 1]      # skip invariant 4
 # [--let $inv_drop_timeout = 300]    # seconds to wait for the drop queue
 # [--let $inv_die = 1]               # --die on the first violation found
+# [--let $inv_skip_orphans = 1]      # skip invariant 8
+# [--let $inv_orphans_known = <list>] # comma list (as returned in
+#                                    # $inv_orphans) that invariant 8 ignores
+# [--let $inv_after_abort = 1]       # the caller knows that the server
+#                                    # aborted inside a DDL statement on this
+#                                    # schema: invariant 8 accepts the entries
+#                                    # of $inv_orphans_abort_ok (a #sql-*
+#                                    # only in the server data dictionary,
+#                                    # see myrocks_inv_orphans.inc). Leftovers
+#                                    # of earlier tests can be listed in
+#                                    # $inv_orphans_known instead.
+# [--let $inv_skip_partial = 1]      # skip partial indexes in invariant 1
+# [--let $inv_fullrow_expect = <v>]  # $inv_fullrow of an earlier run
 # --source suite/rocksdb/include/myrocks_invariants.inc
 #
 # CHECK TABLE is skipped for tables whose name contains a comma (mysqltest
@@ -40,11 +62,19 @@
 # Invariant 3 skips tables whose name needs file-name encoding;
 # $inv_dict_skipped returns how many were skipped.
 #
-# Invisible indexes and indexes with a partial_group comment (partial
-# indexes) are skipped by invariant 1. A prefix index cannot return rows in
-# column order, so its side of the comparison may fall back to a table scan
-# and only CHECK TABLE checks it.
-# Functional key parts are not checksummed; their row count still is.
+# Invariant 1 also reads invisible indexes (use_invisible_indexes=on) and
+# partial indexes (partial_group comment). Reading a partial index
+# materializes every group of at least partial_group_threshold rows that is
+# not materialized yet (rocksdb_partial_index_groups_materialized grows), as
+# any query through that index would; an already materialized group is read
+# from the index, so stale or missing entries in it show up. Groups below the
+# threshold are read from the primary key, so the comparison is trivially
+# equal for them. A prefix index cannot return rows in column order, so its
+# side of the comparison may fall back to a table scan and only CHECK TABLE
+# checks it. Functional key parts are compared by their expression value:
+# the secondary index side orders by the expression (an index scan) and
+# computes the value from the row, so it checks the row count and the
+# rows' membership in the index.
 
 --disable_query_log
 --disable_result_log
@@ -60,7 +90,15 @@ SET SESSION group_concat_max_len = 16 * 1024 * 1024;
 # INSERT ... SELECT from MyRocks tables needs gap locks at REPEATABLE READ.
 SET @inv_saved_iso = @@SESSION.transaction_isolation;
 SET SESSION transaction_isolation = 'READ-COMMITTED';
+# FORCE INDEX of an invisible index needs this.
+SET @inv_saved_osw = @@SESSION.optimizer_switch;
+SET SESSION optimizer_switch = 'use_invisible_indexes=on';
 --eval SET @inv_schema = '$_inv_schema'
+--let $_inv_skip_partial = 0
+if ($inv_skip_partial) {
+  --let $_inv_skip_partial = 1
+}
+--eval SET @inv_skip_partial = $_inv_skip_partial
 
 # Open every MyRocks table of the schema first: until a table is opened
 # after a restart, ROCKSDB_DDL shows empty index names for it (PS-11882),
@@ -85,15 +123,18 @@ while ($_inv_i <= $_inv_ntabs) {
 # index allowed, which is a primary-key scan in MyRocks. Both sides
 # checksum the index columns plus the primary key columns.
 #
+# A functional key part has no COLUMN_NAME; it is used by its EXPRESSION
+# (information_schema shows quotes in it escaped as \', which is undone).
 CREATE TEMPORARY TABLE inv_cols ENGINE=InnoDB AS
 SELECT s.TABLE_NAME AS tn, s.INDEX_NAME AS idx,
-       GROUP_CONCAT(DISTINCT CONCAT('`', REPLACE(s.COLUMN_NAME, '`', '``'), '`')
+       GROUP_CONCAT(DISTINCT IF(s.COLUMN_NAME IS NULL, CONCAT('(', REPLACE(s.EXPRESSION, CONCAT(CHAR(92), CHAR(39)), CHAR(39)), ')'),
+                                CONCAT('`', REPLACE(s.COLUMN_NAME, '`', '``'), '`'))
                     ORDER BY s.SEQ_IN_INDEX) AS cols
   FROM information_schema.STATISTICS s
   JOIN information_schema.TABLES t
     ON t.TABLE_SCHEMA = s.TABLE_SCHEMA AND t.TABLE_NAME = s.TABLE_NAME
  WHERE s.TABLE_SCHEMA = @inv_schema AND t.ENGINE = 'ROCKSDB'
-   AND s.COLUMN_NAME IS NOT NULL
+   AND (s.COLUMN_NAME IS NOT NULL OR s.EXPRESSION IS NOT NULL)
  GROUP BY s.TABLE_NAME, s.INDEX_NAME;
 
 CREATE TEMPORARY TABLE inv_sk ENGINE=InnoDB AS
@@ -102,24 +143,25 @@ SELECT DISTINCT s.TABLE_NAME AS tn, s.INDEX_NAME AS idx
   JOIN information_schema.TABLES t
     ON t.TABLE_SCHEMA = s.TABLE_SCHEMA AND t.TABLE_NAME = s.TABLE_NAME
  WHERE s.TABLE_SCHEMA = @inv_schema AND t.ENGINE = 'ROCKSDB'
-   AND s.INDEX_NAME <> 'PRIMARY' AND s.IS_VISIBLE = 'YES'
-   AND s.INDEX_COMMENT NOT LIKE '%partial_group%';
+   AND s.INDEX_NAME <> 'PRIMARY'
+   AND (s.INDEX_COMMENT NOT LIKE '%partial_group%' OR @inv_skip_partial = 0);
 
-# Columns of the index plus the primary key columns, each once, as a
-# select list and as a checksum expression. Identifiers are quoted with
+# Columns (and functional key part expressions) of the index plus the
+# primary key columns, each once, as a checksum expression. Identifiers are quoted with
 # backticks (doubled inside), so any column name works.
 CREATE TEMPORARY TABLE inv_allcols ENGINE=InnoDB AS
 SELECT k.tn, k.idx,
-       COALESCE(GROUP_CONCAT(DISTINCT CONCAT('`', REPLACE(s.COLUMN_NAME, '`', '``'), '`')
-                             ORDER BY s.COLUMN_NAME), '1') AS cols,
-       COALESCE(GROUP_CONCAT(DISTINCT CONCAT('IFNULL(HEX(CAST(`',
-                                             REPLACE(s.COLUMN_NAME, '`', '``'),
-                                             '` AS BINARY)),''N'')')
-                             ORDER BY s.COLUMN_NAME), '1') AS expr
+       COALESCE(GROUP_CONCAT(DISTINCT IF(s.COLUMN_NAME IS NULL,
+                                         CONCAT('IFNULL(HEX(CAST((', REPLACE(s.EXPRESSION, CONCAT(CHAR(92), CHAR(39)), CHAR(39)), ') AS BINARY)),''N'')'),
+                                         CONCAT('IFNULL(HEX(CAST(`',
+                                                REPLACE(s.COLUMN_NAME, '`', '``'),
+                                                '` AS BINARY)),''N'')'))
+                             ORDER BY IFNULL(s.COLUMN_NAME, s.EXPRESSION)), '1') AS expr
   FROM inv_sk k
   LEFT JOIN information_schema.STATISTICS s
     ON s.TABLE_SCHEMA = @inv_schema AND s.TABLE_NAME = k.tn
-   AND s.INDEX_NAME IN (k.idx, 'PRIMARY') AND s.COLUMN_NAME IS NOT NULL
+   AND s.INDEX_NAME IN (k.idx, 'PRIMARY')
+   AND (s.COLUMN_NAME IS NOT NULL OR s.EXPRESSION IS NOT NULL)
  GROUP BY k.tn, k.idx;
 
 # One row per secondary index: row counts and checksums of both sides.
@@ -134,7 +176,7 @@ SELECT GROUP_CONCAT(
       ' LIMIT 18446744073709551615) d) AS sk_rows, ',
     '(SELECT SUM(CRC32(CONCAT_WS(''#'',', ac.expr, '))) FROM `', @inv_qs, '`.`', k.qtn,
       '` USE INDEX ()) AS pk_sum, ',
-    '(SELECT SUM(CRC32(CONCAT_WS(''#'',', ac.expr, '))) FROM (SELECT ', ac.cols, ' FROM `',
+    '(SELECT SUM(d.h) FROM (SELECT CRC32(CONCAT_WS(''#'',', ac.expr, ')) AS h FROM `',
       @inv_qs, '`.`', k.qtn, '` FORCE INDEX (`', k.qidx, '`) ORDER BY ', ic.cols,
       ' LIMIT 18446744073709551615) d) AS sk_sum')
   SEPARATOR ' UNION ALL ') INTO @inv_q
@@ -342,6 +384,10 @@ if (!$inv_skip_dropped) {
   --let $_inv_drained = 0
   --let $_inv_waited = 0
   while (!$_inv_drained) {
+    # Wake the drop-index thread, which otherwise sleeps up to a minute
+    # between rounds (a pending drop, e.g. after a restart, then makes
+    # every invariants run wait for it).
+    SET GLOBAL rocksdb_signal_drop_index_thread = 1;
     --let $_inv_drained = `SELECT COUNT(*) = 0 FROM information_schema.ROCKSDB_GLOBAL_INFO WHERE TYPE = 'DDL_DROP_INDEX_ONGOING'`
     if (!$_inv_drained) {
       if ($_inv_waited >= $_inv_timeout) {
@@ -407,8 +453,58 @@ if (!$inv_skip_dropped) {
   }
 }
 
+#
+# Invariant 8: no internal DDL table is left.
+#
+if (!$inv_skip_orphans) {
+  --let $_inv_save_schema = $inv_schema
+  --let $inv_schema = $_inv_schema
+  --source suite/rocksdb/include/myrocks_inv_orphans.inc
+  --let $inv_schema = $_inv_save_schema
+  --disable_query_log
+  --disable_result_log
+  if ($inv_orphans != none) {
+    --eval SET @inv_orph = '$inv_orphans', @inv_orph_known = '$inv_orphans_known'
+    if ($inv_after_abort) {
+      --eval SET @inv_orph_known = CONCAT_WS(',', @inv_orph_known, '$inv_orphans_abort_ok')
+    }
+    --let $_inv_orph_new = `SELECT IFNULL(GROUP_CONCAT(j.n ORDER BY j.n), '') FROM JSON_TABLE(CONCAT('["', REPLACE(@inv_orph, ',', '","'), '"]'), '$[*]' COLUMNS (n VARCHAR(512) PATH '$')) j WHERE NOT FIND_IN_SET(j.n, @inv_orph_known)`
+    # $inv_orphans_left returns the names; the line printed masks the
+    # process and thread ids in them, so that the output is stable.
+    --let $inv_orphans_left = $_inv_orph_new
+    if ($_inv_orph_new) {
+      --let $_inv_orph_new = `SELECT REGEXP_REPLACE(REGEXP_REPLACE('$_inv_orph_new', '#sql2-[0-9a-f]+-[0-9a-f]+', '#sql2-<id>'), '#sql-[0-9a-f]+_[0-9a-f]+', '#sql-<id>')`
+      --enable_result_log
+      --echo INVARIANT VIOLATION 8: internal DDL table left in $_inv_schema: $_inv_orph_new
+      --disable_result_log
+      --inc $_inv_violations
+    }
+  }
+}
+
+#
+# Invariant 9: full rows unchanged since $inv_fullrow_expect was taken.
+#
+--let $_inv_save_schema = $inv_schema
+--let $inv_schema = $_inv_schema
+--source suite/rocksdb/include/myrocks_inv_fullrow.inc
+--let $inv_schema = $_inv_save_schema
+--disable_query_log
+--disable_result_log
+if ($inv_fullrow_expect) {
+  if ($inv_fullrow != $inv_fullrow_expect) {
+    --enable_result_log
+    --echo INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+    --echo   expected: $inv_fullrow_expect
+    --echo   now:      $inv_fullrow
+    --disable_result_log
+    --inc $_inv_violations
+  }
+}
+
 SET SESSION group_concat_max_len = @inv_saved_gcml;
 SET SESSION transaction_isolation = @inv_saved_iso;
+SET SESSION optimizer_switch = @inv_saved_osw;
 --let $inv_violations = $_inv_violations
 --enable_result_log
 --enable_query_log

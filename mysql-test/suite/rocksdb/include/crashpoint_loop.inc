@@ -20,8 +20,17 @@
 #   - the recovered state (crashpoint_state()) is either the starting
 #     state ($crashpoint_before) or the post-statement state
 #     ($crashpoint_after), never a mix,
-#   - no #sql% table is left in the MyRocks dictionary (except in the
-#     windows of $crashpoint_leftover_ok, which print the ticket),
+#   - no internal DDL table (#sql*, #sql2*, #truncate_tmp#*) is left in
+#     the MyRocks dictionary or, on debug builds, in the server data
+#     dictionary (myrocks_inv_orphans.inc; except in the windows of
+#     $crashpoint_leftover_ok, which print the ticket; a #sql-* entry that
+#     exists only in the server data dictionary is accepted after a crash,
+#     see $inv_orphans_abort_ok there, and counted in
+#     $MYSQLTEST_VARDIR/log/crashpoint_stats.log),
+#   - the MyRocks invariants hold for schema cp (myrocks_invariants.inc:
+#     every secondary index matches the primary key, the MyRocks
+#     dictionary matches the server data dictionary, the drop queue
+#     drains),
 #   - the table is usable: the post-recovery probe ($crashpoint_probe)
 #     inserts and deletes a row through every index, and the state is
 #     unchanged afterwards.
@@ -209,6 +218,7 @@ if (!$crashpoint_from) {
 --let $crashpoint_done = 0
 --let $crashpoint_violations = 0
 --let $crashpoint_crashes = 0
+--let $cp_hidden_dd = 0
 --let $cp_after_mode = 0
 --let $cp_win = n=$crashpoint_n
 while (!$crashpoint_done) {
@@ -354,17 +364,35 @@ while (!$crashpoint_done) {
           --inc $crashpoint_violations
         }
       }
-      # Leftover internal tables in the MyRocks dictionary.
-      --let $cp_left_cnt = `SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'cp' AND table_name LIKE '#sql%'`
+      # Leftover internal tables in the MyRocks dictionary or the server
+      # data dictionary.
+      --let $inv_schema = cp
+      --source suite/rocksdb/include/myrocks_inv_orphans.inc
+      --disable_query_log
       --let $cp_left_ok = `SELECT FIND_IN_SET($crashpoint_n, '$crashpoint_leftover_ok') > 0`
-      if ($cp_left_cnt) {
+      if ($inv_orphans_abort_ok != none) {
+        --inc $cp_hidden_dd
+        --eval SET @cp_orph = '$inv_orphans', @cp_orph_ok = '$inv_orphans_abort_ok'
+        --let $inv_orphans = `SELECT IFNULL(GROUP_CONCAT(j.n ORDER BY j.n), 'none') FROM JSON_TABLE(CONCAT('["', REPLACE(@cp_orph, ',', '","'), '"]'), '$[*]' COLUMNS (n VARCHAR(512) PATH '$')) j WHERE NOT FIND_IN_SET(j.n, @cp_orph_ok)`
+      }
+      if ($inv_orphans != none) {
         if ($cp_left_ok) {
           --echo # $cp_win: #sql leftover in the MyRocks dictionary ($crashpoint_leftover_ticket)
         }
         if (!$cp_left_ok) {
-          --echo VIOLATION $crashpoint_label $cp_win: #sql leftover in the MyRocks dictionary
+          --echo VIOLATION $crashpoint_label $cp_win: internal DDL table left: $inv_orphans
           --inc $crashpoint_violations
         }
+      }
+      # The MyRocks invariants of schema cp (orphans are checked above).
+      --let $inv_skip_orphans = 1
+      --source suite/rocksdb/include/myrocks_invariants.inc
+      --disable_query_log
+      --let $inv_skip_orphans =
+      --let $inv_schema =
+      if ($inv_violations) {
+        --echo VIOLATION $crashpoint_label $cp_win: MyRocks invariants violated after the recovery (INVARIANT VIOLATION rows above)
+        --inc $crashpoint_violations
       }
       --eval CALL crashpoint_state('$crashpoint_pkcol');
       --let $cp_state_now = `SELECT @crashpoint_state`
@@ -508,6 +536,8 @@ while (!$crashpoint_done) {
 
 # The last window may have been a crash: the expect file is still there.
 --exec rm -f $_cp_expect
+# Debugging aid, not part of the result.
+--exec echo "$crashpoint_label: crashes=$crashpoint_crashes hidden_dd_after_crash=$cp_hidden_dd violations=$crashpoint_violations" >> $MYSQLTEST_VARDIR/log/crashpoint_stats.log
 --enable_result_log
 if ($crashpoint_detail_window) {
   if (!$cp_detail_seen) {

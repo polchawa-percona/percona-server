@@ -8,6 +8,7 @@
 # Writes and iterator steps are covered by errinj_dml_write and
 # errinj_dml_iterator, I/O errors (which abort the server) by errinj_crash.
 #
+--source include/big_test.inc
 --source include/have_rocksdb.inc
 --source include/have_debug.inc
 

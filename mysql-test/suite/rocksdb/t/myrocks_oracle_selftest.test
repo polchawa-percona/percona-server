@@ -1,0 +1,163 @@
+#
+# Self-test of the oracle include files (audit 2026-11-21, PS-11628):
+#   - myrocks_invariants.inc reads invisible, functional and partial
+#     indexes without false positives, and invariant 9 (full rows through
+#     the primary key, every column) holds across a restart and catches a
+#     changed non-key column (LONGBLOB, JSON, INT, TEXT of a table without
+#     a primary key);
+#   - myrocks_inv_orphans.inc finds no internal DDL table;
+#   - errinj_loop.inc: no violation for an atomic statement, with a restart
+#     after every injected failure; a violation for a statement that changes
+#     a non-key column and then fails (its index-only state does not see
+#     the change), and for a non-key column that changes across the restart.
+# Known-bad runs against open bugs (PS-12191, PS-11899, PS-12198, PS-11696)
+# are recorded in the bug hunt notes, not here.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Attempting backtrace");
+# Own schema: earlier tests may have left hidden #sql-* tables in test.
+CREATE DATABASE ost;
+USE ost;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b LONGBLOB, j JSON, c VARCHAR(10),
+  v INT, KEY ka (a), KEY kinv (c) INVISIBLE, KEY kf ((a + 1)),
+  KEY kfj ((CAST(j->'$.x' AS UNSIGNED)))) ENGINE=ROCKSDB;
+CREATE TABLE t2 (i INT, j INT, k INT, PRIMARY KEY (i, j),
+  KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5')
+  ENGINE=ROCKSDB;
+CREATE TABLE t3 (a INT, b TEXT, KEY ka (a)) ENGINE=ROCKSDB;
+--disable_query_log
+let $i = 1;
+while ($i <= 50) {
+  eval INSERT INTO t1 VALUES ($i, $i % 7, IF($i % 5 = 0, NULL, REPEAT('x', 1000 * $i)),
+    IF($i % 3 = 0, NULL, JSON_OBJECT('x', $i, 'y', 'z')), CONCAT('c', $i), $i * 10);
+  eval INSERT INTO t2 VALUES ($i % 4, $i, $i * 2);
+  eval INSERT INTO t3 VALUES ($i % 9, REPEAT('t', $i));
+  inc $i;
+}
+--enable_query_log
+
+--echo # known-good
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+--let $fr0 = $inv_fullrow
+--source include/restart_mysqld.inc
+USE ost;
+--let $inv_fullrow_expect = $fr0
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations after restart: $inv_violations
+
+--echo # known-bad 9: a non-key column changed since the fingerprint
+UPDATE t1 SET v = v + 1 WHERE pk = 17;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+UPDATE t1 SET v = v - 1 WHERE pk = 17;
+UPDATE t1 SET b = CONCAT(b, 'q') WHERE pk = 18;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+UPDATE t1 SET b = LEFT(b, LENGTH(b) - 1) WHERE pk = 18;
+UPDATE t1 SET j = JSON_SET(j, '$.y', 'w') WHERE pk = 19;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+UPDATE t1 SET j = JSON_SET(j, '$.y', 'z') WHERE pk = 19;
+UPDATE t3 SET b = 'zz' WHERE a = 4 LIMIT 1;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+--let $inv_fullrow_expect =
+
+--echo # no internal DDL table
+--source suite/rocksdb/include/myrocks_inv_orphans.inc
+--echo orphans: $inv_orphans
+DROP TABLE t1, t2, t3;
+
+--echo # known-bad 8: an abort inside ALTER TABLE leaves a #sql-* table in the
+--echo # server data dictionary only; reported unless the caller declares the abort
+CREATE TABLE t4 (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t4 VALUES (1, 1), (2, 2);
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 1;
+--exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--error 2013
+ALTER TABLE t4 ADD INDEX ka (a), ALGORITHM=INPLACE;
+--source include/wait_until_disconnected.inc
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--source include/wait_until_connected_again.inc
+USE ost;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+--let $inv_after_abort = 1
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations with inv_after_abort: $inv_violations
+--let $inv_after_abort =
+DROP TABLE t4;
+USE test;
+DROP DATABASE ost;
+
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, v VARCHAR(20) NOT NULL,
+  w LONGBLOB, KEY ka (a)) ENGINE=ROCKSDB;
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE fr_reset()
+BEGIN
+  DELETE FROM t;
+  INSERT INTO t VALUES (1, 1, 'v1', REPEAT('w', 70000)), (2, 2, 'v2', NULL),
+                       (3, 3, 'v3', 'w3');
+END|
+# Index-only state, like the per-index checksums of the setup includes.
+CREATE PROCEDURE fr_state()
+BEGIN
+  SET @errinj_state = (SELECT CONCAT(COUNT(*), '/', IFNULL(SUM(CRC32(CONCAT_WS(',', a, pk))), 0))
+                         FROM t FORCE INDEX (ka));
+END|
+# Not atomic: the UPDATE of the non-key column commits before the INSERT.
+CREATE PROCEDURE fr_stmt()
+BEGIN
+  UPDATE t SET v = CONCAT(v, 'x') WHERE pk = 1;
+  INSERT INTO t VALUES (4, 4, 'v4', 'w4');
+END|
+CREATE PROCEDURE fr_stmt_ok()
+BEGIN
+  START TRANSACTION;
+  UPDATE t SET v = CONCAT(v, 'x'), w = CONCAT(w, 'y') WHERE pk = 1;
+  INSERT INTO t VALUES (4, 4, 'v4', 'w4');
+  COMMIT;
+END|
+delimiter ;|
+--enable_query_log
+
+--let $errinj_reset = CALL fr_reset()
+--let $errinj_state_proc = CALL fr_state()
+--let $errinj_state = SELECT @errinj_state
+--let $errinj_tables = t
+--let $errinj_class = WRITE
+# A restart and the full checks after every injected failure.
+--let $errinj_restart_every = 1
+--let $errinj_status = BUSY
+
+--echo # known-good: one transaction
+--let $errinj_stmt = CALL fr_stmt_ok()
+--let $errinj_label = good WRITE/BUSY
+--source suite/rocksdb/include/errinj_loop.inc
+
+--echo # known-bad (a): an error after a committed change of a non-key column
+--let $errinj_stmt = CALL fr_stmt()
+# The error codes printed below for the injected BUSY (1062 duplicate key,
+# 1213 deadlock) record current behaviour, not an expectation: MyRocks maps
+# an injected Busy at the write to ER_DUP_ENTRY (a known misreport, see the
+# hunt notes); update these lines when that mapping is fixed.
+--let $errinj_label = bad-a WRITE/BUSY
+--source suite/rocksdb/include/errinj_loop.inc
+
+--echo # known-bad (b): a non-key column changes across the restart
+--let $errinj_stmt = CALL fr_stmt_ok()
+--let $errinj_after_restart = UPDATE t SET w = 'lost' WHERE pk = 2
+--let $errinj_label = bad-b WRITE/BUSY
+--source suite/rocksdb/include/errinj_loop.inc
+--let $errinj_after_restart =
+
+DROP TABLE t;
+DROP PROCEDURE fr_reset;
+DROP PROCEDURE fr_state;
+DROP PROCEDURE fr_stmt;
+DROP PROCEDURE fr_stmt_ok;
