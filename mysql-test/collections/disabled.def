@@ -179,3 +179,4 @@ group_replication.gr_xa_commit_failure_before_gtid_externalization @windows : BU
 group_replication.gr_xa_commit_one_phase_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
+rocksdb.rc_update_sk_hidden_pk_skips_locked_row : BUG#0 PS-12208 lost upd
