@@ -1,0 +1,43 @@
+#
+# PS-12207: with rocksdb_master_skip_tx_api=ON a session keeps the write
+# options of its first transaction.
+#
+# The session's write batch object reads rocksdb_write_disable_wal and
+# rocksdb_flush_log_at_trx_commit only when it is created:
+# Rdb_writebatch_impl::start_tx() runs once, because its is_tx_started()
+# always returns true, and reset() after a commit does not re-read them.
+# A commit made after the session turned rocksdb_write_disable_wal off, with
+# rocksdb_flush_log_at_trx_commit=1, is still written without the WAL and is
+# lost on a crash.
+#
+# Expected: the row committed with the WAL on survives kill -9, as it does
+# with the transaction API (rocksdb_master_skip_tx_api=OFF) or in a new
+# connection. The binary log is off (-master.opt) so that the commit path is
+# the engine's own WAL write.
+#
+--source include/have_rocksdb.inc
+--source include/not_valgrind.inc
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, v INT) ENGINE=ROCKSDB;
+
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 2;
+
+--connect (con1,localhost,root,,)
+SET SESSION rocksdb_master_skip_tx_api = ON;
+SET SESSION rocksdb_write_disable_wal = ON;
+# Creates the session's write batch object, written without the WAL.
+INSERT INTO t1 VALUES (1, 1);
+
+# Back to durable settings: WAL on, sync on commit.
+SET SESSION rocksdb_write_disable_wal = OFF;
+SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
+INSERT INTO t1 VALUES (2, 2);
+--disconnect con1
+
+--connection default
+--source include/kill_and_restart_mysqld.inc
+
+--echo # Row 2 was committed with the WAL on and must survive the kill
+SELECT * FROM t1 WHERE pk = 2;
+
+DROP TABLE t1;
