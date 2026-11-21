@@ -1,0 +1,45 @@
+# PS-12208: at READ COMMITTED, an UPDATE that reads a table without a
+# primary key through a secondary key silently skips a row that another
+# transaction holds locked: no lock wait timeout, the row is not updated.
+#
+# ha_rocksdb::secondary_index_read() ignores the error status of
+# get_row_by_rowid() (lock wait timeout); read_hidden_pk_id_from_rowkey()
+# overwrites it, the re-packed key of the stale record buffer differs from
+# the index entry, and the row is treated as changed concurrently
+# (HA_ERR_KEY_NOT_FOUND) and skipped. Related: PS-11905 (same unchecked
+# status; there the statement returns a wrong row or fails with error 1296).
+# Expected result: ER_LOCK_WAIT_TIMEOUT, as with InnoDB and with an explicit
+# primary key.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE t1 (a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--connect (con1, localhost, root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# Lock the row (2, 2) without using the secondary key.
+SELECT * FROM t1 WHERE b = 2 FOR UPDATE;
+
+--connect (con2, localhost, root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 1;
+
+--echo # Point UPDATE of the locked row through the secondary key
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 FORCE INDEX (ka) SET b = b + 1000 WHERE a = 2;
+
+--echo # UPDATE of the locked row and an unlocked row through the secondary key
+--error ER_LOCK_WAIT_TIMEOUT
+UPDATE t1 FORCE INDEX (ka) SET b = b + 1000 WHERE a IN (2, 3);
+
+--connection con1
+COMMIT;
+--disconnect con1
+--disconnect con2
+
+--connection default
+SELECT * FROM t1 ORDER BY a;
+
+DROP TABLE t1;
