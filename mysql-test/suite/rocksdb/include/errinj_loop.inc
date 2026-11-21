@@ -14,6 +14,20 @@
 # restarted and the recovered state must be one of those two states.
 # CHECK TABLE must report OK on every table in $errinj_tables in all cases.
 #
+# The state is $errinj_state followed by the full rows of every MyRocks
+# table of the schema, read through the primary key (every column, also the
+# ones no index covers; myrocks_inv_fullrow.inc).
+# After the first injected failure that did not abort the server, and then
+# after every $errinj_restart_every-th one (default 20; 1 = after every one),
+# the server is restarted (never with $errinj_no_restart_legs = 1) and the
+# state must be the same as before the restart. After every restart (also after an abort) the
+# MyRocks invariants must hold (myrocks_invariants.inc). No internal DDL
+# table (#sql*, #truncate_tmp#*) may be left after the statement, nor after
+# the restart, that was not there before the statement
+# (myrocks_inv_orphans.inc); after an abort, a #sql-* entry that exists only
+# in the server data dictionary is accepted (see $inv_orphans_abort_ok
+# there) and counted in errinj_stats.log.
+#
 # Parameters:
 #   $errinj_class    ANY, WRITE, READ, ITERATOR, COMMIT, DICT, SST, INGEST,
 #                    COMPACT, DICT_READ
@@ -43,6 +57,20 @@
 #                    when an abort may only recover the final state.
 #   $errinj_after_restart_inc  include run after a restart, before the state
 #                    is read (default errinj_noop.inc)
+#   $errinj_no_restart_legs  1 to skip the restart after the injected
+#                    failures that did not abort the server
+#   $errinj_restart_every  restart after the first and then after every N-th
+#                    injected failure that did not abort the server. Default:
+#                    the environment variable ERRINJ_RESTART_EVERY, else 20,
+#                    so that the tests stay within the default MTR test case
+#                    timeout. Depth runs use 1 (a restart and the full checks
+#                    after every injected failure), e.g.
+#                    ERRINJ_RESTART_EVERY=1 ./mtr --testcase-timeout=240 ...
+#   $errinj_crash_orphans_ok  ticket of a known bug that leaves internal DDL
+#                    tables after an abort (PS-11680: COPY ALTER is not
+#                    atomic): such leftovers after an abort are not
+#                    violations; one line naming the ticket is printed at
+#                    the end of the loop instead
 #
 # Output: one line per violation, then one summary line without counts, so
 # that the result does not depend on how many RocksDB calls are made.
@@ -50,6 +78,12 @@
 
 if (!$errinj_max) {
   --let $errinj_max = 200
+}
+if (!$errinj_restart_every) {
+  --let $errinj_restart_every = $ERRINJ_RESTART_EVERY
+}
+if (!$errinj_restart_every) {
+  --let $errinj_restart_every = 20
 }
 if (!$errinj_source) {
   --let $errinj_source = suite/rocksdb/include/errinj_stmt.inc
@@ -66,12 +100,12 @@ if (!$errinj_label) {
 
 # Reference run without injection.
 eval $errinj_reset;
---source suite/rocksdb/include/errinj_state_proc.inc
---let $errinj_before = `$errinj_state`
+--source suite/rocksdb/include/errinj_read_state.inc
+--let $errinj_before = $errinj_state_now
 --let $errinj_arm = 0
 --source $errinj_source
---source suite/rocksdb/include/errinj_state_proc.inc
---let $errinj_after = `$errinj_state`
+--source suite/rocksdb/include/errinj_read_state.inc
+--let $errinj_after = $errinj_state_now
 if ($errinj_before == $errinj_after) {
   --echo # $errinj_label: the statement does not change the state
 }
@@ -82,8 +116,18 @@ if ($errinj_before == $errinj_after) {
 --let $errinj_fired = 0
 --let $errinj_errors = 0
 --let $errinj_crashes = 0
+--let $errinj_restarts = 0
+--let $errinj_leg_k = 0
+--let $errinj_crash_orphans = 0
+--let $errinj_orph_abort_n = 0
 while (!$errinj_done) {
   eval $errinj_reset;
+  # Internal DDL tables that exist before the statement (left by an earlier
+  # iteration, already reported there).
+  --let $errinj_orph_base =
+  --source suite/rocksdb/include/errinj_orphans_new.inc
+  --let $errinj_orph_start = $errinj_orph_now
+  --let $errinj_orph_seen =
   if ($errinj_crash) {
     --exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
   }
@@ -130,8 +174,9 @@ while (!$errinj_done) {
       eval $errinj_after_restart;
     }
     --source $errinj_after_restart_inc
-    --source suite/rocksdb/include/errinj_state_proc.inc
-    --let $errinj_state_now = `$errinj_state`
+    --disable_query_log
+    --disable_result_log
+    --source suite/rocksdb/include/errinj_read_state.inc
     --let $errinj_ok = 0
     if ($errinj_state_now == $errinj_before) {
       if (!$errinj_must_be_after) {
@@ -148,6 +193,9 @@ while (!$errinj_done) {
       --echo   recovered: $errinj_state_now
       --inc $errinj_violations
     }
+    --let $errinj_leg_crashed = 1
+    --source suite/rocksdb/include/errinj_leg_invariants.inc
+    --let $errinj_leg_crashed = 0
   }
 
   if (!$errinj_crashed) {
@@ -164,8 +212,7 @@ while (!$errinj_done) {
     }
     if (!$errinj_left) {
       --inc $errinj_fired
-      --source suite/rocksdb/include/errinj_state_proc.inc
-    --let $errinj_state_now = `$errinj_state`
+      --source suite/rocksdb/include/errinj_read_state.inc
       if ($errinj_err) {
         --inc $errinj_errors
         if ($errinj_state_now != $errinj_before) {
@@ -183,6 +230,13 @@ while (!$errinj_done) {
           --inc $errinj_violations
         }
       }
+      --let $errinj_orph_base = $errinj_orph_start
+      --source suite/rocksdb/include/errinj_orphans_new.inc
+      if ($errinj_orph_new) {
+        --echo VIOLATION $errinj_label n=$errinj_n: internal tables left after the statement: $errinj_orph_new
+        --inc $errinj_violations
+      }
+      --let $errinj_orph_seen = $errinj_orph_now
     }
   }
 
@@ -198,6 +252,30 @@ while (!$errinj_done) {
         --inc $errinj_violations
       }
     }
+    # An injected failure that did not abort the server: restart, and the
+    # state must survive the restart.
+    --let $errinj_restart_now = 0
+    if (!$errinj_crashed) {
+      if (!$errinj_no_restart_legs) {
+        --let $errinj_restart_now = `SELECT $errinj_leg_k % $errinj_restart_every = 0`
+        --inc $errinj_leg_k
+      }
+    }
+    if ($errinj_restart_now) {
+      if (!$errinj_no_restart_legs) {
+        --let $errinj_state_pre = $errinj_state_now
+        --source suite/rocksdb/include/errinj_restart.inc
+        --inc $errinj_restarts
+        --source suite/rocksdb/include/errinj_read_state.inc
+        if ($errinj_state_now != $errinj_state_pre) {
+          --echo VIOLATION $errinj_label n=$errinj_n: the state changed across a restart
+          --echo   before the restart: $errinj_state_pre
+          --echo   after the restart:  $errinj_state_now
+          --inc $errinj_violations
+        }
+        --source suite/rocksdb/include/errinj_leg_invariants.inc
+      }
+    }
   }
 
   --inc $errinj_n
@@ -208,10 +286,13 @@ while (!$errinj_done) {
 }
 
 # Debugging aid, not part of the result: how the injected failures ended.
---exec echo "$errinj_label: injected=$errinj_fired errors=$errinj_errors crashes=$errinj_crashes violations=$errinj_violations" >> $MYSQLTEST_VARDIR/log/errinj_stats.log
+--exec echo "$errinj_label: injected=$errinj_fired errors=$errinj_errors crashes=$errinj_crashes restarts=$errinj_restarts restart_every=$errinj_restart_every hidden_dd_after_abort=$errinj_orph_abort_n violations=$errinj_violations" >> $MYSQLTEST_VARDIR/log/errinj_stats.log
 --enable_result_log
 --enable_query_log
 
+if ($errinj_crash_orphans) {
+  --echo # $errinj_label: internal tables left after an abort ($errinj_crash_orphans_ok)
+}
 if (!$errinj_fired) {
   --echo # $errinj_label: no RocksDB call of this class was made
 }
