@@ -1,0 +1,88 @@
+#
+# PS-12217: TRUNCATE TABLE leaks the data of an earlier #truncate_tmp#
+# leftover of the same table.
+#
+# TRUNCATE TABLE renames the table to #truncate_tmp#<name>, creates it again
+# and drops the renamed copy. When the dictionary write of that drop fails
+# and rocksdb_io_error_action=IGNORE_ERROR, TRUNCATE still succeeds and the
+# copy stays in the persisted MyRocks dictionary until the next restart
+# (startup recovery would drop it). The next TRUNCATE TABLE of the table
+# renames it to the same name: Rdb_ddl_manager::rename() overwrites the
+# persisted entry of the leftover without queueing its indexes for drop, so
+# their rows are never deleted, also after a restart. A dictionary read error
+# in the drop (PS-12198) leaves the same leftover.
+#
+# Debug only: the failed dictionary write is injected
+# (rocksdb_debug_inject_error_*); a release build cannot fail it on demand.
+# The injection hits the last dictionary call of the first TRUNCATE, which
+# is the commit of the drop of the copy; the count is measured on a twin
+# table first. The rows of indexes that are not in the MyRocks dictionary
+# must be gone once the drop-index queue drains.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Failure when trying to drop table");
+
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+
+--echo # Count the dictionary calls of TRUNCATE on a twin table
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+TRUNCATE TABLE t0;
+--let $dict_calls = `SELECT 1000000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+DROP TABLE t0;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30) SELECT i, i FROM s;
+--let $base_ino = `SELECT MIN(INDEX_NUMBER) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`
+
+--echo # TRUNCATE whose drop of the old copy fails: #truncate_tmp#t1 stays
+--disable_query_log
+--eval SET SESSION rocksdb_debug_inject_error_nth = $dict_calls
+--enable_query_log
+TRUNCATE TABLE t1;
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+--let $assert_text = The drop of #truncate_tmp#t1 failed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.truncate_leftover_data_leak
+--let $assert_select = Failure when trying to drop table test.#truncate_tmp#t1 during truncation of table test.t1
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--echo # The next TRUNCATE of the same table
+INSERT INTO t1 VALUES (1, 1);
+TRUNCATE TABLE t1;
+
+--let $i = 1
+while ($i <= 2) {
+  if ($i == 2) {
+    --source include/restart_mysqld.inc
+  }
+  --disable_query_log
+  SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+  --source suite/rocksdb/include/drop_table_sync.inc
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  --enable_query_log
+  --echo # Rows of indexes that are not in the dictionary (pass $i)
+  --replace_result $base_ino BASE_INO
+  eval SELECT COUNT(DISTINCT f.INDEX_NUMBER) AS leaked_indexes,
+              IFNULL(SUM(f.NUM_ROWS), 0) AS leaked_rows
+         FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+        WHERE f.INDEX_NUMBER >= $base_ino AND f.NUM_ROWS > 0
+          AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d
+                           WHERE d.COLUMN_FAMILY = f.COLUMN_FAMILY
+                             AND d.INDEX_NUMBER = f.INDEX_NUMBER);
+  --inc $i
+}
+
+DROP TABLE t1;
