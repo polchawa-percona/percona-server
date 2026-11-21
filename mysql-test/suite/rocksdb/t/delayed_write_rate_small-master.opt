@@ -1,0 +1,1 @@
+--rocksdb_default_cf_options=write_buffer_size=64k;level0_slowdown_writes_trigger=2;level0_stop_writes_trigger=100;level0_file_num_compaction_trigger=2
