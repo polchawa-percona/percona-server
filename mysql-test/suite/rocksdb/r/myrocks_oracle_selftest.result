@@ -1,0 +1,85 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Attempting backtrace");
+CREATE DATABASE ost;
+USE ost;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b LONGBLOB, j JSON, c VARCHAR(10),
+v INT, KEY ka (a), KEY kinv (c) INVISIBLE, KEY kf ((a + 1)),
+KEY kfj ((CAST(j->'$.x' AS UNSIGNED)))) ENGINE=ROCKSDB;
+CREATE TABLE t2 (i INT, j INT, k INT, PRIMARY KEY (i, j),
+KEY ik1 (i, k) COMMENT 'partial_group_keyparts=1;partial_group_threshold=5')
+ENGINE=ROCKSDB;
+CREATE TABLE t3 (a INT, b TEXT, KEY ka (a)) ENGINE=ROCKSDB;
+# known-good
+violations: 0
+# restart
+USE ost;
+violations after restart: 0
+# known-bad 9: a non-key column changed since the fingerprint
+UPDATE t1 SET v = v + 1 WHERE pk = 17;
+INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+expected: t1=50/106251650827;t2=50/94758502700;t3=50/105481495174
+now:      t1=50/106216537492;t2=50/94758502700;t3=50/105481495174
+violations: 1
+UPDATE t1 SET v = v - 1 WHERE pk = 17;
+UPDATE t1 SET b = CONCAT(b, 'q') WHERE pk = 18;
+INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+expected: t1=50/106251650827;t2=50/94758502700;t3=50/105481495174
+now:      t1=50/109128257192;t2=50/94758502700;t3=50/105481495174
+violations: 1
+UPDATE t1 SET b = LEFT(b, LENGTH(b) - 1) WHERE pk = 18;
+UPDATE t1 SET j = JSON_SET(j, '$.y', 'w') WHERE pk = 19;
+INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+expected: t1=50/106251650827;t2=50/94758502700;t3=50/105481495174
+now:      t1=50/105786139609;t2=50/94758502700;t3=50/105481495174
+violations: 1
+UPDATE t1 SET j = JSON_SET(j, '$.y', 'z') WHERE pk = 19;
+UPDATE t3 SET b = 'zz' WHERE a = 4 LIMIT 1;
+INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+expected: t1=50/106251650827;t2=50/94758502700;t3=50/105481495174
+now:      t1=50/106251650827;t2=50/94758502700;t3=50/103825018842
+violations: 1
+# no internal DDL table
+orphans: none
+DROP TABLE t1, t2, t3;
+# known-bad 8: an abort inside ALTER TABLE leaves a #sql-* table in the
+# server data dictionary only; reported unless the caller declares the abort
+CREATE TABLE t4 (pk INT PRIMARY KEY, a INT NOT NULL) ENGINE=ROCKSDB;
+INSERT INTO t4 VALUES (1, 1), (2, 2);
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 1;
+ALTER TABLE t4 ADD INDEX ka (a), ALGORITHM=INPLACE;
+ERROR HY000: Lost connection to MySQL server during query
+USE ost;
+INVARIANT VIOLATION 8: internal DDL table left in ost: dd:#sql-<id>
+violations: 1
+violations with inv_after_abort: 0
+DROP TABLE t4;
+USE test;
+DROP DATABASE ost;
+CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, v VARCHAR(20) NOT NULL,
+w LONGBLOB, KEY ka (a)) ENGINE=ROCKSDB;
+# known-good: one transaction
+# good WRITE/BUSY: every injected failure was handled correctly
+# known-bad (a): an error after a committed change of a non-key column
+VIOLATION bad-a WRITE/BUSY n=2: error 1062 but the state changed
+before: 3/5282568262|rows:t=3/9240532769
+now:    3/5282568262|rows:t=3/7336794538
+VIOLATION bad-a WRITE/BUSY n=3: error 1213 but the state changed
+before: 3/5282568262|rows:t=3/9240532769
+now:    3/5282568262|rows:t=3/7336794538
+# bad-a WRITE/BUSY: violations found
+# known-bad (b): a non-key column changes across the restart
+VIOLATION bad-b WRITE/BUSY n=1: the state changed across a restart
+before the restart: 3/5282568262|rows:t=3/9240532769
+after the restart:  3/5282568262|rows:t=3/8950975170
+VIOLATION bad-b WRITE/BUSY n=2: the state changed across a restart
+before the restart: 3/5282568262|rows:t=3/9240532769
+after the restart:  3/5282568262|rows:t=3/8950975170
+VIOLATION bad-b WRITE/BUSY n=3: the state changed across a restart
+before the restart: 3/5282568262|rows:t=3/9240532769
+after the restart:  3/5282568262|rows:t=3/8950975170
+# bad-b WRITE/BUSY: violations found
+DROP TABLE t;
+DROP PROCEDURE fr_reset;
+DROP PROCEDURE fr_state;
+DROP PROCEDURE fr_stmt;
+DROP PROCEDURE fr_stmt_ok;
