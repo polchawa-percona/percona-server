@@ -1,0 +1,99 @@
+# Table with an explicit primary key
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4), (5, 5, 5);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# con1 locks the row with a = 2
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+id	a	b
+2	2	2
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE READ, secondary key: rows 1, 3, 4, 5 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+1	1	1
+3	3	3
+4	4	4
+5	5	5
+# REPEATABLE READ, secondary key, descending: rows 5, 4, 3, 1 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a >= 1 ORDER BY a DESC FOR UPDATE SKIP LOCKED;
+id	a	b
+5	5	5
+4	4	4
+3	3	3
+1	1	1
+# REPEATABLE READ, secondary key, first row locked: rows 3, 4, 5 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 2 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+3	3	3
+4	4	4
+5	5	5
+# Control: REPEATABLE READ, primary key
+SELECT * FROM t1 FORCE INDEX (PRIMARY) WHERE id BETWEEN 1 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+1	1	1
+3	3	3
+4	4	4
+5	5	5
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Control: READ COMMITTED, secondary key
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+1	1	1
+3	3	3
+4	4	4
+5	5	5
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 2 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+3	3	3
+4	4	4
+5	5	5
+SET SESSION transaction_isolation = DEFAULT;
+ROLLBACK;
+DROP TABLE t1;
+# Table without a primary key (hidden primary key)
+CREATE TABLE t1 (id INT, a INT, b INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4), (5, 5, 5);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+# con1 locks the row with a = 2
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a = 2 FOR UPDATE;
+id	a	b
+2	2	2
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+# REPEATABLE READ, secondary key: rows 1, 3, 4, 5 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+1	1	1
+3	3	3
+4	4	4
+5	5	5
+# REPEATABLE READ, secondary key, descending: rows 5, 4, 3, 1 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a >= 1 ORDER BY a DESC FOR UPDATE SKIP LOCKED;
+id	a	b
+5	5	5
+4	4	4
+3	3	3
+1	1	1
+# REPEATABLE READ, secondary key, first row locked: rows 3, 4, 5 expected
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 2 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+3	3	3
+4	4	4
+5	5	5
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# Control: READ COMMITTED, secondary key
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+1	1	1
+3	3	3
+4	4	4
+5	5	5
+SELECT * FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 2 AND 5 FOR UPDATE SKIP LOCKED;
+id	a	b
+3	3	3
+4	4	4
+5	5	5
+SET SESSION transaction_isolation = DEFAULT;
+ROLLBACK;
+DROP TABLE t1;
