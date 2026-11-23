@@ -1,0 +1,109 @@
+--source include/have_rocksdb.inc
+
+# PS-12225: a compaction that runs while ALTER TABLE ... ADD INDEX,
+# ALGORITHM=INPLACE on a TTL table has ingested the new index but not yet
+# committed it removes the new index's entries as expired. The index has no
+# dictionary info yet, so Rdb_compact_filter::get_ttl_duration_and_offset()
+# keeps the TTL duration of the previous index of the same compaction job (here
+# t2, TTL 60 s) and applies it to rows that are valid for an hour. The new
+# index ends up with fewer rows than the primary key, CHECK TABLE reports OK,
+# and the loss survives a restart. Same root cause as PS-11785.
+# No debug features: an open reader transaction (con2) holds the ALTER at the
+# exclusive metadata lock it needs to commit, after the new index's files were
+# ingested; the rows carry an old timestamp in their ttl_col.
+
+--source include/count_sessions.inc
+
+# Victim: TTL table with a long TTL; its rows are ten minutes old and stay
+# valid for fifty more minutes.
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, ts BIGINT UNSIGNED NOT NULL)
+  ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, 1, UNIX_TIMESTAMP() - 600),
+  (2, 2, UNIX_TIMESTAMP() - 600), (3, 3, UNIX_TIMESTAMP() - 600),
+  (4, 4, UNIX_TIMESTAMP() - 600), (5, 5, UNIX_TIMESTAMP() - 600);
+
+# Neighbour: created after t1, so its index id lies between t1's primary key
+# and the index the ALTER creates; TTL of one minute (its own rows stay).
+CREATE TABLE t2 (id INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+  COMMENT='ttl_duration=60;';
+INSERT INTO t2 VALUES (1, 1);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+
+# con3 holds a metadata lock on t1, so the ALTER waits for it.
+--connect (con3,localhost,root,,test)
+BEGIN;
+SELECT COUNT(*) FROM t1;
+
+--connect (con1,localhost,root,,test)
+--let $alter_id= `SELECT CONNECTION_ID()`
+--send ALTER TABLE t1 ADD INDEX ka (a), ALGORITHM=INPLACE
+
+--connection default
+--let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist WHERE id = $alter_id AND state = 'Waiting for table metadata lock'
+--source include/wait_condition.inc
+if (!$success)
+{
+  --die ALTER did not wait for con3's metadata lock
+}
+
+# con2's reader transaction queues behind the ALTER's pending lock request.
+--connect (con2,localhost,root,,test)
+--let $con2_id= `SELECT CONNECTION_ID()`
+BEGIN;
+--send SELECT COUNT(*) FROM t1
+
+--connection default
+--let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist WHERE id = $con2_id AND state = 'Waiting for table metadata lock'
+--source include/wait_condition.inc
+if (!$success)
+{
+  --die con2 did not queue behind the ALTER
+}
+
+# The ALTER gets its lock and builds and ingests the new index; con2's read
+# then holds its lock, so the ALTER waits again, now to commit.
+--connection con3
+COMMIT;
+--disconnect con3
+--connection con2
+--reap
+
+--connection default
+--let $wait_condition= SELECT COUNT(*) = 1 FROM information_schema.processlist WHERE id = $alter_id AND state = 'Waiting for table metadata lock'
+--source include/wait_condition.inc
+if (!$success)
+{
+  --die ALTER did not wait for con2's metadata lock before its commit
+}
+
+# t3 gets an index id above the new index; one L0 file holding keys of t2 and
+# t3 spans the new index's key range, so one compaction job reads t2's key and
+# then the new index's keys.
+CREATE TABLE t3 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (2, 2);
+INSERT INTO t3 VALUES (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+# The reader finishes; the ALTER commits.
+--connection con2
+COMMIT;
+--disconnect con2
+--connection con1
+--reap
+--disconnect con1
+--connection default
+--source include/wait_until_count_sessions.inc
+
+--echo # Expected: 5 rows through both indexes
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+SELECT id, a FROM t1 FORCE INDEX (ka) ORDER BY a;
+CHECK TABLE t1;
+
+--source include/restart_mysqld.inc
+--echo # After a restart
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+
+DROP TABLE t1, t2, t3;

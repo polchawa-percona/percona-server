@@ -1,0 +1,51 @@
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, ts BIGINT UNSIGNED NOT NULL)
+ENGINE=ROCKSDB COMMENT='ttl_duration=3600;ttl_col=ts;';
+INSERT INTO t1 VALUES (1, 1, UNIX_TIMESTAMP() - 600),
+(2, 2, UNIX_TIMESTAMP() - 600), (3, 3, UNIX_TIMESTAMP() - 600),
+(4, 4, UNIX_TIMESTAMP() - 600), (5, 5, UNIX_TIMESTAMP() - 600);
+CREATE TABLE t2 (id INT PRIMARY KEY, b INT) ENGINE=ROCKSDB
+COMMENT='ttl_duration=60;';
+INSERT INTO t2 VALUES (1, 1);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+BEGIN;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+5
+ALTER TABLE t1 ADD INDEX ka (a), ALGORITHM=INPLACE;
+BEGIN;
+SELECT COUNT(*) FROM t1;
+COMMIT;
+COUNT(*)
+5
+CREATE TABLE t3 (id INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (2, 2);
+INSERT INTO t3 VALUES (1);
+SET GLOBAL rocksdb_force_flush_memtable_now = ON;
+SET GLOBAL rocksdb_compact_cf = 'default';
+COMMIT;
+# Expected: 5 rows through both indexes
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+COUNT(*)
+5
+SELECT id, a FROM t1 FORCE INDEX (ka) ORDER BY a;
+id	a
+1	1
+2	2
+3	3
+4	4
+5	5
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# restart
+# After a restart
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (ka);
+COUNT(*)
+5
+DROP TABLE t1, t2, t3;
