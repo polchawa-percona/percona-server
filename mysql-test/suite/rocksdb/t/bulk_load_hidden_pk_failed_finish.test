@@ -1,0 +1,117 @@
+--source include/have_rocksdb.inc
+#
+# PS-12218: a failed bulk load keeps the rows of a table without a PRIMARY KEY
+# but loses their secondary key entries.
+#
+# With rocksdb_bulk_load=1 and rocksdb_bulk_load_allow_sk=ON the secondary
+# keys are written to SST files (update_write_sk(), bulk_load_sk), but a
+# hidden primary key is never bulk loaded (update_write_pk() calls
+# bulk_load_key() only for an explicit primary key), so the rows go to the
+# transaction's write batch and are committed by each INSERT. When the ingest
+# at the end of the load fails (commit_bulk_load(): "Failed to bulk load"),
+# the SST files are discarded: the rows stay in the primary key without their
+# secondary key entries, and CHECK TABLE does not notice.
+#
+# On the unfixed server the load ends with a failed ingest in four ways:
+# SET rocksdb_bulk_load=0 with the loaded keys overlapping rows in the
+# memtable, a statement on another table that finishes the load (the error is
+# returned by that statement), an overlap with rows in an SST file, and a
+# second session whose load overlaps the one a first session just finished.
+# The finishing statements accept success or the current error, and the
+# result does not show which happened: a fix may avoid the failure.
+#
+# Expected: every index has the same rows, and the rows that existed before
+# the load are kept. With an explicit primary key the failed load leaves the
+# loaded rows in no index; with rocksdb_bulk_load_allow_sk=OFF nothing is bulk
+# loaded and the rows are in every index; both outcomes pass.
+# Related: PS-12210 (same split of a table without a primary key, rollback:
+# secondary key entries without rows), PS-11759 (explicit primary key,
+# rocksdb_bulk_load_allow_sk=OFF, failed ingest: secondary key entries
+# without rows), PS-11899 (explicit primary key, rollback: same symptom).
+#
+
+call mtr.add_suppression("Failed to bulk load");
+# Logged when the failed load bulk loaded a primary key (explicit primary key,
+# or a fix that bulk loads the hidden one).
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+
+--let $case = 0
+while ($case < 4)
+{
+  CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, KEY kb (b)) ENGINE=ROCKSDB;
+  CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (10, 10), (20, 20), (30, 30);
+  if ($case >= 2)
+  {
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  }
+  if ($case < 3)
+  {
+    SET SESSION rocksdb_bulk_load = 1;
+    INSERT INTO t1 VALUES (15, 15);
+    INSERT INTO t1 VALUES (25, 25);
+  }
+  if ($case == 0)
+  {
+    --echo # SET rocksdb_bulk_load = 0 (memtable overlap)
+    --disable_result_log
+    --error 0, ER_UNKNOWN_ERROR
+    SET SESSION rocksdb_bulk_load = 0;
+    --enable_result_log
+  }
+  if ($case == 1)
+  {
+    --echo # a statement on another table finishes the load
+    --disable_result_log
+    --error 0, ER_UNKNOWN_ERROR
+    INSERT INTO t2 VALUES (1);
+    --enable_result_log
+    SET SESSION rocksdb_bulk_load = 0;
+  }
+  if ($case == 2)
+  {
+    --echo # SET rocksdb_bulk_load = 0 (overlap with an SST file)
+    --disable_result_log
+    --error 0, ER_OVERLAPPING_KEYS
+    SET SESSION rocksdb_bulk_load = 0;
+    --enable_result_log
+  }
+  if ($case == 3)
+  {
+    --echo # two sessions, the second load overlaps the first one
+    --connect (con1,localhost,root,,)
+    SET SESSION rocksdb_bulk_load_allow_sk = ON;
+    SET SESSION rocksdb_bulk_load = 1;
+    INSERT INTO t1 VALUES (40, 40);
+    --connect (con2,localhost,root,,)
+    SET SESSION rocksdb_bulk_load_allow_sk = ON;
+    SET SESSION rocksdb_bulk_load = 1;
+    INSERT INTO t1 VALUES (35, 35), (45, 45);
+    --connection con1
+    SET SESSION rocksdb_bulk_load = 0;
+    --connection con2
+    --disable_result_log
+    --error 0, ER_OVERLAPPING_KEYS
+    SET SESSION rocksdb_bulk_load = 0;
+    --enable_result_log
+    --disconnect con1
+    --disconnect con2
+    --connection default
+  }
+
+  # Row counts of the primary key scan and of the index-only scan of kb, in
+  # total and for the rows that existed before the load.
+  SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+         (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS kb_count_matches_pk,
+         (SELECT COUNT(*) FROM t1 USE INDEX () WHERE b IN (10, 20, 30))
+         AS pk_old_rows,
+         (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b IN (10, 20, 30))
+         AS kb_old_rows;
+  CHECK TABLE t1;
+  DROP TABLE t1, t2;
+  --inc $case
+}
+
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
