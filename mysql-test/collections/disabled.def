@@ -153,6 +153,7 @@ rocksdb.power_loss_ctas_flush_log_lazy : BUG#0 PS-11763 CTAS not atomic
 rocksdb.power_loss_bulk_load_flush_log_lazy : BUG#0 PS-12042 SK entries lost
 rocksdb.ddl_crash_create_lctn2 : BUG#0 PS-11833 lower_case_table_names=2 CREATE crash not recovered
 rocksdb.ddl_truncate_leftover_rename : BUG#0 PS-11831 TRUNCATE leftover restored after rename
+rocksdb.copy_alter_drop_old_commit_failure : BUG#0 PS-12221 status not set
 rocksdb.sst_partitioner_multi_version : BUG#0 PS-11725 SST partitioner assert
 rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest error message
 rocksdb.write_batch_limit_sk_bulk_load : BUG#0 PS-11899 SK lost on failed load
