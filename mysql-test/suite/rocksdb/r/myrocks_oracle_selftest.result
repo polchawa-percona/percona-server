@@ -126,6 +126,17 @@ INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
 expected: ta=3/6388331359;tb=2/6839069135
 now:      ta=unreadable(1815);tb=2/2647828618
 violations: 4, unreadable: ta, persisted dictionary read: 1
+# known-bad: without ldb the rows are marked unverified and the cause is named
+v	tn	err
+INVARIANT VIOLATION 10: table unreadable	ta	1815
+v	tn	pn	idx
+INVARIANT VIOLATION 3: index missing in MyRocks dictionary	ta	NULL	ka
+INVARIANT VIOLATION 3: index missing in MyRocks dictionary	ta	NULL	PRIMARY
+NOTE invariant 4: the persisted MyRocks dictionary was not read (ldb not found at /nonexistent/ldb); rows marked unverified may be invariant 11
+v	cf	ino	num_rows	persisted_table
+INVARIANT VIOLATION 4: SST rows for an index not in the dictionary	0	<ino>	3	unverified
+INVARIANT VIOLATION 4: SST rows for an index not in the dictionary	0	<ino>	3	unverified
+violations: 3, persisted dictionary read: 0
 UPDATE tb SET v = 2 WHERE pk = 2;
 # known-good: a restart reloads ta from the persisted dictionary
 # restart

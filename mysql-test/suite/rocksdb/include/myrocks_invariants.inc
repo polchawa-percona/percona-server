@@ -28,7 +28,8 @@
 #      an index of such an entry are reported as invariant 11, not 4. The
 #      persisted dictionary is not readable from SQL; it is read with ldb
 #      from a checkpoint (see invariant 4 below; $inv_pdict_checked = 0
-#      when that was not possible, and the rows stay invariant 4).
+#      when that was not possible: a NOTE line then names the cause and
+#      the rows stay invariant 4 with persisted_table "unverified").
 #      Only evaluated when invariant 4 has hits: a persisted-only entry
 #      without SST rows is not seen, and invariant 8 (names) reads
 #      ROCKSDB_DDL too, so it stays invisible until a restart reloads it.
@@ -504,8 +505,9 @@ if (!$inv_skip_dropped) {
       # Rows whose index number belongs to a persisted table entry are
       # reported as invariant 11 (dictionary/map mismatch); the others stay
       # invariant 4 (index data without any dictionary entry). Without ldb,
-      # or if the checkpoint or ldb fails, all rows stay invariant 4 and
-      # $inv_pdict_checked is 0.
+      # or if the checkpoint or ldb fails, a NOTE line names the cause, the
+      # rows stay invariant 4 with persisted_table "unverified" (they may be
+      # invariant 11), and $inv_pdict_checked is 0.
       --let INV_PDICT_CKPT = $MYSQLTEST_VARDIR/tmp/inv_pdict_ckpt
       --let INV_PDICT_OUT = $MYSQLTEST_VARDIR/tmp/inv_pdict.txt
       --remove_files_wildcard $MYSQLTEST_VARDIR/tmp inv_pdict.txt
@@ -526,7 +528,19 @@ if (!$inv_skip_dropped) {
         (my $dir = ($ENV{MYSQL_SST_DUMP} // '')) =~ s{/[^/]*$}{};
         my $ldb = "$dir/ldb";
         open(my $o, '>', $out) or die "cannot write $out: $!";
-        if (!$ENV{INV_PDICT_SET_ERR} && -d $ck && -x $ldb) {
+        # The last line is the status: "ok" or the reason the persisted
+        # dictionary was not read.
+        my $st;
+        if ($ENV{INV_PDICT_SET_ERR}) {
+          $st = "checkpoint error $ENV{INV_PDICT_SET_ERR}";
+        } elsif (!-d $ck) {
+          $st = 'checkpoint directory missing';
+        } elsif (!$ENV{MYSQL_SST_DUMP}) {
+          $st = 'ldb not found (MYSQL_SST_DUMP unset)';
+        } elsif (!-x $ldb) {
+          $st = "ldb not found at $ldb";
+        }
+        if (!defined $st) {
           # Key: 0x00000001 (DDL_ENTRY_INDEX_START_NUMBER) + "db.table";
           # value: 2-byte version, then (cf_id, index_id) 4 bytes each.
           if (open(my $p, '-|', $ldb, "--db=$ck", '--column_family=__system__',
@@ -540,22 +554,38 @@ if (!$inv_skip_dropped) {
                   hex(substr($v, $i + 8, 8)), $n;
               }
             }
-            print $o "0\t0\t#ldb_ok\n" if close($p);
+            $st = close($p) ? 'ok' : 'ldb failed rc=' . ($? >> 8);
+          } else {
+            $st = "ldb failed to start: $!";
           }
         }
+        $st =~ s/[\t\n\\]/_/g;
+        print $o "0\t0\t#status $st\n";
         close($o);
         rmtree($ck) if -d $ck;
       EOF
       CREATE TEMPORARY TABLE inv_pdict (cf BIGINT, ino BIGINT, tn VARCHAR(600)) ENGINE=InnoDB;
       --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/tmp/inv_pdict.txt' INTO TABLE inv_pdict
       --remove_file $MYSQLTEST_VARDIR/tmp/inv_pdict.txt
-      --let $inv_pdict_checked = `SELECT COUNT(*) > 0 FROM inv_pdict WHERE tn = '#ldb_ok'`
+      --let $_inv_pdict_status = `SELECT IFNULL(MAX(SUBSTRING(tn, 9)), 'no status line') FROM inv_pdict WHERE tn LIKE '#status %'`
+      --let $inv_pdict_checked = 0
+      if ($_inv_pdict_status == ok) {
+        --let $inv_pdict_checked = 1
+      }
       ALTER TABLE inv_v4 MODIFY v VARCHAR(200), ADD COLUMN persisted_table VARCHAR(600);
-      UPDATE inv_v4 v4 JOIN inv_pdict p ON p.cf = v4.cf AND p.ino = v4.ino
-         SET v4.v = 'INVARIANT VIOLATION 11: index data of a table in the persisted MyRocks dictionary only (dictionary/map mismatch)',
-             v4.persisted_table = p.tn;
+      if ($inv_pdict_checked) {
+        UPDATE inv_v4 v4 JOIN inv_pdict p ON p.cf = v4.cf AND p.ino = v4.ino AND p.tn NOT LIKE '#status %'
+           SET v4.v = 'INVARIANT VIOLATION 11: index data of a table in the persisted MyRocks dictionary only (dictionary/map mismatch)',
+               v4.persisted_table = p.tn;
+      }
+      if (!$inv_pdict_checked) {
+        UPDATE inv_v4 SET persisted_table = 'unverified';
+      }
       DROP TEMPORARY TABLE inv_pdict;
       --enable_result_log
+      if (!$inv_pdict_checked) {
+        --echo NOTE invariant 4: the persisted MyRocks dictionary was not read ($_inv_pdict_status); rows marked unverified may be invariant 11
+      }
       if ($inv_mask_index_numbers) {
         --replace_column 3 <ino>
       }
@@ -564,6 +594,9 @@ if (!$inv_skip_dropped) {
       --inc $_inv_violations
     }
     DROP TEMPORARY TABLE inv_v4;
+    --let INV_PDICT_CKPT =
+    --let INV_PDICT_OUT =
+    --let INV_PDICT_SET_ERR =
   }
 }
 
