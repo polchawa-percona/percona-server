@@ -10,6 +10,19 @@
 #     after every injected failure; a violation for a statement that changes
 #     a non-key column and then fails (its index-only state does not see
 #     the change), and for a non-key column that changes across the restart.
+#   - myrocks_invariants.inc reports a table that cannot be opened
+#     (invariant 10) and still checks the other tables, and reports the
+#     index data of a table that is only in the persisted MyRocks
+#     dictionary as invariant 11 (dictionary/map mismatch), not as data
+#     without any dictionary entry (invariant 4); both are silent again
+#     after a restart. The state comes from a DROP TABLE whose MyRocks
+#     dictionary commit fails (PS-12220): the server keeps the table, the
+#     in-memory map no longer has it, the persisted dictionary still has it.
+#   - crashpoint_loop.inc: no violation for a plain INSERT; when MyRocks
+#     does not start after a crash it records that, restarts in the repair
+#     mode and checks the window; when MyRocks is inactive also in the
+#     repair mode, or when the reset of schema cp fails, it records that and
+#     skips the remaining windows (no hang, no stop without a summary).
 # Known-bad runs against open bugs (PS-12191, PS-11899, PS-12198, PS-11696)
 # are recorded in the bug hunt notes, not here.
 #
@@ -17,6 +30,11 @@
 --source include/have_debug.inc
 call mtr.add_suppression("Got error [0-9]+ when reading table");
 call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("injected error at");
+call mtr.add_suppression("Plugin rocksdb reported");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
 # Own schema: earlier tests may have left hidden #sql-* tables in test.
 CREATE DATABASE ost;
 USE ost;
@@ -161,3 +179,162 @@ DROP PROCEDURE fr_reset;
 DROP PROCEDURE fr_state;
 DROP PROCEDURE fr_stmt;
 DROP PROCEDURE fr_stmt_ok;
+
+--echo # known-bad 10 and 11: a DROP TABLE whose MyRocks dictionary commit fails
+CREATE DATABASE ost2;
+USE ost2;
+CREATE TABLE ta (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE tb (pk INT PRIMARY KEY, a INT NOT NULL, v INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO ta VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO tb VALUES (1, 1, 1), (2, 2, 2);
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+# The dictionary calls of DROP TABLE, counted on a twin table; the last one
+# is the commit in delete_table().
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+DROP TABLE t0;
+--let $dict_calls = `SELECT 1000000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations
+--let $fr2 = $inv_fullrow
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+--disable_query_log
+--eval SET SESSION rocksdb_debug_inject_error_nth = $dict_calls
+--enable_query_log
+--disable_result_log
+--disable_abort_on_error
+DROP TABLE ta;
+--let $drop_errno = $mysql_errno
+--enable_abort_on_error
+--enable_result_log
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+--let $drop_failed = `SELECT $drop_errno <> 0`
+--echo drop failed: $drop_failed
+--let $assert_text = The dictionary commit of the DROP failed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.myrocks_oracle_selftest
+--let $assert_select = injected error at dict_commit
+--let $assert_count = 1
+--source include/assert_grep.inc
+--error ER_INTERNAL_ERROR
+SELECT COUNT(*) FROM ta;
+# The other table changes too: its new value in the invariant 9 line shows
+# that it is still read.
+UPDATE tb SET v = 20 WHERE pk = 2;
+# Data of ta in SST files (invariant 4 reads the SST file map).
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--let $inv_fullrow_expect = $fr2
+--let $inv_mask_index_numbers = 1
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations: $inv_violations, unreadable: $inv_unreadable, persisted dictionary read: $inv_pdict_checked
+UPDATE tb SET v = 2 WHERE pk = 2;
+--echo # known-good: a restart reloads ta from the persisted dictionary
+--source include/restart_mysqld.inc
+USE ost2;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations after restart: $inv_violations, unreadable: $inv_unreadable
+--let $inv_fullrow_expect =
+--let $inv_mask_index_numbers =
+DROP TABLE ta, tb;
+--source suite/rocksdb/include/myrocks_invariants.inc
+--echo violations after DROP: $inv_violations
+USE test;
+DROP DATABASE ost2;
+
+--echo # crashpoint_loop.inc
+--source suite/rocksdb/include/crashpoint_state.inc
+CREATE TABLE cp_marker (n INT) ENGINE=InnoDB;
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE crashpoint_reset()
+BEGIN
+  IF (SELECT COUNT(*) FROM test.cp_marker) > 0 THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'reset refused';
+  END IF;
+  DROP DATABASE IF EXISTS cp;
+  CREATE DATABASE cp;
+  CREATE TABLE cp.t (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+  INSERT INTO cp.t VALUES (1, 1), (2, 2), (3, 3);
+END|
+CREATE PROCEDURE crashpoint_probe()
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    GET DIAGNOSTICS CONDITION 1 @crashpoint_probe_res = MESSAGE_TEXT;
+  END;
+  SET @crashpoint_probe_res = 'ok';
+  INSERT INTO cp.t VALUES (1000, 1000);
+  DELETE FROM cp.t WHERE pk = 1000;
+  INSERT INTO test.cp_marker SELECT 1 FROM DUAL WHERE @cp_poison = 1;
+END|
+delimiter ;|
+--enable_query_log
+--let $crashpoint_reset = CALL crashpoint_reset()
+--let $crashpoint_probe = CALL crashpoint_probe()
+--let $crashpoint_stmt = INSERT INTO cp.t VALUES (10, 10)
+--let $crashpoint_pkcol = pk
+--let $crashpoint_tables = cp.t
+--let $crashpoint_no_die = 1
+
+--echo # known-good: no violation
+--let $crashpoint_label = good
+--source suite/rocksdb/include/crashpoint_loop.inc
+--echo violations: $crashpoint_result_violations
+
+--echo # known-bad: MyRocks does not start after the crash (plugin init
+--echo # failure), but in the repair mode: the window is still checked
+# A start without MyRocks that runs the binlog crash recovery cannot hand a
+# prepared MyRocks transaction to MyRocks, and the next start then stops in
+# the binlog recovery ("Found 1 prepared transactions"; not what is tested
+# here). So the start without MyRocks also runs without the binary log,
+# which leaves the crash recovery to the repair-mode start. The crash is at
+# the checkpoint site (the hook fires there before anything is written);
+# one window.
+--let $crashpoint_stmt = SET GLOBAL rocksdb_create_checkpoint = @ost_ckpt
+--disable_query_log
+--eval SET @ost_ckpt = '$MYSQLTEST_VARDIR/tmp/ost_ckpt'
+--enable_query_log
+--let $crashpoint_max = 1
+--let $restart_parameters = restart: --rocksdb_default_cf_options=write_buffer_size=notanumber --skip-log-bin
+--let $crashpoint_label = no-start
+--let $crashpoint_no_die = 1
+--source suite/rocksdb/include/crashpoint_loop.inc
+--echo violations: $crashpoint_result_violations
+
+--echo # known-bad: MyRocks inactive also in the repair mode: the remaining
+--echo # windows are skipped
+--let $crashpoint_repair_parameters = $restart_parameters
+--force-rmdir $MYSQLTEST_VARDIR/tmp/ost_ckpt
+--disable_query_log
+--eval SET @ost_ckpt = '$MYSQLTEST_VARDIR/tmp/ost_ckpt'
+--enable_query_log
+--let $crashpoint_label = no-start-repair
+--let $crashpoint_no_die = 1
+--source suite/rocksdb/include/crashpoint_loop.inc
+--echo violations: $crashpoint_result_violations
+--let $restart_parameters =
+--source include/restart_mysqld.inc
+SELECT engine, support FROM information_schema.engines WHERE engine = 'ROCKSDB';
+--force-rmdir $MYSQLTEST_VARDIR/tmp/ost_ckpt
+
+--echo # known-bad: the reset of schema cp fails before a window
+--let $crashpoint_stmt = INSERT INTO cp.t VALUES (10, 10)
+--let $crashpoint_max =
+--let $crashpoint_label = reset-fails
+--let $crashpoint_no_die = 1
+SET @cp_poison = 1;
+--source suite/rocksdb/include/crashpoint_loop.inc
+--echo violations: $crashpoint_result_violations
+SET @cp_poison = NULL;
+
+DROP DATABASE cp;
+DROP TABLE cp_marker;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

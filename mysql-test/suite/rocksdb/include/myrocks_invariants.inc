@@ -21,6 +21,17 @@
 #      read through the primary key (every column, myrocks_inv_fullrow.inc),
 #      are the same as when $inv_fullrow_expect was taken, for example
 #      before a restart. $inv_fullrow always returns the current value.
+#  10. Every MyRocks table can be opened; an unreadable table is reported
+#      (with its error code) and the other tables are still checked.
+#  11. (with invariant 4 hits) The persisted MyRocks dictionary has no
+#      table entry that the in-memory map (ROCKSDB_DDL) lacks: SST rows of
+#      an index of such an entry are reported as invariant 11, not 4. The
+#      persisted dictionary is not readable from SQL; it is read with ldb
+#      from a checkpoint (see invariant 4 below; $inv_pdict_checked = 0
+#      when that was not possible, and the rows stay invariant 4).
+#      Only evaluated when invariant 4 has hits: a persisted-only entry
+#      without SST rows is not seen, and invariant 8 (names) reads
+#      ROCKSDB_DDL too, so it stays invisible until a restart reloads it.
 #
 # Invariants 2 (InnoDB mirror), 5 (snapshot across compaction), 6 (crash
 # loses only a suffix) and 7 (errors are truthful) need scenario context;
@@ -55,6 +66,9 @@
 #                                    # $inv_orphans_known instead.
 # [--let $inv_skip_partial = 1]      # skip partial indexes in invariant 1
 # [--let $inv_fullrow_expect = <v>]  # $inv_fullrow of an earlier run
+# [--let $inv_mask_index_numbers = 1] # print index numbers of invariant
+#                                    # 4 and 11 rows as <ino> (for a
+#                                    # recorded result)
 # --source suite/rocksdb/include/myrocks_invariants.inc
 #
 # CHECK TABLE is skipped for tables whose name contains a comma (mysqltest
@@ -103,17 +117,44 @@ if ($inv_skip_partial) {
 # Open every MyRocks table of the schema first: until a table is opened
 # after a restart, ROCKSDB_DDL shows empty index names for it (PS-11882),
 # which invariant 3 would report as a mismatch.
+#
+# Invariant 10: every MyRocks table of the server data dictionary can be
+# opened. A table that cannot be opened (e.g. ER 1815 "not present in
+# RocksDB-SE data dictionary" after a failed DROP or a crash inside a
+# rename) is reported once, with the error code, and left out of
+# invariant 1 and CHECK TABLE; the other tables are still checked.
+# Invariant 3 and 9 still see it (its dictionary entries, and
+# "<table>=unreadable(<errno>)" in the full-row fingerprint).
+# $inv_unreadable returns the comma list of such tables ("" if none).
 CREATE TEMPORARY TABLE inv_tabs ENGINE=InnoDB AS
-SELECT TABLE_NAME AS tn, ROW_NUMBER() OVER (ORDER BY TABLE_NAME) AS n
+SELECT TABLE_NAME AS tn, ROW_NUMBER() OVER (ORDER BY TABLE_NAME) AS n,
+       0 AS err
   FROM information_schema.TABLES
  WHERE TABLE_SCHEMA = @inv_schema AND ENGINE = 'ROCKSDB';
 --let $_inv_ntabs = `SELECT COUNT(*) FROM inv_tabs`
 --let $_inv_i = 1
 while ($_inv_i <= $_inv_ntabs) {
   --let $_inv_tn = `SELECT REPLACE(tn, CHAR(96), REPEAT(CHAR(96), 2)) FROM inv_tabs WHERE n = $_inv_i`
+  --disable_abort_on_error
   --eval SELECT 1 FROM `$_inv_schema`.`$_inv_tn` LIMIT 0
+  --let $_inv_err = $mysql_errno
+  --enable_abort_on_error
+  if ($_inv_err) {
+    --eval UPDATE inv_tabs SET err = $_inv_err WHERE n = $_inv_i
+  }
   --inc $_inv_i
 }
+--let $inv_unreadable = `SELECT IFNULL(GROUP_CONCAT(tn ORDER BY tn), '') FROM inv_tabs WHERE err <> 0`
+--let $_inv_n = `SELECT COUNT(*) FROM inv_tabs WHERE err <> 0`
+if ($_inv_n) {
+  --enable_result_log
+  SELECT 'INVARIANT VIOLATION 10: table unreadable' AS v, tn, err
+    FROM inv_tabs WHERE err <> 0 ORDER BY tn;
+  --disable_result_log
+  --inc $_inv_violations
+}
+CREATE TEMPORARY TABLE inv_bad ENGINE=InnoDB AS
+SELECT CONVERT(tn USING utf8mb4) COLLATE utf8mb4_general_ci AS tn FROM inv_tabs WHERE err <> 0;
 
 #
 # Invariant 1: secondary index vs primary key, per table and index.
@@ -144,7 +185,9 @@ SELECT DISTINCT s.TABLE_NAME AS tn, s.INDEX_NAME AS idx
     ON t.TABLE_SCHEMA = s.TABLE_SCHEMA AND t.TABLE_NAME = s.TABLE_NAME
  WHERE s.TABLE_SCHEMA = @inv_schema AND t.ENGINE = 'ROCKSDB'
    AND s.INDEX_NAME <> 'PRIMARY'
-   AND (s.INDEX_COMMENT NOT LIKE '%partial_group%' OR @inv_skip_partial = 0);
+   AND (s.INDEX_COMMENT NOT LIKE '%partial_group%' OR @inv_skip_partial = 0)
+   AND NOT EXISTS (SELECT 1 FROM inv_bad b
+                    WHERE b.tn = CONVERT(s.TABLE_NAME USING utf8mb4) COLLATE utf8mb4_general_ci);
 
 # Columns (and functional key part expressions) of the index plus the
 # primary key columns, each once, as a checksum expression. Identifiers are quoted with
@@ -215,9 +258,14 @@ if (!$inv_skip_check_table) {
     # cannot be prepared, so tables whose name contains a comma are not
     # checked here; $inv_check_skipped counts them.
     --let $_inv_comma = `SELECT LOCATE(',', tn) > 0 FROM inv_tabs WHERE n = $_inv_i`
+    # An unreadable table is already reported (invariant 10).
+    --let $_inv_bad = `SELECT err <> 0 FROM inv_tabs WHERE n = $_inv_i`
     --let $_inv_ct = OK
     if ($_inv_comma) {
       --inc $inv_check_skipped
+    }
+    if ($_inv_bad) {
+      --let $_inv_comma = 1
     }
     if (!$_inv_comma) {
       --let $_inv_tn = `SELECT REPLACE(tn, CHAR(96), REPEAT(CHAR(96), 2)) FROM inv_tabs WHERE n = $_inv_i`
@@ -233,6 +281,7 @@ if (!$inv_skip_check_table) {
   }
 }
 DROP TEMPORARY TABLE inv_tabs;
+DROP TEMPORARY TABLE inv_bad;
 
 DROP TEMPORARY TABLE inv_cols;
 DROP TEMPORARY TABLE inv_allcols;
@@ -443,9 +492,74 @@ if (!$inv_skip_dropped) {
       --inc $_inv_pass
     }
     --let $_inv_n = `SELECT COUNT(*) FROM inv_v4`
+    --let $inv_pdict_checked = 0
     if ($_inv_n) {
+      # ROCKSDB_DDL (and so the check above) shows the in-memory table map
+      # only. A table can be missing there while its entry is still in the
+      # persisted MyRocks dictionary (a DROP or TRUNCATE whose dictionary
+      # commit failed, PS-12220, PS-12217): its index data is not orphaned
+      # yet (a restart reloads the entry). The persisted dictionary is not
+      # readable from SQL, so it is read from a checkpoint with the ldb tool
+      # of the build (next to $MYSQL_SST_DUMP), only when there are hits.
+      # Rows whose index number belongs to a persisted table entry are
+      # reported as invariant 11 (dictionary/map mismatch); the others stay
+      # invariant 4 (index data without any dictionary entry). Without ldb,
+      # or if the checkpoint or ldb fails, all rows stay invariant 4 and
+      # $inv_pdict_checked is 0.
+      --let INV_PDICT_CKPT = $MYSQLTEST_VARDIR/tmp/inv_pdict_ckpt
+      --let INV_PDICT_OUT = $MYSQLTEST_VARDIR/tmp/inv_pdict.txt
+      --remove_files_wildcard $MYSQLTEST_VARDIR/tmp inv_pdict.txt
+      # A checkpoint left by an aborted earlier run would be read instead.
+      --perl
+        use File::Path qw(rmtree);
+        rmtree($ENV{INV_PDICT_CKPT}) if -d $ENV{INV_PDICT_CKPT};
+      EOF
+      --disable_abort_on_error
+      --eval SET GLOBAL rocksdb_create_checkpoint = '$MYSQLTEST_VARDIR/tmp/inv_pdict_ckpt'
+      --let INV_PDICT_SET_ERR = $mysql_errno
+      --enable_abort_on_error
+      --perl
+        use strict;
+        use File::Path qw(rmtree);
+        my $ck = $ENV{INV_PDICT_CKPT};
+        my $out = $ENV{INV_PDICT_OUT};
+        (my $dir = ($ENV{MYSQL_SST_DUMP} // '')) =~ s{/[^/]*$}{};
+        my $ldb = "$dir/ldb";
+        open(my $o, '>', $out) or die "cannot write $out: $!";
+        if (!$ENV{INV_PDICT_SET_ERR} && -d $ck && -x $ldb) {
+          # Key: 0x00000001 (DDL_ENTRY_INDEX_START_NUMBER) + "db.table";
+          # value: 2-byte version, then (cf_id, index_id) 4 bytes each.
+          if (open(my $p, '-|', $ldb, "--db=$ck", '--column_family=__system__',
+                   'scan', '--hex')) {
+            while (my $l = <$p>) {
+              next unless $l =~ /^0x00000001([0-9A-F]*) ==> 0x([0-9A-F]+)/;
+              my ($n, $v) = (pack('H*', $1), $2);
+              $n =~ s/[\t\n\\]/_/g;
+              for (my $i = 4; $i + 16 <= length($v); $i += 16) {
+                printf $o "%d\t%d\t%s\n", hex(substr($v, $i, 8)),
+                  hex(substr($v, $i + 8, 8)), $n;
+              }
+            }
+            print $o "0\t0\t#ldb_ok\n" if close($p);
+          }
+        }
+        close($o);
+        rmtree($ck) if -d $ck;
+      EOF
+      CREATE TEMPORARY TABLE inv_pdict (cf BIGINT, ino BIGINT, tn VARCHAR(600)) ENGINE=InnoDB;
+      --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/tmp/inv_pdict.txt' INTO TABLE inv_pdict
+      --remove_file $MYSQLTEST_VARDIR/tmp/inv_pdict.txt
+      --let $inv_pdict_checked = `SELECT COUNT(*) > 0 FROM inv_pdict WHERE tn = '#ldb_ok'`
+      ALTER TABLE inv_v4 MODIFY v VARCHAR(200), ADD COLUMN persisted_table VARCHAR(600);
+      UPDATE inv_v4 v4 JOIN inv_pdict p ON p.cf = v4.cf AND p.ino = v4.ino
+         SET v4.v = 'INVARIANT VIOLATION 11: index data of a table in the persisted MyRocks dictionary only (dictionary/map mismatch)',
+             v4.persisted_table = p.tn;
+      DROP TEMPORARY TABLE inv_pdict;
       --enable_result_log
-      SELECT v, cf, ino, num_rows FROM inv_v4 ORDER BY cf, ino;
+      if ($inv_mask_index_numbers) {
+        --replace_column 3 <ino>
+      }
+      SELECT v, cf, ino, num_rows, persisted_table FROM inv_v4 ORDER BY v, cf, ino;
       --disable_result_log
       --inc $_inv_violations
     }
