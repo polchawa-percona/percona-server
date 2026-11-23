@@ -1,0 +1,11 @@
+CALL mtr.add_suppression("Attempting backtrace");
+CALL mtr.add_suppression("Removing truncated leftover table");
+CALL mtr.add_suppression("TRUNCATE TABLE was interrupted");
+# TRUNCATE TABLE t
+statement_crashed	windows_partly_truncated
+1	0
+# ALTER TABLE t TRUNCATE PARTITION p0, p1, p2
+statement_crashed	windows_partly_truncated
+1	0
+include/assert_grep.inc [the crash-point hook fired inside the statements]
+DROP TABLE t;

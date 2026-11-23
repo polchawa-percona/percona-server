@@ -1,0 +1,107 @@
+# PS-12226: a crash inside TRUNCATE TABLE (or ALTER TABLE ... TRUNCATE
+# PARTITION of several partitions) of a partitioned MyRocks table leaves the
+# table partly truncated: the partitions whose truncate finished before the
+# crash are empty, the others keep their rows.
+#
+# Partition_base::truncate() calls ha_truncate() for one partition after the
+# other, and every ha_rocksdb::truncate_table() commits its own rename,
+# create and drop in the MyRocks dictionary. The startup recovery only
+# restores the partition whose truncate was in flight.
+#
+# Expected (PS-11668: "after restart the table is usable, either with its old
+# rows or empty"; InnoDB with atomic DDL): after a crash at any point of the
+# statement, the table has either all 10 rows or none, through the primary
+# key and through the secondary key.
+#
+# The test crashes the server at every durable write of the statement in
+# turn (rocksdb_debug_crash_on_nth_durable_write = 1, 2, ...) until the
+# statement completes without a crash, restarts it and checks the table.
+# Only windows that break the rule are printed.
+
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/not_crashrep.inc
+
+CALL mtr.add_suppression("Attempting backtrace");
+CALL mtr.add_suppression("Removing truncated leftover table");
+CALL mtr.add_suppression("TRUNCATE TABLE was interrupted");
+
+--let $expect_file = $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+
+--let $case = 1
+while ($case <= 2) {
+  if ($case == 1) {
+    --let $stmt = TRUNCATE TABLE t
+  }
+  if ($case == 2) {
+    --let $stmt = ALTER TABLE t TRUNCATE PARTITION p0, p1, p2
+  }
+  --echo # $stmt
+  --let $crashes = 0
+  --let $partial = 0
+  --let $n = 1
+  --let $done = 0
+  --disable_query_log
+  --disable_result_log
+  while (!$done) {
+    DROP TABLE IF EXISTS t;
+    CREATE TABLE t (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a))
+      ENGINE=ROCKSDB
+      PARTITION BY RANGE (pk) (PARTITION p0 VALUES LESS THAN (4),
+      PARTITION p1 VALUES LESS THAN (7),
+      PARTITION p2 VALUES LESS THAN MAXVALUE);
+    INSERT INTO t VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),
+      (9,9),(10,10);
+
+    eval SET SESSION rocksdb_debug_crash_on_nth_durable_write = $n;
+    --exec echo "wait" > $expect_file
+    --error 0,2013
+    eval $stmt;
+    --let $err = $mysql_errno
+    if ($err == 0) {
+      # The statement completed: fewer than $n durable writes.
+      --remove_file $expect_file
+      SET SESSION rocksdb_debug_crash_on_nth_durable_write = 0;
+      --let $done = 1
+    }
+    if ($err == 2013) {
+      --inc $crashes
+      --source include/wait_until_disconnected.inc
+      # Restart with the default options (no "# restart" line: the number
+      # of crash windows is not part of the expected result).
+      --exec echo "restart" > $expect_file
+      --let $wait_counter = 6000
+      --source include/wait_until_connected_again.inc
+      --disable_query_log
+      --disable_result_log
+    }
+    --let $check_msg = query_get_value(CHECK TABLE t, Msg_text, 1)
+    --let $rows_pk = `SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY)`
+    --let $rows_ka = `SELECT COUNT(*) FROM t FORCE INDEX (ka)`
+    --let $ok = `SELECT '$check_msg' = 'OK' AND $rows_pk = $rows_ka AND (($done = 0 AND $rows_pk IN (0, 10)) OR ($done = 1 AND $rows_pk = 0))`
+    if (!$ok) {
+      --inc $partial
+      --echo crash at durable write $n: CHECK TABLE $check_msg, rows through PRIMARY $rows_pk, through ka $rows_ka (expected all 10 or none)
+    }
+    --inc $n
+  }
+  --enable_result_log
+  --enable_query_log
+
+  # Expected: at least one crash window inside the statement, and no window
+  # that left the table partly truncated.
+  --disable_query_log
+  eval SELECT $crashes > 0 AS statement_crashed, $partial AS windows_partly_truncated;
+  --enable_query_log
+  --inc $case
+}
+
+--let $assert_text = the crash-point hook fired inside the statements
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = crash-point hook fired at
+--let $assert_only_after = CURRENT_TEST: rocksdb.truncate_partitioned_crash
+--let $assert_match = .
+--source include/assert_grep.inc
+
+DROP TABLE t;
