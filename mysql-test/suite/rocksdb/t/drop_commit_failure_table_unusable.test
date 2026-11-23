@@ -1,0 +1,115 @@
+#
+# PS-12220: a DROP TABLE whose MyRocks dictionary commit fails leaves the
+# table unusable, and the DROP TABLE IF EXISTS that the server then
+# suggests makes MyRocks refuse to start at the next restart.
+#
+# ha_rocksdb::delete_table() erases the table from the in-memory table map
+# (Rdb_ddl_manager::remove()) before it commits the dictionary batch. When
+# that commit fails and rocksdb_io_error_action=IGNORE_ERROR, DROP TABLE
+# returns an error and the server keeps the table, but MyRocks no longer
+# knows it until a restart: SELECT fails with ER 1815 and DROP TABLE with
+# ER 3605 ("use DROP TABLE IF EXISTS"). DROP TABLE IF EXISTS then removes
+# only the server's DD entry; the persisted MyRocks entry stays and the
+# next start fails rocksdb_validate_tables ("Schema mismatch"), so the
+# server comes up without ROCKSDB.
+#
+# Expected: the DROP either fails and leaves the table unchanged (all rows
+# through the PK and the secondary key), or succeeds and removes it; after
+# DROP TABLE IF EXISTS and a restart ROCKSDB is active and no rows of the
+# dropped table's indexes are left. The checks print only these verdicts,
+# so any fix that gives either outcome passes.
+#
+# Debug only: the failed dictionary commit is injected
+# (rocksdb_debug_inject_error_*); a release build cannot fail a dictionary
+# write on demand. The injection hits the last dictionary call of the DROP,
+# the commit in delete_table() ("dict_commit"); the number of calls is
+# measured on a twin table first.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Ignoring I/O errors");
+
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+
+--echo # Count the dictionary calls of DROP TABLE on a twin table
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+DROP TABLE t0;
+--let $dict_calls = `SELECT 1000000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30) SELECT i, i FROM s;
+--let $base_ino = `SELECT MIN(INDEX_NUMBER) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`
+
+--echo # DROP TABLE whose dictionary commit fails
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+--disable_query_log
+--eval SET SESSION rocksdb_debug_inject_error_nth = $dict_calls
+--enable_query_log
+# Any error code is accepted (none is printed); losing the server is not.
+--disable_result_log
+--disable_abort_on_error
+DROP TABLE t1;
+--enable_abort_on_error
+--enable_result_log
+--let $drop_errno = $mysql_errno
+if ($drop_errno == 2013) {
+  --die The server went away during DROP TABLE
+}
+if ($drop_errno == 2006) {
+  --die The server went away during DROP TABLE
+}
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+--let $assert_text = The dictionary commit of the DROP failed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.drop_commit_failure_table_unusable
+--let $assert_select = injected error at dict_commit
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--echo # A failed DROP leaves the table unchanged, a successful one removes it
+--let $in_dd = `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`
+SET @rows_pk = NULL, @rows_sk = NULL;
+--disable_result_log
+--error 0,1146,1815
+SELECT COUNT(*) INTO @rows_pk FROM t1 FORCE INDEX (PRIMARY);
+--error 0,1146,1815
+SELECT COUNT(*) INTO @rows_sk FROM t1 FORCE INDEX (ka);
+--enable_result_log
+--disable_query_log
+--eval SELECT IF($drop_errno = 0, $in_dd = 0, $in_dd = 1 AND @rows_pk <=> 30 AND @rows_sk <=> 30) AS drop_result_truthful
+--enable_query_log
+
+--echo # DROP TABLE IF EXISTS, then restart
+--disable_warnings
+DROP TABLE IF EXISTS t1;
+--enable_warnings
+--source include/restart_mysqld.inc
+SELECT PLUGIN_STATUS FROM information_schema.PLUGINS
+ WHERE PLUGIN_NAME = 'ROCKSDB';
+--let $rocksdb_active = `SELECT COUNT(*) FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'ROCKSDB' AND PLUGIN_STATUS = 'ACTIVE'`
+if ($rocksdb_active) {
+  --disable_query_log
+  SET GLOBAL rocksdb_signal_drop_index_thread = 1;
+  --source suite/rocksdb/include/drop_table_sync.inc
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+  --enable_query_log
+  --echo # Rows of indexes that are not in the dictionary
+  --replace_result $base_ino BASE_INO
+  eval SELECT COUNT(DISTINCT f.INDEX_NUMBER) AS leaked_indexes,
+              IFNULL(SUM(f.NUM_ROWS), 0) AS leaked_rows
+         FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+        WHERE f.INDEX_NUMBER >= $base_ino AND f.NUM_ROWS > 0
+          AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d
+                           WHERE d.COLUMN_FAMILY = f.COLUMN_FAMILY
+                             AND d.INDEX_NUMBER = f.INDEX_NUMBER);
+}

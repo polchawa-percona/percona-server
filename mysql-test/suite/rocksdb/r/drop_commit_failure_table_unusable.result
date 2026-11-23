@@ -1,0 +1,45 @@
+call mtr.add_suppression("Ignoring I/O errors");
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+# Count the dictionary calls of DROP TABLE on a twin table
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+DROP TABLE t0;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30) SELECT i, i FROM s;
+# DROP TABLE whose dictionary commit fails
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+DROP TABLE t1;
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+injection_pending
+0
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+include/assert_grep.inc [The dictionary commit of the DROP failed]
+# A failed DROP leaves the table unchanged, a successful one removes it
+SET @rows_pk = NULL, @rows_sk = NULL;
+SELECT COUNT(*) INTO @rows_pk FROM t1 FORCE INDEX (PRIMARY);
+SELECT COUNT(*) INTO @rows_sk FROM t1 FORCE INDEX (ka);
+drop_result_truthful
+1
+# DROP TABLE IF EXISTS, then restart
+DROP TABLE IF EXISTS t1;
+# restart
+SELECT PLUGIN_STATUS FROM information_schema.PLUGINS
+WHERE PLUGIN_NAME = 'ROCKSDB';
+PLUGIN_STATUS
+ACTIVE
+# Rows of indexes that are not in the dictionary
+SELECT COUNT(DISTINCT f.INDEX_NUMBER) AS leaked_indexes,
+IFNULL(SUM(f.NUM_ROWS), 0) AS leaked_rows
+FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER >= BASE_INO AND f.NUM_ROWS > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d
+WHERE d.COLUMN_FAMILY = f.COLUMN_FAMILY
+AND d.INDEX_NUMBER = f.INDEX_NUMBER);
+leaked_indexes	leaked_rows
+0	0
