@@ -1,0 +1,48 @@
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("Failure when trying to drop table");
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+# Count the dictionary calls of TRUNCATE on a twin table
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+TRUNCATE TABLE t0;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+DROP TABLE t0;
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 WITH RECURSIVE s(i) AS
+(SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30) SELECT i, i FROM s;
+# TRUNCATE whose drop of the old copy fails: #truncate_tmp#t1 stays
+TRUNCATE TABLE t1;
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+injection_pending
+0
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+include/assert_grep.inc [The drop of #truncate_tmp#t1 failed]
+# The next TRUNCATE of the same table
+INSERT INTO t1 VALUES (1, 1);
+TRUNCATE TABLE t1;
+# Rows of indexes that are not in the dictionary (pass 1)
+SELECT COUNT(DISTINCT f.INDEX_NUMBER) AS leaked_indexes,
+IFNULL(SUM(f.NUM_ROWS), 0) AS leaked_rows
+FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER >= BASE_INO AND f.NUM_ROWS > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d
+WHERE d.COLUMN_FAMILY = f.COLUMN_FAMILY
+AND d.INDEX_NUMBER = f.INDEX_NUMBER);
+leaked_indexes	leaked_rows
+0	0
+# restart
+# Rows of indexes that are not in the dictionary (pass 2)
+SELECT COUNT(DISTINCT f.INDEX_NUMBER) AS leaked_indexes,
+IFNULL(SUM(f.NUM_ROWS), 0) AS leaked_rows
+FROM information_schema.ROCKSDB_INDEX_FILE_MAP f
+WHERE f.INDEX_NUMBER >= BASE_INO AND f.NUM_ROWS > 0
+AND NOT EXISTS (SELECT 1 FROM information_schema.ROCKSDB_DDL d
+WHERE d.COLUMN_FAMILY = f.COLUMN_FAMILY
+AND d.INDEX_NUMBER = f.INDEX_NUMBER);
+leaked_indexes	leaked_rows
+0	0
+DROP TABLE t1;
