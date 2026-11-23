@@ -1,0 +1,100 @@
+#
+# PS-12222: a DROP TABLE of a partitioned MyRocks table that fails at one
+# partition still drops the other partitions; the table is gone after the
+# next restart although the DROP returned an error.
+#
+# Partition_base::del_ren_table() (sql/partitioning/partition_base.cc)
+# calls ha_delete_table() for every partition and only remembers the last
+# error: when the drop of the first partition fails, the second one is
+# dropped anyway, and its committed DDL recovery log DROP record makes the
+# startup recovery drop the whole table ("DROP TABLE was interrupted after
+# the table was dropped in RocksDB"). Here the drop of the first partition
+# fails at its dictionary commit with rocksdb_io_error_action=IGNORE_ERROR;
+# a dictionary read error in the drop (PS-12198) reaches the same code.
+#
+# Expected: the DROP either fails and leaves the table unchanged (all rows
+# through the PK and the secondary key, also after a restart), or succeeds
+# and removes it from the DD and from MyRocks (ROCKSDB active after the
+# restart, no ROCKSDB_DDL rows for it). The restart follows the DROP
+# directly, so the check does not depend on the in-memory state of the
+# failed partition; it prints only the verdict, so any fix that gives
+# either outcome passes.
+#
+# Debug only: the failed dictionary commit is injected
+# (rocksdb_debug_inject_error_*); a release build cannot fail a dictionary
+# write on demand. The number of dictionary calls of a DROP TABLE is
+# measured on a non-partitioned twin table; the same number in the
+# partitioned DROP is the commit in delete_table() of the first partition
+# ("dict_commit").
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+call mtr.add_suppression("Ignoring I/O errors");
+
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+
+--echo # Count the dictionary calls of DROP TABLE on a non-partitioned twin
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+DROP TABLE t0;
+--let $dict_calls = `SELECT 1000000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+
+CREATE TABLE tp (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB
+  PARTITION BY HASH(pk) PARTITIONS 2;
+INSERT INTO tp WITH RECURSIVE s(i) AS
+  (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30) SELECT i, i FROM s;
+
+--echo # DROP TABLE whose first partition fails its dictionary commit
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+--disable_query_log
+--eval SET SESSION rocksdb_debug_inject_error_nth = $dict_calls
+--enable_query_log
+# Any error code is accepted (none is printed); losing the server is not.
+--disable_result_log
+--disable_abort_on_error
+DROP TABLE tp;
+--enable_abort_on_error
+--enable_result_log
+--let $drop_errno = $mysql_errno
+if ($drop_errno == 2013) {
+  --die The server went away during DROP TABLE
+}
+if ($drop_errno == 2006) {
+  --die The server went away during DROP TABLE
+}
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+--let $assert_text = The dictionary commit of the first partition failed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.drop_partitioned_commit_failure
+--let $assert_select = injected error at dict_commit
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--source include/restart_mysqld.inc
+
+--echo # A failed DROP left the table unchanged, a successful one removed it
+--let $in_dd = `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tp'`
+SET @rows_pk = NULL, @rows_sk = NULL;
+--error 0,1146,1815
+SELECT COUNT(*) INTO @rows_pk FROM tp FORCE INDEX (PRIMARY);
+--error 0,1146,1815
+SELECT COUNT(*) INTO @rows_sk FROM tp FORCE INDEX (ka);
+--let $rocksdb_active = `SELECT COUNT(*) FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'ROCKSDB' AND PLUGIN_STATUS = 'ACTIVE'`
+--let $rocksdb_rows = -1
+if ($rocksdb_active) {
+  --let $rocksdb_rows = `SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 'tp'`
+}
+--disable_query_log
+--eval SELECT IF($drop_errno = 0, $in_dd = 0 AND $rocksdb_active = 1 AND $rocksdb_rows = 0, $in_dd = 1 AND @rows_pk <=> 30 AND @rows_sk <=> 30) AS drop_result_truthful
+--enable_query_log
+
+--disable_warnings
+DROP TABLE IF EXISTS tp;
+--enable_warnings
