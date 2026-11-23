@@ -1,5 +1,10 @@
 call mtr.add_suppression("Got error [0-9]+ when reading table");
 call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("Ignoring I/O errors");
+call mtr.add_suppression("injected error at");
+call mtr.add_suppression("Plugin rocksdb reported");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
 CREATE DATABASE ost;
 USE ost;
 CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b LONGBLOB, j JSON, c VARCHAR(10),
@@ -83,3 +88,106 @@ DROP PROCEDURE fr_reset;
 DROP PROCEDURE fr_state;
 DROP PROCEDURE fr_stmt;
 DROP PROCEDURE fr_stmt_ok;
+# known-bad 10 and 11: a DROP TABLE whose MyRocks dictionary commit fails
+CREATE DATABASE ost2;
+USE ost2;
+CREATE TABLE ta (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE tb (pk INT PRIMARY KEY, a INT NOT NULL, v INT, KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO ta VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO tb VALUES (1, 1, 1), (2, 2, 2);
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+DROP TABLE t0;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+violations: 0
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+DROP TABLE ta;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+drop failed: 1
+include/assert_grep.inc [The dictionary commit of the DROP failed]
+SELECT COUNT(*) FROM ta;
+ERROR HY000: Internal error: Attempt to open a table that is not present in RocksDB-SE data dictionary
+UPDATE tb SET v = 20 WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+v	tn	err
+INVARIANT VIOLATION 10: table unreadable	ta	1815
+v	tn	pn	idx
+INVARIANT VIOLATION 3: index missing in MyRocks dictionary	ta	NULL	ka
+INVARIANT VIOLATION 3: index missing in MyRocks dictionary	ta	NULL	PRIMARY
+v	cf	ino	num_rows	persisted_table
+INVARIANT VIOLATION 11: index data of a table in the persisted MyRocks dictionary only (dictionary/map mismatch)	0	<ino>	3	ost2.ta
+INVARIANT VIOLATION 11: index data of a table in the persisted MyRocks dictionary only (dictionary/map mismatch)	0	<ino>	3	ost2.ta
+INVARIANT VIOLATION 9: full rows differ from the expected fingerprint
+expected: ta=3/6388331359;tb=2/6839069135
+now:      ta=unreadable(1815);tb=2/2647828618
+violations: 4, unreadable: ta, persisted dictionary read: 1
+UPDATE tb SET v = 2 WHERE pk = 2;
+# known-good: a restart reloads ta from the persisted dictionary
+# restart
+USE ost2;
+violations after restart: 0, unreadable: 
+DROP TABLE ta, tb;
+violations after DROP: 0
+USE test;
+DROP DATABASE ost2;
+# crashpoint_loop.inc
+CREATE TABLE cp_marker (n INT) ENGINE=InnoDB;
+# known-good: no violation
+INSERT INTO cp.t VALUES (10, 10);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=1: crashed at tx_prepare, recovered to the starting state
+INSERT INTO cp.t VALUES (10, 10);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=2: crashed at flush_wal, recovered to the starting state
+INSERT INTO cp.t VALUES (10, 10);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# n=3: crashed at tx_commit, recovered to the post-statement state
+INSERT INTO cp.t VALUES (10, 10);
+CALL crashpoint_state('pk');;
+# good: 3 crash points enumerated, no violations
+violations: 0
+# known-bad: MyRocks does not start after the crash (plugin init
+# failure), but in the repair mode: the window is still checked
+SET GLOBAL rocksdb_create_checkpoint = @ost_ckpt;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_default_cf_options=write_buffer_size=notanumber --skip-log-bin
+VIOLATION no-start n=1: MyRocks did not start after the abort with the default options
+# restart
+# n=1: crashed at checkpoint, recovered to the post-statement state
+# no-start: stopped at the loop bound 1
+# no-start: 1 crash points enumerated, 1 violations
+violations: 1
+# known-bad: MyRocks inactive also in the repair mode: the remaining
+# windows are skipped
+SET GLOBAL rocksdb_create_checkpoint = @ost_ckpt;
+ERROR HY000: Lost connection to MySQL server during query
+# restart: --rocksdb_default_cf_options=write_buffer_size=notanumber --skip-log-bin
+VIOLATION no-start-repair n=1: MyRocks did not start after the abort with the default options
+# restart
+VIOLATION no-start-repair n=1: MyRocks inactive after restart, also in the repair mode; the remaining windows of no-start-repair are skipped
+# no-start-repair: 1 crash points enumerated, 2 violations
+violations: 2
+# restart
+SELECT engine, support FROM information_schema.engines WHERE engine = 'ROCKSDB';
+engine	support
+ROCKSDB	YES
+# known-bad: the reset of schema cp fails before a window
+SET @cp_poison = 1;
+VIOLATION reset-fails n=1: the reset of schema cp failed with error 1644; the remaining windows of reset-fails are skipped
+# reset-fails: no crash point enumerated, 1 violations
+violations: 1
+SET @cp_poison = NULL;
+DROP DATABASE cp;
+DROP TABLE cp_marker;
+DROP PROCEDURE crashpoint_reset;
+DROP PROCEDURE crashpoint_probe;
+DROP PROCEDURE crashpoint_state;
+DROP PROCEDURE crashpoint_run;

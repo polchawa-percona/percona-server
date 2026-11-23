@@ -22,6 +22,12 @@
 # Names are listed as stored: ROCKSDB_DDL shows names in the file-name
 # encoding, where # may appear as @0023.
 #
+# ROCKSDB_DDL is the in-memory table map. An entry that is only in the
+# persisted MyRocks dictionary (a DROP or TRUNCATE whose dictionary commit
+# failed, PS-12220, PS-12217) is not listed until a restart reloads it;
+# myrocks_invariants.inc reports such an entry as invariant 11 only when
+# it still has index data in SST files (invariant 4 hits).
+#
 # $inv_orphans_abort_ok lists ("none" if empty) the entries that are
 # accepted after a server abort (never after a statement that returned):
 # a #sql-* table (not #sql2-*, not #truncate_tmp#*) that exists only in the

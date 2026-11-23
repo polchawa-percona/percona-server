@@ -52,10 +52,22 @@
 # violations must always be 0: a known bug is a skipped window that cites
 # its ticket (and a disabled test that asserts the correct result), never
 # an expected violation.
-# If MyRocks refused to start with the default options, the violation is
-# recorded and the server is restarted with rocksdb_validate_tables=2
-# (and then with the default options if even that fails) so that the loop
-# can go on.
+# If MyRocks refused to start with the default options (the server runs,
+# the plugin did not initialize), the violation is recorded and the server
+# is shut down and started again in the repair mode
+# ($crashpoint_repair_parameters, default rocksdb_validate_tables=2), so
+# that the window is still checked and the loop can go on. If MyRocks is
+# inactive also then, that is recorded as a second violation and the loop
+# ends with this window ("the remaining windows ... are skipped"): the
+# summary line and the final --die still run, and the server is left
+# running without MyRocks for MTR to clean up after the failed test. The
+# same holds when $crashpoint_reset fails before a window (e.g. ER 8010
+# after a recovery in the repair mode left MyRocks entries of schema cp).
+# Not handled: when the crash left a prepared MyRocks transaction, the
+# start without MyRocks runs the binlog crash recovery without it, and the
+# repair-mode start can then abort ("Found 1 prepared transactions",
+# "Can't init tc log"); MTR then reports the server as failed during the
+# test instead of this loop printing its summary.
 # If a prepared XA transaction was recovered and $crashpoint_finish is
 # set, it is finished that way, before the tables are checked and the
 # state is compared.
@@ -116,6 +128,13 @@
 #                        completed statement, see above
 #   $crashpoint_from     (optional) first window to run (default 1); with
 #                        $crashpoint_max it selects a single window
+#   $crashpoint_repair_parameters (optional) restart parameters of the
+#                        repair-mode start after MyRocks did not start,
+#                        in restart_mysqld.inc form (default
+#                        "restart: --loose-rocksdb_validate_tables=2")
+#   $crashpoint_no_die   (optional, self-test only) do not --die at the
+#                        end when there were violations; the count is
+#                        returned in $crashpoint_result_violations
 #   $crashpoint_neutral  (optional) when set, a correct recovery prints
 #                        "recovered to a consistent state" instead of
 #                        naming the starting or the post-statement state
@@ -151,6 +170,10 @@ if (!$crashpoint_probe) {
   --die crashpoint_loop.inc: crashpoint_probe is required
 }
 --let $_cp_expect = $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--let $_cp_repair = restart: --loose-rocksdb_validate_tables=2
+if ($crashpoint_repair_parameters) {
+  --let $_cp_repair = $crashpoint_repair_parameters
+}
 --let $_cp_power = `SELECT @@global.rocksdb_debug_unsynced_data_loss`
 --let $_cp_mode = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
 --let $_cp_lazy = `SELECT @@global.rocksdb_flush_log_at_trx_commit <> 1`
@@ -220,6 +243,8 @@ if (!$crashpoint_from) {
 --let $crashpoint_crashes = 0
 --let $cp_hidden_dd = 0
 --let $cp_after_mode = 0
+--let $cp_dead = 0
+--let $cp_dead_window = 0
 --let $cp_win = n=$crashpoint_n
 while (!$crashpoint_done) {
   --let $cp_win = n=$crashpoint_n
@@ -232,10 +257,27 @@ while (!$crashpoint_done) {
   if ($_cp_lazy) {
     SET GLOBAL rocksdb_flush_log_at_trx_commit = 1;
   }
+  # A reset that fails (e.g. the MyRocks dictionary still has entries of
+  # schema cp after a recovery in the repair mode: ER 8010) ends the loop
+  # with a violation instead of stopping the test without a summary.
+  --disable_result_log
+  --disable_abort_on_error
   eval $crashpoint_reset;
+  --let $cp_reset_err = $mysql_errno
+  --enable_abort_on_error
+  --enable_result_log
+  if ($cp_reset_err) {
+    --echo VIOLATION $crashpoint_label $cp_win: the reset of schema cp failed with error $cp_reset_err; the remaining windows of $crashpoint_label are skipped
+    --inc $crashpoint_violations
+    --let $cp_dead = 1
+    --let $crashpoint_done = 1
+  }
   if ($_cp_lazy) {
     eval SET GLOBAL rocksdb_flush_log_at_trx_commit = $_cp_mode;
   }
+  # The rest of the window runs only while schema cp can be used (not
+  # re-indented).
+  if (!$cp_dead) {
   if (!$cp_after_mode) {
     eval SET SESSION rocksdb_debug_crash_on_nth_durable_write = $crashpoint_n;
   }
@@ -288,20 +330,38 @@ while (!$crashpoint_done) {
     # The include files above turn the query and result logs back on.
     --disable_query_log
     # If MyRocks refused to start, record it and restart in the repair
-    # mode, then with the defaults, so that the loop can go on.
+    # mode, so that the window is still checked and the loop can go on.
     --let $cp_engine = `SELECT COUNT(*) FROM information_schema.engines WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT')`
     if (!$cp_engine) {
       --echo VIOLATION $crashpoint_label $cp_win: MyRocks did not start after the abort with the default options
       --inc $crashpoint_violations
-      --let $_expect_file_name = $_cp_expect
-      --let $restart_parameters = restart: --loose-rocksdb_validate_tables=2
+      # The server runs without MyRocks: shut it down and start it again
+      # in the repair mode.
+      --let $_cp_saved_restart = $restart_parameters
+      --let $restart_parameters = $_cp_repair
       --let $do_not_echo_parameters = 1
-      --source include/start_mysqld.inc
-      --let $restart_parameters =
+      --source include/restart_mysqld.inc
+      --let $restart_parameters = $_cp_saved_restart
       --let $do_not_echo_parameters =
-      --let $_expect_file_name =
       --disable_query_log
+      --let $cp_engine = `SELECT COUNT(*) FROM information_schema.engines WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT')`
+      if (!$cp_engine) {
+        # Nothing of schema cp can be checked or reset any more: record it
+        # and end the loop here (the summary and the final --die still run).
+        --echo VIOLATION $crashpoint_label $cp_win: MyRocks inactive after restart, also in the repair mode; the remaining windows of $crashpoint_label are skipped
+        --inc $crashpoint_violations
+        --let $cp_dead = 1
+        --let $crashpoint_done = 1
+      }
     }
+  }
+  if ($cp_dead) {
+    # Skip the checks of this window; the loop ends below.
+    --let $cp_crashed = 0
+    --let $cp_body_err = 0
+    --let $cp_dead_window = 1
+  }
+  if ($cp_crashed) {
     # Which site fired, and was it the hook that crashed the server?
     --source suite/rocksdb/include/crashpoint_site.inc
     --let $cp_want = `SELECT $cp_fired_prev + 1`
@@ -484,6 +544,9 @@ while (!$crashpoint_done) {
       --let $crashpoint_done = 1
     }
   }
+  if ($cp_dead_window) {
+    --let $cp_crashed = 1
+  }
   if (!$cp_crashed) {
     --remove_file $_cp_expect
     if ($cp_body_err) {
@@ -520,6 +583,7 @@ while (!$crashpoint_done) {
       }
     }
   }
+  }
 
   --inc $crashpoint_n
   if ($cp_after_mode) {
@@ -528,7 +592,9 @@ while (!$crashpoint_done) {
   }
   if ($crashpoint_n > $crashpoint_max) {
     if ($crashpoint_from == 1) {
-      --echo # $crashpoint_label: stopped at the loop bound $crashpoint_max
+      if (!$cp_dead) {
+        --echo # $crashpoint_label: stopped at the loop bound $crashpoint_max
+      }
     }
     --let $crashpoint_done = 1
   }
@@ -546,7 +612,12 @@ if ($crashpoint_detail_window) {
   }
 }
 if (!$crashpoint_crashes) {
-  --echo # $crashpoint_label: no durable write was made by the statement
+  if (!$cp_dead) {
+    --echo # $crashpoint_label: no durable write was made by the statement
+  }
+  if ($cp_dead) {
+    --echo # $crashpoint_label: no crash point enumerated, $crashpoint_violations violations
+  }
 }
 if ($crashpoint_crashes) {
   if (!$crashpoint_violations) {
@@ -558,8 +629,11 @@ if ($crashpoint_crashes) {
 }
 # The violation count is never recorded as expected output: a known bug
 # is a skipped window with a ticket, so the loop always requires 0.
-if ($crashpoint_violations) {
-  --die $crashpoint_label: $crashpoint_violations crash-window violations; see the VIOLATION lines above
+--let $crashpoint_result_violations = $crashpoint_violations
+if (!$crashpoint_no_die) {
+  if ($crashpoint_violations) {
+    --die $crashpoint_label: $crashpoint_violations crash-window violations; see the VIOLATION lines above
+  }
 }
 --enable_query_log
 
@@ -599,6 +673,12 @@ if ($crashpoint_violations) {
 --let $cp_fired =
 --let $cp_dropped =
 --let $cp_win =
+--let $cp_dead =
+--let $cp_dead_window =
+--let $cp_reset_err =
+--let $_cp_saved_restart =
+--let $crashpoint_repair_parameters =
+--let $crashpoint_no_die =
 --let $cp_after_mode =
 --let $cp_drop_want =
 --let $cp_drop_have =

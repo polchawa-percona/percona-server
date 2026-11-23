@@ -23,8 +23,8 @@
 # --source suite/rocksdb/include/myrocks_inv_fullrow.inc
 # --echo $inv_fullrow                # "t1=<rows>/<sum>;t2=..." or "no_tables"
 #
-# The value contains no spaces. If the tables cannot be read, it is
-# "unreadable(<errno>)".
+# The value contains no spaces. A table that cannot be read appears as
+# "<table>=unreadable(<errno>)"; the other tables keep their values.
 
 --disable_query_log
 --disable_result_log
@@ -38,17 +38,15 @@ SET SESSION group_concat_max_len = 16 * 1024 * 1024;
 --eval SET @invf_skip = '$inv_fullrow_skip_cols'
 SET @invf_qs = REPLACE(@invf_schema, '`', '``');
 
-# One scalar subquery per table; USE INDEX () makes MyRocks read the
-# primary key (hidden or not).
-SET @invf_q = NULL;
-SELECT CONCAT('SELECT CONCAT_WS('';'', ',
-              GROUP_CONCAT(
-                CONCAT('(SELECT CONCAT(', QUOTE(REPLACE(x.tn, ' ', '_')), ', ''='', COUNT(*), ''/'', ',
-                       'IFNULL(SUM(CRC32(CONCAT_WS(''#'', ', x.expr, '))), 0)) FROM `',
-                       @invf_qs, '`.`', REPLACE(x.tn, '`', '``'), '` USE INDEX ())')
-                ORDER BY x.tn SEPARATOR ', '),
-              ') INTO @invf_res')
-  INTO @invf_q
+# One query per table, so that a table that cannot be opened does not hide
+# the others; USE INDEX () makes MyRocks read the primary key (hidden or
+# not).
+CREATE TEMPORARY TABLE invf_q ENGINE=InnoDB AS
+SELECT ROW_NUMBER() OVER (ORDER BY x.tn) AS n,
+       REPLACE(x.tn, ' ', '_') AS tn,
+       CONCAT('SELECT CONCAT(', QUOTE(REPLACE(x.tn, ' ', '_')), ', ''='', COUNT(*), ''/'', ',
+              'IFNULL(SUM(CRC32(CONCAT_WS(''#'', ', x.expr, '))), 0)) INTO @invf_one FROM `',
+              @invf_qs, '`.`', REPLACE(x.tn, '`', '``'), '` USE INDEX ()') AS q
   FROM (SELECT c.TABLE_NAME AS tn,
                GROUP_CONCAT(CONCAT('IFNULL(CRC32(CAST(`', REPLACE(c.COLUMN_NAME, '`', '``'),
                                    '` AS BINARY)), ''N'')')
@@ -62,22 +60,32 @@ SELECT CONCAT('SELECT CONCAT_WS('';'', ',
          GROUP BY c.TABLE_NAME) x;
 
 --let $inv_fullrow = no_tables
---let $_invf_have = `SELECT @invf_q IS NOT NULL`
-if ($_invf_have) {
+--let $_invf_n = `SELECT COUNT(*) FROM invf_q`
+if ($_invf_n) {
   SET @invf_res = NULL;
-  --disable_abort_on_error
-  PREPARE invf_stmt FROM @invf_q;
-  EXECUTE invf_stmt;
-  --let $_invf_err = $mysql_errno
-  DEALLOCATE PREPARE invf_stmt;
-  --enable_abort_on_error
-  if ($_invf_err) {
-    --let $inv_fullrow = unreadable($_invf_err)
+  --let $_invf_i = 1
+  while ($_invf_i <= $_invf_n) {
+    --eval SELECT q, tn INTO @invf_q, @invf_tn FROM invf_q WHERE n = $_invf_i
+    SET @invf_one = NULL;
+    --disable_abort_on_error
+    # The table is opened by PREPARE already; keep the first error.
+    PREPARE invf_stmt FROM @invf_q;
+    --let $_invf_err = $mysql_errno
+    if (!$_invf_err) {
+      EXECUTE invf_stmt;
+      --let $_invf_err = $mysql_errno
+      DEALLOCATE PREPARE invf_stmt;
+    }
+    --enable_abort_on_error
+    if ($_invf_err) {
+      --eval SET @invf_one = CONCAT(@invf_tn, '=unreadable($_invf_err)')
+    }
+    SET @invf_res = CONCAT_WS(';', @invf_res, @invf_one);
+    --inc $_invf_i
   }
-  if (!$_invf_err) {
-    --let $inv_fullrow = `SELECT REPLACE(@invf_res, ' ', '_')`
-  }
+  --let $inv_fullrow = `SELECT REPLACE(@invf_res, ' ', '_')`
 }
+DROP TEMPORARY TABLE invf_q;
 SET SESSION group_concat_max_len = @invf_saved_gcml;
 --enable_result_log
 --enable_query_log
