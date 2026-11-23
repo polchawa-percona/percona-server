@@ -1,0 +1,104 @@
+#
+# PS-12221: COPY ALTER TABLE whose drop of the old copy fails its MyRocks
+# dictionary commit ends without a statement status (debug assertion in
+# THD::send_statement_status()).
+#
+# mysql_alter_table() drops the #sql2 backup of the old table with
+# quick_rm_table() -> ha_delete_table(..., generate_warning=false) and goes
+# to err_with_mdl when that fails, relying on the engine to have set the
+# error. ha_rocksdb::delete_table() returns the failed
+# Rdb_dict_manager::commit() (rocksdb_io_error_action=IGNORE_ERROR) without
+# my_error(), so the statement ends with an empty diagnostics area: assert(0)
+# in THD::send_statement_status() on a debug build, an OK packet on a
+# release build although the ALTER was not written to the binary log.
+#
+# Expected: the ALTER ends with a status, either an error or success (with
+# or without a warning), and that status agrees with the binary log: it is
+# logged when it succeeds and not logged when it fails. The check prints
+# only that verdict, so any fix that gives either outcome passes.
+#
+# Debug only: the failed dictionary commit is injected
+# (rocksdb_debug_inject_error_*); a release build cannot fail a dictionary
+# write on demand. The injection hits the last dictionary call of the
+# ALTER, the commit of the drop of the old copy ("dict_commit"); the number
+# of calls is measured on a twin table first.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+
+call mtr.add_suppression("Ignoring I/O errors");
+
+SET @saved_io_error_action = @@global.rocksdb_io_error_action;
+SET SESSION rocksdb_debug_inject_error_class = 'DICT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+
+--echo # Count the dictionary calls of the COPY ALTER on a twin table
+CREATE TABLE t0 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t0 VALUES (1, 1);
+SET SESSION rocksdb_debug_inject_error_nth = 1000000;
+ALTER TABLE t0 ADD COLUMN c INT, ALGORITHM=COPY;
+--let $dict_calls = `SELECT 1000000 - @@session.rocksdb_debug_inject_error_nth`
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+DROP TABLE t0;
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT NOT NULL, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
+
+--echo # COPY ALTER whose drop of the old copy fails its dictionary commit
+--let $file_before = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--let $pos_before = query_get_value(SHOW BINARY LOG STATUS, Position, 1)
+SET GLOBAL rocksdb_io_error_action = 'IGNORE_ERROR';
+--disable_query_log
+--eval SET SESSION rocksdb_debug_inject_error_nth = $dict_calls
+--enable_query_log
+# Any error code is accepted (none is printed); losing the server is not.
+--disable_result_log
+--disable_warnings
+--disable_abort_on_error
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=COPY;
+--enable_abort_on_error
+--enable_warnings
+--enable_result_log
+--let $alter_errno = $mysql_errno
+if ($alter_errno == 2013) {
+  --die The server went away during the ALTER
+}
+if ($alter_errno == 2006) {
+  --die The server went away during the ALTER
+}
+--let $file_after = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--let $pos_after = query_get_value(SHOW BINARY LOG STATUS, Position, 1)
+SELECT @@session.rocksdb_debug_inject_error_nth AS injection_pending;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+SET GLOBAL rocksdb_io_error_action = @saved_io_error_action;
+--let $assert_text = The dictionary commit of the drop of the old copy failed
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: rocksdb.copy_alter_drop_old_commit_failure
+--let $assert_select = injected error at dict_commit
+--let $assert_count = 1
+--source include/assert_grep.inc
+
+--echo # The status of the ALTER agrees with the binary log
+--disable_query_log
+--eval SELECT ($alter_errno = 0) = ('$file_after' <> '$file_before' OR $pos_after <> $pos_before) AS status_agrees_with_binlog
+--enable_query_log
+SELECT COUNT(*) FROM t1;
+
+DROP TABLE t1;
+
+# Cleanup of the old copy. A fix that only reports the error leaves the
+# #sql2-... backup in the DD and in the persisted MyRocks dictionary (not in
+# the in-memory map), the PS-12198 kind of leftover; that is product
+# behaviour, not checked here. After a restart MyRocks knows it again and a
+# DROP TABLE removes it from both; with any other outcome there is nothing
+# to drop. Nothing is printed either way.
+--source include/restart_mysqld.inc
+--disable_query_log
+SET SESSION debug = '+d,skip_dd_table_access_check';
+--let $old_copy = `SELECT t.name FROM mysql.tables t JOIN mysql.schemata s ON t.schema_id = s.id WHERE s.name = 'test' AND t.name LIKE '#sql2-%' LIMIT 1`
+if ($old_copy) {
+  --eval DROP TABLE `$old_copy`
+}
+SET SESSION debug = '-d,skip_dd_table_access_check';
+--enable_query_log
