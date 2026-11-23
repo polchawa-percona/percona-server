@@ -1,0 +1,73 @@
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+# Case 1: the row is in the memtable, a write to another table ends the load
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+SET SESSION rocksdb_bulk_load = 1;
+# the UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+# the other rows are unchanged
+SELECT a, b, c FROM t1 USE INDEX () WHERE a <> 2 ORDER BY a;
+a	b	c
+1	10	100
+3	30	300
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: the row is in an SST file, SET rocksdb_bulk_load = 0 ends the load
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load = 1;
+# the UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+# the other rows are unchanged
+SELECT a, b, c FROM t1 USE INDEX () WHERE a <> 2 ORDER BY a;
+a	b	c
+1	10	100
+3	30	300
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: a table without secondary index
+CREATE TABLE t3 (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+SET SESSION rocksdb_bulk_load = 1;
+# the UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+# the other rows are unchanged
+SELECT a, b, c FROM t3 USE INDEX () WHERE a <> 2 ORDER BY a;
+a	b	c
+1	10	100
+3	30	300
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;
+DROP TABLE t2;
