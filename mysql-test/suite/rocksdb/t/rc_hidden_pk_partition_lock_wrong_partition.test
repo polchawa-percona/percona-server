@@ -1,0 +1,61 @@
+# PS-12223: at READ COMMITTED, an UPDATE through a secondary key of a
+# partitioned table without a primary key that meets a row another
+# transaction holds locked fails with "Found a row in wrong partition"
+# (ER_ROW_IN_WRONG_PARTITION) and logs "Table ... corrupted: row in wrong
+# partition ... Please REPAIR the table!" instead of failing with
+# ER_LOCK_WAIT_TIMEOUT. The table is not corrupted.
+#
+# ha_rocksdb::secondary_index_read() ignores the lock wait timeout returned
+# by get_row_by_rowid(); on a table without a primary key
+# read_hidden_pk_id_from_rowkey() overwrites it with success and the stale
+# record buffer is returned as the found row (same cause as PS-11905). Its
+# partitioning columns are those of an earlier row, so
+# Partition_helper::ph_update_row() finds the row in the wrong partition.
+#
+# Expected result: ER_LOCK_WAIT_TIMEOUT and no error log entry, as with an
+# explicit primary key (the first table, a control) and with InnoDB.
+
+--source include/have_rocksdb.inc
+
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0)
+  {
+    --echo # Control: table with an explicit primary key
+    CREATE TABLE t1 (id INT NOT NULL, p INT NOT NULL, a INT, b INT, KEY ka (a),
+      PRIMARY KEY (id, p)) ENGINE=ROCKSDB PARTITION BY HASH (p) PARTITIONS 4;
+  }
+  if ($i == 1)
+  {
+    --echo # Table without a primary key (hidden primary key)
+    CREATE TABLE t1 (id INT NOT NULL, p INT NOT NULL, a INT, b INT, KEY ka (a))
+      ENGINE=ROCKSDB PARTITION BY HASH (p) PARTITIONS 4;
+  }
+  INSERT INTO t1 VALUES (1, 0, 1, 1), (2, 1, 2, 2), (3, 2, 3, 3), (4, 3, 4, 4),
+    (5, 0, 5, 5);
+
+  --connect (con1, localhost, root,,)
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  BEGIN;
+  --echo # con1 locks the row with id = 3 (partition p2)
+  SELECT * FROM t1 WHERE id = 3 FOR UPDATE;
+
+  --connection default
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  SET SESSION rocksdb_lock_wait_timeout = 1;
+  --error ER_LOCK_WAIT_TIMEOUT
+  UPDATE t1 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 5;
+  SET SESSION transaction_isolation = DEFAULT;
+  SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+
+  --connection con1
+  ROLLBACK;
+  --disconnect con1
+
+  --connection default
+  SELECT * FROM t1 ORDER BY id;
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $i
+}
