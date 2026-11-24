@@ -14,9 +14,7 @@ call mtr.add_suppression("Error finishing bulk load");
 call mtr.add_suppression("Found [0-9]+ prepared XA transactions");
 # WRITE/BUSY INSERT over an expired row (hidden TTL): every injected failure was handled correctly
 # WRITE/BUSY INSERT over an expired row (TTL column): every injected failure was handled correctly
-# WRITE/BUSY UPDATE of expired and unexpired rows (hidden TTL): the statement does not change the state
 # WRITE/BUSY UPDATE of expired and unexpired rows (hidden TTL): every injected failure was handled correctly
-# WRITE/BUSY UPDATE of expired and unexpired rows (TTL column): the statement does not change the state
 # WRITE/BUSY UPDATE of expired and unexpired rows (TTL column): every injected failure was handled correctly
 # WRITE/BUSY DELETE of expired and unexpired rows: every injected failure was handled correctly
 # WRITE/BUSY REPLACE of an expired and an unexpired row: every injected failure was handled correctly
