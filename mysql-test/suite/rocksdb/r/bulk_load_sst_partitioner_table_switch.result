@@ -1,0 +1,35 @@
+call mtr.add_suppression("is being used by another bulk load transaction");
+CREATE TABLE t0 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=RocksDB;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a), KEY kb (b))
+ENGINE=RocksDB;
+INSERT INTO t1 VALUES (1, 1, 1);
+SET SESSION rocksdb_bulk_load_allow_sk=ON;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner=ON;
+SET SESSION rocksdb_bulk_load=1;
+INSERT INTO t0 VALUES (100, 5);
+# The switch to t1 finishes the load of t0 and clears the registry
+INSERT INTO t1 VALUES (100, 100, 100);
+SET SESSION rocksdb_bulk_load_allow_sk=ON;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner=ON;
+SET SESSION rocksdb_bulk_load=1;
+# Either refused before any key is written, or loaded in every index
+INSERT INTO t1 VALUES (200, 200, 200);
+SET SESSION rocksdb_bulk_load=0;
+SET SESSION rocksdb_bulk_load=0;
+# Rows loaded by con1 and the earlier row
+SELECT id, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE id < 200 ORDER BY id;
+id	a	b
+1	1	1
+100	100	100
+# Every index has the same rows (the row of con2 in all or in none)
+SELECT
+(SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (PRIMARY)) =
+(SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (ka)) AS pk_eq_ka,
+(SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (PRIMARY)) =
+(SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (kb)) AS pk_eq_kb;
+pk_eq_ka	pk_eq_kb
+1	1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t0, t1;

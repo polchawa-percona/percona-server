@@ -1,0 +1,30 @@
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to read the pending ALTER TABLE record");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("RocksDB: ");
+call mtr.add_suppression("MyRocks: ");
+call mtr.add_suppression("Plugin .ROCKSDB.");
+call mtr.add_suppression("Removing truncated leftover table");
+call mtr.add_suppression("Failed to get column family info from index id");
+# pk DICT_READ/IOERROR COPY ALTER: every injected failure was handled correctly
+# reverse_cf DICT_READ/IOERROR COPY ALTER: every injected failure was handled correctly
+# ttl DICT_READ/IOERROR COPY ALTER: every injected failure was handled correctly
+CALL fr1_reset('reverse_cf');
+ALTER TABLE t ADD COLUMN z INT NOT NULL DEFAULT 5, ALGORITHM=COPY;
+ALTER TABLE t DROP COLUMN z, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(a) FROM t;
+COUNT(*)	SUM(a)
+20	630
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+DROP PROCEDURE fr1_reset;
+DROP PROCEDURE fr1_state;
+DROP PROCEDURE errinj_tables_state;

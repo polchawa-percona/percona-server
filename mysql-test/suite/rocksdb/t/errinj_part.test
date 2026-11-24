@@ -5,6 +5,7 @@
 # reads, SST writes, ingests and compactions. After every injected failure
 # each partition is checked through each index.
 #
+--source include/big_test.inc
 --source include/have_rocksdb.inc
 --source include/have_debug.inc
 
