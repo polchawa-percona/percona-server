@@ -1,0 +1,102 @@
+# PS-12242: a REPEATABLE READ transaction whose snapshot is older than an
+# ALTER TABLE ... ADD INDEX, ALGORITHM=INPLACE reads the new index with the
+# data committed after its snapshot: rows inserted later are returned, rows
+# deleted later are missing and updated values show their new value. Reads
+# through the primary key and through an index that existed before the
+# snapshot return the snapshot data in the same transaction.
+#
+# The index is built from the current data and its SST files are ingested
+# with sequence number 0, so every snapshot, also one older than the ALTER,
+# sees the new index's entries. PS-11627 (a table or index created after the
+# snapshot reads as empty) has the same missing snapshot check.
+#
+# Expected for every read through the new index: the snapshot's rows, or
+# ER_TABLE_DEF_CHANGED as InnoDB returns. Never the later data.
+
+--source include/have_rocksdb.inc
+
+CREATE TABLE o (k INT PRIMARY KEY) ENGINE=ROCKSDB;
+INSERT INTO o VALUES (1);
+CREATE TABLE t (pk INT PRIMARY KEY, d INT NOT NULL, c INT NOT NULL,
+  KEY kold (d, pk)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10, 1), (2, 20, 2), (3, 30, 3), (4, 40, 4);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+connect (con_s, localhost, root,,);
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+# a read of another table: the snapshot holds no metadata lock on t
+SELECT * FROM o;
+
+connection default;
+DELETE FROM t WHERE pk = 2;
+UPDATE t SET d = 35 WHERE pk = 3;
+INSERT INTO t VALUES (5, 50, 5), (6, 60, 6);
+ALTER TABLE t ADD INDEX kd (d), ALGORITHM=INPLACE;
+
+connection con_s;
+--echo # the snapshot through the primary key
+SELECT * FROM t FORCE INDEX (PRIMARY) ORDER BY pk;
+
+# Each read runs through kold (existing before the snapshot: must return the
+# snapshot data) and through kd (new: snapshot data or ER_TABLE_DEF_CHANGED).
+--let $ix = 1
+while ($ix <= 2) {
+  --let $idx = kold
+  if ($ix == 2) {
+    --let $idx = kd
+  }
+  --let $n = 1
+  while ($n <= 5) {
+    if ($n == 1) {
+      --let $what = scan, index-only
+      --let $q = SELECT GROUP_CONCAT(pk, ':', d ORDER BY d, pk) FROM t FORCE INDEX ($idx) WHERE d > 0
+      --let $exp = '1:10,2:20,3:30,4:40'
+    }
+    if ($n == 2) {
+      --let $what = d = 35 (a value pk 3 got after the snapshot)
+      --let $q = SELECT COUNT(*) FROM t FORCE INDEX ($idx) WHERE d = 35
+      --let $exp = 0
+    }
+    if ($n == 3) {
+      --let $what = d = 20 (pk 2, deleted after the snapshot)
+      --let $q = SELECT COUNT(*) FROM t FORCE INDEX ($idx) WHERE d = 20
+      --let $exp = 1
+    }
+    if ($n == 4) {
+      --let $what = row count
+      --let $q = SELECT COUNT(*) FROM t FORCE INDEX ($idx)
+      --let $exp = 4
+    }
+    if ($n == 5) {
+      --let $what = scan that reads the rows
+      --let $q = SELECT GROUP_CONCAT(pk, ':', d, ':', c ORDER BY pk) FROM t FORCE INDEX ($idx) WHERE d > 0
+      --let $exp = '1:10:1,2:20:2,3:30:3,4:40:4'
+    }
+    --disable_query_log
+    SET @v = 'not set';
+    --disable_result_log
+    --error 0,ER_TABLE_DEF_CHANGED
+    eval $q INTO @v;
+    --let $err = $mysql_errno
+    --enable_result_log
+    --enable_query_log
+    --let $ok = `SELECT @v <=> $exp OR ('$idx' = 'kd' AND $err = 1412)`
+    --echo # $idx, $what: snapshot data or ER_TABLE_DEF_CHANGED: $ok
+    if (!$ok) {
+      --let $got = `SELECT IFNULL(@v, 'NULL')`
+      --echo # $idx, $what: returned $got, error $err
+    }
+    --inc $n
+  }
+  --inc $ix
+}
+COMMIT;
+
+--echo # a new transaction reads the current data through kd
+SELECT * FROM t FORCE INDEX (kd) WHERE d > 0 ORDER BY d;
+CHECK TABLE t;
+
+disconnect con_s;
+connection default;
+DROP TABLE t, o;
