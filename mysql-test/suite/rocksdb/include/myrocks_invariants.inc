@@ -84,9 +84,12 @@
 # any query through that index would; an already materialized group is read
 # from the index, so stale or missing entries in it show up. Groups below the
 # threshold are read from the primary key, so the comparison is trivially
-# equal for them. A prefix index cannot return rows in column order, so its
-# side of the comparison may fall back to a table scan and only CHECK TABLE
-# checks it. Functional key parts are compared by their expression value:
+# equal for them. A prefix index (also a BLOB/TEXT key part) cannot return
+# rows in column order, so its side of that comparison may fall back to a
+# table scan; it is checked key-only instead (count and primary key
+# checksum through the index, see "Invariant 1, prefix indexes"), which
+# finds entries without a row and rows without an entry. CHECK TABLE does
+# not find entries without a row in such an index. Functional key parts are compared by their expression value:
 # the secondary index side orders by the expression (an index scan) and
 # computes the value from the row, so it checks the row count and the
 # rows' membership in the index.
@@ -249,6 +252,73 @@ if ($_inv_have_sk) {
   }
   DROP TEMPORARY TABLE inv_v1;
 }
+
+# Invariant 1, prefix indexes: an index with a prefix key part (also every
+# BLOB/TEXT key part) cannot cover its columns, so every read above that
+# names one of its columns fetches the row through the primary key, and an
+# entry whose row is missing ends the scan (the comparison above is then
+# trivially equal, and CHECK TABLE says OK for such entries). Here each
+# such index is counted key-only (COUNT(*) through FORCE INDEX names no
+# column, so it counts the raw index entries) and compared with the
+# primary key row count: this finds entries without a row and rows
+# without an entry, unless both happen equally often. A checksum of the
+# primary key columns through the index is compared as well; MyRocks
+# fetches the row for it (a prefix index never covers a lookup), so it
+# stops at the first entry without a row and only adds a check of the
+# entries that have one. A table with a hidden primary key, or a primary
+# key with a prefix part, is compared by row count only. Partial indexes
+# are left out (groups below the threshold have no entries).
+CREATE TEMPORARY TABLE inv_pfx ENGINE=InnoDB AS
+SELECT DISTINCT k.tn, k.idx
+  FROM inv_sk k
+  JOIN information_schema.STATISTICS s
+    ON s.TABLE_SCHEMA = @inv_schema AND s.TABLE_NAME = k.tn AND s.INDEX_NAME = k.idx
+ WHERE s.SUB_PART IS NOT NULL AND s.INDEX_COMMENT NOT LIKE '%partial_group%';
+CREATE TEMPORARY TABLE inv_pkx ENGINE=InnoDB AS
+SELECT p.tn,
+       IF(MAX(s.SUB_PART IS NOT NULL) OR COUNT(s.COLUMN_NAME) = 0, '1',
+          GROUP_CONCAT(CONCAT('IFNULL(HEX(CAST(`', REPLACE(s.COLUMN_NAME, '`', '``'),
+                              '` AS BINARY)),''N'')') ORDER BY s.SEQ_IN_INDEX)) AS expr
+  FROM (SELECT DISTINCT tn FROM inv_pfx) p
+  LEFT JOIN information_schema.STATISTICS s
+    ON s.TABLE_SCHEMA = @inv_schema AND s.TABLE_NAME = p.tn AND s.INDEX_NAME = 'PRIMARY'
+ GROUP BY p.tn;
+SET @inv_q = NULL;
+SELECT GROUP_CONCAT(
+  CONCAT(
+    'SELECT ', QUOTE(k.tn), ' AS tn, ', QUOTE(k.idx), ' AS idx, ',
+    '(SELECT COUNT(*) FROM `', @inv_qs, '`.`', k.qtn, '` USE INDEX ()) AS pk_rows, ',
+    '(SELECT COUNT(*) FROM `', @inv_qs, '`.`', k.qtn, '` FORCE INDEX (`', k.qidx, '`)) AS sk_entries, ',
+    '(SELECT SUM(CRC32(CONCAT_WS(''#'',', x.expr, '))) FROM `', @inv_qs, '`.`', k.qtn,
+      '` USE INDEX ()) AS pk_sum, ',
+    '(SELECT SUM(CRC32(CONCAT_WS(''#'',', x.expr, '))) FROM `', @inv_qs, '`.`', k.qtn,
+      '` FORCE INDEX (`', k.qidx, '`)) AS sk_sum')
+  SEPARATOR ' UNION ALL ') INTO @inv_q
+  FROM (SELECT tn, idx, REPLACE(tn, '`', '``') AS qtn, REPLACE(idx, '`', '``') AS qidx
+          FROM inv_pfx) k
+  JOIN inv_pkx x ON x.tn = k.tn;
+--let $_inv_have_pfx = `SELECT @inv_q IS NOT NULL`
+if ($_inv_have_pfx) {
+  SET @inv_q = CONCAT('SELECT ''INVARIANT VIOLATION 1: prefix index entries differ from primary key'' AS v, x.* FROM (',
+                      @inv_q, ') x WHERE NOT (x.pk_rows <=> x.sk_entries) OR NOT (x.pk_sum <=> x.sk_sum)');
+  CREATE TEMPORARY TABLE inv_v1p (v VARCHAR(100), tn VARCHAR(64), idx VARCHAR(64),
+                                  pk_rows BIGINT, sk_entries BIGINT,
+                                  pk_sum DECIMAL(65), sk_sum DECIMAL(65)) ENGINE=InnoDB;
+  SET @inv_q = CONCAT('INSERT INTO inv_v1p ', @inv_q);
+  PREPARE inv_stmt FROM @inv_q;
+  EXECUTE inv_stmt;
+  DEALLOCATE PREPARE inv_stmt;
+  --let $_inv_n = `SELECT COUNT(*) FROM inv_v1p`
+  if ($_inv_n) {
+    --enable_result_log
+    SELECT * FROM inv_v1p ORDER BY tn, idx;
+    --disable_result_log
+    --inc $_inv_violations
+  }
+  DROP TEMPORARY TABLE inv_v1p;
+}
+DROP TEMPORARY TABLE inv_pfx;
+DROP TEMPORARY TABLE inv_pkx;
 
 # CHECK TABLE on every ROCKSDB table of the schema.
 --let $inv_check_skipped = 0
