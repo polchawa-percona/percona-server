@@ -25,6 +25,27 @@ CREATE TABLE t_inv (pk INT PRIMARY KEY, a INT, KEY ka (a) INVISIBLE) ENGINE=ROCK
 CREATE TABLE t_innodb (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=InnoDB;
 CREATE TABLE `t,"odd``` (`p,k` INT PRIMARY KEY, `a"b` INT, `c``d` VARCHAR(10),
 KEY `k,"1``` (`a"b`, `c``d`)) ENGINE=ROCKSDB;
+CREATE TABLE t_upk (a INT NOT NULL, b INT, UNIQUE KEY ua (a), KEY kb (b))
+ENGINE=ROCKSDB;
+CREATE TABLE t_upk2 (a INT, b INT NOT NULL, c VARCHAR(10) NOT NULL, d INT,
+UNIQUE KEY ua (a), UNIQUE KEY ubc (b, c), KEY kd (d))
+ENGINE=ROCKSDB;
+CREATE TABLE t_upk_stored (a INT NOT NULL, g INT AS (a + 1) STORED NOT NULL,
+UNIQUE KEY ug (g), KEY ka (a)) ENGINE=ROCKSDB;
+CREATE TABLE t_upk_part (a INT NOT NULL, b INT, UNIQUE KEY ua (a), KEY kb (b))
+ENGINE=ROCKSDB PARTITION BY HASH (a) PARTITIONS 2;
+CREATE TABLE t_upk_blob (b TINYBLOB NOT NULL, c INT, UNIQUE KEY ub (b(255)),
+KEY kc (c)) ENGINE=ROCKSDB;
+CREATE TABLE t_unp_blob (b TINYBLOB NOT NULL, c INT, UNIQUE KEY ub (b(200)),
+KEY kc (c)) ENGINE=ROCKSDB;
+CREATE TABLE t_unp_null (a INT, b INT, UNIQUE KEY ua (a), KEY kb (b))
+ENGINE=ROCKSDB;
+CREATE TABLE t_unp_prefix (a VARCHAR(20) NOT NULL, b INT,
+UNIQUE KEY ua (a(5)), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE t_unp_func (a INT NOT NULL, b INT, UNIQUE KEY uf ((a + 1)),
+KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE t_unp_virtual (a INT NOT NULL, g INT AS (a + 1) VIRTUAL NOT NULL,
+UNIQUE KEY ug (g), KEY ka (a)) ENGINE=ROCKSDB;
 INSERT INTO t_pk VALUES (1, 10, 'x', 'blob1'), (2, NULL, 'y', NULL),
 (3, 10, NULL, REPEAT('z', 100)), (4, 40, 'w', '');
 INSERT INTO t_hidden VALUES (1, 'a'), (1, 'a'), (NULL, NULL);
@@ -35,6 +56,31 @@ INSERT INTO t_ttl VALUES (1, 1), (2, 2);
 INSERT INTO t_inv VALUES (1, 1);
 INSERT INTO `t,"odd``` VALUES (1, 1, 'x'), (2, NULL, 'y');
 INSERT INTO t_innodb VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, NULL);
+INSERT INTO t_upk VALUES (1, 1), (2, NULL), (3, 1);
+INSERT INTO t_upk2 VALUES (NULL, 1, 'x', 1), (NULL, 2, 'x', NULL), (3, 1, 'y', 1);
+INSERT INTO t_upk_stored (a) VALUES (1), (2), (3);
+INSERT INTO t_upk_part VALUES (1, 1), (2, NULL), (3, 1);
+INSERT INTO t_unp_blob VALUES ('x', 1), ('y', NULL), (REPEAT('z', 255), 1);
+INSERT INTO t_unp_null VALUES (1, 1), (NULL, 1), (NULL, NULL);
+INSERT INTO t_unp_prefix VALUES ('abcdefg', 1), ('bcdefgh', NULL);
+INSERT INTO t_unp_func VALUES (1, 1), (2, NULL);
+INSERT INTO t_unp_virtual (a) VALUES (1), (2), (3);
+# Hidden primary key only where no UNIQUE key qualifies.
+SELECT TABLE_NAME, GROUP_CONCAT(DISTINCT INDEX_NAME ORDER BY INDEX_NAME) AS idx
+FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'inv' AND TABLE_NAME LIKE 't\_u%'
+ GROUP BY TABLE_NAME ORDER BY TABLE_NAME;
+TABLE_NAME	idx
+t_unp_blob	HIDDEN_PK_ID,kc,ub
+t_unp_func	HIDDEN_PK_ID,kb,uf
+t_unp_null	HIDDEN_PK_ID,kb,ua
+t_unp_prefix	HIDDEN_PK_ID,kb,ua
+t_unp_virtual	HIDDEN_PK_ID,ka,ug
+t_upk	kb,ua
+t_upk2	kd,ua,ubc
+t_upk_blob	kc,ub
+t_upk_part	kb,ua
+t_upk_stored	ka,ug
 ALTER TABLE t_pk DROP INDEX kab;
 ALTER TABLE t_cf ADD INDEX kab (a, b), ALGORITHM=INPLACE;
 CREATE TABLE t_dropped (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
@@ -72,6 +118,40 @@ INVARIANT VIOLATION 1: CHECK TABLE inv.t_cf: Corrupt
 violations: 2
 DELETE FROM t_pk WHERE pk = 5;
 DROP TABLE t_cf;
+#
+# Invariant 3: the server DD and the MyRocks dictionary disagree on the
+# hidden primary key. The DD is edited directly; the open tables keep
+# their share, so only the dictionary check sees the change.
+#
+# t_upk.a nullable in the DD: no UNIQUE key qualifies, the DD expects a
+# HIDDEN_PK_ID that MyRocks does not have.
+SET SESSION debug = '+d,skip_dd_table_access_check';
+UPDATE mysql.columns c JOIN mysql.tables t ON c.table_id = t.id
+JOIN mysql.schemata s ON t.schema_id = s.id
+SET c.is_nullable = 1
+WHERE s.name = 'inv' AND t.name = 't_upk' AND c.name = 'a';
+v	tn	pn	idx
+INVARIANT VIOLATION 3: index missing in MyRocks dictionary	t_upk	NULL	HIDDEN_PK_ID
+violations: 1
+UPDATE mysql.columns c JOIN mysql.tables t ON c.table_id = t.id
+JOIN mysql.schemata s ON t.schema_id = s.id
+SET c.is_nullable = 0
+WHERE s.name = 'inv' AND t.name = 't_upk' AND c.name = 'a';
+# t_unp_null.a NOT NULL in the DD: UNIQUE ua qualifies, MyRocks has a
+# HIDDEN_PK_ID that the DD does not expect.
+UPDATE mysql.columns c JOIN mysql.tables t ON c.table_id = t.id
+JOIN mysql.schemata s ON t.schema_id = s.id
+SET c.is_nullable = 0
+WHERE s.name = 'inv' AND t.name = 't_unp_null' AND c.name = 'a';
+v	tn	pn	idx
+INVARIANT VIOLATION 3: MyRocks dictionary entry without a table or index	t_unp_null	NULL	HIDDEN_PK_ID
+violations: 1
+UPDATE mysql.columns c JOIN mysql.tables t ON c.table_id = t.id
+JOIN mysql.schemata s ON t.schema_id = s.id
+SET c.is_nullable = 1
+WHERE s.name = 'inv' AND t.name = 't_unp_null' AND c.name = 'a';
+SET SESSION debug = '-d,skip_dd_table_access_check';
+violations after restoring the DD: 0
 #
 # Invariant 2: InnoDB mirror compare.
 #
