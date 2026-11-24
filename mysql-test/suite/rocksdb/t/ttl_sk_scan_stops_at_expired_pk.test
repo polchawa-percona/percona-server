@@ -1,0 +1,70 @@
+# PS-12240: with rocksdb_enable_ttl_read_filtering = OFF, a scan through a
+# secondary index that has to read the rows stops at the first index entry
+# whose primary key row TTL compaction already removed. The live rows after
+# that entry are not returned; no error, no warning.
+#
+# The primary key and the secondary index are in different column families,
+# so TTL compaction removes the expired rows from the primary key and leaves
+# their secondary index entries until the index's own column family is
+# compacted. ha_rocksdb::index_next_with_direction_intern() turns the
+# HA_ERR_KEY_NOT_FOUND of the primary key lookup into the end of the scan,
+# unless the read is a locking read at READ COMMITTED. The same scan-stop was
+# reported for orphan entries made by PS-12210 (comment 482101); see also
+# PS-11704 (a scan that ends silently at an iterator error).
+
+--source include/have_rocksdb.inc
+
+SET @saved_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = OFF;
+
+CREATE TABLE t (pk INT, a INT NOT NULL, b CHAR(4) NOT NULL,
+  ts BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (pk), KEY kb (b) COMMENT 'cfname=cf_sk')
+  ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts';
+
+# 20 rows with b = 'x': odd pk live (ts in the future), even pk expired
+# (ts 1000 seconds ago, ttl_duration 100)
+INSERT INTO t
+  WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 20)
+  SELECT i, i, 'x',
+         IF(i MOD 2, UNIX_TIMESTAMP() + 100000, UNIX_TIMESTAMP() - 1000)
+  FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+# TTL compaction of the primary key's column family only
+SET GLOBAL rocksdb_compact_cf = 'default';
+
+SELECT index_name, cf FROM information_schema.rocksdb_ddl
+  WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+
+--echo # the primary key holds the 10 live rows
+SELECT COUNT(*), SUM(pk MOD 2) FROM t FORCE INDEX (PRIMARY);
+--echo # kb still holds the entries of the 10 expired rows (index-only read)
+SELECT COUNT(*) FROM t FORCE INDEX (kb) WHERE b = 'x';
+
+--echo # every live row must be returned through kb
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' ORDER BY pk;
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' ORDER BY pk DESC;
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' AND pk >= 2 ORDER BY pk;
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+
+--echo # a locking read at READ COMMITTED skips the missing rows
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0
+  FOR UPDATE;
+ROLLBACK;
+SET SESSION transaction_isolation = DEFAULT;
+
+--echo # with TTL read filtering expired entries are skipped by their own TTL
+SET GLOBAL rocksdb_enable_ttl_read_filtering = ON;
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = OFF;
+
+--echo # after compacting the column family of kb no entry is without a row
+SET GLOBAL rocksdb_compact_cf = 'cf_sk';
+SELECT COUNT(*) FROM t FORCE INDEX (kb) WHERE b = 'x';
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @saved_filtering;
+DROP TABLE t;

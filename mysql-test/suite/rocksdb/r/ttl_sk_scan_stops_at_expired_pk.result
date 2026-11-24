@@ -1,0 +1,90 @@
+SET @saved_filtering = @@global.rocksdb_enable_ttl_read_filtering;
+SET GLOBAL rocksdb_enable_ttl_read_filtering = OFF;
+CREATE TABLE t (pk INT, a INT NOT NULL, b CHAR(4) NOT NULL,
+ts BIGINT UNSIGNED NOT NULL,
+PRIMARY KEY (pk), KEY kb (b) COMMENT 'cfname=cf_sk')
+ENGINE=ROCKSDB COMMENT 'ttl_duration=100;ttl_col=ts';
+INSERT INTO t
+WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 20)
+SELECT i, i, 'x',
+IF(i MOD 2, UNIX_TIMESTAMP() + 100000, UNIX_TIMESTAMP() - 1000)
+FROM s;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SELECT index_name, cf FROM information_schema.rocksdb_ddl
+WHERE table_schema = 'test' AND table_name = 't' ORDER BY index_name;
+index_name	cf
+kb	cf_sk
+PRIMARY	default
+# the primary key holds the 10 live rows
+SELECT COUNT(*), SUM(pk MOD 2) FROM t FORCE INDEX (PRIMARY);
+COUNT(*)	SUM(pk MOD 2)
+10	10
+# kb still holds the entries of the 10 expired rows (index-only read)
+SELECT COUNT(*) FROM t FORCE INDEX (kb) WHERE b = 'x';
+COUNT(*)
+20
+# every live row must be returned through kb
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' ORDER BY pk;
+pk	a
+1	1
+3	3
+5	5
+7	7
+9	9
+11	11
+13	13
+15	15
+17	17
+19	19
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' ORDER BY pk DESC;
+pk	a
+19	19
+17	17
+15	15
+13	13
+11	11
+9	9
+7	7
+5	5
+3	3
+1	1
+SELECT pk, a FROM t FORCE INDEX (kb) WHERE b = 'x' AND pk >= 2 ORDER BY pk;
+pk	a
+3	3
+5	5
+7	7
+9	9
+11	11
+13	13
+15	15
+17	17
+19	19
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+COUNT(*)	SUM(a)
+10	100
+# a locking read at READ COMMITTED skips the missing rows
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0
+FOR UPDATE;
+COUNT(*)	SUM(a)
+10	100
+ROLLBACK;
+SET SESSION transaction_isolation = DEFAULT;
+# with TTL read filtering expired entries are skipped by their own TTL
+SET GLOBAL rocksdb_enable_ttl_read_filtering = ON;
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+COUNT(*)	SUM(a)
+10	100
+SET GLOBAL rocksdb_enable_ttl_read_filtering = OFF;
+# after compacting the column family of kb no entry is without a row
+SET GLOBAL rocksdb_compact_cf = 'cf_sk';
+SELECT COUNT(*) FROM t FORCE INDEX (kb) WHERE b = 'x';
+COUNT(*)
+10
+SELECT COUNT(*), SUM(a) FROM t FORCE INDEX (kb) WHERE b = 'x' AND a > 0;
+COUNT(*)	SUM(a)
+10	100
+SET GLOBAL rocksdb_enable_ttl_read_filtering = @saved_filtering;
+DROP TABLE t;
