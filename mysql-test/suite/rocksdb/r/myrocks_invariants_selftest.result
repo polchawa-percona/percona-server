@@ -114,8 +114,10 @@ INVARIANT VIOLATION 1: secondary index differs from primary key	t_cf	ka	3	3	1001
 INVARIANT VIOLATION 1: secondary index differs from primary key	t_cf	kab	3	3	5968646228	6556379114
 INVARIANT VIOLATION 1: secondary index differs from primary key	t_pk	ka	5	4	10947448732	7220181418
 INVARIANT VIOLATION 1: secondary index differs from primary key	t_pk	kb	5	4	8467610551	5905911387
+v	tn	idx	pk_rows	sk_entries	pk_sum	sk_sum
+INVARIANT VIOLATION 1: prefix index entries differ from primary key	t_pk	kc	5	4	12402289795	8593750167
 INVARIANT VIOLATION 1: CHECK TABLE inv.t_cf: Corrupt
-violations: 2
+violations: 3
 DELETE FROM t_pk WHERE pk = 5;
 DROP TABLE t_cf;
 #
