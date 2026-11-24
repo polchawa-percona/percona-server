@@ -1,0 +1,60 @@
+# Concurrent UPDATE of the bulk-loaded row
+CREATE TABLE t1 (a INT, b INT, c BOOL, KEY k2 (a, b), KEY k1 (a))
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (70, 200, true);
+UPDATE t1 SET b = 481 WHERE c = true;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT
+(SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 FORCE INDEX (k2)) <=>
+(SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 IGNORE INDEX (k1, k2))
+AS k2_matches_pk,
+(SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 FORCE INDEX (k1)) <=>
+(SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 IGNORE INDEX (k1, k2))
+AS k1_matches_pk,
+(SELECT COUNT(*) FROM t1 FORCE INDEX (k2) WHERE a = 70 AND b = 200) =
+(SELECT COUNT(*) FROM t1 IGNORE INDEX (k1, k2) WHERE a = 70 AND b = 200)
+AS k2_lookup_matches_pk;
+k2_matches_pk	k1_matches_pk	k2_lookup_matches_pk
+1	1	1
+SELECT COUNT(*) = 1 AS one_row_kept FROM t1 IGNORE INDEX (k1, k2)
+WHERE a = 70 AND b IN (200, 481);
+one_row_kept
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Concurrent DELETE of the bulk-loaded row
+CREATE TABLE t1 (a INT, b INT, c BOOL, KEY k2 (a, b), KEY k1 (a))
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (70, 200, true);
+DELETE FROM t1 WHERE c = true;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET GLOBAL rocksdb_compact_cf = 'default';
+SET SESSION rocksdb_bulk_load = 0;
+SELECT
+(SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 FORCE INDEX (k2)) <=>
+(SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 IGNORE INDEX (k1, k2))
+AS k2_matches_pk,
+(SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 FORCE INDEX (k1)) <=>
+(SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 IGNORE INDEX (k1, k2))
+AS k1_matches_pk,
+(SELECT COUNT(*) FROM t1 FORCE INDEX (k2) WHERE a = 70 AND b = 200) =
+(SELECT COUNT(*) FROM t1 IGNORE INDEX (k1, k2) WHERE a = 70 AND b = 200)
+AS k2_lookup_matches_pk;
+k2_matches_pk	k1_matches_pk	k2_lookup_matches_pk
+1	1	1
+SELECT COUNT(*) = COALESCE(SUM(a = 70 AND b = 200), 0) AND COUNT(*) <= 1
+AS no_other_row FROM t1 IGNORE INDEX (k1, k2);
+no_other_row
+1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

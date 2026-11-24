@@ -9124,14 +9124,32 @@ class Rdb_pending_alters {
     *token = it->second;
     return true;
   }
+  /*
+    Whether the table can have a record. Before the records are loaded at
+    startup (the DDL recovery runs before that), every table can. This relies
+    on every record written to the dictionary after the load also being added
+    here, under the dictionary lock (commit_inplace_alter_table(),
+    rename_table()).
+  */
+  bool may_have(const std::string &tbl_name) {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    return !m_loaded || m_tokens.count(tbl_name) != 0;
+  }
   void clear() {
     std::lock_guard<std::mutex> guard(m_mutex);
     m_tokens.clear();
+    m_loaded = false;
+  }
+  /* All records of the dictionary were added */
+  void set_loaded() {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    m_loaded = true;
   }
 
  private:
   std::mutex m_mutex;
   std::unordered_map<std::string, uint64> m_tokens;
+  bool m_loaded = false;
 };
 
 Rdb_pending_alters rdb_pending_alters;
@@ -9925,6 +9943,9 @@ static int rocksdb_init_internal(void *const p) {
     DBUG_RETURN(HA_EXIT_FAILURE);
   }
 
+  /* The DDL recovery below runs before the pending ALTER records are loaded */
+  rdb_pending_alters.clear();
+
   LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
                   "Initializing DDL Manager...");
   if (st_rdb_exec_time.exec("Rdb_ddl_manager::init", [&]() {
@@ -9946,10 +9967,11 @@ static int rocksdb_init_internal(void *const p) {
     /*
       Inplace ALTER TABLE statements interrupted before the server data
       dictionary commit. Resolved when the table is opened, renamed or
-      dropped, see rdb_resolve_pending_alter().
+      dropped, see rdb_resolve_pending_alter(). The map was cleared before
+      the DDL recovery above; only the user dictionary has records that
+      survive a restart.
     */
     std::vector<std::string> pending_alter_tables;
-    rdb_pending_alters.clear();
     const auto *const local_dict_manager =
         dict_manager.get_dict_manager_selector_const(false /*is_tmp_table*/);
     if (!local_dict_manager->get_pending_alter_tables(&pending_alter_tables)
@@ -9973,6 +9995,7 @@ static int rocksdb_init_internal(void *const p) {
                       tbl_name.c_str());
       rdb_pending_alters.add(tbl_name, token);
     }
+    rdb_pending_alters.set_loaded();
   }
 
   for (const auto &cf_handle : cf_manager.get_all_cf()) {
@@ -16254,13 +16277,19 @@ int ha_rocksdb::delete_table(Rdb_tbl_def *const tbl,
     /*
       A pending inplace ALTER TABLE (see rdb_resolve_pending_alter()) still
       owns the indexes of the index list from before the ALTER TABLE: drop
-      them with the table. The record is read from the dictionary, not only
-      looked up in rdb_pending_alters, which is not loaded yet when the
-      startup recovery drops a table.
+      them with the table. The record is read from the dictionary only if
+      the table can have one: rdb_pending_alters knows every record once it
+      is loaded at startup; before that (the startup DDL recovery drops
+      tables) any table can. A table without a record must not depend on a
+      dictionary read here: the old copy of the table at the end of a COPY
+      ALTER TABLE is dropped after the server data dictionary commit, and a
+      failed read reported an error for the committed ALTER TABLE and left
+      the old copy behind. A table that does have a record still gets that
+      error: its old index ids are only known from the record.
     */
     const std::string &tbl_name = name;
     bool had_pending_alter = false;
-    {
+    if (rdb_pending_alters.may_have(tbl_name)) {
       uint64 token;
       std::vector<GL_INDEX_ID> old_ids;
       const rocksdb::Status status =
