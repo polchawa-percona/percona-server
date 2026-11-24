@@ -1,0 +1,109 @@
+#
+# I/O errors at the data dictionary reads of COPY ALTER TABLE (see
+# suite/rocksdb/include/errinj_loop.inc), for a table in the default column
+# family, in a reverse column family and with TTL.
+#
+# At the end of a COPY ALTER TABLE the server commits its data dictionary and
+# then drops the old copy of the table (#sql2-...). A failed dictionary read
+# in that drop must not turn the committed ALTER TABLE into an error and must
+# not leave the #sql2 table behind (the next COPY ALTER TABLE then failed with
+# ER_TABLE_EXISTS_ERROR). The column definitions are part of the compared
+# state, so a committed ALTER TABLE reported as an error is a violation.
+#
+# Other dictionary reads of the statement abort the server by design. An
+# abort after the server data dictionary commit can leave the old copy in
+# MyRocks only (PS-11681 family), so the #sql leftovers are not part of the
+# state; the statement after the loops shows that COPY ALTER TABLE works.
+#
+# The same read failed the drop of #truncate_tmp# at the end of TRUNCATE
+# TABLE (TRUNCATE reported success and the old copy stayed in the MyRocks
+# dictionary until a restart); rocksdb.errinj_dict_read and
+# rocksdb.errinj_dict_crash_truncate cover that path.
+#
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+call mtr.add_suppression("Got error [0-9]+ when reading table");
+call mtr.add_suppression("Failed to read the pending ALTER TABLE record");
+call mtr.add_suppression("Failed to read/write in RocksDB");
+call mtr.add_suppression("aborting on");
+call mtr.add_suppression("failed on I/O");
+call mtr.add_suppression("Status error, code: 5");
+call mtr.add_suppression("Attempting backtrace");
+call mtr.add_suppression("following information to find out");
+call mtr.add_suppression("Rocksdb: ");
+call mtr.add_suppression("RocksDB: ");
+call mtr.add_suppression("MyRocks: ");
+call mtr.add_suppression("Plugin .ROCKSDB.");
+call mtr.add_suppression("Removing truncated leftover table");
+call mtr.add_suppression("Failed to get column family info from index id");
+
+--source suite/rocksdb/include/errinj_tables_state.inc
+
+--disable_query_log
+delimiter |;
+CREATE PROCEDURE fr1_reset(IN shape VARCHAR(16))
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  DECLARE stmt TEXT;
+  DROP TABLE IF EXISTS t;
+  SET stmt = CONCAT(
+    'CREATE TABLE t (pk INT NOT NULL, a INT NOT NULL, b VARCHAR(20) NOT NULL, ',
+    'PRIMARY KEY (pk)',
+    IF(shape = 'reverse_cf', ' COMMENT ''rev:fr1_rev''', ''),
+    ', KEY kb (b)',
+    IF(shape = 'reverse_cf', ' COMMENT ''rev:fr1_rev''', ''),
+    ') ENGINE=ROCKSDB',
+    IF(shape = 'ttl', ' COMMENT=''ttl_duration=3000;''', ''));
+  SET @fr1_stmt = stmt;
+  PREPARE s FROM @fr1_stmt;
+  EXECUTE s;
+  DEALLOCATE PREPARE s;
+  WHILE i <= 20 DO
+    INSERT INTO t VALUES (i, i * 3, CONCAT('b', i MOD 5));
+    SET i = i + 1;
+  END WHILE;
+END|
+
+CREATE PROCEDURE fr1_state()
+BEGIN
+  CALL errinj_tables_state('t', '', 0);
+  SET @errinj_state = CONCAT(@errinj_state, '|cols=',
+    (SELECT GROUP_CONCAT(column_name, ':', column_type
+                         ORDER BY ordinal_position)
+     FROM information_schema.columns
+     WHERE table_schema = 'test' AND table_name = 't'));
+END|
+delimiter ;|
+--enable_query_log
+
+--let $errinj_tables = t
+--let $errinj_state_proc = CALL fr1_state()
+--let $errinj_state = SELECT REPLACE(@errinj_state, ' ', '_')
+--let $errinj_stmt = ALTER TABLE t ADD COLUMN z INT NOT NULL DEFAULT 5, MODIFY b VARCHAR(40) NOT NULL, ALGORITHM=COPY
+--let $errinj_class = DICT_READ
+--let $errinj_status = IOERROR
+# Other dictionary reads of the statement may abort the server by design.
+--let $errinj_crash = 1
+
+--let $s_list = pk,reverse_cf,ttl
+while ($s_list) {
+  --let $shape = `SELECT SUBSTRING_INDEX('$s_list', ',', 1)`
+  --let $s_list = `SELECT IF(LOCATE(',', '$s_list') > 0, SUBSTRING('$s_list', LOCATE(',', '$s_list') + 1), '')`
+  --let $errinj_reset = CALL fr1_reset('$shape')
+  --let $errinj_label = $shape DICT_READ/IOERROR COPY ALTER
+  --source suite/rocksdb/include/errinj_loop.inc
+}
+
+# COPY ALTER TABLE works afterwards.
+CALL fr1_reset('reverse_cf');
+ALTER TABLE t ADD COLUMN z INT NOT NULL DEFAULT 5, ALGORITHM=COPY;
+ALTER TABLE t DROP COLUMN z, ALGORITHM=COPY;
+SELECT COUNT(*), SUM(a) FROM t;
+CHECK TABLE t;
+
+DROP TABLE t;
+DROP PROCEDURE fr1_reset;
+DROP PROCEDURE fr1_state;
+DROP PROCEDURE errinj_tables_state;

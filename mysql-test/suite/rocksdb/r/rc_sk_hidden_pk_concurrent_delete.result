@@ -1,0 +1,119 @@
+# Case 1: UPDATE
+CREATE TABLE t1 (id INT NOT NULL, a INT, b INT, KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1), (2,2,2), (3,3,3), (4,4,4), (5,5,5), (6,9,9);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+DELETE FROM t1 WHERE id = 3;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+UPDATE t1 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 5;
+COMMIT;
+SELECT ROW_COUNT();
+ROW_COUNT()
+4
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT id, a, b FROM t1 USE INDEX () ORDER BY id, a, b;
+id	a	b
+1	1	101
+2	2	102
+4	4	104
+5	5	105
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (ka) ORDER BY id, a, b;
+id	a	b
+1	1	101
+2	2	102
+4	4	104
+5	5	105
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (kb) ORDER BY id, a, b;
+id	a	b
+1	1	101
+2	2	102
+4	4	104
+5	5	105
+6	9	9
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: SELECT ... FOR UPDATE
+CREATE TABLE t1 (id INT NOT NULL, a INT, b INT, KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1), (2,2,2), (3,3,3), (4,4,4), (5,5,5), (6,9,9);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+DELETE FROM t1 WHERE id = 3;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT id, a, b FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE;
+COMMIT;
+id	a	b
+1	1	1
+2	2	2
+4	4	4
+5	5	5
+SELECT ROW_COUNT();
+ROW_COUNT()
+-1
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT id, a, b FROM t1 USE INDEX () ORDER BY id, a, b;
+id	a	b
+1	1	1
+2	2	2
+4	4	4
+5	5	5
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (ka) ORDER BY id, a, b;
+id	a	b
+1	1	1
+2	2	2
+4	4	4
+5	5	5
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (kb) ORDER BY id, a, b;
+id	a	b
+1	1	1
+2	2	2
+4	4	4
+5	5	5
+6	9	9
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: DELETE
+CREATE TABLE t1 (id INT NOT NULL, a INT, b INT, KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1,1,1), (2,2,2), (3,3,3), (4,4,4), (5,5,5), (6,9,9);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+DELETE FROM t1 WHERE id = 3;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+DELETE t1 FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5;
+COMMIT;
+SELECT ROW_COUNT();
+ROW_COUNT()
+4
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT id, a, b FROM t1 USE INDEX () ORDER BY id, a, b;
+id	a	b
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (ka) ORDER BY id, a, b;
+id	a	b
+6	9	9
+SELECT id, a, b FROM t1 FORCE INDEX (kb) ORDER BY id, a, b;
+id	a	b
+6	9	9
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

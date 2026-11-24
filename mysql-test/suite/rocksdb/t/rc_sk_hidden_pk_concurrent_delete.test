@@ -1,0 +1,72 @@
+--source include/have_rocksdb.inc
+
+# PS-12235: at READ COMMITTED, a locking read through a secondary key of a
+# table without a primary key (hidden primary key) waits for the row lock of a
+# matching row; the lock holder deletes that row and commits. The primary key
+# lookup then finds no row, but ha_rocksdb::secondary_index_read() does not
+# check its status: read_hidden_pk_id_from_rowkey() overwrites it with success
+# and the record buffer, which still holds the previously read row with the
+# secondary key columns of the deleted row, is used as the found row.
+# - UPDATE writes that buffer back under the deleted row's hidden primary key:
+#   the table gets a row that never existed (case 1).
+# - SELECT ... FOR UPDATE returns that row (case 2).
+# - DELETE can count the deleted row as deleted by itself (case 3; timing-dependent).
+# Related: PS-11905, PS-12208, PS-12223 (same unchecked status, triggered by a
+# lock wait timeout instead of a concurrent delete).
+#
+# Expected (InnoDB, and MyRocks with a primary key): the deleted row is skipped;
+# the statement affects the 4 other matching rows and the deleted row stays gone.
+
+--let $case = 1
+while ($case <= 3)
+{
+  if ($case == 1)
+  {
+    --echo # Case 1: UPDATE
+    --let $stmt = UPDATE t1 FORCE INDEX (ka) SET b = b + 100 WHERE a BETWEEN 1 AND 5
+  }
+  if ($case == 2)
+  {
+    --echo # Case 2: SELECT ... FOR UPDATE
+    --let $stmt = SELECT id, a, b FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5 FOR UPDATE
+  }
+  if ($case == 3)
+  {
+    --echo # Case 3: DELETE
+    --let $stmt = DELETE t1 FROM t1 FORCE INDEX (ka) WHERE a BETWEEN 1 AND 5
+  }
+  CREATE TABLE t1 (id INT NOT NULL, a INT, b INT, KEY ka (a), KEY kb (b)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1,1,1), (2,2,2), (3,3,3), (4,4,4), (5,5,5), (6,9,9);
+
+  --connect (con1,localhost,root,,)
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  BEGIN;
+  DELETE FROM t1 WHERE id = 3;
+
+  --connection default
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  SET SESSION rocksdb_lock_wait_timeout = 100;
+  BEGIN;
+  --send_eval $stmt
+
+  --connection con1
+  # The statement waits for the row lock of id = 3.
+  let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE waiting_key <> '';
+  --source include/wait_condition.inc
+  COMMIT;
+  --disconnect con1
+
+  --connection default
+  --reap
+  SELECT ROW_COUNT();
+  COMMIT;
+  SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+  SET SESSION transaction_isolation = DEFAULT;
+
+  SELECT id, a, b FROM t1 USE INDEX () ORDER BY id, a, b;
+  SELECT id, a, b FROM t1 FORCE INDEX (ka) ORDER BY id, a, b;
+  SELECT id, a, b FROM t1 FORCE INDEX (kb) ORDER BY id, a, b;
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $case
+}
