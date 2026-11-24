@@ -1,0 +1,82 @@
+--source include/have_rocksdb.inc
+#
+# PS-12238: a bulk load with rocksdb_bulk_load_allow_sk=ON into a table without a
+# PRIMARY KEY writes the hidden-PK row through the write batch (visible to other
+# sessions at once) and its secondary keys into the bulk-load SST (the split of
+# PS-12218 and PS-12210). Another session updates or deletes the row; flush and
+# compaction drop its secondary-key tombstones before the SST is ingested, and
+# the ingest brings the row's old secondary-key entries back.
+#
+# Expected: every secondary key has the same rows as the primary key scan, a
+# point lookup through k2 finds the old value only if the primary key has it,
+# the UPDATE case keeps exactly one row, the DELETE case keeps at most the
+# loaded one, and CHECK TABLE is OK. The result does not show which session
+# won: InnoDB and MyRocks with rocksdb_bulk_load_allow_sk=OFF give the changed
+# row (the UPDATE/DELETE sees the loaded row), a fix that bulk loads the hidden
+# primary key as well gives the loaded row (70, 200) in every index (as with an
+# explicit primary key); both pass.
+#
+
+--let $v = 0
+while ($v < 2)
+{
+  if (!$v)
+  {
+    --echo # Concurrent UPDATE of the bulk-loaded row
+  }
+  if ($v)
+  {
+    --echo # Concurrent DELETE of the bulk-loaded row
+  }
+  CREATE TABLE t1 (a INT, b INT, c BOOL, KEY k2 (a, b), KEY k1 (a))
+    ENGINE=ROCKSDB;
+
+  --connect (con1,localhost,root,,test)
+  SET SESSION rocksdb_bulk_load_allow_sk = ON;
+  SET SESSION rocksdb_bulk_load = 1;
+  INSERT INTO t1 VALUES (70, 200, true);
+
+  --connection default
+  if (!$v)
+  {
+    UPDATE t1 SET b = 481 WHERE c = true;
+  }
+  if ($v)
+  {
+    DELETE FROM t1 WHERE c = true;
+  }
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  SET GLOBAL rocksdb_compact_cf = 'default';
+
+  --connection con1
+  SET SESSION rocksdb_bulk_load = 0;
+  --disconnect con1
+  --connection default
+
+  # Each secondary key compared with the primary key scan (index-only scans of
+  # k2 and k1, the primary key through IGNORE INDEX), and the k2 point lookup of
+  # the loaded value compared with the primary key.
+  SELECT
+    (SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 FORCE INDEX (k2)) <=>
+    (SELECT GROUP_CONCAT(a, ':', b ORDER BY a, b) FROM t1 IGNORE INDEX (k1, k2))
+    AS k2_matches_pk,
+    (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 FORCE INDEX (k1)) <=>
+    (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 IGNORE INDEX (k1, k2))
+    AS k1_matches_pk,
+    (SELECT COUNT(*) FROM t1 FORCE INDEX (k2) WHERE a = 70 AND b = 200) =
+    (SELECT COUNT(*) FROM t1 IGNORE INDEX (k1, k2) WHERE a = 70 AND b = 200)
+    AS k2_lookup_matches_pk;
+  if (!$v)
+  {
+    SELECT COUNT(*) = 1 AS one_row_kept FROM t1 IGNORE INDEX (k1, k2)
+      WHERE a = 70 AND b IN (200, 481);
+  }
+  if ($v)
+  {
+    SELECT COUNT(*) = COALESCE(SUM(a = 70 AND b = 200), 0) AND COUNT(*) <= 1
+      AS no_other_row FROM t1 IGNORE INDEX (k1, k2);
+  }
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $v
+}
