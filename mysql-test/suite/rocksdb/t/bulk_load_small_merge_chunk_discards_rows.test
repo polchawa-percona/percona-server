@@ -1,0 +1,78 @@
+# PS-12241: an unsorted bulk load with a small rocksdb_merge_combine_read_size
+# reports success for the INSERT, then SET rocksdb_bulk_load = 0 fails with the
+# generic ER_WRONG_VALUE_FOR_VAR and every loaded row is discarded.
+#
+# The merge of the unsorted rows runs when the bulk load ends. Its per-chunk
+# read buffer (rocksdb_merge_combine_read_size divided among the sort buffers)
+# is too small for one record, so Rdb_index_merge::merge_heap_prepare() fails
+# ("Chunk size is too small to process merge.", same cause as PS-11637 for
+# ALTER TABLE ... ADD INDEX). The rows were already reported as written.
+#
+# Expected: the load keeps every row, or the statement that wrote the rows
+# fails and the table stays empty; valid data must not be dropped after the
+# INSERT reported success because of an allowed combine read size.
+
+--source include/have_rocksdb.inc
+
+call mtr.add_suppression("Chunk size is too small to process merge");
+call mtr.add_suppression("finalizing last SST file while setting bulk loading");
+
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE src (pk INT PRIMARY KEY, b VARCHAR(32) NOT NULL, d INT NOT NULL)
+  ENGINE=InnoDB;
+# 3000 rows in a non-sorted primary key order
+INSERT INTO src
+  WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 3000)
+  SELECT (i * 7919) MOD 100003, CONCAT('b', i MOD 7), 100000 - i FROM s;
+SELECT COUNT(*), SUM(CRC32(CONCAT(pk, b, d))) INTO @n, @c FROM src;
+
+# Case 1: the default rocksdb_merge_combine_read_size (control).
+# Case 2: rocksdb_merge_combine_read_size = 400: many 4 KB sort buffers, a
+# per-chunk read buffer of a few bytes, smaller than one record.
+--let $small_combine = 400
+--let $case = 1
+while ($case <= 2) {
+  CREATE TABLE t (pk INT PRIMARY KEY, b VARCHAR(32) NOT NULL, d INT NOT NULL)
+    ENGINE=ROCKSDB;
+  SET SESSION rocksdb_merge_buf_size = 4096;
+  if ($case == 2) {
+    --echo # rocksdb_merge_combine_read_size = 400
+    --disable_query_log
+    --disable_warnings
+    --error 0,ER_WRONG_VALUE_FOR_VAR,ER_WRONG_ARGUMENTS
+    eval SET SESSION rocksdb_merge_combine_read_size = $small_combine;
+    --enable_warnings
+    --enable_query_log
+  }
+  SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+  SET SESSION rocksdb_bulk_load = 1;
+  --error 0,ER_GET_ERRNO,ER_GET_ERRMSG,ER_UNKNOWN_ERROR,8012
+  INSERT INTO t SELECT * FROM src;
+  --let $insert_errno = $mysql_errno
+  --error 0,ER_WRONG_VALUE_FOR_VAR,ER_GET_ERRNO,ER_GET_ERRMSG,8012
+  SET SESSION rocksdb_bulk_load = 0;
+  --let $end_errno = $mysql_errno
+  SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+  SET SESSION rocksdb_merge_combine_read_size = DEFAULT;
+  SET SESSION rocksdb_merge_buf_size = DEFAULT;
+
+  # A successful INSERT must be followed by a successful end of the bulk load
+  # and every row with its values; a failed INSERT must leave no row.
+  --let $rows = `SELECT COUNT(*) FROM t`
+  --disable_query_log
+  eval SELECT IF($insert_errno, COUNT(*) = 0,
+                 $end_errno = 0 AND COUNT(*) = @n AND
+                 SUM(CRC32(CONCAT(pk, b, d))) = @c) INTO @ok FROM t;
+  --enable_query_log
+  --let $ok = `SELECT @ok`
+  --echo # case $case: rows kept or the INSERT failed: $ok
+  if (!$ok) {
+    --echo # case $case: INSERT errno $insert_errno,
+    --echo # SET rocksdb_bulk_load = 0 errno $end_errno, $rows of 3000 rows in t
+  }
+  CHECK TABLE t;
+  DROP TABLE t;
+  --inc $case
+}
+
+DROP TABLE src;
