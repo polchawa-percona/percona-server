@@ -145,6 +145,7 @@ rocksdb.errinj_xa : BUG#11631 PS-11631 PS-11773 XA crash, by-XID commit error
 rocksdb.xa_commit_by_xid_error : BUG#11773 PS-11773 PS-11631 commit error
 rocksdb.errinj_part_write : BUG#11745 PS-11745 partition DDL write status
 rocksdb.errinj_ttl_write : BUG#11745 PS-11745 COPY ALTER write status
+rocksdb.bulk_load_partition_move_update_deletes_row : BUG#0 PS-12234 row lost
 # 8.0
 rocksdb.allow_to_start_after_corruption : BUG#4584 PS-4584
 rocksdb.crashpoint_copy_alter_rename : BUG#0 PS-11681 table lost after crash

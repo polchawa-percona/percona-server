@@ -1,0 +1,124 @@
+--source include/have_rocksdb.inc
+
+# PS-12234: an UPDATE that moves rows of a partitioned table with a primary
+# key to another partition, run while rocksdb_bulk_load=1 is in effect, is
+# executed by the partition handler as an insert of the new row into the new
+# partition plus a delete of the old row from the old one
+# (Partition_helper::ph_update_row()). MyRocks treats the insert like any bulk
+# load insert: its primary key record goes to the bulk load's SST file
+# (ha_rocksdb::update_write_pk()), while the delete of the old row (and, with
+# rocksdb_bulk_load_allow_sk=0, the secondary keys) go to the transaction.
+# - When the load's ingest fails (here: the new keys overlap an existing key),
+#   the moved rows are deleted; with allow_sk=0 the secondary index keeps them.
+# - When the UPDATE is rolled back, the old rows come back and the SST file is
+#   still ingested: the rows exist twice in the primary key.
+# Related: PS-11759 (failed ingest drops bulk-loaded inserts), PS-12229 (same
+# loss for a primary key change inside one partition), PS-12233 (rolled-back
+# primary key changing UPDATE leaves a copy), PS-12218, PS-11899.
+#
+# Expected: an UPDATE either takes effect completely or not at all, and every
+# index holds the same rows. The test does not print whether an UPDATE
+# succeeded, failed or was undone, only whether the table agrees with one of
+# the two allowed outcomes.
+
+# The failed ingest of cases 1 and 2 is logged; a fix may keep that error.
+--disable_query_log
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+--enable_query_log
+
+--let $case = 1
+while ($case <= 3)
+{
+  if ($case == 1)
+  {
+    --echo # Case 1: UPDATE moving rows to another partition, load ingest fails
+  }
+  if ($case == 2)
+  {
+    --echo # Case 2: as case 1, rocksdb_bulk_load_allow_sk = 1
+  }
+  if ($case == 3)
+  {
+    --echo # Case 3: UPDATE moving rows to another partition, then ROLLBACK
+  }
+  CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB
+    PARTITION BY RANGE (a)
+    (PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE);
+  if ($case != 3)
+  {
+    INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (250, 25);
+  }
+  if ($case == 3)
+  {
+    INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (150, 15);
+  }
+  if ($case == 2)
+  {
+    SET SESSION rocksdb_bulk_load_allow_sk = 1;
+  }
+
+  SET SESSION rocksdb_bulk_load = 1;
+  --disable_query_log
+  --disable_result_log
+  --disable_abort_on_error
+  if ($case != 3)
+  {
+    # moves 1 and 2 from p0 to p1 as 200 and 300; 250 lies between the new keys
+    UPDATE t1 SET a = a * 100 + 100 WHERE a <= 2;
+  }
+  if ($case == 3)
+  {
+    BEGIN;
+    UPDATE t1 SET a = a + 200 WHERE a IN (1, 2);
+    ROLLBACK;
+  }
+  SET SESSION rocksdb_bulk_load = 0;
+  --enable_abort_on_error
+  --enable_result_log
+  --enable_query_log
+  SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+
+  # Allowed outcomes: the original rows, or the rows after the UPDATE took
+  # full effect (after a ROLLBACK the second one is what PS-11899 accepts for
+  # rolled-back rows of a bulk load); never a mix, and the same rows through
+  # the primary key and the secondary index.
+  if ($case != 3)
+  {
+    --let $orig = 1:10,2:20,3:30,250:25
+    --let $upd = 3:30,200:10,250:25,300:20
+  }
+  if ($case == 3)
+  {
+    --let $orig = 1:10,2:20,3:30,150:15
+    --let $upd = 3:30,150:15,201:10,202:20
+  }
+  --let $pk_rows = `SELECT GROUP_CONCAT(a, ':', b ORDER BY a) FROM t1 USE INDEX ()`
+  --let $sk_rows = `SELECT GROUP_CONCAT(a, ':', b ORDER BY a) FROM t1 FORCE INDEX (kb)`
+  --let $ok = 0
+  if ($pk_rows == $orig)
+  {
+    if ($sk_rows == $orig)
+    {
+      --let $ok = 1
+    }
+  }
+  if ($pk_rows == $upd)
+  {
+    if ($sk_rows == $upd)
+    {
+      --let $ok = 1
+    }
+  }
+  --echo ok: $ok
+  if (!$ok)
+  {
+    --echo primary key: $pk_rows
+    --echo secondary key: $sk_rows
+  }
+  SELECT COUNT(*) FROM t1 USE INDEX ();
+  SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $case
+}
