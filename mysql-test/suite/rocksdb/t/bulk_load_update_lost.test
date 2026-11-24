@@ -1,0 +1,104 @@
+--source include/have_rocksdb.inc
+
+# PS-12227: an UPDATE that keeps the primary key value, run while
+# rocksdb_bulk_load=1 is in effect, reports success, but
+# ha_rocksdb::update_write_pk() writes the new primary key record to the bulk
+# load's SST file. That record overlaps the existing row, so the ingest fails
+# when the load ends ("External file requires flush" or ER_OVERLAPPING_KEYS),
+# the error is reported by the statement that ends the load, and the change is
+# lost. Secondary index changes of the UPDATE are committed through the
+# transaction, so they keep the new values and the table is left corrupt.
+#
+# Expected: the UPDATE either takes effect completely (new values through the
+# primary key and every secondary index) or fails and changes nothing. The
+# test accepts both: it does not print the UPDATE's outcome, only whether the
+# table agrees with it.
+
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+--let $case = 1
+while ($case <= 3)
+{
+  if ($case == 1)
+  {
+    --echo # Case 1: the row is in the memtable, a write to another table ends the load
+    --let $t = t1
+  }
+  if ($case == 2)
+  {
+    --echo # Case 2: the row is in an SST file, SET rocksdb_bulk_load = 0 ends the load
+    --let $t = t1
+  }
+  if ($case == 3)
+  {
+    --echo # Case 3: a table without secondary index
+    --let $t = t3
+  }
+  if ($case != 3)
+  {
+    CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c INT, KEY kb (b)) ENGINE=ROCKSDB;
+  }
+  if ($case == 3)
+  {
+    CREATE TABLE t3 (a INT PRIMARY KEY, b INT, c INT) ENGINE=ROCKSDB;
+  }
+  eval INSERT INTO $t VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+  if ($case == 2)
+  {
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  }
+  SET SESSION rocksdb_bulk_load = 1;
+  --disable_query_log
+  --disable_result_log
+  --disable_abort_on_error
+  eval UPDATE $t SET b = 21, c = 201 WHERE a = 2;
+  --let $upd_errno = $mysql_errno
+  if ($case == 1)
+  {
+    INSERT INTO t2 VALUES (7);
+  }
+  SET SESSION rocksdb_bulk_load = 0;
+  --enable_abort_on_error
+  --enable_result_log
+  --enable_query_log
+
+  --echo # the UPDATE took effect completely, or failed and changed nothing
+  --let $pk_new = `SELECT COUNT(*) FROM $t USE INDEX () WHERE a = 2 AND b = 21 AND c = 201`
+  --let $pk_old = `SELECT COUNT(*) FROM $t USE INDEX () WHERE a = 2 AND b = 20 AND c = 200`
+  --let $sk_new = 1
+  --let $sk_old = 1
+  if ($case != 3)
+  {
+    --let $sk_new = `SELECT COUNT(*) = 1 FROM t1 FORCE INDEX (kb) WHERE a = 2 AND b = 21`
+    --let $sk_old = `SELECT COUNT(*) = 1 FROM t1 FORCE INDEX (kb) WHERE a = 2 AND b = 20`
+    --let $sk_both = `SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE a = 2`
+    if ($sk_both != 1)
+    {
+      --let $sk_new = 0
+      --let $sk_old = 0
+    }
+  }
+  --disable_query_log
+  eval SELECT ($upd_errno = 0 AND $pk_new = 1 AND $sk_new = 1) OR
+              ($upd_errno <> 0 AND $pk_old = 1 AND $sk_old = 1) AS all_or_nothing;
+  --enable_query_log
+  --echo # the other rows are unchanged
+  eval SELECT a, b, c FROM $t USE INDEX () WHERE a <> 2 ORDER BY a;
+  if ($case != 3)
+  {
+    --echo # the primary key and the secondary index agree
+    SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+           (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+    SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+    WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+                      WHERE s.a = p.a AND s.b <=> p.b);
+  }
+  eval CHECK TABLE $t;
+  eval DROP TABLE $t;
+  --inc $case
+}
+
+DROP TABLE t2;
