@@ -1,0 +1,52 @@
+CALL mtr.add_suppression("Plugin rocksdb reported: 'CHECKTABLE t[fpb]: ");
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE m (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), d MEDIUMTEXT) ENGINE=InnoDB;
+INSERT INTO m WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 833)
+SELECT n * 3 + 1, CONCAT('b', LPAD(n, 8, '0')), REPEAT(CONCAT('d', n, '-'), 1 + n % 30) FROM r;
+CREATE TABLE tf (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE tp (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b(6))) ENGINE=ROCKSDB;
+CREATE TABLE tb (pk INT NOT NULL PRIMARY KEY, d MEDIUMTEXT, KEY kd (d(10))) ENGINE=ROCKSDB;
+INSERT INTO tp VALUES (1, 'a1'), (2, 'a2');
+INSERT INTO tb VALUES (1, 'a1'), (2, 'a2');
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tf SELECT pk, b FROM m ORDER BY pk;
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tp SELECT pk, b FROM m ORDER BY pk;
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tb SELECT pk, d FROM m ORDER BY pk;
+# Kill the server while the three bulk loads are open
+# Kill and restart
+# Precondition (PS-11696): rows in the primary key vs entries in the
+# secondary index, counted key-only (COUNT(*) reads no column).
+SELECT (SELECT COUNT(*) FROM tf FORCE INDEX (PRIMARY)) AS tf_pk_rows,
+(SELECT COUNT(*) FROM tf FORCE INDEX (kb)) AS tf_kb_entries;
+tf_pk_rows	tf_kb_entries
+0	833
+SELECT (SELECT COUNT(*) FROM tp FORCE INDEX (PRIMARY)) AS tp_pk_rows,
+(SELECT COUNT(*) FROM tp FORCE INDEX (kb)) AS tp_kb_entries;
+tp_pk_rows	tp_kb_entries
+2	835
+SELECT (SELECT COUNT(*) FROM tb FORCE INDEX (PRIMARY)) AS tb_pk_rows,
+(SELECT COUNT(*) FROM tb FORCE INDEX (kd)) AS tb_kd_entries;
+tb_pk_rows	tb_kd_entries
+2	835
+# The plain COUNT(*) is read through the prefix index and counts the
+# orphan entries.
+SELECT COUNT(*) FROM tp;
+COUNT(*)
+835
+# Control: a prefix-index table without corruption.
+CREATE TABLE tq (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b(6))) ENGINE=ROCKSDB;
+INSERT INTO tq SELECT pk, b FROM m;
+# CHECK TABLE must report the tables with orphan index entries.
+tf (full-column index) reported as corrupt: 1
+tp (prefix index) reported as corrupt: 1
+tb (TEXT prefix index) reported as corrupt: 1
+tq (no corruption) reported as OK: 1
+DROP TABLE tf, tp, tb, tq, m;

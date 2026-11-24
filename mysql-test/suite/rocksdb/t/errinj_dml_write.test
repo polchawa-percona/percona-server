@@ -8,6 +8,7 @@
 # PS-11744: update_write_sk() ignores the status of the secondary-index Put,
 # so a failed secondary-index write is lost and the statement succeeds.
 #
+--source include/big_test.inc
 --source include/have_rocksdb.inc
 --source include/have_debug.inc
 

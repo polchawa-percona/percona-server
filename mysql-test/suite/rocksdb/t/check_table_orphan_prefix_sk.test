@@ -1,0 +1,88 @@
+# PS-12245: CHECK TABLE reports OK for a MyRocks table whose prefix (or
+# BLOB/TEXT) secondary index has entries for rows that are not in the
+# primary key, while the same corruption in a full-column index is
+# reported as Corrupt.
+#
+# The orphan entries are made with PS-11696: an unfinished bulk load with
+# rocksdb_bulk_load_allow_sk=OFF commits the secondary key entries every
+# rocksdb_bulk_load_size rows, the primary key rows stay in SST files that
+# are never ingested when the server is killed. The test checks that
+# precondition first (primary key rows vs index-only entry count); if
+# PS-11696 is fixed, these lines change and the test needs another trigger.
+#
+# Expected: CHECK TABLE reports every table with orphan index entries as
+# not OK (tf, tp, tb), a table without corruption as OK (tq).
+
+--source include/have_rocksdb.inc
+
+CALL mtr.add_suppression("Plugin rocksdb reported: 'CHECKTABLE t[fpb]: ");
+
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE m (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), d MEDIUMTEXT) ENGINE=InnoDB;
+INSERT INTO m WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 833)
+  SELECT n * 3 + 1, CONCAT('b', LPAD(n, 8, '0')), REPEAT(CONCAT('d', n, '-'), 1 + n % 30) FROM r;
+
+# tf: full-column index (control), tp: prefix index, tb: TEXT prefix index.
+# tp and tb have two ordinary rows that sort before the loaded ones.
+CREATE TABLE tf (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b)) ENGINE=ROCKSDB;
+CREATE TABLE tp (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b(6))) ENGINE=ROCKSDB;
+CREATE TABLE tb (pk INT NOT NULL PRIMARY KEY, d MEDIUMTEXT, KEY kd (d(10))) ENGINE=ROCKSDB;
+INSERT INTO tp VALUES (1, 'a1'), (2, 'a2');
+INSERT INTO tb VALUES (1, 'a1'), (2, 'a2');
+
+--connect (con_f,localhost,root,,test)
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tf SELECT pk, b FROM m ORDER BY pk;
+
+--connect (con_p,localhost,root,,test)
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tp SELECT pk, b FROM m ORDER BY pk;
+
+--connect (con_b,localhost,root,,test)
+SET SESSION rocksdb_bulk_load_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = OFF;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT INTO tb SELECT pk, d FROM m ORDER BY pk;
+
+--connection default
+--echo # Kill the server while the three bulk loads are open
+--source include/kill_and_restart_mysqld.inc
+--disconnect con_f
+--disconnect con_p
+--disconnect con_b
+
+--echo # Precondition (PS-11696): rows in the primary key vs entries in the
+--echo # secondary index, counted key-only (COUNT(*) reads no column).
+SELECT (SELECT COUNT(*) FROM tf FORCE INDEX (PRIMARY)) AS tf_pk_rows,
+       (SELECT COUNT(*) FROM tf FORCE INDEX (kb)) AS tf_kb_entries;
+SELECT (SELECT COUNT(*) FROM tp FORCE INDEX (PRIMARY)) AS tp_pk_rows,
+       (SELECT COUNT(*) FROM tp FORCE INDEX (kb)) AS tp_kb_entries;
+SELECT (SELECT COUNT(*) FROM tb FORCE INDEX (PRIMARY)) AS tb_pk_rows,
+       (SELECT COUNT(*) FROM tb FORCE INDEX (kd)) AS tb_kd_entries;
+--echo # The plain COUNT(*) is read through the prefix index and counts the
+--echo # orphan entries.
+SELECT COUNT(*) FROM tp;
+
+--echo # Control: a prefix-index table without corruption.
+CREATE TABLE tq (pk INT NOT NULL PRIMARY KEY, b VARCHAR(40), KEY kb (b(6))) ENGINE=ROCKSDB;
+INSERT INTO tq SELECT pk, b FROM m;
+
+--echo # CHECK TABLE must report the tables with orphan index entries.
+--let $ct = query_get_value(CHECK TABLE tf, Msg_text, 1)
+--let $f = `SELECT '$ct' <> 'OK'`
+--echo tf (full-column index) reported as corrupt: $f
+--let $ct = query_get_value(CHECK TABLE tp, Msg_text, 1)
+--let $f = `SELECT '$ct' <> 'OK'`
+--echo tp (prefix index) reported as corrupt: $f
+--let $ct = query_get_value(CHECK TABLE tb, Msg_text, 1)
+--let $f = `SELECT '$ct' <> 'OK'`
+--echo tb (TEXT prefix index) reported as corrupt: $f
+--let $ct = query_get_value(CHECK TABLE tq, Msg_text, 1)
+--let $f = `SELECT '$ct' = 'OK'`
+--echo tq (no corruption) reported as OK: $f
+
+DROP TABLE tf, tp, tb, tq, m;

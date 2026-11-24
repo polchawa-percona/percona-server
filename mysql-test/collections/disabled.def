@@ -139,7 +139,6 @@ rocksdb.bulk_load_failed_ingest_sk : BUG#11759 PS-11759 orphan SK entries
 rocksdb.errinj_bg_drop_index_empty_check : BUG#11775 PS-11775 rows not reclaimed
 rocksdb.errinj_bg_index_stats_iterator : BUG#11704 PS-11704 truncated scan
 rocksdb.errinj_dict_crash_create_drop : BUG#11666 PS-11666 partitioned DROP
-rocksdb.errinj_dict_crash_truncate : BUG#11831 PS-11831 TRUNCATE leftover kept
 rocksdb.errinj_dict_crash_copy_alter : BUG#11681 PS-11681 crash window
 rocksdb.flush_wal_error_group_commit : BUG#11761 PS-11761 WAL flush error
 rocksdb.errinj_xa : BUG#11631 PS-11631 PS-11773 XA crash, by-XID commit error
@@ -157,6 +156,7 @@ rocksdb.sst_partitioner_multi_version : BUG#0 PS-11725 SST partitioner assert
 rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest error message
 rocksdb.write_batch_limit_sk_bulk_load : BUG#0 PS-11899 SK lost on failed load
 rocksdb.write_batch_limit_skip_unique_check : BUG#0 PS-11745 rows lost over batch limit
+rocksdb.check_table_orphan_prefix_sk : BUG#0 PS-12245 CHECK TABLE OK on orphans
 rocksdb.innodb_port_ddl_kill : BUG#0 PS-11635 killed ADD INDEX reports 8012, not 1317
 
 # rocksdb_rpl suite tests
