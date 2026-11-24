@@ -1,0 +1,55 @@
+# PS-12236: with rocksdb_bulk_load_use_sst_partitioner=ON, a bulk load that switches
+# from one table to another unregisters the new table's PRIMARY KEY from the SST
+# partitioner (bulk_load_key() registers the index, then start_bulk_load() commits
+# the previous table's load, which clears the whole registry). A second session can
+# then start a bulk load of the same PRIMARY KEY; its INSERT is refused on a
+# secondary key after its PRIMARY KEY entry was written, and the row is left in the
+# PRIMARY KEY only (related: PS-12232, no undo of a row's earlier keys).
+# Expected: the second INSERT either succeeds in every index or fails and leaves
+# nothing; every index of t1 has the same rows.
+--source include/have_rocksdb.inc
+
+call mtr.add_suppression("is being used by another bulk load transaction");
+
+CREATE TABLE t0 (id INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=RocksDB;
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a), KEY kb (b))
+  ENGINE=RocksDB;
+INSERT INTO t1 VALUES (1, 1, 1);
+
+connect (con1,localhost,root,,test);
+SET SESSION rocksdb_bulk_load_allow_sk=ON;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner=ON;
+SET SESSION rocksdb_bulk_load=1;
+INSERT INTO t0 VALUES (100, 5);
+--echo # The switch to t1 finishes the load of t0 and clears the registry
+INSERT INTO t1 VALUES (100, 100, 100);
+
+connect (con2,localhost,root,,test);
+SET SESSION rocksdb_bulk_load_allow_sk=ON;
+SET SESSION rocksdb_bulk_load_use_sst_partitioner=ON;
+SET SESSION rocksdb_bulk_load=1;
+--echo # Either refused before any key is written, or loaded in every index
+--disable_result_log
+--error 0,ER_GET_ERRMSG,ER_GET_ERRNO,ER_UNKNOWN_ERROR
+INSERT INTO t1 VALUES (200, 200, 200);
+--error 0,ER_GET_ERRMSG,ER_GET_ERRNO,ER_UNKNOWN_ERROR,ER_OVERLAPPING_KEYS
+SET SESSION rocksdb_bulk_load=0;
+--enable_result_log
+disconnect con2;
+
+connection con1;
+SET SESSION rocksdb_bulk_load=0;
+disconnect con1;
+
+connection default;
+--echo # Rows loaded by con1 and the earlier row
+SELECT id, a, b FROM t1 FORCE INDEX (PRIMARY) WHERE id < 200 ORDER BY id;
+--echo # Every index has the same rows (the row of con2 in all or in none)
+SELECT
+  (SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (PRIMARY)) =
+  (SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (ka)) AS pk_eq_ka,
+  (SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (PRIMARY)) =
+  (SELECT GROUP_CONCAT(id ORDER BY id) FROM t1 FORCE INDEX (kb)) AS pk_eq_kb;
+CHECK TABLE t1;
+
+DROP TABLE t0, t1;
