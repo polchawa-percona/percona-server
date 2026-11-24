@@ -1,0 +1,114 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+# PS-12239: under write_prepared and write_unprepared, a transaction can write
+# its data to the database before it ends: at XA PREPARE, and under
+# write_unprepared also whenever its batch passes
+# rocksdb_write_batch_flush_threshold. When it is then rolled back, RocksDB
+# removes a key that it wrote and that has no committed value with a Delete,
+# because MyRocks does not set TransactionDBOptions::
+# rollback_deletion_type_callback. MyRocks removes secondary key entries with
+# SingleDelete, and RocksDB does not support mixing SingleDelete and Delete
+# for the same key (include/rocksdb/db.h, SingleDelete; the compaction
+# iterator names rollback_deletion_type_callback for these write policies).
+# If the rolled-back write of an entry reached an SST file before the
+# rollback, and the same entry is later written and SingleDeleted again by
+# committed statements, the entry written by the rolled-back transaction is
+# visible again after the next memtable flush: the secondary key returns a
+# value the row no longer has and CHECK TABLE reports Corrupt.
+# - Case 0: write_unprepared batch written before ROLLBACK, no memtable flush
+#   in between (passes).
+# - Case 1: as case 0 with a memtable flush before the ROLLBACK
+#   (write_unprepared only; under write_prepared nothing is written early).
+# - Case 2: XA PREPARE, memtable flush, XA ROLLBACK (both policies).
+# - Case 3: as case 2 for the primary key of a table whose primary key covers
+#   all columns: a deleted row comes back (both policies).
+# Every case uses its own table.
+# Automatic compactions are disabled (-master.opt) so that a background
+# compaction cannot merge the files between the steps (timing).
+# Related: PS-12186 (same SingleDelete use under write_unprepared, but there
+# the rollback writes a second Put for a key the transaction only locked).
+#
+# Expected (write_committed): kc returns only (1, 30) and (2, 100), no row
+# has c = 20, CHECK TABLE OK, in cases 0-2; table a holds (2, 2) and (3, 3)
+# after case 3.
+
+call mtr.add_suppression("CHECKTABLE");
+
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+--connect (con1,localhost,root,,)
+--connection default
+
+# Each case uses a new table t, so that no entry left by an earlier case can
+# take part in the next one.
+--let $case = 0
+while ($case <= 2)
+{
+  --echo # Case $case
+  CREATE TABLE t (pk INT PRIMARY KEY, c BIGINT NOT NULL, KEY kc (c)) ENGINE=ROCKSDB;
+  INSERT INTO t VALUES (1, 10), (2, 100);
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  if ($case <= 1)
+  {
+    BEGIN;
+    # Writes the entry (20, 1) of kc; under write_unprepared the second
+    # statement writes the batch to the database (flush threshold 1).
+    UPDATE t SET c = 20 WHERE pk = 1;
+    UPDATE t SET c = c + 1 WHERE pk = 2;
+    if ($case == 1)
+    {
+      --connection con1
+      SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+      --connection default
+    }
+    ROLLBACK;
+  }
+  if ($case == 2)
+  {
+    XA START 'x1';
+    UPDATE t SET c = 20 WHERE pk = 1;
+    XA END 'x1';
+    XA PREPARE 'x1';
+    --connection con1
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+    --connection default
+    XA ROLLBACK 'x1';
+  }
+  # The same entry written again, then removed.
+  UPDATE t SET c = 20 WHERE pk = 1;
+  UPDATE t SET c = 30 WHERE pk = 1;
+  SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+
+  SELECT pk, c FROM t USE INDEX () ORDER BY pk;
+  SELECT pk, c FROM t FORCE INDEX (kc) ORDER BY c, pk;
+  SELECT pk, c FROM t WHERE c = 20;
+  CHECK TABLE t;
+  DROP TABLE t;
+  --inc $case
+}
+
+# Case 3: a primary key that covers all columns is also removed with
+# SingleDelete (ha_rocksdb::can_use_single_delete()): a rolled-back INSERT
+# (XA PREPARE, memtable flush, XA ROLLBACK), the same row inserted and
+# deleted again by committed statements: the deleted row comes back.
+--echo # Case 3
+CREATE TABLE a (x INT, y INT, PRIMARY KEY (x, y)) ENGINE=ROCKSDB;
+INSERT INTO a VALUES (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+XA START 'x2';
+INSERT INTO a VALUES (1, 1);
+XA END 'x2';
+XA PREPARE 'x2';
+--connection con1
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+--connection default
+XA ROLLBACK 'x2';
+INSERT INTO a VALUES (1, 1);
+DELETE FROM a WHERE x = 1 AND y = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT x, y FROM a ORDER BY x, y;
+CHECK TABLE a;
+DROP TABLE a;
+
+--disconnect con1
+--source include/wait_until_count_sessions.inc

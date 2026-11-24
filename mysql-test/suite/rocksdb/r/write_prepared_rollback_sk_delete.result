@@ -1,0 +1,101 @@
+call mtr.add_suppression("CHECKTABLE");
+SET SESSION rocksdb_write_batch_flush_threshold = 1;
+# Case 0
+CREATE TABLE t (pk INT PRIMARY KEY, c BIGINT NOT NULL, KEY kc (c)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10), (2, 100);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+BEGIN;
+UPDATE t SET c = 20 WHERE pk = 1;
+UPDATE t SET c = c + 1 WHERE pk = 2;
+ROLLBACK;
+UPDATE t SET c = 20 WHERE pk = 1;
+UPDATE t SET c = 30 WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT pk, c FROM t USE INDEX () ORDER BY pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t FORCE INDEX (kc) ORDER BY c, pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t WHERE c = 20;
+pk	c
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+# Case 1
+CREATE TABLE t (pk INT PRIMARY KEY, c BIGINT NOT NULL, KEY kc (c)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10), (2, 100);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+BEGIN;
+UPDATE t SET c = 20 WHERE pk = 1;
+UPDATE t SET c = c + 1 WHERE pk = 2;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+ROLLBACK;
+UPDATE t SET c = 20 WHERE pk = 1;
+UPDATE t SET c = 30 WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT pk, c FROM t USE INDEX () ORDER BY pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t FORCE INDEX (kc) ORDER BY c, pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t WHERE c = 20;
+pk	c
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+# Case 2
+CREATE TABLE t (pk INT PRIMARY KEY, c BIGINT NOT NULL, KEY kc (c)) ENGINE=ROCKSDB;
+INSERT INTO t VALUES (1, 10), (2, 100);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+XA START 'x1';
+UPDATE t SET c = 20 WHERE pk = 1;
+XA END 'x1';
+XA PREPARE 'x1';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+XA ROLLBACK 'x1';
+UPDATE t SET c = 20 WHERE pk = 1;
+UPDATE t SET c = 30 WHERE pk = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT pk, c FROM t USE INDEX () ORDER BY pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t FORCE INDEX (kc) ORDER BY c, pk;
+pk	c
+1	30
+2	100
+SELECT pk, c FROM t WHERE c = 20;
+pk	c
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+# Case 3
+CREATE TABLE a (x INT, y INT, PRIMARY KEY (x, y)) ENGINE=ROCKSDB;
+INSERT INTO a VALUES (2, 2), (3, 3);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+XA START 'x2';
+INSERT INTO a VALUES (1, 1);
+XA END 'x2';
+XA PREPARE 'x2';
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+XA ROLLBACK 'x2';
+INSERT INTO a VALUES (1, 1);
+DELETE FROM a WHERE x = 1 AND y = 1;
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SELECT x, y FROM a ORDER BY x, y;
+x	y
+2	2
+3	3
+CHECK TABLE a;
+Table	Op	Msg_type	Msg_text
+test.a	check	status	OK
+DROP TABLE a;
