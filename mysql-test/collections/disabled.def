@@ -157,6 +157,7 @@ rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest e
 rocksdb.write_batch_limit_sk_bulk_load : BUG#0 PS-11899 SK lost on failed load
 rocksdb.write_batch_limit_skip_unique_check : BUG#0 PS-11745 rows lost over batch limit
 rocksdb.innodb_port_ddl_kill : BUG#0 PS-11635 killed ADD INDEX reports 8012, not 1317
+rocksdb.ttl_sk_scan_stops_at_expired_pk : BUG#0 PS-12240 SK scan stops early
 
 # rocksdb_rpl suite tests
 rocksdb_rpl.rpl_rocksdb_snapshot : BUG#0 LOCK BINLOG FOR BACKUP
