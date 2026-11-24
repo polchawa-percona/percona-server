@@ -1,0 +1,54 @@
+# Case 1: UPDATE of the primary key, then ROLLBACK
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: as case 1, on a table without secondary index
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: as case 1, rocksdb_bulk_load_allow_sk = 1, rows in an SST file
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+3
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 4: autocommit UPDATE of the primary key whose new keys are not in order
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 40), (4, 30);
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
