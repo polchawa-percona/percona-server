@@ -1,0 +1,115 @@
+--source include/have_rocksdb.inc
+
+# PS-12237: at READ COMMITTED, a locking statement that reads through a
+# composite secondary key KEY kbc (b, c) with a condition on the first key
+# column only (WHERE b = 'r001') waits for the row lock of a matching row. The
+# lock holder changes the second key column (c = c + 1) and commits. After the
+# lock is granted, ha_rocksdb::secondary_index_read() re-reads the row through
+# the primary key, re-packs the secondary key from the new row and, because it
+# differs from the index entry the scan found, returns HA_ERR_KEY_NOT_FOUND:
+# the row is skipped although it still matches the WHERE condition.
+# - UPDATE loses its change of the row: 0 rows affected (case 1).
+# - DELETE does not delete the row (case 2).
+# - SELECT ... FOR UPDATE does not return the row (case 3).
+# - The same with a full scan of the index and a condition only on a
+#   primary key column (case 4: SELECT ... WHERE pk = 1 FOR UPDATE).
+# The existing tests sk_rc_concurrent_update and
+# rocksdb_concurrent_point_update_sk cover the skip when the concurrent change
+# makes the row stop matching the condition; here it still matches.
+# Related: PS-11905, PS-12208, PS-12235 (same function, hidden primary key,
+# the primary key lookup fails instead of finding a changed row).
+#
+# Expected (InnoDB): the statement sees the committed row and handles it:
+# c = 1011 after case 1, the row is deleted in case 2, case 3 returns
+# (1, 'r001', 1001) and case 4 returns (1, 1001).
+
+--let $case = 1
+while ($case <= 3)
+{
+  if ($case == 1)
+  {
+    --echo # Case 1: UPDATE
+    --let $stmt = UPDATE t1 FORCE INDEX (kbc) SET c = c + 10 WHERE b = 'r001'
+  }
+  if ($case == 2)
+  {
+    --echo # Case 2: DELETE
+    --let $stmt = DELETE t1 FROM t1 FORCE INDEX (kbc) WHERE b = 'r001'
+  }
+  if ($case == 3)
+  {
+    --echo # Case 3: SELECT ... FOR UPDATE
+    --let $stmt = SELECT pk, b, c FROM t1 FORCE INDEX (kbc) WHERE b = 'r001' FOR UPDATE
+  }
+  CREATE TABLE t1 (pk INT PRIMARY KEY, b VARCHAR(16) NOT NULL,
+                   c BIGINT NOT NULL, KEY kbc (b, c)) ENGINE=ROCKSDB;
+  INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+
+  --connect (con1,localhost,root,,)
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  BEGIN;
+  UPDATE t1 SET c = c + 1 WHERE pk = 1;
+
+  --connection default
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  SET SESSION rocksdb_lock_wait_timeout = 100;
+  BEGIN;
+  --send_eval $stmt
+
+  --connection con1
+  # The statement waits for the row lock of pk = 1.
+  let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE waiting_key <> '';
+  --source include/wait_condition.inc
+  COMMIT;
+  --disconnect con1
+
+  --connection default
+  --reap
+  SELECT ROW_COUNT();
+  COMMIT;
+  SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+  SET SESSION transaction_isolation = DEFAULT;
+
+  SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+  SELECT pk, b, c FROM t1 FORCE INDEX (kbc) ORDER BY pk;
+  CHECK TABLE t1;
+  DROP TABLE t1;
+  --inc $case
+}
+
+--echo # Case 4: SELECT ... FOR UPDATE through a full scan of the secondary key
+# PRIMARY KEY (b, pk), KEY kbc (b, c): the condition is on pk only, so the
+# statement scans the whole index (type index, covering); the row is skipped
+# the same way.
+CREATE TABLE t1 (pk INT NOT NULL, b VARCHAR(16) NOT NULL, c BIGINT NOT NULL,
+                 PRIMARY KEY (b, pk), KEY kbc (b, c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+
+--connect (con1,localhost,root,,)
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE t1 SET c = c + 1 WHERE b = 'r001' AND pk = 1;
+
+--connection default
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+--send SELECT pk, c FROM t1 FORCE INDEX (kbc) WHERE pk = 1 FOR UPDATE
+
+--connection con1
+# The statement waits for the row lock of pk = 1.
+let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.rocksdb_trx WHERE waiting_key <> '';
+--source include/wait_condition.inc
+COMMIT;
+--disconnect con1
+
+--connection default
+--reap
+SELECT ROW_COUNT();
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+
+SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+CHECK TABLE t1;
+DROP TABLE t1;

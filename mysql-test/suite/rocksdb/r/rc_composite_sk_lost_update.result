@@ -1,0 +1,118 @@
+# Case 1: UPDATE
+CREATE TABLE t1 (pk INT PRIMARY KEY, b VARCHAR(16) NOT NULL,
+c BIGINT NOT NULL, KEY kbc (b, c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE t1 SET c = c + 1 WHERE pk = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+UPDATE t1 FORCE INDEX (kbc) SET c = c + 10 WHERE b = 'r001';
+COMMIT;
+SELECT ROW_COUNT();
+ROW_COUNT()
+1
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+pk	b	c
+1	r001	1011
+2	r002	1000
+SELECT pk, b, c FROM t1 FORCE INDEX (kbc) ORDER BY pk;
+pk	b	c
+1	r001	1011
+2	r002	1000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: DELETE
+CREATE TABLE t1 (pk INT PRIMARY KEY, b VARCHAR(16) NOT NULL,
+c BIGINT NOT NULL, KEY kbc (b, c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE t1 SET c = c + 1 WHERE pk = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+DELETE t1 FROM t1 FORCE INDEX (kbc) WHERE b = 'r001';
+COMMIT;
+SELECT ROW_COUNT();
+ROW_COUNT()
+1
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+pk	b	c
+2	r002	1000
+SELECT pk, b, c FROM t1 FORCE INDEX (kbc) ORDER BY pk;
+pk	b	c
+2	r002	1000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: SELECT ... FOR UPDATE
+CREATE TABLE t1 (pk INT PRIMARY KEY, b VARCHAR(16) NOT NULL,
+c BIGINT NOT NULL, KEY kbc (b, c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE t1 SET c = c + 1 WHERE pk = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT pk, b, c FROM t1 FORCE INDEX (kbc) WHERE b = 'r001' FOR UPDATE;
+COMMIT;
+pk	b	c
+1	r001	1001
+SELECT ROW_COUNT();
+ROW_COUNT()
+-1
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+pk	b	c
+1	r001	1001
+2	r002	1000
+SELECT pk, b, c FROM t1 FORCE INDEX (kbc) ORDER BY pk;
+pk	b	c
+1	r001	1001
+2	r002	1000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 4: SELECT ... FOR UPDATE through a full scan of the secondary key
+CREATE TABLE t1 (pk INT NOT NULL, b VARCHAR(16) NOT NULL, c BIGINT NOT NULL,
+PRIMARY KEY (b, pk), KEY kbc (b, c)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 'r001', 1000), (2, 'r002', 1000);
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+BEGIN;
+UPDATE t1 SET c = c + 1 WHERE b = 'r001' AND pk = 1;
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_lock_wait_timeout = 100;
+BEGIN;
+SELECT pk, c FROM t1 FORCE INDEX (kbc) WHERE pk = 1 FOR UPDATE;
+COMMIT;
+pk	c
+1	1001
+SELECT ROW_COUNT();
+ROW_COUNT()
+-1
+COMMIT;
+SET SESSION rocksdb_lock_wait_timeout = DEFAULT;
+SET SESSION transaction_isolation = DEFAULT;
+SELECT pk, b, c FROM t1 USE INDEX () ORDER BY pk;
+pk	b	c
+1	r001	1001
+2	r002	1000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
