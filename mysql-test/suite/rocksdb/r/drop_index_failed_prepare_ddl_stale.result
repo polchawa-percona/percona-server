@@ -1,0 +1,100 @@
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+CALL mtr.add_suppression("RocksDB error on COMMIT");
+#
+# 1. DROP INDEX fails at the MyRocks prepare
+#
+CREATE TABLE t1 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+ALTER TABLE t1 DROP INDEX kb, ALGORITHM=INPLACE;
+ERROR HY000: Internal error: <prepare failure>
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+# Nothing has opened t1 since the failed ALTER TABLE.
+# MyRocks must still have kb (the same index numbers as before).
+same_indexes_as_before: 1, rocksdb_ddl_entries: 2
+# The data dictionary still has kb.
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+# kb is still usable
+SELECT pk, b FROM t1 FORCE INDEX (kb) WHERE b > 0 ORDER BY b;
+pk	b
+1	10
+2	20
+3	30
+INSERT INTO t1 VALUES (4, 40, 400);
+SELECT pk, b FROM t1 FORCE INDEX (kb) WHERE b > 0 ORDER BY b;
+pk	b
+1	10
+2	20
+3	30
+4	40
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# After the open
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+#
+# 2. ADD INDEX fails at the MyRocks prepare
+#
+CREATE TABLE t2 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE;
+ERROR HY000: Internal error: <prepare failure>
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+# Nothing has opened t2 since the failed ALTER TABLE.
+# MyRocks must not have kd (the same index numbers as before).
+same_indexes_as_before: 1, rocksdb_ddl_entries: 2
+# The data dictionary has no kd.
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+PRIMARY
+# The same ALTER TABLE without the failure
+ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' ORDER BY INDEX_NAME;
+INDEX_NAME
+kb
+kd
+PRIMARY
+SELECT pk, d FROM t2 FORCE INDEX (kd) WHERE d > 0 ORDER BY d;
+pk	d
+1	100
+2	200
+3	300
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+#
+# 3. Control: a DROP INDEX that succeeds is shown at once
+#
+CREATE TABLE t3 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+ALTER TABLE t3 DROP INDEX kb, ALGORITHM=INPLACE;
+SELECT COUNT(*) AS rocksdb_ddl_entries FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't3';
+rocksdb_ddl_entries
+1
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't3' ORDER BY INDEX_NAME;
+INDEX_NAME
+PRIMARY
+SET SESSION rocksdb_debug_inject_error_class = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_status = DEFAULT;
+DROP TABLE t1, t2, t3;

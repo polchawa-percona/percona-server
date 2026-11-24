@@ -1,0 +1,112 @@
+# PS-12244: an INPLACE DROP INDEX (or ADD INDEX) whose MyRocks prepare fails
+# is rolled back, but information_schema.ROCKSDB_DDL keeps showing the index
+# list of the failed ALTER TABLE until the table is opened again.
+#
+# commit_inplace_alter_table() installs the new index list in the MyRocks
+# data dictionary and in memory before the server commits the DDL. When the
+# MyRocks prepare of that commit fails, the server reports ER_INTERNAL_ERROR
+# and keeps the old table definition. The MyRocks pending ALTER TABLE record
+# restores the old index list only at the next open of the table.
+#
+# Debug only: the prepare failure is injected
+# (rocksdb_debug_inject_error_class = COMMIT, the first call = tx_prepare).
+
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+CALL mtr.add_suppression("ALTER TABLE was interrupted before the data dictionary commit");
+CALL mtr.add_suppression("RocksDB error on COMMIT");
+
+--echo #
+--echo # 1. DROP INDEX fails at the MyRocks prepare
+--echo #
+CREATE TABLE t1 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+                 KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+
+let $ids_before = `SELECT GROUP_CONCAT(INDEX_NUMBER ORDER BY INDEX_NUMBER)
+  FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`;
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+--replace_regex /Internal error: .*/Internal error: <prepare failure>/
+--error ER_INTERNAL_ERROR
+ALTER TABLE t1 DROP INDEX kb, ALGORITHM=INPLACE;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+
+--echo # Nothing has opened t1 since the failed ALTER TABLE.
+--echo # MyRocks must still have kb (the same index numbers as before).
+let $ids_after = `SELECT GROUP_CONCAT(INDEX_NUMBER ORDER BY INDEX_NUMBER)
+  FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`;
+let $n_after = `SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1'`;
+--let $same = `SELECT '$ids_after' = '$ids_before'`
+--echo same_indexes_as_before: $same, rocksdb_ddl_entries: $n_after
+--echo # The data dictionary still has kb.
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+
+--echo # kb is still usable
+SELECT pk, b FROM t1 FORCE INDEX (kb) WHERE b > 0 ORDER BY b;
+INSERT INTO t1 VALUES (4, 40, 400);
+SELECT pk, b FROM t1 FORCE INDEX (kb) WHERE b > 0 ORDER BY b;
+CHECK TABLE t1;
+--echo # After the open
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY INDEX_NAME;
+
+--echo #
+--echo # 2. ADD INDEX fails at the MyRocks prepare
+--echo #
+CREATE TABLE t2 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+                 KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+
+let $ids_before = `SELECT GROUP_CONCAT(INDEX_NUMBER ORDER BY INDEX_NUMBER)
+  FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2'`;
+SET SESSION rocksdb_debug_inject_error_class = 'COMMIT';
+SET SESSION rocksdb_debug_inject_error_status = 'IOERROR';
+SET SESSION rocksdb_debug_inject_error_nth = 1;
+--replace_regex /Internal error: .*/Internal error: <prepare failure>/
+--error ER_INTERNAL_ERROR
+ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE;
+SET SESSION rocksdb_debug_inject_error_nth = 0;
+
+--echo # Nothing has opened t2 since the failed ALTER TABLE.
+--echo # MyRocks must not have kd (the same index numbers as before).
+let $ids_after = `SELECT GROUP_CONCAT(INDEX_NUMBER ORDER BY INDEX_NUMBER)
+  FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2'`;
+let $n_after = `SELECT COUNT(*) FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2'`;
+--let $same = `SELECT '$ids_after' = '$ids_before'`
+--echo same_indexes_as_before: $same, rocksdb_ddl_entries: $n_after
+--echo # The data dictionary has no kd.
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' ORDER BY INDEX_NAME;
+
+--echo # The same ALTER TABLE without the failure
+ALTER TABLE t2 ADD INDEX kd (d), ALGORITHM=INPLACE;
+SELECT INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't2' ORDER BY INDEX_NAME;
+SELECT pk, d FROM t2 FORCE INDEX (kd) WHERE d > 0 ORDER BY d;
+CHECK TABLE t2;
+
+--echo #
+--echo # 3. Control: a DROP INDEX that succeeds is shown at once
+--echo #
+CREATE TABLE t3 (pk INT PRIMARY KEY, b INT NOT NULL, d INT NOT NULL,
+                 KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+ALTER TABLE t3 DROP INDEX kb, ALGORITHM=INPLACE;
+SELECT COUNT(*) AS rocksdb_ddl_entries FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't3';
+SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't3' ORDER BY INDEX_NAME;
+
+SET SESSION rocksdb_debug_inject_error_class = DEFAULT;
+SET SESSION rocksdb_debug_inject_error_status = DEFAULT;
+DROP TABLE t1, t2, t3;
