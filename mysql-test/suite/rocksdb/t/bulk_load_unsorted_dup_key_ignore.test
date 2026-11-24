@@ -1,0 +1,49 @@
+# PS-12246: in an unsorted MyRocks bulk load a duplicate primary key value
+# inside the merge buffer is returned as the SQL error number 1062 in place
+# of a handler error, so INSERT IGNORE fails with "Got error 1062 - 'Unknown
+# error 1062' from storage engine" instead of skipping the duplicate, and a
+# plain INSERT adds that error to its diagnostics area.
+#
+# Expected (InnoDB, the same statements run first as the reference):
+# INSERT IGNORE succeeds with a duplicate-key warning and loads the other
+# rows; a plain INSERT fails with ER_DUP_ENTRY and no ER_GET_ERRNO.
+
+--source include/have_rocksdb.inc
+
+--let $i = 0
+while ($i < 2) {
+  --let $eng = `SELECT ELT($i + 1, 'InnoDB', 'ROCKSDB')`
+  --echo # Engine $eng
+  --eval CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=$eng
+  SET SESSION rocksdb_bulk_load_allow_unsorted = ON;
+  SET SESSION rocksdb_bulk_load = ON;
+
+  --disable_warnings
+  --disable_result_log
+  --disable_abort_on_error
+  INSERT IGNORE INTO t VALUES (3, 3), (1, 1), (1, 2), (2, 2);
+  --let $err = $mysql_errno
+  --enable_abort_on_error
+  --enable_result_log
+  --let $c1 = query_get_value(SHOW WARNINGS, Code, 1)
+  --let $c2 = query_get_value(SHOW WARNINGS, Code, 2)
+  --echo INSERT IGNORE: errno $err, condition codes: $c1, $c2
+
+  --disable_result_log
+  --disable_abort_on_error
+  INSERT INTO t VALUES (6, 6), (5, 5), (5, 7);
+  --let $err = $mysql_errno
+  --enable_abort_on_error
+  --enable_result_log
+  --let $c1 = query_get_value(SHOW WARNINGS, Code, 1)
+  --let $c2 = query_get_value(SHOW WARNINGS, Code, 2)
+  --echo INSERT: errno $err, condition codes: $c1, $c2
+  --enable_warnings
+
+  SET SESSION rocksdb_bulk_load = OFF;
+  SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+  --echo # rows of the INSERT IGNORE: 1 (first value), 2, 3
+  SELECT pk, a FROM t WHERE pk <= 3 ORDER BY pk;
+  DROP TABLE t;
+  --inc $i
+}

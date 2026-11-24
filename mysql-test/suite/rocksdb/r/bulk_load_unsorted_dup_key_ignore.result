@@ -1,0 +1,34 @@
+# Engine InnoDB
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=InnoDB;
+SET SESSION rocksdb_bulk_load_allow_unsorted = ON;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT IGNORE INTO t VALUES (3, 3), (1, 1), (1, 2), (2, 2);
+INSERT IGNORE: errno 0, condition codes: 1062, No such row
+INSERT INTO t VALUES (6, 6), (5, 5), (5, 7);
+INSERT: errno 1062, condition codes: 1062, No such row
+SET SESSION rocksdb_bulk_load = OFF;
+SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+# rows of the INSERT IGNORE: 1 (first value), 2, 3
+SELECT pk, a FROM t WHERE pk <= 3 ORDER BY pk;
+pk	a
+1	1
+2	2
+3	3
+DROP TABLE t;
+# Engine ROCKSDB
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load_allow_unsorted = ON;
+SET SESSION rocksdb_bulk_load = ON;
+INSERT IGNORE INTO t VALUES (3, 3), (1, 1), (1, 2), (2, 2);
+INSERT IGNORE: errno 0, condition codes: 1062, No such row
+INSERT INTO t VALUES (6, 6), (5, 5), (5, 7);
+INSERT: errno 1062, condition codes: 1062, No such row
+SET SESSION rocksdb_bulk_load = OFF;
+SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+# rows of the INSERT IGNORE: 1 (first value), 2, 3
+SELECT pk, a FROM t WHERE pk <= 3 ORDER BY pk;
+pk	a
+1	1
+2	2
+3	3
+DROP TABLE t;
