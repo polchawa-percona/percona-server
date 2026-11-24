@@ -1,0 +1,80 @@
+CREATE TABLE t2 (a INT, b INT NOT NULL, c INT,
+w INT GENERATED ALWAYS AS (CAST(CONCAT(b, 'x') AS SIGNED)) VIRTUAL,
+KEY k (b)) ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 4;
+SET @old_sql_mode = @@sql_mode;
+SET sql_mode = '';
+INSERT INTO t2 (a, b, c) VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4),
+(5, 5, 5), (6, 6, 6), (7, 7, 7), (8, 8, 8);
+SET sql_mode = @old_sql_mode;
+SELECT b, a FROM t2 FORCE INDEX (k) ORDER BY b;
+b	a
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+DROP TABLE t2;
+CREATE TABLE t1 (a INT, b INT NOT NULL AUTO_INCREMENT, t MEDIUMTEXT,
+g TEXT GENERATED ALWAYS AS (SUBSTR(t, 1, 7)) VIRTUAL,
+KEY k (b)) ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 4;
+INSERT INTO t1 (a, t)
+WITH RECURSIVE s (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 16)
+SELECT n, REPEAT(CHAR(96 + n), 150000 + n * 20000) FROM s;
+SELECT b, a FROM t1 FORCE INDEX (k) ORDER BY b;
+b	a
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+9	9
+10	10
+11	11
+12	12
+13	13
+14	14
+15	15
+16	16
+SELECT b, a, g FROM t1 FORCE INDEX (k) ORDER BY b;
+b	a	g
+1	1	aaaaaaa
+2	2	bbbbbbb
+3	3	ccccccc
+4	4	ddddddd
+5	5	eeeeeee
+6	6	fffffff
+7	7	ggggggg
+8	8	hhhhhhh
+9	9	iiiiiii
+10	10	jjjjjjj
+11	11	kkkkkkk
+12	12	lllllll
+13	13	mmmmmmm
+14	14	nnnnnnn
+15	15	ooooooo
+16	16	ppppppp
+SELECT b, a, g, LENGTH(t) FROM t1 IGNORE INDEX (k) ORDER BY b;
+b	a	g	LENGTH(t)
+1	1	aaaaaaa	170000
+2	2	bbbbbbb	190000
+3	3	ccccccc	210000
+4	4	ddddddd	230000
+5	5	eeeeeee	250000
+6	6	fffffff	270000
+7	7	ggggggg	290000
+8	8	hhhhhhh	310000
+9	9	iiiiiii	330000
+10	10	jjjjjjj	350000
+11	11	kkkkkkk	370000
+12	12	lllllll	390000
+13	13	mmmmmmm	410000
+14	14	nnnnnnn	430000
+15	15	ooooooo	450000
+16	16	ppppppp	470000
+DROP TABLE t1;
