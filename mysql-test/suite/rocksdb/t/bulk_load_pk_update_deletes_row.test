@@ -1,0 +1,162 @@
+--source include/have_rocksdb.inc
+
+# PS-12229: an UPDATE that changes the primary key value, run while
+# rocksdb_bulk_load=1 is in effect, deletes the old primary key record through
+# the transaction and writes the new one to the bulk load's SST file
+# (ha_rocksdb::update_write_pk()). When the ingest of that file fails at the end
+# of the load (its key range overlaps keys in the memtable or in an SST file),
+# the new record is dropped while the delete of the old one and the secondary
+# index changes are committed: the row is gone from the table, and the
+# secondary index points at a primary key value that does not exist.
+# Related: PS-12227 (the same code path loses UPDATEs that keep the primary key
+# value).
+#
+# Expected: every UPDATE either takes effect completely (the row is found under
+# its new key through the primary key and the secondary index) or fails and
+# changes nothing. The test accepts both: it does not print the outcome of an
+# UPDATE, only whether the table agrees with it.
+
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+
+--let $case = 1
+while ($case <= 5)
+{
+  --let $t = t1
+  --let $has_sk = 1
+  if ($case == 1)
+  {
+    --echo # Case 1: rows in the memtable, SET rocksdb_bulk_load = 0 ends the load
+  }
+  if ($case == 2)
+  {
+    --echo # Case 2: rows in the memtable, a write to another table ends the load
+  }
+  if ($case == 3)
+  {
+    --echo # Case 3: rows in an SST file, SET rocksdb_bulk_load = 0 ends the load
+  }
+  if ($case == 4)
+  {
+    --echo # Case 4: a table without secondary index
+    --let $t = t3
+    --let $has_sk = 0
+  }
+  if ($case == 5)
+  {
+    --echo # Case 5: one UPDATE whose new key overlaps no other key
+  }
+  if ($has_sk)
+  {
+    CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+  }
+  if (!$has_sk)
+  {
+    CREATE TABLE t3 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+  }
+  eval INSERT INTO $t VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+  if ($case == 3)
+  {
+    SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+  }
+
+  SET SESSION rocksdb_bulk_load = 1;
+  --disable_query_log
+  --disable_result_log
+  --disable_abort_on_error
+  if ($case != 5)
+  {
+    # the new keys 15 and 25 lie on both sides of the existing key 20
+    eval UPDATE $t SET a = 15 WHERE a = 40;
+    --let $err1 = $mysql_errno
+    eval UPDATE $t SET a = 25 WHERE a = 30;
+    --let $err2 = $mysql_errno
+  }
+  if ($case == 5)
+  {
+    eval UPDATE $t SET a = 50 WHERE a = 40;
+    --let $err1 = $mysql_errno
+  }
+  if ($case == 2)
+  {
+    INSERT INTO t2 VALUES (7);
+  }
+  SET SESSION rocksdb_bulk_load = 0;
+  --enable_abort_on_error
+  --enable_result_log
+  --enable_query_log
+
+  --echo # every row that existed before the load is still there
+  eval SELECT b FROM $t USE INDEX () ORDER BY b;
+
+  --echo # each UPDATE took effect completely, or failed and changed nothing
+  --let $u = 1
+  --let $u_max = 2
+  if ($case == 5)
+  {
+    --let $u_max = 1
+  }
+  while ($u <= $u_max)
+  {
+    if ($case != 5)
+    {
+      if ($u == 1)
+      {
+        --let $old_a = 40
+        --let $new_a = 15
+        --let $b = 40
+        --let $err = $err1
+      }
+      if ($u == 2)
+      {
+        --let $old_a = 30
+        --let $new_a = 25
+        --let $b = 30
+        --let $err = $err2
+      }
+    }
+    if ($case == 5)
+    {
+      --let $old_a = 40
+      --let $new_a = 50
+      --let $b = 40
+      --let $err = $err1
+    }
+    --let $pk_new = `SELECT COUNT(*) = 1 FROM $t USE INDEX () WHERE b = $b AND a = $new_a`
+    --let $pk_old = `SELECT COUNT(*) = 1 FROM $t USE INDEX () WHERE b = $b AND a = $old_a`
+    --let $sk_new = 1
+    --let $sk_old = 1
+    if ($has_sk)
+    {
+      --let $sk_new = `SELECT COUNT(*) = 1 AND MIN(a) = $new_a FROM t1 FORCE INDEX (kb) WHERE b = $b`
+      --let $sk_old = `SELECT COUNT(*) = 1 AND MIN(a) = $old_a FROM t1 FORCE INDEX (kb) WHERE b = $b`
+    }
+    --disable_query_log
+    eval SELECT ($err = 0 AND $pk_new AND $sk_new) OR
+                ($err <> 0 AND $pk_old AND $sk_old) AS all_or_nothing;
+    --enable_query_log
+    --inc $u
+  }
+
+  --echo # the rows the UPDATEs did not touch are unchanged
+  eval SELECT a, b FROM $t USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+  if ($has_sk)
+  {
+    --echo # the primary key and the secondary index agree
+    SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+           (SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+    SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+    WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+                      WHERE s.a = p.a AND s.b <=> p.b);
+    SELECT COUNT(*) AS sk_entries_without_pk_row FROM t1 AS s FORCE INDEX (kb)
+    WHERE NOT EXISTS (SELECT 1 FROM t1 AS p USE INDEX ()
+                      WHERE p.a = s.a AND p.b <=> s.b);
+  }
+  eval CHECK TABLE $t;
+  eval DROP TABLE $t;
+  --inc $case
+}
+
+DROP TABLE t2;
