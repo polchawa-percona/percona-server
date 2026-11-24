@@ -1,0 +1,41 @@
+call mtr.add_suppression("Chunk size is too small to process merge");
+call mtr.add_suppression("finalizing last SST file while setting bulk loading");
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE src (pk INT PRIMARY KEY, b VARCHAR(32) NOT NULL, d INT NOT NULL)
+ENGINE=InnoDB;
+INSERT INTO src
+WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 3000)
+SELECT (i * 7919) MOD 100003, CONCAT('b', i MOD 7), 100000 - i FROM s;
+SELECT COUNT(*), SUM(CRC32(CONCAT(pk, b, d))) INTO @n, @c FROM src;
+CREATE TABLE t (pk INT PRIMARY KEY, b VARCHAR(32) NOT NULL, d INT NOT NULL)
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 4096;
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+SET SESSION rocksdb_merge_combine_read_size = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+# case 1: rows kept or the INSERT failed: 1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+CREATE TABLE t (pk INT PRIMARY KEY, b VARCHAR(32) NOT NULL, d INT NOT NULL)
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 4096;
+# rocksdb_merge_combine_read_size = 400
+SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t SELECT * FROM src;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+SET SESSION rocksdb_merge_combine_read_size = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+# case 2: rows kept or the INSERT failed: 1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+DROP TABLE src;

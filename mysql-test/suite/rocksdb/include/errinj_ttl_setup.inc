@@ -52,6 +52,10 @@ delimiter ;|
 --let $errinj_reset = CALL errinj_ttl_reset($errinj_ttl_sk)
 --let $errinj_state_proc = CALL errinj_tables_state('tt_h,tt_c', 't_outt', 0)
 --let $errinj_state = SELECT @errinj_state
+# tt_c.ts holds UNIX_TIMESTAMP() of the reset and of the statement, which
+# differs between the reference run and the iterations: leave it out of the
+# full-row state (myrocks_inv_fullrow.inc); TTL filtering still counts rows.
+--let $inv_fullrow_skip_cols = tt_c.ts
 --let $errinj_tables = tt_h,tt_c
 --let $errinj_source = suite/rocksdb/include/errinj_stmt.inc
 --let $errinj_after_restart_inc = suite/rocksdb/include/errinj_noop.inc
