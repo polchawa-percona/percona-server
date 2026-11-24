@@ -1,0 +1,66 @@
+--source include/have_rocksdb.inc
+
+# PS-12230: an ordered scan through a secondary index of a partitioned MyRocks
+# table that has a VIRTUAL generated column over a BLOB/TEXT column crashes
+# the server. Related: PS-11849 (same cause, there shown by ASAN only, with
+# results equal to InnoDB).
+#
+# Cause: ha_rocksdb::get_row_by_rowid() calls fill_virtual_columns(), which
+# evaluates every VIRTUAL column, also those the query does not read. The
+# row decoder decodes only the read columns and the base columns of requested
+# VIRTUAL columns, so the BLOB/TEXT base column t of the unread column g is
+# never decoded: its null flag, length and data pointer are leftover bytes.
+# In an ordered partitioned scan (Partition_helper::handle_ordered_next())
+# each partition's row is read into its own priority-queue buffer (my_malloc,
+# not zeroed), so these bytes were never written, and SUBSTR(t, 1, 7) reads
+# through them: SIGSEGV in Item_func_substr::val_str(), also on release
+# builds. Evaluating only the VIRTUAL columns in the read set avoids the
+# crash; evaluating all of them over the row buffer instead of
+# table->record[0] does not (the buffer's t is not decoded either). That
+# fill_virtual_columns() evaluates over table->record[0] instead of the
+# buffer is a second, smaller defect (PS-11849): it makes the evaluations
+# use the wrong row.
+#
+# 1. Without a crash, on every build: an unread VIRTUAL column whose
+#    expression warns. Here its base column b is read (decoded), so the leg
+#    shows that the unrequested column is evaluated at all (any warning; on
+#    a partitioned table also over the wrong rows), not the undecoded base.
+#    Expected: no warnings (as InnoDB).
+# 2. The crash. Whether the leftover bytes crash depends on the heap state:
+#    a pass alone does not prove a fix. With a fixed fill byte it crashed on
+#    every run:
+#    ./mtr --mysqld-env=MALLOC_PERTURB_=90 \
+#      --mysqld-env=GLIBC_TUNABLES=glibc.malloc.perturb=90:glibc.malloc.tcache_count=0
+#    Expected: the queries return the rows.
+#
+# Also related: PS-11841 (partitioned ordered scan with an indexed VIRTUAL
+# column, server side), PS-9853 (same call chain, 8.0 assertion).
+# Expected result recorded from InnoDB.
+
+# 1. Unread VIRTUAL column w is evaluated (warnings 1292 for 'Nx').
+CREATE TABLE t2 (a INT, b INT NOT NULL, c INT,
+  w INT GENERATED ALWAYS AS (CAST(CONCAT(b, 'x') AS SIGNED)) VIRTUAL,
+  KEY k (b)) ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 4;
+SET @old_sql_mode = @@sql_mode;
+SET sql_mode = '';
+--disable_warnings
+INSERT INTO t2 (a, b, c) VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4),
+  (5, 5, 5), (6, 6, 6), (7, 7, 7), (8, 8, 8);
+--enable_warnings
+SET sql_mode = @old_sql_mode;
+SELECT b, a FROM t2 FORCE INDEX (k) ORDER BY b;
+DROP TABLE t2;
+
+# 2. Crash: unread VIRTUAL column g over the undecoded TEXT column t.
+CREATE TABLE t1 (a INT, b INT NOT NULL AUTO_INCREMENT, t MEDIUMTEXT,
+  g TEXT GENERATED ALWAYS AS (SUBSTR(t, 1, 7)) VIRTUAL,
+  KEY k (b)) ENGINE=ROCKSDB PARTITION BY KEY (a) PARTITIONS 4;
+INSERT INTO t1 (a, t)
+  WITH RECURSIVE s (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 16)
+  SELECT n, REPEAT(CHAR(96 + n), 150000 + n * 20000) FROM s;
+
+SELECT b, a FROM t1 FORCE INDEX (k) ORDER BY b;
+SELECT b, a, g FROM t1 FORCE INDEX (k) ORDER BY b;
+SELECT b, a, g, LENGTH(t) FROM t1 IGNORE INDEX (k) ORDER BY b;
+
+DROP TABLE t1;
