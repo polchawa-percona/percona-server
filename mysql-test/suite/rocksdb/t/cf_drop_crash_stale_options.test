@@ -1,0 +1,106 @@
+# Bug PS-12231: MyRocks refuses to start after a crash during the background
+# drop of a column family (SET GLOBAL rocksdb_delete_cf).
+#
+# RocksDB's DropColumnFamily() first records the drop in the MANIFEST and
+# then writes a new OPTIONS file. A crash between the two leaves the newest
+# OPTIONS file listing the dropped column family. RocksDB opens such a
+# database (the MANIFEST is the source of truth and the OPTIONS file is
+# rewritten on open), but MyRocks first compares the newest OPTIONS file with
+# the column families of the MANIFEST and refuses to start on a count
+# mismatch ("Mismatched size of column family descriptors"), so the server
+# comes up without the ROCKSDB engine. rocksdb.restart_during_drop_cf
+# expects a restart during a column family drop to work.
+#
+# The crash is a simulated power cut (rocksdb_debug_unsynced_data_loss) fired
+# by the next durable write of this session
+# (rocksdb_debug_crash_on_nth_durable_write), the commit of an INSERT into
+# t1, while the background thread drops the column family. The crash races
+# that thread, so the test checks that it landed inside the window and fails
+# otherwise (no retry):
+# - before the restart, the newest OPTIONS file must still list cf_drop
+#   (else it dies with "crash missed the window: OPTIONS already rewritten")
+#   and the MANIFEST (ldb list_column_families) must no longer list it
+#   (else "crash missed the window: MANIFEST still lists cf_drop");
+# - after a successful restart, the server log must have "Column family with
+#   id N doesn't exist in cf manager, but it is listed to be dropped", the
+#   server's own view that the MANIFEST had the drop (assert_grep "The
+#   MANIFEST recorded the drop before the crash").
+# A "crash missed the window" failure means the run proves nothing; rerun.
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+--disable_query_log
+# The first four suppressions are for the unfixed server, which refuses to
+# start MyRocks after the crash.
+call mtr.add_suppression("Compatibility check against existing database options failed");
+call mtr.add_suppression("Plugin 'ROCKSDB' init function returned error");
+call mtr.add_suppression("Plugin 'ROCKSDB' registration as a STORAGE ENGINE failed");
+call mtr.add_suppression("Couldn't stop the .* thread");
+call mtr.add_suppression("Column family with id .* doesn't exist in cf manager, but it is listed to be dropped");
+--enable_query_log
+
+--let CFDROP_RDB_DIR = `SELECT CONCAT(@@datadir, '.rocksdb')`
+
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+
+CREATE TABLE t2 (pk INT, a INT, PRIMARY KEY (pk) COMMENT 'cfname=cf_drop') ENGINE=ROCKSDB;
+INSERT INTO t2 VALUES (1, 1);
+DROP TABLE t2;
+SET GLOBAL rocksdb_signal_drop_index_thread = ON;
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.rocksdb_global_info WHERE type = 'DDL_DROP_INDEX_ONGOING';
+--source include/wait_condition.inc
+
+SET GLOBAL rocksdb_delete_cf = 'cf_drop';
+--exec echo "wait" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+SET SESSION rocksdb_debug_crash_on_nth_durable_write = 1;
+--error 2013
+INSERT INTO t1 VALUES (3, 3);
+--source include/wait_until_disconnected.inc
+
+--echo # The newest OPTIONS file must still list cf_drop (crash inside the drop).
+--perl
+use strict;
+my $dir = $ENV{'CFDROP_RDB_DIR'};
+opendir(my $dh, $dir) or die "cannot open $dir: $!";
+my @opts = sort { $a->[0] <=> $b->[0] }
+           map { /^OPTIONS-(\d+)$/ ? [$1, $_] : () } readdir($dh);
+closedir($dh);
+die "no OPTIONS file in $dir" unless @opts;
+my $newest = "$dir/$opts[-1]->[1]";
+open(my $fh, '<', $newest) or die "cannot open $newest: $!";
+my $listed = grep { /^\[CFOptions "cf_drop"\]/ } <$fh>;
+close($fh);
+die "crash missed the window: OPTIONS already rewritten" unless $listed;
+print "newest OPTIONS file lists cf_drop\n";
+# ldb is built next to sst_dump (storage/rocksdb/CMakeLists.txt).
+my $ldb = $ENV{'MYSQL_SST_DUMP'};
+$ldb =~ s/sst_dump$/ldb/;
+-x $ldb or die "cannot find ldb next to sst_dump ($ldb)";
+my $cfs = `$ldb --db=$dir list_column_families 2>&1`;
+die "ldb list_column_families failed: $cfs" if $? || $cfs !~ /\{([^}]*)\}/;
+my %manifest_cfs = map { s/^\s+|\s+$//g; ($_ => 1) } split(/,/, $1);
+die "ldb list_column_families: no default CF: $cfs" unless $manifest_cfs{'default'};
+die "crash missed the window: MANIFEST still lists cf_drop" if $manifest_cfs{'cf_drop'};
+print "MANIFEST no longer lists cf_drop\n";
+EOF
+--let $_expect_file_name = $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--source include/start_mysqld.inc
+
+--echo # MyRocks must start after the crash.
+SELECT support FROM information_schema.engines WHERE engine = 'ROCKSDB';
+--let $rdb_ok = `SELECT COUNT(*) FROM information_schema.engines WHERE engine = 'ROCKSDB' AND support IN ('YES', 'DEFAULT')`
+if ($rdb_ok) {
+  --let $assert_text = The MANIFEST recorded the drop before the crash
+  --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+  --let $assert_select = Column family with id .* doesn't exist in cf manager, but it is listed to be dropped
+  --let $assert_count = 1
+  --let $assert_only_after = CURRENT_TEST: rocksdb.cf_drop_crash_stale_options
+  --source include/assert_grep.inc
+  SELECT * FROM t1 ORDER BY pk;
+  DROP TABLE t1;
+}
+# Only an unfixed server gets here: MyRocks refused to start.
+if (!$rdb_ok) {
+  --echo # ROCKSDB is not available after the restart
+}

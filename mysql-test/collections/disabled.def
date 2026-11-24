@@ -134,6 +134,7 @@ rocksdb.level_read_uncommitted : BUG#0 MyRocks does not yet suppore ISO read unc
 rocksdb.level_serializable : BUG#0 MyRocks does not yet support ISO serializable
 rocksdb.slow_query_log : BUG#26 MYR-26
 rocksdb.errinj_ddl_write : BUG#11744 PS-11744 PS-11745 write status ignored
+rocksdb.cf_drop_crash_stale_options : BUG#0 PS-12231 MyRocks fails to start
 rocksdb.errinj_bulk_load : BUG#11759 PS-11759 orphan SK entries
 rocksdb.bulk_load_failed_ingest_sk : BUG#11759 PS-11759 orphan SK entries
 rocksdb.errinj_bg_drop_index_empty_check : BUG#11775 PS-11775 rows not reclaimed
