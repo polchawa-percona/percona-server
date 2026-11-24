@@ -1,0 +1,30 @@
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(64) NOT NULL,
+KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 (pk, a, b)
+WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30)
+SELECT i, i * 7 MOD 11, REPEAT(CHAR(96 + i MOD 26), i) FROM s;
+# Leg 1: default settings.
+SELECT GET_LOCK('ctas_crash', 0);
+GET_LOCK('ctas_crash', 0)
+1
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# CREATE TABLE t3 ... AS SELECT * FROM t2, blocks at row 20.
+# Kill the server while the CREATE TABLE ... SELECT runs.
+# Kill the server
+# restart
+t3 does not exist or holds all rows of t2: 1
+DROP TABLE IF EXISTS t3;
+# Leg 2: rocksdb_commit_in_the_middle=ON, rocksdb_bulk_load_size=8.
+SELECT GET_LOCK('ctas_crash', 0);
+GET_LOCK('ctas_crash', 0)
+1
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+SET SESSION rocksdb_commit_in_the_middle = ON;
+SET SESSION rocksdb_bulk_load_size = 8;
+# CREATE TABLE t3 ... AS SELECT * FROM t2, blocks at row 20.
+# Kill the server while the CREATE TABLE ... SELECT runs.
+# Kill the server
+# restart
+t3 does not exist or holds all rows of t2: 1
+DROP TABLE IF EXISTS t3;
+DROP TABLE t2;

@@ -1,0 +1,88 @@
+--source include/have_rocksdb.inc
+
+# PS-12228: the server is killed while CREATE TABLE ... SELECT into a ROCKSDB
+# table is still copying rows. After the restart the new table exists, empty,
+# or, with rocksdb_commit_in_the_middle=ON, holding the rows of the
+# intermediate commits made so far. A partial copy looks like a finished one.
+# MyRocks does not declare HTON_SUPPORTS_ATOMIC_DDL, so the server commits the
+# CREATE (server data dictionary and MyRocks dictionary) before the rows are
+# inserted. Related: PS-11763 (same mechanism, power cut after a successful
+# CTAS), PS-11666 (no atomic DDL in MyRocks).
+# No debug features: the SELECT blocks in GET_LOCK() on row 20 while another
+# connection holds the lock, and the server is killed there.
+# Expected result (as for an engine with atomic DDL, and as PS-11763 states):
+# after the crash t3 does not exist, or it holds all rows of t2. The test
+# accepts both and prints only whether one of them holds.
+# Note: the server documents CTAS as non-atomic for engines without atomic
+# DDL (sql/sql_insert.cc, Query_result_create::send_eof), and
+# rocksdb.ddl_crash_recovery case 9 records the empty leftover table as the
+# current behaviour, so this may be closed as by design; a fix must update
+# that case too.
+
+--let $engine = ROCKSDB
+
+CREATE TABLE t2 (pk INT PRIMARY KEY, a INT NOT NULL, b VARCHAR(64) NOT NULL,
+  KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO t2 (pk, a, b)
+  WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 30)
+  SELECT i, i * 7 MOD 11, REPEAT(CHAR(96 + i MOD 26), i) FROM s;
+
+--let $leg = 1
+while ($leg <= 2) {
+  if ($leg == 1) {
+    --echo # Leg 1: default settings.
+  }
+  if ($leg == 2) {
+    --echo # Leg 2: rocksdb_commit_in_the_middle=ON, rocksdb_bulk_load_size=8.
+  }
+  --connect (con_lock,localhost,root,,test)
+  SELECT GET_LOCK('ctas_crash', 0);
+
+  --connect (con_ctas,localhost,root,,test)
+  SET SESSION transaction_isolation = 'READ-COMMITTED';
+  if ($leg == 2) {
+    SET SESSION rocksdb_commit_in_the_middle = ON;
+    SET SESSION rocksdb_bulk_load_size = 8;
+  }
+  --echo # CREATE TABLE t3 ... AS SELECT * FROM t2, blocks at row 20.
+  --disable_query_log
+  --send_eval CREATE TABLE t3 ENGINE=$engine AS SELECT * FROM t2 WHERE IF(pk < 20, 1, GET_LOCK('ctas_crash', 3600)) = 1
+  --enable_query_log
+
+  --connection default
+  let $wait_condition = SELECT COUNT(*) = 1 FROM information_schema.processlist
+    WHERE state = 'User lock' AND info LIKE 'CREATE TABLE t3%';
+  --source include/wait_condition.inc
+
+  --echo # Kill the server while the CREATE TABLE ... SELECT runs.
+  --source include/kill_mysqld.inc
+  --source include/start_mysqld.inc
+
+  --connection con_ctas
+  --disable_result_log
+  --error 2013
+  --reap
+  --enable_result_log
+  --disconnect con_ctas
+  --disconnect con_lock
+  --connection default
+
+  --let $in_dd = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't3'`
+  --let $in_rdb = `SELECT COUNT(*) FROM information_schema.rocksdb_ddl WHERE table_schema = 'test' AND table_name = 't3'`
+  --let $ok = 0
+  if ($in_dd == 0) {
+    if ($in_rdb == 0) {
+      --let $ok = 1
+    }
+  }
+  if ($in_dd == 1) {
+    --let $ok = `SELECT (SELECT COUNT(*) FROM t3) = 30 AND (SELECT BIT_XOR(CRC32(CONCAT_WS('#', pk, a, b))) FROM t3) = (SELECT BIT_XOR(CRC32(CONCAT_WS('#', pk, a, b))) FROM t2)`
+  }
+  --echo t3 does not exist or holds all rows of t2: $ok
+  --disable_warnings
+  DROP TABLE IF EXISTS t3;
+  --enable_warnings
+  --inc $leg
+}
+
+DROP TABLE t2;
