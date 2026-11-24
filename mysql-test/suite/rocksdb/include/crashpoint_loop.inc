@@ -46,7 +46,26 @@
 # With $crashpoint_after_window the loop ends with one more crash, after the
 # statement completed and was acknowledged to the client (a power cut right
 # after it, fired through the checkpoint site by power_loss_now.inc): the
-# recovered state must then be the post-statement state in every mode.
+# recovered state must then be the post-statement state, except with a lazy
+# rocksdb_flush_log_at_trx_commit (0 or 2) together with the power loss
+# simulation. There the acknowledged statement may be lost as a whole
+# (documented lazy durability: a lost suffix of whole acknowledged commits),
+# so the recovered state may be the starting or the post-statement state,
+# never a mix (still a violation, as is any CHECK TABLE or invariant
+# failure), and it must be consistent with the binary log: the MyRocks
+# state must be a prefix of the binary log's commit order, never ahead of
+# it. With the binary log on, the binary log file that was current before
+# the statement must still hold every event up to the starting state
+# (recovered starting state) or up to the end of the statement (recovered
+# post-statement state); a binary log that still holds the lost statement
+# (ahead by exactly the lost suffix) is accepted. Such a window prints
+# "recovered to a prefix of the acknowledged commits (lazy durability)"
+# whichever state it recovered (fltc=2 races the background WAL sync).
+# With rocksdb_flush_log_at_trx_commit=1, or with a plain abort (no power
+# loss), nothing acknowledged may be lost. Limitation: the loop knows only
+# the starting and the post-statement state, so a body that makes several
+# commits and recovers to an intermediate prefix is reported as "neither"
+# (the conservative direction).
 # Windows listed in $crashpoint_skip are crashed and restarted like the
 # others but not checked; each prints "skipped (<ticket>)". The number of
 # violations must always be 0: a known bug is a skipped window that cites
@@ -177,6 +196,10 @@ if ($crashpoint_repair_parameters) {
 --let $_cp_power = `SELECT @@global.rocksdb_debug_unsynced_data_loss`
 --let $_cp_mode = `SELECT @@global.rocksdb_flush_log_at_trx_commit`
 --let $_cp_lazy = `SELECT @@global.rocksdb_flush_log_at_trx_commit <> 1`
+# Lazy durability with a power loss: the after-statement window accepts a
+# lost acknowledged statement if the binary log agrees (see above).
+--let $_cp_lazy_power = `SELECT $_cp_lazy AND $_cp_power`
+--let $_cp_binlog = `SELECT @@global.log_bin`
 
 # The statement is run through a body include: the loop body below must
 # not contain a conditional --source with a possibly empty name, because
@@ -287,6 +310,18 @@ while (!$crashpoint_done) {
   if (!$cp_after_mode) {
     eval SET SESSION rocksdb_debug_crash_on_nth_durable_write = $crashpoint_n;
   }
+  # Binary log position before the statement (lazy power-loss after window).
+  --let $cp_bl_file = none
+  --let $cp_bl_pos1 = 0
+  --let $cp_bl_pos2 = 0
+  if ($cp_after_mode) {
+    if ($_cp_lazy_power) {
+      if ($_cp_binlog) {
+        --let $cp_bl_file = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+        --let $cp_bl_pos1 = query_get_value(SHOW BINARY LOG STATUS, Position, 1)
+      }
+    }
+  }
   --exec echo "wait" > $_cp_expect
   --enable_query_log
 
@@ -297,6 +332,17 @@ while (!$crashpoint_done) {
     # The statement is done and acknowledged: cut the power now (the
     # hook fires at the checkpoint site, before anything is written).
     --disable_query_log
+    if ($cp_bl_file != none) {
+      --let $cp_bl_pos2 = query_get_value(SHOW BINARY LOG STATUS, Position, 1)
+      --let $cp_bl_file2 = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+      if ($cp_bl_file2 != $cp_bl_file) {
+        # The statement rotated the binary log: the size check below would
+        # compare positions of different files.
+        --echo VIOLATION $crashpoint_label $cp_win: the binary log rotated during the statement ($cp_bl_file -> $cp_bl_file2); the binary log check cannot be made
+        --inc $crashpoint_violations
+        --let $cp_bl_file = none
+      }
+    }
     SET SESSION rocksdb_debug_crash_on_nth_durable_write = 1;
     --disable_result_log
     --error 0,1040,1053,1317,2002,2003,2006,2013,2014,2016,2017,2055,ER_CLIENT_INTERACTION_TIMEOUT
@@ -479,8 +525,33 @@ while (!$crashpoint_done) {
       }
       if ($cp_after_mode) {
         if ($cp_recovered != final) {
-          --echo VIOLATION $crashpoint_label $cp_win: the acknowledged statement was lost by the crash that followed it
-          --inc $crashpoint_violations
+          if (!$_cp_lazy_power) {
+            --echo VIOLATION $crashpoint_label $cp_win: the acknowledged statement was lost by the crash that followed it
+            --inc $crashpoint_violations
+          }
+        }
+        if ($_cp_lazy_power) {
+          # Lazy durability: the statement may be lost as a whole (the
+          # "neither" check above flags a partial state), but the MyRocks
+          # state must not be ahead of the binary log: the binary log file
+          # of the statement must hold every event up to the recovered
+          # state.
+          --let $cp_bl_size = -
+          if ($cp_bl_file != none) {
+            --let $cp_bl_need = $cp_bl_pos1
+            if ($cp_recovered == final) {
+              --let $cp_bl_need = $cp_bl_pos2
+            }
+            # -1: the file cannot be read (secure_file_priv, removed).
+            --let $cp_bl_size = `SELECT IFNULL(LENGTH(LOAD_FILE(CONCAT(LEFT(@@global.log_bin_basename, LENGTH(@@global.log_bin_basename) - LENGTH(SUBSTRING_INDEX(@@global.log_bin_basename, '/', -1))), '$cp_bl_file'))), -1)`
+            --let $cp_bl_bad = `SELECT $cp_bl_size < $cp_bl_need`
+            if ($cp_bl_bad) {
+              --echo VIOLATION $crashpoint_label $cp_win: the recovered state is ahead of the binary log (binary log $cp_bl_file has $cp_bl_size bytes, the recovered $cp_recovered state needs $cp_bl_need)
+              --inc $crashpoint_violations
+            }
+          }
+          # Evidence of the lazy window (not part of the result).
+          --exec echo "$crashpoint_label: lazy_power_after recovered=$cp_recovered log_bin=$_cp_binlog binlog=$cp_bl_file pos_before=$cp_bl_pos1 pos_after=$cp_bl_pos2 size_after_recovery=$cp_bl_size" >> $MYSQLTEST_VARDIR/log/crashpoint_stats.log
         }
       }
       if ($cp_recovered != final) {
@@ -530,6 +601,20 @@ while (!$crashpoint_done) {
       if ($cp_recovered == violation) {
         --echo # $cp_win: crashed at $cp_site, recovered to an invalid state
       }
+      # The lazy power-loss after window may recover either state (the
+      # background WAL sync races the cut): one line for both.
+      --let $cp_lazy_line = 0
+      if ($cp_after_mode) {
+        if ($_cp_lazy_power) {
+          if ($cp_recovered != violation) {
+            --let $cp_lazy_line = 1
+          }
+        }
+      }
+      if ($cp_lazy_line) {
+        --echo # $cp_win: crashed at $cp_site, recovered to a prefix of the acknowledged commits (lazy durability)
+      }
+      if (!$cp_lazy_line) {
       if ($crashpoint_neutral) {
         if ($cp_recovered != violation) {
           --echo # $cp_win: crashed at $cp_site, recovered to a consistent state
@@ -542,6 +627,7 @@ while (!$crashpoint_done) {
         if ($cp_recovered == final) {
           --echo # $cp_win: crashed at $cp_site, recovered to the post-statement state
         }
+      }
       }
     }
   }
@@ -693,4 +779,14 @@ if (!$crashpoint_no_die) {
 --let $cp_dropped_base =
 --let $cp_fired_prev =
 --let $cp_log_marker =
+--let $cp_bl_file =
+--let $cp_bl_file2 =
+--let $cp_bl_pos1 =
+--let $cp_bl_pos2 =
+--let $cp_bl_need =
+--let $cp_bl_size =
+--let $cp_bl_bad =
+--let $cp_lazy_line =
+--let $_cp_lazy_power =
+--let $_cp_binlog =
 --let $wait_counter =
