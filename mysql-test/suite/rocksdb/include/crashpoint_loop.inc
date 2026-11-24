@@ -198,7 +198,12 @@ if (!$crashpoint_body) {
 --disable_query_log
 --disable_abort_on_error
 SET SESSION rocksdb_debug_crash_on_nth_durable_write = 0;
-# Counts the hook lines of earlier loops of the same test.
+# A unique marker line in the error log: crashpoint_site.inc counts the
+# hook and drop lines after it only, so lines written before this loop
+# (earlier loops of the same test, earlier tests of the same worker)
+# cannot shift the counts.
+--let $cp_log_marker = `SELECT CONCAT('crashpoint_loop marker ', REPLACE(UUID(), '-', ''))`
+--exec echo "$cp_log_marker" >> $MYSQLTEST_VARDIR/log/mysqld.1.err
 --source suite/rocksdb/include/crashpoint_site.inc
 --let $cp_fired_prev = $cp_fired
 --let $cp_fired_base = $cp_fired
@@ -227,6 +232,7 @@ if ($cp_ref_err) {
   --die the reference run of $crashpoint_label failed with error $cp_ref_err
 }
 if ($cp_probe_res != ok) {
+  --echo REFERENCE PROBE FAILED: $cp_probe_res
   --die the probe failed in the reference run of $crashpoint_label: $cp_probe_res
 }
 if ($cp_state_now != $crashpoint_after) {
@@ -376,6 +382,7 @@ while (!$crashpoint_done) {
     --let $cp_drop_have = `SELECT $cp_dropped - $cp_dropped_base`
     if ($cp_drop_have != $cp_drop_want) {
       --echo VIOLATION $crashpoint_label $cp_win: the unsynced data drop lines in the error log do not match the power loss setting
+      --echo ORACLE-DIAG power=$_cp_power fired=$cp_fired fired_base=$cp_fired_base dropped=$cp_dropped dropped_base=$cp_dropped_base want=$cp_drop_want have=$cp_drop_have
       --inc $crashpoint_violations
     }
     if ($crashpoint_detail_window) {
@@ -685,4 +692,5 @@ if (!$crashpoint_no_die) {
 --let $cp_fired_base =
 --let $cp_dropped_base =
 --let $cp_fired_prev =
+--let $cp_log_marker =
 --let $wait_counter =
