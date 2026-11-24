@@ -1,0 +1,66 @@
+--source include/have_rocksdb.inc
+
+# PS-12232: an error raised for a secondary key of a row during a bulk load
+# (rocksdb_bulk_load=1, rocksdb_bulk_load_allow_sk=ON), after the primary key
+# of that row was already written to the load's SST file, leaves the row in
+# the primary key and in the secondary keys written before the error, but not
+# in the others. The keys already handed to the bulk load are not undone when
+# the statement fails, and they are ingested when the load ends.
+#
+# Here the error comes from the secondary key merge buffer
+# (rocksdb_merge_buf_size smaller than one secondary key entry). A KILL QUERY
+# landing between the keys of a row (bulk_load_key() returns
+# HA_ERR_QUERY_INTERRUPTED) leaves the same state.
+#
+# Expected: after the load ends, every index of the table has the same rows,
+# whether the failing statement keeps the row or not.
+
+call mtr.add_suppression("Current value of rocksdb_merge_buf_size=100 is too small");
+
+--echo #
+--echo # Case 1: the first row of the load has a secondary key entry larger
+--echo # than the merge buffer.
+--echo #
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(255), KEY kb (b), KEY kc (c)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+--disable_query_log
+--disable_result_log
+--error 0,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (1, 10, REPEAT('x', 150));
+# A fix may also refuse the rest of the load: ending it may fail as well.
+--disable_abort_on_error
+SET SESSION rocksdb_bulk_load = 0;
+--enable_abort_on_error
+--enable_result_log
+--enable_query_log
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+--source suite/rocksdb/include/bulk_load_sk_error_partial_row_check.inc
+DROP TABLE t1;
+
+--echo #
+--echo # Case 2: a later row of the load (the merge buffer already holds
+--echo # entries and is written out first).
+--echo #
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(255), KEY kb (b), KEY kc (c)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 10, 'short');
+--disable_query_log
+--disable_result_log
+--error 0,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (2, 20, REPEAT('x', 150));
+# A fix may also refuse the rest of the load: these may fail as well.
+--disable_abort_on_error
+INSERT INTO t1 VALUES (3, 30, 'short3');
+SET SESSION rocksdb_bulk_load = 0;
+--enable_abort_on_error
+--enable_result_log
+--enable_query_log
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+--source suite/rocksdb/include/bulk_load_sk_error_partial_row_check.inc
+DROP TABLE t1;

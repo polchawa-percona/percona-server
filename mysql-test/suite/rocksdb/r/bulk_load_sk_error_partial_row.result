@@ -1,0 +1,26 @@
+call mtr.add_suppression("Current value of rocksdb_merge_buf_size=100 is too small");
+#
+# Case 1: the first row of the load has a secondary key entry larger
+# than the merge buffer.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(255), KEY kb (b), KEY kc (c)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+# all indexes have the same rows
+DROP TABLE t1;
+#
+# Case 2: a later row of the load (the merge buffer already holds
+# entries and is written out first).
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(255), KEY kb (b), KEY kc (c)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_merge_buf_size = 100;
+SET SESSION rocksdb_bulk_load_allow_sk = ON;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t1 VALUES (1, 10, 'short');
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_merge_buf_size = DEFAULT;
+# all indexes have the same rows
+DROP TABLE t1;
