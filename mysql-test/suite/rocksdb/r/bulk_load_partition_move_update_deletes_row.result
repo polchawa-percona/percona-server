@@ -1,0 +1,55 @@
+# Case 1: UPDATE moving rows to another partition, load ingest fails
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (250, 25);
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+4
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: as case 1, rocksdb_bulk_load_allow_sk = 1
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (250, 25);
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+4
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: UPDATE moving rows to another partition, then ROLLBACK
+CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a), KEY kb (b)) ENGINE=ROCKSDB
+PARTITION BY RANGE (a)
+(PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (150, 15);
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+ok: 1
+SELECT COUNT(*) FROM t1 USE INDEX ();
+COUNT(*)
+4
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+4
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

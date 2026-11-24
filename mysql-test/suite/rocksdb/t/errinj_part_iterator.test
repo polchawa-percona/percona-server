@@ -2,6 +2,7 @@
 # Systematic error injection into the iterator steps of DML and partition
 # DDL on partitioned tables (see suite/rocksdb/include/errinj_loop.inc).
 #
+--source include/big_test.inc
 --source include/have_rocksdb.inc
 --source include/have_debug.inc
 
