@@ -1,0 +1,188 @@
+call mtr.add_suppression("Failed to bulk load");
+call mtr.add_suppression("Error 504 finalizing last SST file");
+CREATE TABLE t2 (a INT PRIMARY KEY) ENGINE=ROCKSDB;
+# Case 1: rows in the memtable, SET rocksdb_bulk_load = 0 ends the load
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+SET SESSION rocksdb_bulk_load = 1;
+# every row that existed before the load is still there
+SELECT b FROM t1 USE INDEX () ORDER BY b;
+b
+10
+20
+30
+40
+# each UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+all_or_nothing
+1
+# the rows the UPDATEs did not touch are unchanged
+SELECT a, b FROM t1 USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+a	b
+10	10
+20	20
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+SELECT COUNT(*) AS sk_entries_without_pk_row FROM t1 AS s FORCE INDEX (kb)
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS p USE INDEX ()
+WHERE p.a = s.a AND p.b <=> s.b);
+sk_entries_without_pk_row
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 2: rows in the memtable, a write to another table ends the load
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+SET SESSION rocksdb_bulk_load = 1;
+# every row that existed before the load is still there
+SELECT b FROM t1 USE INDEX () ORDER BY b;
+b
+10
+20
+30
+40
+# each UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+all_or_nothing
+1
+# the rows the UPDATEs did not touch are unchanged
+SELECT a, b FROM t1 USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+a	b
+10	10
+20	20
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+SELECT COUNT(*) AS sk_entries_without_pk_row FROM t1 AS s FORCE INDEX (kb)
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS p USE INDEX ()
+WHERE p.a = s.a AND p.b <=> s.b);
+sk_entries_without_pk_row
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 3: rows in an SST file, SET rocksdb_bulk_load = 0 ends the load
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+SET GLOBAL rocksdb_force_flush_memtable_now = 1;
+SET SESSION rocksdb_bulk_load = 1;
+# every row that existed before the load is still there
+SELECT b FROM t1 USE INDEX () ORDER BY b;
+b
+10
+20
+30
+40
+# each UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+all_or_nothing
+1
+# the rows the UPDATEs did not touch are unchanged
+SELECT a, b FROM t1 USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+a	b
+10	10
+20	20
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+SELECT COUNT(*) AS sk_entries_without_pk_row FROM t1 AS s FORCE INDEX (kb)
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS p USE INDEX ()
+WHERE p.a = s.a AND p.b <=> s.b);
+sk_entries_without_pk_row
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# Case 4: a table without secondary index
+CREATE TABLE t3 (a INT PRIMARY KEY, b INT) ENGINE=ROCKSDB;
+INSERT INTO t3 VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+SET SESSION rocksdb_bulk_load = 1;
+# every row that existed before the load is still there
+SELECT b FROM t3 USE INDEX () ORDER BY b;
+b
+10
+20
+30
+40
+# each UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+all_or_nothing
+1
+# the rows the UPDATEs did not touch are unchanged
+SELECT a, b FROM t3 USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+a	b
+10	10
+20	20
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;
+# Case 5: one UPDATE whose new key overlaps no other key
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY kb (b)) ENGINE=ROCKSDB;
+INSERT INTO t1 VALUES (10, 10), (20, 20), (30, 30), (40, 40);
+SET SESSION rocksdb_bulk_load = 1;
+# every row that existed before the load is still there
+SELECT b FROM t1 USE INDEX () ORDER BY b;
+b
+10
+20
+30
+40
+# each UPDATE took effect completely, or failed and changed nothing
+all_or_nothing
+1
+# the rows the UPDATEs did not touch are unchanged
+SELECT a, b FROM t1 USE INDEX () WHERE b IN (10, 20) ORDER BY a;
+a	b
+10	10
+20	20
+# the primary key and the secondary index agree
+SELECT (SELECT COUNT(*) FROM t1 USE INDEX ()) =
+(SELECT COUNT(*) FROM t1 FORCE INDEX (kb)) AS same_count;
+same_count
+1
+SELECT COUNT(*) AS pk_rows_without_sk_entry FROM t1 AS p USE INDEX ()
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS s FORCE INDEX (kb)
+WHERE s.a = p.a AND s.b <=> p.b);
+pk_rows_without_sk_entry
+0
+SELECT COUNT(*) AS sk_entries_without_pk_row FROM t1 AS s FORCE INDEX (kb)
+WHERE NOT EXISTS (SELECT 1 FROM t1 AS p USE INDEX ()
+WHERE p.a = s.a AND p.b <=> s.b);
+sk_entries_without_pk_row
+0
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+DROP TABLE t2;
