@@ -1,0 +1,26 @@
+call mtr.add_suppression("Removing table test.t2: CREATE TABLE was interrupted");
+CREATE TABLE t1 (pk INT PRIMARY KEY, a INT, b VARCHAR(64), KEY ka (a))
+ENGINE=ROCKSDB;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 100)
+SELECT n, n, REPEAT('a', 50) FROM s;
+SET SESSION cte_max_recursion_depth = 10000;
+BEGIN;
+INSERT INTO t1
+WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 6000)
+SELECT n + 1000, n, REPEAT('b', 50) FROM s;
+# Kill the server
+# Restart with the ordering hook; the start and a DDL statement must complete
+# Server start + CREATE TABLE + DROP TABLE completed within 60 s: 1
+# restart
+# Reach: the init ran while a background adjust_stats held the lock
+include/assert_grep.inc [DDL manager init ran while a background adjust_stats held the lock]
+include/assert_grep.inc [a background adjust_stats held the DDL manager lock]
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+100
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
