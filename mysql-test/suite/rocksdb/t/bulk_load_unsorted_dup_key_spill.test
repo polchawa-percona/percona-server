@@ -1,0 +1,84 @@
+--source include/have_rocksdb.inc
+
+#
+# PS-12248: in an unsorted bulk load, the outcome of a load that contains a
+# duplicate primary key must not depend on whether the merge buffer
+# (rocksdb_merge_buf_size) spilled to disk. Without a spill the statement that
+# inserts the duplicate fails with ER_DUP_ENTRY and the end of the bulk load
+# succeeds with the other rows. With a spill the end of the bulk load fails with
+# "Rows must be inserted in primary key order" and nothing is loaded; when the
+# duplicate is in an earlier merge chunk the statement itself succeeds.
+#
+# Each case runs first with the default merge buffer (no spill) and then with a
+# 1 KB merge buffer (spill), and compares the statement error code, the bulk
+# load end error code and the loaded rows (count and a checksum over every
+# row). It does not decide which outcome is right, only that the merge buffer
+# size does not change it.
+#
+
+# A fix that fails the load at the end logs this error for the failed SST file.
+CALL mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+
+CREATE TABLE s (n INT PRIMARY KEY) ENGINE=InnoDB;
+--disable_query_log
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO s WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3000) SELECT n FROM r;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+--enable_query_log
+
+# Rows are inserted in descending pk order, plus a second row with pk 7 at
+# position o: -1 = last (next to the first pk 7), 5000 = first (the first
+# pk 7 comes 2994 rows later, in another merge chunk when the buffer spills).
+--let $case = 0
+while ($case < 2)
+{
+  --let $pos = -1
+  if ($case == 1)
+  {
+    --let $pos = 5000
+  }
+  --echo # Duplicate pk 7 at position $pos
+  --let $run = 0
+  while ($run < 2)
+  {
+    --let $mbs = 67108864
+    if ($run == 1)
+    {
+      --let $mbs = 1024
+    }
+    CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+    --disable_query_log
+    --eval SET SESSION rocksdb_merge_buf_size = $mbs
+    SET SESSION rocksdb_bulk_load_allow_unsorted = 1;
+    SET SESSION rocksdb_bulk_load = 1;
+    --error 0,ER_DUP_ENTRY,ER_DUP_KEY,ER_KEYS_OUT_OF_ORDER
+    --eval INSERT INTO t SELECT pk, a FROM (SELECT n AS pk, n AS a, n AS o FROM s UNION ALL SELECT 7, 70, $pos) x ORDER BY o DESC
+    --let $e1 = $mysql_errno
+    --error 0,ER_KEYS_OUT_OF_ORDER,ER_DUP_ENTRY,ER_DUP_KEY
+    SET SESSION rocksdb_bulk_load = 0;
+    --let $e2 = $mysql_errno
+    SET SESSION rocksdb_merge_buf_size = DEFAULT;
+    SET SESSION rocksdb_bulk_load_allow_unsorted = DEFAULT;
+    --let $rows = `SELECT CONCAT(COUNT(*), '/', IFNULL(SUM(CRC32(CONCAT(pk, ':', a))), 0)) FROM t`
+    --enable_query_log
+    if ($run == 0)
+    {
+      --let $ref_e1 = $e1
+      --let $ref_e2 = $e2
+      --let $ref_rows = $rows
+    }
+    if ($run == 1)
+    {
+      --let $same = `SELECT '$e1' = '$ref_e1' AND '$e2' = '$ref_e2' AND '$rows' = '$ref_rows'`
+      --echo # Same statement error, bulk load end error and rows with a spilled merge buffer: $same
+      if (!$same)
+      {
+        --echo # no spill: statement $ref_e1, end $ref_e2, rows/checksum $ref_rows; spill: statement $e1, end $e2, rows/checksum $rows
+      }
+    }
+    DROP TABLE t;
+    --inc $run
+  }
+  --inc $case
+}
+DROP TABLE s;
