@@ -155,6 +155,7 @@ rocksdb.ddl_truncate_leftover_rename : BUG#0 PS-11831 TRUNCATE leftover restored
 rocksdb.sst_partitioner_multi_version : BUG#0 PS-11725 SST partitioner assert
 rocksdb.ddl_index_build_ingest_error_message : BUG#0 PS-11726 (null) in ingest error message
 rocksdb.write_batch_limit_sk_bulk_load : BUG#0 PS-11899 SK lost on failed load
+rocksdb.bulk_load_hidden_pk_write_batch_max_bytes_sk : BUG#0 PS-12247 orphan SK
 rocksdb.write_batch_limit_skip_unique_check : BUG#0 PS-11745 rows lost over batch limit
 rocksdb.innodb_port_ddl_kill : BUG#0 PS-11635 killed ADD INDEX reports 8012, not 1317
 
