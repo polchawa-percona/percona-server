@@ -1,0 +1,15 @@
+CALL mtr.add_suppression("Error [0-9]+ finalizing last SST file");
+CREATE TABLE s (n INT PRIMARY KEY) ENGINE=InnoDB;
+# Duplicate pk 7 at position -1
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+DROP TABLE t;
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+# Same statement error, bulk load end error and rows with a spilled merge buffer: 1
+DROP TABLE t;
+# Duplicate pk 7 at position 5000
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+DROP TABLE t;
+CREATE TABLE t (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+# Same statement error, bulk load end error and rows with a spilled merge buffer: 1
+DROP TABLE t;
+DROP TABLE s;
