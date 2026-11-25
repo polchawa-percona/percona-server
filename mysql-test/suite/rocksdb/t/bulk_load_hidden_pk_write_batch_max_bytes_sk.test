@@ -1,0 +1,80 @@
+--source include/have_rocksdb.inc
+--source include/count_sessions.inc
+
+#
+# PS-12247: a bulk load into a table without a primary key, with
+# rocksdb_bulk_load_allow_sk=ON and a secondary key, must not leave secondary
+# key entries without rows when the write batch exceeds
+# rocksdb_write_batch_max_bytes. The secondary keys go to SST files, the hidden
+# primary key goes through the write batch, and ha_rocksdb::update_write_pk()
+# ignores the status of that Put (PS-11745). The statement and the end of the
+# bulk load succeed, the primary key keeps only the rows that fitted in each
+# batch, and the secondary key gets an entry for every row.
+#
+# The statement may fail with the write batch limit error (PS-11745) or load
+# every row; either way every secondary key entry must have its row.
+#
+
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+
+--disable_query_log
+CREATE TABLE src (id INT PRIMARY KEY, v VARCHAR(200), k INT) ENGINE=ROCKSDB;
+let $i = 0;
+while ($i < 2000) {
+  eval INSERT INTO src VALUES ($i, REPEAT('x', 150), $i);
+  inc $i;
+}
+--let $file = $MYSQLTEST_VARDIR/tmp/bulk_load_hidden_pk_write_batch_max_bytes_sk.txt
+eval SELECT * INTO OUTFILE '$file' FROM src;
+--enable_query_log
+
+--let $c = 0
+while ($c < 2)
+{
+  if ($c == 0)
+  {
+    --echo # INSERT ... SELECT, non-unique secondary key
+    CREATE TABLE t (id INT, v VARCHAR(200), k INT, KEY kk (k)) ENGINE=ROCKSDB;
+  }
+  if ($c == 1)
+  {
+    --echo # LOAD DATA, unique secondary key
+    CREATE TABLE t (id INT, v VARCHAR(200), k INT, UNIQUE KEY kk (k)) ENGINE=ROCKSDB;
+  }
+  SET SESSION rocksdb_write_batch_max_bytes = 16384;
+  SET SESSION rocksdb_bulk_load_allow_sk = 1;
+  SET SESSION rocksdb_bulk_load = 1;
+  --disable_result_log
+  --disable_query_log
+  if ($c == 0)
+  {
+    --error 0,ER_GET_ERRMSG
+    INSERT INTO t SELECT * FROM src;
+  }
+  if ($c == 1)
+  {
+    --error 0,ER_GET_ERRMSG
+    eval LOAD DATA INFILE '$file' INTO TABLE t;
+  }
+  --let $stmt_errno = $mysql_errno
+  --enable_query_log
+  --enable_result_log
+  SET SESSION rocksdb_bulk_load = 0;
+  SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+  SET SESSION rocksdb_write_batch_max_bytes = 0;
+
+  --let $ok = `SELECT $stmt_errno <> 0 OR COUNT(*) = 2000 FROM t IGNORE INDEX (kk)`
+  --echo # A statement that succeeded loaded every row: $ok
+  SELECT (SELECT COUNT(*) FROM t IGNORE INDEX (kk)) =
+         (SELECT COUNT(*) FROM t FORCE INDEX (kk)) AS rows_equal_sk_entries;
+  SELECT (SELECT COUNT(*) FROM t FORCE INDEX (kk) WHERE k >= 1990) =
+         (SELECT COUNT(v) FROM t FORCE INDEX (kk) WHERE k >= 1990)
+         AS every_sk_entry_has_its_row;
+  CHECK TABLE t;
+  DROP TABLE t;
+  --inc $c
+}
+
+--remove_file $file
+DROP TABLE src;
+--source include/wait_until_count_sessions.inc

@@ -1,0 +1,46 @@
+SET SESSION transaction_isolation = 'READ-COMMITTED';
+# INSERT ... SELECT, non-unique secondary key
+CREATE TABLE t (id INT, v VARCHAR(200), k INT, KEY kk (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+# A statement that succeeded loaded every row: 1
+SELECT (SELECT COUNT(*) FROM t IGNORE INDEX (kk)) =
+(SELECT COUNT(*) FROM t FORCE INDEX (kk)) AS rows_equal_sk_entries;
+rows_equal_sk_entries
+1
+SELECT (SELECT COUNT(*) FROM t FORCE INDEX (kk) WHERE k >= 1990) =
+(SELECT COUNT(v) FROM t FORCE INDEX (kk) WHERE k >= 1990)
+AS every_sk_entry_has_its_row;
+every_sk_entry_has_its_row
+1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+# LOAD DATA, unique secondary key
+CREATE TABLE t (id INT, v VARCHAR(200), k INT, UNIQUE KEY kk (k)) ENGINE=ROCKSDB;
+SET SESSION rocksdb_write_batch_max_bytes = 16384;
+SET SESSION rocksdb_bulk_load_allow_sk = 1;
+SET SESSION rocksdb_bulk_load = 1;
+SET SESSION rocksdb_bulk_load = 0;
+SET SESSION rocksdb_bulk_load_allow_sk = DEFAULT;
+SET SESSION rocksdb_write_batch_max_bytes = 0;
+# A statement that succeeded loaded every row: 1
+SELECT (SELECT COUNT(*) FROM t IGNORE INDEX (kk)) =
+(SELECT COUNT(*) FROM t FORCE INDEX (kk)) AS rows_equal_sk_entries;
+rows_equal_sk_entries
+1
+SELECT (SELECT COUNT(*) FROM t FORCE INDEX (kk) WHERE k >= 1990) =
+(SELECT COUNT(v) FROM t FORCE INDEX (kk) WHERE k >= 1990)
+AS every_sk_entry_has_its_row;
+every_sk_entry_has_its_row
+1
+CHECK TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+DROP TABLE t;
+DROP TABLE src;
