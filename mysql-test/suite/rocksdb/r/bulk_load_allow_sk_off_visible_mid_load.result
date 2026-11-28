@@ -1,0 +1,15 @@
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b VARCHAR(40), KEY ka (a))
+ENGINE=ROCKSDB;
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t VALUES (1, 5, 'x'), (2, 5, 'y'), (3, 6, 'z');
+SELECT @@session.rocksdb_bulk_load AS bulk_load_open;
+bulk_load_open
+1
+# Bulk load open in the other session: all paths must agree.
+all access paths agree: 1
+SET SESSION rocksdb_bulk_load = 0;
+# Bulk load finished: every path returns all rows.
+SELECT (SELECT COUNT(*) FROM t FORCE INDEX (ka) WHERE a = 5) AS ka_index_only, (SELECT COUNT(b) FROM t FORCE INDEX (ka) WHERE a = 5) AS ka_row_lookup, (SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE a = 5) AS pk_a5, (SELECT COUNT(*) FROM t FORCE INDEX (ka)) AS ka_all, (SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY)) AS pk_all;
+ka_index_only	ka_row_lookup	pk_a5	ka_all	pk_all
+2	2	2	3	3
+DROP TABLE t;
