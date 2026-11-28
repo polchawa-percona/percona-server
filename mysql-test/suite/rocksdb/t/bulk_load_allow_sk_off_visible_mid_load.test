@@ -1,0 +1,48 @@
+--source include/have_rocksdb.inc
+#
+# PS-12264: while a bulk load with the default rocksdb_bulk_load_allow_sk=OFF
+# is open in one session, other sessions see the loaded rows through
+# index-only reads of a secondary key, but not through the primary key and
+# not through row lookups from that secondary key.
+#
+# The primary key of each loaded row goes to an SST file that is ingested only
+# when the bulk load ends, while its secondary key entries go through the
+# transaction and are committed by each statement. A reader in between gets
+# different answers for the same rows depending on the access path.
+#
+# Expected: while the load is open, every access path returns the same rows
+# (whether none or all of them is for the fix to decide); after the load,
+# every path returns all of them.
+#
+
+--source include/count_sessions.inc
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b VARCHAR(40), KEY ka (a))
+  ENGINE=ROCKSDB;
+
+--connect (loader,localhost,root,,test)
+SET SESSION rocksdb_bulk_load = 1;
+INSERT INTO t VALUES (1, 5, 'x'), (2, 5, 'y'), (3, 6, 'z');
+SELECT @@session.rocksdb_bulk_load AS bulk_load_open;
+
+--connection default
+# One statement, so all paths read the same snapshot.
+--let $paths = SELECT (SELECT COUNT(*) FROM t FORCE INDEX (ka) WHERE a = 5) AS ka_index_only, (SELECT COUNT(b) FROM t FORCE INDEX (ka) WHERE a = 5) AS ka_row_lookup, (SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY) WHERE a = 5) AS pk_a5, (SELECT COUNT(*) FROM t FORCE INDEX (ka)) AS ka_all, (SELECT COUNT(*) FROM t FORCE INDEX (PRIMARY)) AS pk_all
+
+--echo # Bulk load open in the other session: all paths must agree.
+--let $same = `SELECT ka_index_only = pk_a5 AND ka_row_lookup = pk_a5 AND ka_all = pk_all FROM ($paths) AS p`
+--echo all access paths agree: $same
+if (!$same)
+{
+  --eval $paths
+}
+
+--connection loader
+SET SESSION rocksdb_bulk_load = 0;
+--disconnect loader
+
+--connection default
+--source include/wait_until_count_sessions.inc
+--echo # Bulk load finished: every path returns all rows.
+--eval $paths
+
+DROP TABLE t;
