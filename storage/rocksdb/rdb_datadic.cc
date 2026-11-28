@@ -4922,6 +4922,24 @@ bool Rdb_ddl_manager::validate_auto_incr() const {
 #endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
         // ROCKSDB_INCLUDE_VALIDATE_TABLES
 
+#ifndef NDEBUG
+/*
+  Test hook "rocksdb_ddl_manager_init_during_adjust_stats" (global debug
+  keyword, startup option --debug=d,<keyword>): orders the startup DDL manager
+  init after a background flush listener has entered
+  adjust_stats() and holds m_rwlock. The first listener call of the startup
+  waits until the init has started, then takes the lock and keeps it until the
+  init has passed the point where it initializes m_rwlock. It only orders
+  events; every wait is bounded (20 s).
+*/
+static const char *const rdb_dbug_ddl_init_kw =
+    "rocksdb_ddl_manager_init_during_adjust_stats";
+/* 0 idle, 1 init waits for a holder, 2 adjust_stats holds m_rwlock,
+   3 init passed the lock initialization */
+static std::atomic<int> rdb_dbug_ddl_init_step{0};
+static std::atomic<bool> rdb_dbug_ddl_init_listener{false};
+#endif  // !NDEBUG
+
 #if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
 bool Rdb_ddl_manager::init(Rdb_dict_manager_selector *const dict_arg,
                            Rdb_cf_manager *const cf_manager,
@@ -4934,7 +4952,27 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
         // ROCKSDB_INCLUDE_VALIDATE_TABLES
   m_dict = dict_arg;
   m_cf_manager = cf_manager;
+#ifndef NDEBUG
+  if (rdb_dbug_global_keyword_set(rdb_dbug_ddl_init_kw)) {
+    rdb_dbug_ddl_init_step.store(1);
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: DDL manager init waits for a background "
+                    "adjust_stats");
+    for (int i = 0; i < 200 && rdb_dbug_ddl_init_step.load() != 2; i++)
+      my_sleep(100000);
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: DDL manager init %s",
+                    rdb_dbug_ddl_init_step.load() == 2
+                        ? "runs while adjust_stats holds the lock"
+                        : "found no background adjust_stats (timeout)");
+  }
+#endif  // !NDEBUG
   mysql_rwlock_init(0, &m_rwlock);
+#ifndef NDEBUG
+  rdb_dbug_ddl_init_step.store(3);
+#endif  // !NDEBUG
 
   /* Read the data dictionary and populate the hash */
   uchar ddl_entry[Rdb_key_def::INDEX_NUMBER_SIZE];
@@ -5308,7 +5346,38 @@ void Rdb_ddl_manager::set_stats(
 void Rdb_ddl_manager::adjust_stats(
     const std::vector<Rdb_index_stats> &new_data,
     const std::vector<Rdb_index_stats> &deleted_data) {
+#ifndef NDEBUG
+  bool rdb_dbug_holder = false;
+  if (rdb_dbug_ddl_init_step.load() < 3 &&
+      rdb_dbug_global_keyword_set(rdb_dbug_ddl_init_kw)) {
+    bool rdb_dbug_first = false;
+    if (rdb_dbug_ddl_init_listener.compare_exchange_strong(rdb_dbug_first,
+                                                           true)) {
+      rdb_dbug_holder = true;
+      // NO_LINT_DEBUG
+      LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                      "MyRocks: test: background adjust_stats waits for the "
+                      "DDL manager init");
+      for (int i = 0; i < 200 && rdb_dbug_ddl_init_step.load() < 1; i++)
+        my_sleep(100000);
+    }
+  }
+#endif  // !NDEBUG
   mysql_rwlock_wrlock(&m_rwlock);
+#ifndef NDEBUG
+  if (rdb_dbug_holder) {
+    rdb_dbug_ddl_init_step.store(2);
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: background adjust_stats holds the DDL "
+                    "manager lock");
+    for (int i = 0; i < 200 && rdb_dbug_ddl_init_step.load() != 3; i++)
+      my_sleep(100000);
+    // NO_LINT_DEBUG
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                    "MyRocks: test: background adjust_stats continues");
+  }
+#endif  // !NDEBUG
   int i = 0;
   for (const auto &data : {new_data, deleted_data}) {
     for (const auto &src : data) {
