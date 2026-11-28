@@ -1,0 +1,36 @@
+# PS-12265: DROP DATABASE leaves the MyRocks data of a user table whose name
+# starts with "#sql", and MyRocks then refuses to start.
+#
+# find_db_tables() marks every table whose name starts with "#sql" as an
+# internal temporary table, so the DROP DATABASE path passes the unencoded
+# name ("./db/#sql-user") to ha_rocksdb::delete_table(). MyRocks stores the
+# user table under its encoded file name ("db.@0023sql@002duser"), does not
+# find it, returns HA_ERR_NO_SUCH_TABLE, which DROP DATABASE ignores, and the
+# server data dictionary drops the table. The MyRocks dictionary entry and the
+# data stay behind, and the next start fails the table validation.
+#
+# Expected: DROP DATABASE removes the table from MyRocks as DROP TABLE does,
+# and MyRocks starts after a restart.
+
+--source include/have_rocksdb.inc
+
+CREATE DATABASE d1;
+CREATE TABLE d1.`#sql-user` (pk INT PRIMARY KEY, a INT, KEY ka (a))
+  ENGINE=ROCKSDB;
+CREATE TABLE d1.t1 (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO d1.`#sql-user` VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO d1.t1 VALUES (1, 1), (2, 2), (3, 3);
+
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'd1' ORDER BY TABLE_NAME, INDEX_NAME;
+
+DROP DATABASE d1;
+
+--echo # Nothing of d1 may be left in the MyRocks dictionary
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL
+  WHERE TABLE_SCHEMA = 'd1' ORDER BY TABLE_NAME, INDEX_NAME;
+
+--echo # MyRocks must start after a restart (default rocksdb_validate_tables=1)
+--source include/restart_mysqld.inc
+SELECT ENGINE, SUPPORT FROM information_schema.ENGINES
+  WHERE ENGINE = 'ROCKSDB';

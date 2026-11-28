@@ -1,0 +1,24 @@
+CREATE DATABASE d1;
+CREATE TABLE d1.`#sql-user` (pk INT PRIMARY KEY, a INT, KEY ka (a))
+ENGINE=ROCKSDB;
+CREATE TABLE d1.t1 (pk INT PRIMARY KEY, a INT, KEY ka (a)) ENGINE=ROCKSDB;
+INSERT INTO d1.`#sql-user` VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO d1.t1 VALUES (1, 1), (2, 2), (3, 3);
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'd1' ORDER BY TABLE_NAME, INDEX_NAME;
+TABLE_NAME	INDEX_NAME
+@0023sql@002duser	ka
+@0023sql@002duser	PRIMARY
+t1	ka
+t1	PRIMARY
+DROP DATABASE d1;
+# Nothing of d1 may be left in the MyRocks dictionary
+SELECT TABLE_NAME, INDEX_NAME FROM information_schema.ROCKSDB_DDL
+WHERE TABLE_SCHEMA = 'd1' ORDER BY TABLE_NAME, INDEX_NAME;
+TABLE_NAME	INDEX_NAME
+# MyRocks must start after a restart (default rocksdb_validate_tables=1)
+# restart
+SELECT ENGINE, SUPPORT FROM information_schema.ENGINES
+WHERE ENGINE = 'ROCKSDB';
+ENGINE	SUPPORT
+ROCKSDB	YES
